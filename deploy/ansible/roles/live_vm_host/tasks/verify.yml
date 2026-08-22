@@ -51,27 +51,41 @@
   failed_when: not live_vm_host_xdg.stat.exists
 
 # Part 3: the fixed live-worker authority contract (ADR-0555). These proofs cover the identity,
-# file, unit, socket, and slot-isolation surface; the session-libvirt daemon/provider authority
-# is verified by its own follow-up change (#1937).
+# file, unit, session-libvirt daemon/provider, socket, and slot-isolation surface.
 - name: Inspect the protected runtime parent
   ansible.builtin.stat:
     path: /run/kdive
   register: live_vm_host_worker_runtime_parent
 
-- name: Assert the runtime parent authority
+- name: Inspect the protected socket namespaces
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /run/kdive/live-libvirt
+    - /run/kdive/live-libvirt/libvirt
+  register: live_vm_host_worker_socket_namespaces
+
+- name: Assert the runtime parent and socket namespace authority
   ansible.builtin.assert:
     that:
       - live_vm_host_worker_runtime_parent.stat.isdir
       - live_vm_host_worker_runtime_parent.stat.pw_name == "root"
       - live_vm_host_worker_runtime_parent.stat.gr_name == "root"
       - live_vm_host_worker_runtime_parent.stat.mode == "0755"
+      - item.stat.isdir
+      - item.stat.pw_name == github_runner_user
+      - item.stat.gr_name == live_vm_host_worker_libvirt_group
+      - item.stat.mode == "0750"
+  loop: "{{ live_vm_host_worker_socket_namespaces.results }}"
 
-- name: Prove a worker cannot write the protected runtime parent
+- name: Prove a worker cannot write protected socket namespaces
   ansible.builtin.command: "/usr/bin/test ! -w {{ item }}"
   become: true
   become_user: kdive-worker-1
   loop:
     - /run/kdive
+    - /run/kdive/live-libvirt
+    - /run/kdive/live-libvirt/libvirt
   changed_when: false
 
 - name: Read every fixed worker account's groups
@@ -158,6 +172,30 @@
       - item.stat.mode == "0600"
   loop: "{{ live_vm_host_worker_root_files.results }}"
 
+- name: Inspect the published worker libvirt URI
+  ansible.builtin.stat:
+    path: /etc/kdive/live-worker-libvirt.env
+  register: live_vm_host_worker_libvirt_env_file
+
+- name: Assert the worker libvirt URI is public and root-owned
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_worker_libvirt_env_file.stat.pw_name == "root"
+      - live_vm_host_worker_libvirt_env_file.stat.gr_name == "root"
+      - live_vm_host_worker_libvirt_env_file.stat.mode == "0644"
+
+- name: Read the published worker libvirt URI
+  ansible.builtin.slurp:
+    path: /etc/kdive/live-worker-libvirt.env
+  register: live_vm_host_worker_libvirt_env
+
+- name: Assert the published worker libvirt URI matches the selected tuple
+  ansible.builtin.assert:
+    that:
+      - >-
+        (live_vm_host_worker_libvirt_env.content | b64decode)
+        == 'KDIVE_LIBVIRT_URI=' + live_vm_host_worker_libvirt_uri + '\n'
+
 - name: Inspect the installed lifecycle revision
   ansible.builtin.stat:
     path: /opt/kdive-live-worker-lifecycle/revision
@@ -187,6 +225,12 @@
     /etc/systemd/system/kdive-live-worker-lifecycle@.service
   changed_when: false
 
+- name: Verify shared session libvirt is readable as slot one
+  ansible.builtin.command: "virsh -c {{ live_vm_host_worker_libvirt_uri }} list"
+  become: true
+  become_user: kdive-worker-1
+  changed_when: false
+
 - name: Verify workers import the installed KDIVE revision
   ansible.builtin.command: >-
     /opt/kdive-live-worker-lifecycle/.venv/bin/python -c
@@ -200,7 +244,7 @@
     not live_vm_host_worker_import_results.stdout.startswith(
     '/opt/kdive-live-worker-lifecycle/.venv/')
 
-- name: Verify workers can access installed Python and fixture paths
+- name: Verify workers can access installed Python and provider paths
   ansible.builtin.command: >-
     /bin/sh -c 'test -x /opt/kdive-live-worker-lifecycle/.venv/bin/python
     && test -r {{ live_vm_host_worker_fixture_catalog }}
@@ -210,7 +254,17 @@
     && test -r
     {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_ppc64le.yaml
     && test -r
-    {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_x86_64.yaml'
+    {{ live_vm_host_worker_fixture_catalog }}/profiles/console-ready_x86_64.yaml
+    && test -w /var/lib/kdive/rootfs
+    && test -x /var/lib/kdive/rootfs
+    && test -w /var/lib/kdive/console
+    && test -x /var/lib/kdive/console
+    && test -w /var/lib/kdive/pcap
+    && test -x /var/lib/kdive/pcap
+    && test -w /var/lib/kdive/build
+    && test -x /var/lib/kdive/build
+    && test -w /var/lib/kdive/install
+    && test -x /var/lib/kdive/install'
   become: true
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts }}"
@@ -232,6 +286,25 @@
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts }}"
   changed_when: false
+
+- name: Verify the selected session libvirtd process is live
+  ansible.builtin.command: >-
+    pgrep --uid {{ github_runner_user }} --exact libvirtd
+    --pidfile /run/kdive/live-libvirt/libvirt/libvirtd.pid
+  changed_when: false
+
+- name: Inspect the selected session libvirt socket
+  ansible.builtin.stat:
+    path: /run/kdive/live-libvirt/libvirt/libvirt-sock
+  register: live_vm_host_worker_libvirt_socket
+
+- name: Assert the selected session libvirt socket authority
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_worker_libvirt_socket.stat.issock
+      - live_vm_host_worker_libvirt_socket.stat.pw_name == github_runner_user
+      - live_vm_host_worker_libvirt_socket.stat.gr_name == live_vm_host_worker_libvirt_group
+      - live_vm_host_worker_libvirt_socket.stat.mode == "0770"
 
 - name: Create root-owned permission-probe markers for every slot
   ansible.builtin.copy:

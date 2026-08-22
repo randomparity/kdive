@@ -239,15 +239,128 @@
     mode: "0750"
   loop: "{{ live_vm_host_worker_accounts }}"
 
+- name: Inspect the protected runtime parent without following links
+  ansible.builtin.stat:
+    path: /run/kdive
+    follow: false
+  register: live_vm_host_worker_runtime_parent_before
+
+- name: Require a real protected runtime parent
+  ansible.builtin.assert:
+    that:
+      - >-
+        not live_vm_host_worker_runtime_parent_before.stat.exists
+        or (
+        live_vm_host_worker_runtime_parent_before.stat.isdir
+        and not live_vm_host_worker_runtime_parent_before.stat.islnk
+        )
+    fail_msg: >-
+      /run/kdive must be a real directory; the existing entry was left untouched. Correct it and
+      rerun provisioning.
+
 - name: Create the protected runtime parent
-  # The lifecycle control socket lives directly under /run/kdive; systemd creates it on socket
-  # activation, but converging it here pins the root-owned 0755 authority before that.
   ansible.builtin.file:
     path: /run/kdive
     state: directory
     owner: root
     group: root
     mode: "0755"
+
+- name: Create the protected session-libvirt socket namespaces
+  block:
+    - name: Inspect the runtime root without following links
+      ansible.builtin.stat:
+        path: "{{ live_vm_host_worker_libvirt_runtime }}"
+        follow: false
+      register: live_vm_host_worker_runtime_root_before
+
+    - name: Require a real session-libvirt runtime root
+      ansible.builtin.assert:
+        that:
+          - >-
+            not live_vm_host_worker_runtime_root_before.stat.exists
+            or (
+            live_vm_host_worker_runtime_root_before.stat.isdir
+            and not live_vm_host_worker_runtime_root_before.stat.islnk
+            )
+        fail_msg: >-
+          The session-libvirt runtime root must be a real directory; it was left untouched.
+
+    - name: Lock the session-libvirt runtime root
+      ansible.builtin.file:
+        path: "{{ live_vm_host_worker_libvirt_runtime }}"
+        state: directory
+        owner: root
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+
+    - name: Inspect the libvirt child without following links
+      ansible.builtin.stat:
+        path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
+        follow: false
+      register: live_vm_host_worker_runtime_child_before
+
+    - name: Require a real libvirt runtime child
+      ansible.builtin.assert:
+        that:
+          - >-
+            not live_vm_host_worker_runtime_child_before.stat.exists
+            or (
+            live_vm_host_worker_runtime_child_before.stat.isdir
+            and not live_vm_host_worker_runtime_child_before.stat.islnk
+            )
+        fail_msg: >-
+          The libvirt runtime child must be a real directory; it and its target were left
+          untouched.
+
+    - name: Lock the libvirt runtime child
+      ansible.builtin.file:
+        path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
+        state: directory
+        owner: root
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+  always:
+    - name: Restore the initial libvirt runtime child ownership
+      ansible.builtin.file:
+        path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
+        state: directory
+        owner: "{{ github_runner_user }}"
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+      when:
+        - live_vm_host_worker_runtime_child_before is defined
+        - >-
+          not live_vm_host_worker_runtime_child_before.stat.exists
+          or (
+          live_vm_host_worker_runtime_child_before.stat.isdir
+          and not live_vm_host_worker_runtime_child_before.stat.islnk
+          )
+
+    - name: Restore the initial session-libvirt runtime root ownership
+      ansible.builtin.file:
+        path: "{{ live_vm_host_worker_libvirt_runtime }}"
+        state: directory
+        owner: "{{ github_runner_user }}"
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+      when:
+        - live_vm_host_worker_runtime_root_before is defined
+        - >-
+          not live_vm_host_worker_runtime_root_before.stat.exists
+          or (
+          live_vm_host_worker_runtime_root_before.stat.isdir
+          and not live_vm_host_worker_runtime_root_before.stat.islnk
+          )
+
+- name: Create group-writable provider data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "2770"
+  loop: "{{ live_vm_host_worker_shared_directories }}"
 
 - name: Inspect the fixed worker fixture parent without following links
   ansible.builtin.stat:
@@ -360,6 +473,23 @@
     - kdive-live-worker-lifecycle.socket
     - kdive-live-worker-lifecycle@.service
 
+- name: Install the dedicated session-libvirt configuration
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/libvirtd-live.conf"
+    dest: /etc/kdive/libvirtd-live.conf
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Publish the selected worker libvirt URI
+  ansible.builtin.copy:
+    dest: /etc/kdive/live-worker-libvirt.env
+    content: "KDIVE_LIBVIRT_URI={{ live_vm_host_worker_libvirt_uri }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Install the root-only lifecycle service configuration
   ansible.builtin.copy:
     dest: /etc/kdive/live-worker-lifecycle.conf
@@ -423,6 +553,356 @@
     owner: root
     group: root
     mode: "0444"
+
+- name: Inspect the selected Debian-family libvirtd executable
+  ansible.builtin.stat:
+    path: /usr/sbin/libvirtd
+  register: live_vm_host_worker_libvirtd_executable
+
+- name: Require the selected Debian-family libvirtd executable
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_worker_libvirtd_executable.stat.exists
+      - live_vm_host_worker_libvirtd_executable.stat.isreg
+      - live_vm_host_worker_libvirtd_executable.stat.executable
+    fail_msg: selected Debian-family libvirtd executable is missing at /usr/sbin/libvirtd
+
+- name: Initialize the selected libvirt startup decision
+  ansible.builtin.set_fact:
+    live_vm_host_worker_libvirtd_should_start: false
+
+- name: Reconcile the selected libvirt tuple under a protected hierarchy
+  block:
+    - name: Lock the selected libvirt tuple hierarchy
+      ansible.builtin.file:
+        path: "{{ live_vm_host_worker_libvirt_runtime }}"
+        state: directory
+        owner: root
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+
+    - name: Reinspect the libvirt child without following links
+      ansible.builtin.stat:
+        path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
+        follow: false
+      register: live_vm_host_worker_runtime_child_locked
+
+    - name: Require the locked libvirt child to remain a real directory
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_worker_runtime_child_locked.stat.exists
+          - live_vm_host_worker_runtime_child_locked.stat.isdir
+          - not live_vm_host_worker_runtime_child_locked.stat.islnk
+        fail_msg: >-
+          The libvirt runtime child changed before tuple inspection; it was left untouched.
+
+    - name: Lock the libvirt tuple child directory
+      ansible.builtin.file:
+        path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
+        state: directory
+        owner: root
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+
+    - name: Inspect the selected libvirtd pid file
+      ansible.builtin.stat:
+        path: /run/kdive/live-libvirt/libvirt/libvirtd.pid
+        follow: false
+      register: live_vm_host_worker_libvirtd_pid_file
+
+    - name: Inspect the selected libvirt socket residue
+      ansible.builtin.stat:
+        path: /run/kdive/live-libvirt/libvirt/libvirt-sock
+        follow: false
+      register: live_vm_host_worker_libvirt_socket_residue
+
+    - name: Fail closed on unsafe selected libvirt residue authority
+      ansible.builtin.assert:
+        that:
+          - >-
+            not live_vm_host_worker_libvirtd_pid_file.stat.exists
+            or (
+            live_vm_host_worker_libvirtd_pid_file.stat.isreg
+            and not live_vm_host_worker_libvirtd_pid_file.stat.islnk
+            and live_vm_host_worker_libvirtd_pid_file.stat.pw_name == github_runner_user
+            and live_vm_host_worker_libvirtd_pid_file.stat.mode in ['0600', '0644']
+            )
+          - >-
+            not live_vm_host_worker_libvirt_socket_residue.stat.exists
+            or (
+            live_vm_host_worker_libvirt_socket_residue.stat.issock
+            and not live_vm_host_worker_libvirt_socket_residue.stat.islnk
+            and live_vm_host_worker_libvirt_socket_residue.stat.pw_name == github_runner_user
+            and live_vm_host_worker_libvirt_socket_residue.stat.gr_name
+            == live_vm_host_worker_libvirt_group
+            and live_vm_host_worker_libvirt_socket_residue.stat.mode == '0770'
+            )
+        fail_msg: >-
+          Contradictory selected libvirt residue authority; the exact pid and socket paths were
+          left untouched. Inspect their type and ownership, correct the evidence, then rerun.
+
+    - name: Read the selected libvirtd pid file
+      ansible.builtin.slurp:
+        path: /run/kdive/live-libvirt/libvirt/libvirtd.pid
+      when: live_vm_host_worker_libvirtd_pid_file.stat.exists
+      register: live_vm_host_worker_libvirtd_pid_content
+
+    - name: Fail closed on malformed selected libvirtd pid evidence
+      ansible.builtin.assert:
+        that:
+          - >-
+            not live_vm_host_worker_libvirtd_pid_file.stat.exists
+            or (live_vm_host_worker_libvirtd_pid_content.content | b64decode | trim)
+            is match('^[1-9][0-9]*$')
+        fail_msg: >-
+          Contradictory selected libvirt pid content; the exact pid and socket paths were left
+          untouched. Inspect the selected pid file, correct the evidence, then rerun.
+
+    - name: Record the selected libvirtd pid
+      ansible.builtin.set_fact:
+        live_vm_host_worker_libvirtd_pid: >-
+          {{ (live_vm_host_worker_libvirtd_pid_content.content | b64decode | trim)
+          if live_vm_host_worker_libvirtd_pid_file.stat.exists else '' }}
+
+    - name: Inspect the selected libvirtd pid process
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ps
+          - -o
+          - uid=,comm=
+          - -p
+          - "{{ live_vm_host_worker_libvirtd_pid }}"
+      when: live_vm_host_worker_libvirtd_pid | length > 0
+      register: live_vm_host_worker_libvirtd_process
+      failed_when: false
+      changed_when: false
+
+    - name: Record whether the selected libvirtd pid is live
+      ansible.builtin.set_fact:
+        live_vm_host_worker_libvirtd_live: >-
+          {{ live_vm_host_worker_libvirtd_pid | length > 0
+          and (live_vm_host_worker_libvirtd_process.rc | default(1)) == 0 }}
+
+    - name: Probe the selected libvirt socket listener
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import socket
+            import sys
+
+            client = socket.socket(socket.AF_UNIX)
+            client.settimeout(0.5)
+            try:
+                client.connect(sys.argv[1])
+            except ConnectionRefusedError:
+                raise SystemExit(3)
+            except OSError:
+                raise SystemExit(4)
+            finally:
+                client.close()
+          - /run/kdive/live-libvirt/libvirt/libvirt-sock
+      when: live_vm_host_worker_libvirt_socket_residue.stat.exists
+      register: live_vm_host_worker_libvirt_socket_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Fail closed on contradictory selected libvirt evidence
+      ansible.builtin.assert:
+        that:
+          - >-
+            not live_vm_host_worker_libvirtd_live
+            or live_vm_host_worker_libvirtd_process.stdout.split()
+            == [live_vm_host_worker_operator_uid | string, 'libvirtd']
+          - >-
+            not live_vm_host_worker_libvirtd_live
+            or (
+            live_vm_host_worker_libvirt_socket_residue.stat.exists
+            and live_vm_host_worker_libvirt_socket_probe.rc == 0
+            )
+          - >-
+            live_vm_host_worker_libvirtd_live
+            or not live_vm_host_worker_libvirt_socket_residue.stat.exists
+            or live_vm_host_worker_libvirt_socket_probe.rc == 3
+        fail_msg: >-
+          Contradictory selected libvirt process, pid, or listener evidence; the exact pid and
+          socket paths were left untouched. Inspect their owning process, correct the evidence,
+          then rerun.
+
+    - name: Refresh selected libvirt residue identity before cleanup
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /run/kdive/live-libvirt/libvirt/libvirtd.pid
+        - /run/kdive/live-libvirt/libvirt/libvirt-sock
+      register: live_vm_host_worker_libvirt_residue_refresh
+      when: not live_vm_host_worker_libvirtd_live
+
+    - name: Reinspect the selected libvirtd process before cleanup
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ps
+          - -o
+          - uid=,comm=
+          - -p
+          - "{{ live_vm_host_worker_libvirtd_pid }}"
+      when:
+        - not live_vm_host_worker_libvirtd_live
+        - live_vm_host_worker_libvirtd_pid | length > 0
+      register: live_vm_host_worker_libvirtd_process_refresh
+      failed_when: false
+      changed_when: false
+
+    - name: Reprobe the selected libvirt socket listener before cleanup
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import socket
+            import sys
+
+            client = socket.socket(socket.AF_UNIX)
+            client.settimeout(0.5)
+            try:
+                client.connect(sys.argv[1])
+            except ConnectionRefusedError:
+                raise SystemExit(3)
+            except OSError:
+                raise SystemExit(4)
+            finally:
+                client.close()
+          - /run/kdive/live-libvirt/libvirt/libvirt-sock
+      when:
+        - not live_vm_host_worker_libvirtd_live
+        - live_vm_host_worker_libvirt_socket_residue.stat.exists
+      register: live_vm_host_worker_libvirt_socket_probe_refresh
+      failed_when: false
+      changed_when: false
+
+    - name: Assert selected libvirt evidence did not change under lock
+      ansible.builtin.assert:
+        that:
+          - >-
+            not live_vm_host_worker_libvirtd_pid_file.stat.exists
+            or live_vm_host_worker_libvirtd_process_refresh.rc != 0
+          - >-
+            not live_vm_host_worker_libvirt_socket_residue.stat.exists
+            or live_vm_host_worker_libvirt_socket_probe_refresh.rc == 3
+          - >-
+            live_vm_host_worker_libvirt_residue_refresh.results[0].stat.exists
+            == live_vm_host_worker_libvirtd_pid_file.stat.exists
+          - >-
+            not live_vm_host_worker_libvirtd_pid_file.stat.exists
+            or (
+            live_vm_host_worker_libvirt_residue_refresh.results[0].stat.inode
+            == live_vm_host_worker_libvirtd_pid_file.stat.inode
+            and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.dev
+            == live_vm_host_worker_libvirtd_pid_file.stat.dev
+            and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.isreg
+            and not live_vm_host_worker_libvirt_residue_refresh.results[0].stat.islnk
+            and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.pw_name
+            == github_runner_user
+            and live_vm_host_worker_libvirt_residue_refresh.results[0].stat.mode
+            in ['0600', '0644']
+            )
+          - >-
+            live_vm_host_worker_libvirt_residue_refresh.results[1].stat.exists
+            == live_vm_host_worker_libvirt_socket_residue.stat.exists
+          - >-
+            not live_vm_host_worker_libvirt_socket_residue.stat.exists
+            or (
+            live_vm_host_worker_libvirt_residue_refresh.results[1].stat.inode
+            == live_vm_host_worker_libvirt_socket_residue.stat.inode
+            and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.dev
+            == live_vm_host_worker_libvirt_socket_residue.stat.dev
+            and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.issock
+            and not live_vm_host_worker_libvirt_residue_refresh.results[1].stat.islnk
+            and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.pw_name
+            == github_runner_user
+            and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.gr_name
+            == live_vm_host_worker_libvirt_group
+            and live_vm_host_worker_libvirt_residue_refresh.results[1].stat.mode == '0770'
+            )
+        fail_msg: >-
+          Selected libvirt residue changed under the protected hierarchy; both paths were left
+          untouched. Inspect the exact entries, correct the evidence, then rerun.
+      when: not live_vm_host_worker_libvirtd_live
+
+    - name: Remove proven stale selected libvirt residues
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop:
+        - path: /run/kdive/live-libvirt/libvirt/libvirtd.pid
+          exists: "{{ live_vm_host_worker_libvirtd_pid_file.stat.exists }}"
+        - path: /run/kdive/live-libvirt/libvirt/libvirt-sock
+          exists: "{{ live_vm_host_worker_libvirt_socket_residue.stat.exists }}"
+      when:
+        - not live_vm_host_worker_libvirtd_live
+        - item.exists | bool
+
+    - name: Verify selected libvirt stale cleanup postconditions
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - /run/kdive/live-libvirt/libvirt/libvirtd.pid
+        - /run/kdive/live-libvirt/libvirt/libvirt-sock
+      register: live_vm_host_worker_libvirt_cleanup_postconditions
+      when: not live_vm_host_worker_libvirtd_live
+
+    - name: Require complete selected libvirt stale cleanup
+      ansible.builtin.assert:
+        that:
+          - >-
+            live_vm_host_worker_libvirt_cleanup_postconditions.results
+            | map(attribute='stat.exists') | select('equalto', true) | list | length == 0
+        fail_msg: >-
+          Selected libvirt stale cleanup was incomplete; startup remains blocked. Inspect the exact
+          pid and socket paths, correct the residue, then rerun.
+      when: not live_vm_host_worker_libvirtd_live
+
+    - name: Permit selected libvirtd startup only after complete stale cleanup
+      ansible.builtin.set_fact:
+        live_vm_host_worker_libvirtd_should_start: true
+      when:
+        - not live_vm_host_worker_libvirtd_live
+        - >-
+          live_vm_host_worker_libvirt_cleanup_postconditions.results
+          | map(attribute='stat.exists') | select('equalto', true) | list | length == 0
+  always:
+    - name: Restore the session-libvirt runtime hierarchy
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ github_runner_user }}"
+        group: "{{ live_vm_host_worker_libvirt_group }}"
+        mode: "0750"
+      loop:
+        - path: "{{ live_vm_host_worker_libvirt_runtime + '/libvirt' }}"
+          safe: >-
+            {{ live_vm_host_worker_runtime_child_locked is defined
+            and live_vm_host_worker_runtime_child_locked.stat.exists
+            and live_vm_host_worker_runtime_child_locked.stat.isdir
+            and not live_vm_host_worker_runtime_child_locked.stat.islnk }}
+        - path: "{{ live_vm_host_worker_libvirt_runtime }}"
+          safe: true
+      when: item.safe | bool
+
+- name: Start the operator-owned dedicated session libvirtd
+  ansible.builtin.command:
+    cmd: >-
+      /usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf
+      --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
+  environment:
+    XDG_RUNTIME_DIR: /run/kdive/live-libvirt
+  become: true
+  become_user: "{{ github_runner_user }}"
+  when: live_vm_host_worker_libvirtd_should_start
+  changed_when: true
 
 - name: Enable the live-worker lifecycle control socket
   ansible.builtin.systemd_service:
