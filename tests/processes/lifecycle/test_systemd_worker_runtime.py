@@ -229,6 +229,39 @@ def test_observe_preserves_remain_after_exit_invocation_after_cgroup_empties(
     )
 
 
+def test_observe_preserves_remain_after_exit_invocation_after_systemd_unlinks_cgroup(
+    fake_host: tuple[Path, Path],
+) -> None:
+    # Hosted failure #2051: after SIGTERM under RemainAfterExit=yes systemd keeps the
+    # loaded unit's InvocationID (and may keep the stale ControlGroup value) while
+    # unlinking the now-empty cgroup directory, so stop must read the terminal facts
+    # from systemctl instead of failing closed on the unreadable cgroup.events.
+    exited = (
+        "ActiveState=active\n"
+        "SubState=exited\n"
+        "Result=success\n"
+        "ExecMainStatus=0\n"
+        f"ControlGroup={_CONTROL_GROUP}\n"
+        f"InvocationID={_INVOCATION_ID}\n"
+    )
+    _, cgroup_root = fake_host
+    (cgroup_root / _CGROUP_EVENTS).unlink()
+
+    observation = _runtime(fake_host, FakeRunner(exited)).observe(_WORKER_UNIT, FakeDeadline(120.0))
+
+    assert observation == UnitObservation(
+        unit=_WORKER_UNIT,
+        boot_id=_BOOT_ID,
+        invocation_id=_INVOCATION_ID,
+        active_state="active",
+        sub_state="exited",
+        result="success",
+        exec_main_status=0,
+        control_group=_CONTROL_GROUP,
+        membership="empty",
+    )
+
+
 @pytest.mark.parametrize(
     "output",
     [
@@ -297,17 +330,14 @@ def test_observe_reads_recursive_cgroup_membership(
     assert cast(UnitObservation, observation).membership == membership
 
 
-def test_missing_unreadable_and_oversized_membership_are_unknown(
+def test_unreadable_and_oversized_membership_are_unknown(
     fake_host: tuple[Path, Path],
 ) -> None:
     _, cgroup_root = fake_host
     path = cgroup_root / _CGROUP_EVENTS
     path.unlink()
-    runtime = _runtime(fake_host, FakeRunner())
-    observation = runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0))
-    assert cast(UnitObservation, observation).membership == "unknown"
-
     path.mkdir()
+    runtime = _runtime(fake_host, FakeRunner())
     observation = runtime.observe("kdive-live-worker@1.service", FakeDeadline(120.0))
     assert cast(UnitObservation, observation).membership == "unknown"
     path.rmdir()
