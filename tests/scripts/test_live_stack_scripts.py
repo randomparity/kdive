@@ -542,7 +542,7 @@ def test_down_force_stops_backends_only_after_forced_daemon_stop(tmp_path: Path)
     events = tmp_path / "events"
     lifecycle = script_dir / "worker-lifecycle.sh"
     lifecycle.write_text(
-        f'#!/bin/sh\n[[ "$1" == stop ]] && echo lifecycle >>"{events}"\n',
+        f'#!/bin/sh\n[ "$1" = stop ] && echo lifecycle >>"{events}"\n',
         encoding="utf-8",
     )
     lifecycle.chmod(0o755)
@@ -571,7 +571,7 @@ def test_down_force_keeps_backends_up_when_forced_daemon_stop_fails(tmp_path: Pa
     events = tmp_path / "events"
     lifecycle = script_dir / "worker-lifecycle.sh"
     lifecycle.write_text(
-        f'#!/bin/sh\n[[ "$1" == stop ]] && echo lifecycle >>"{events}"\n',
+        f'#!/bin/sh\n[ "$1" = stop ] && echo lifecycle >>"{events}"\n',
         encoding="utf-8",
     )
     lifecycle.chmod(0o755)
