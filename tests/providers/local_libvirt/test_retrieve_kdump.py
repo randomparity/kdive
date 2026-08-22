@@ -22,6 +22,7 @@ import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -45,6 +46,12 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
 )
 from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE, MAX_CORE_BYTES
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import (
+    UNCONFIGURED_OBJECT_STORE,
+    ObjectStoreAssembly,
+    ObjectStoreFactory,
+)
+from kdive.store.objectstore import ObjectStore
 from tests.live_vm import require_live_vm_provisioned
 
 _OVERLAY = "/var/lib/kdive/rootfs/sys-overlay.qcow2"
@@ -273,6 +280,46 @@ def test_redact_dmesg_scrubs_a_registered_secret(tmp_path: Path) -> None:
 # Manual end-to-end runbook (including kdump service wire-up and drgn/libguestfs
 # venv prep): docs/operating/runbooks/four-method-live-run.md §4b.
 
+
+def _build_live_proof_retriever() -> LocalLibvirtRetrieve:
+    """Build the live-proof retriever through the production store assembly (#1931).
+
+    Production wiring passes the assembled process store to ``from_env`` (see
+    ``providers/local_libvirt/composition.py``); omitting it silently defaults to the
+    ``UNCONFIGURED_OBJECT_STORE`` sentinel, which fails loud only mid-capture — after a real
+    vmcore has already been harvested on the provisioned host. Imported at call time so the
+    deterministic test below can replace the assembly seam explicitly (conftest precedent).
+    """
+    from kdive.store.assembly import build_object_store_assembly
+
+    return LocalLibvirtRetrieve.from_env(
+        secret_registry=SecretRegistry(), store=build_object_store_assembly().store
+    )
+
+
+def test_live_proof_retriever_binds_the_production_store_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live proof builds its retriever through the production assembly boundary (#1931).
+
+    Regression guard: constructing without ``store=`` yields the ``UNCONFIGURED_OBJECT_STORE``
+    sentinel, so a real vmcore upload fails after the core was harvested (hosted run in #1931).
+    """
+    marker = cast(ObjectStore, object())
+
+    def _fake_assembly(
+        store_factory: ObjectStoreFactory | None = None,
+    ) -> ObjectStoreAssembly:
+        return ObjectStoreAssembly(store=marker)
+
+    monkeypatch.setattr("kdive.store.assembly.build_object_store_assembly", _fake_assembly)
+
+    retriever = _build_live_proof_retriever()
+
+    assert retriever._store_factory() is marker
+    assert retriever._store_factory() is not UNCONFIGURED_OBJECT_STORE
+
+
 _FORCE_CRASH_WAIT_S = 60  # seconds to poll for the vmcore after the NMI
 _VMCORE_POLL_INTERVAL_S = 5
 
@@ -304,9 +351,7 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
 
     from kdive.domain.capture import CaptureMethod
     from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
-    from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
     from kdive.providers.shared.runtime_paths import domain_name_for
-    from kdive.security.secrets.secret_registry import SecretRegistry
 
     system_id = UUID(contract.system_id)
     domain_name = domain_name_for(system_id)
@@ -324,7 +369,7 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
 
     # Step 3: harvest the core via the real seam — libguestfs reads the overlay read-only,
     # streams the core to a worker spool dir, then uploads it to the object store.
-    retriever = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
+    retriever = _build_live_proof_retriever()
     run_id = UUID("44444444-4444-4444-4444-444444444444")
     out = retriever.capture(system_id, run_id, CaptureMethod.KDUMP)
 
