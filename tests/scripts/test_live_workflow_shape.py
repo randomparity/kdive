@@ -59,16 +59,20 @@ def test_ci_yml_no_longer_defines_a_live_vm_job() -> None:
 def test_native_block_exports_warm_store_wiring() -> None:
     # emit_wiring prints bare (non-export) assignments, so the native run block must export the
     # warm-store wiring vars or the child mint-system.sh / preflight / pytest never see the rootfs.
-    steps = _load(_LIVE)["jobs"]["native"]["steps"]
-    run = next(s["run"] for s in steps if "run" in s)
+    run = _native_spine()
     exported = " ".join(ln for ln in run.splitlines() if ln.strip().startswith("export"))
     for var in ("KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_VMLINUX"):
         assert var in exported, f"{var} not exported in the native run block"
 
 
-def test_native_block_preflights_debug_stepping_with_both_native_families() -> None:
+def _native_spine() -> str:
+    """The native job's one big shell, selected by name — not just its first run block."""
     steps = _load(_LIVE)["jobs"]["native"]["steps"]
-    run = next(s["run"] for s in steps if "run" in s)
+    return next(s["run"] for s in steps if s.get("name", "").startswith("Run both native families"))
+
+
+def test_native_block_preflights_debug_stepping_with_both_native_families() -> None:
+    run = _native_spine()
     assert "preflight-env.sh throwaway provisioned debug-stepping" in run
 
 
@@ -290,6 +294,34 @@ def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
     assert "kdive-witness-local" in command
     assert "KDIVE_DATABASE_URL" not in command
     assert "--witness-dsn" not in command
+
+
+def test_native_job_installs_fixed_lifecycle_contract_before_stack_up() -> None:
+    """#2050: the persistent native box carries a stale installed witness revision unless the
+
+    native arm re-installs the contract from its OWN checkout before stack-up — the same gap the
+    tcg job closed with its identically named step (run 32585991555 died at host-process start
+    with "installed lifecycle witness revision does not match this checkout").
+    """
+    steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    install = next(
+        i
+        for i, step in enumerate(steps)
+        if "install-live-worker-lifecycle.sh" in step.get("run", "")
+    )
+    spine = next(i for i, step in enumerate(steps) if step.get("name", "").startswith("Run both"))
+    assert install < spine, "the native install must precede the single shell that runs up.sh"
+    command = steps[install]["run"]
+    # Same installer invocation as the tcg step: DSN over stdin only, operator + source pinned.
+    assert '--operator "$(id -un)" --source "$GITHUB_WORKSPACE"' in command
+    assert "printf" in command and "| sudo" in command
+    assert "kdive-witness-member" in command and "kdive-witness-local" in command
+    assert "KDIVE_DATABASE_URL" not in command
+    assert "--witness-dsn" not in command
+
+
+def test_native_install_step_is_named_like_the_tcg_one() -> None:
+    _, _ = _named_step("native", "Install the fixed live-worker lifecycle host contract")
 
 
 def test_hosted_spine_enters_refreshed_control_group_and_probes_socket() -> None:
