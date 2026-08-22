@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+
+exec /opt/kdive-live-worker-lifecycle/.venv/bin/python \
+  -m kdive.processes.lifecycle.systemd_worker_control serve

@@ -1,0 +1,152 @@
+#!/usr/bin/python3
+"""Release one fixed worker only after its registered systemd invocation is published."""
+
+import os
+import re
+import stat
+import sys
+import time
+from pathlib import Path
+
+_STATE_ROOT = Path("/var/lib/kdive/live-workers")
+_START_SECONDS = 120.0
+_POLL_SECONDS = 0.05
+_MAX_CREDENTIAL_BYTES = 4096
+_MAX_MARKER_BYTES = 256
+_INVOCATION = re.compile(r"[0-9a-f]{32}")
+_WORKER_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "KDIVE_BUILD_COMPONENT_ROOTS",
+        "KDIVE_BUILD_USER",
+        "KDIVE_BUILD_WORKSPACE",
+        "KDIVE_DATABASE_URL",
+        "KDIVE_FIXTURE_CATALOG_PATH",
+        "KDIVE_HEALTH_BIND_ADDR",
+        "KDIVE_INSTALL_STAGING",
+        "KDIVE_KERNEL_SRC",
+        "KDIVE_LIBVIRT_URI",
+        "KDIVE_LOG_LEVEL",
+        "KDIVE_ROOTFS_DIR",
+        "KDIVE_S3_BUCKET",
+        "KDIVE_S3_ENDPOINT_URL",
+        "KDIVE_S3_REGION",
+        "KDIVE_WORKER_ACCEPTED_LANES",
+        "KDIVE_WORKER_SOURCE_ROOT",
+    }
+)
+
+
+def _fail(slot, invariant):
+    print(f"kdive worker gate slot {slot}: {invariant}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _required(slot, name):
+    value = os.environ.get(name)
+    if not value or "\x00" in value or "\n" in value:
+        _fail(slot, f"required {name} invariant failed")
+    return value
+
+
+def _read_regular(slot, path, maximum, invariant, *, missing_ok=False, owner_uid=None):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            metadata = os.fstat(descriptor)
+            trusted = (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_nlink == 1
+                and metadata.st_size <= maximum
+                and (owner_uid is None or metadata.st_uid == owner_uid)
+            )
+            if not trusted:
+                _fail(slot, invariant)
+            data = os.read(descriptor, maximum + 1)
+        finally:
+            os.close(descriptor)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        _fail(slot, invariant)
+    except OSError:
+        _fail(slot, invariant)
+    if len(data) > maximum:
+        _fail(slot, invariant)
+    return data
+
+
+def _configuration(slot):
+    incarnation = _required(slot, "KDIVE_WORKER_INCARNATION_ID")
+    pattern = re.compile(rf"local-systemd:kdive-live-worker@{slot}\.service:([0-9a-f]{{32}})")
+    match = pattern.fullmatch(incarnation)
+    if match is None:
+        _fail(slot, "fixed incarnation identity invariant failed")
+    invocation = _required(slot, "INVOCATION_ID")
+    if _INVOCATION.fullmatch(invocation) is None:
+        _fail(slot, "systemd invocation invariant failed")
+    python = Path(_required(slot, "KDIVE_WORKER_PYTHON"))
+    if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
+        _fail(slot, "worker Python executable invariant failed")
+    credentials = Path(_required(slot, "CREDENTIALS_DIRECTORY"))
+    if not credentials.is_absolute():
+        _fail(slot, "systemd credential directory invariant failed")
+    credential = _read_regular(
+        slot,
+        credentials / "worker-incarnation",
+        _MAX_CREDENTIAL_BYTES,
+        "systemd worker credential invariant failed",
+    )
+    if not credential.strip():
+        _fail(slot, "systemd worker credential invariant failed")
+    root = Path(os.environ.get("KDIVE_LIVE_WORKER_STATE_ROOT", str(_STATE_ROOT)))
+    if not root.is_absolute():
+        _fail(slot, "fixed state root invariant failed")
+    return incarnation, match.group(1), invocation, python, credentials, root
+
+
+def _wait_for_release(slot, release, generation, invocation, deadline):
+    while True:
+        marker = _read_regular(
+            slot,
+            release,
+            _MAX_MARKER_BYTES,
+            "release marker invariant failed",
+            missing_ok=True,
+            owner_uid=0,
+        )
+        if marker is None:
+            if time.monotonic() >= deadline:
+                _fail(slot, "release marker deadline expired")
+            time.sleep(min(_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+            continue
+        expected = f"{generation}\n{invocation}\n".encode("ascii")
+        if marker != expected:
+            _fail(slot, "release marker binding invariant failed")
+        return
+
+
+def _worker_environment(incarnation, credentials):
+    worker = {name: os.environ[name] for name in _WORKER_ENV_NAMES if name in os.environ}
+    worker["KDIVE_WORKER_INCARNATION_KIND"] = "local"
+    worker["KDIVE_WORKER_INCARNATION_ID"] = incarnation
+    worker["CREDENTIALS_DIRECTORY"] = str(credentials)
+    return worker
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in tuple(str(slot) for slot in range(1, 9)):
+        print("kdive worker gate: slot must be in 1..8", file=sys.stderr)
+        return 2
+    slot = int(sys.argv[1])
+    deadline = time.monotonic() + _START_SECONDS
+    incarnation, generation, invocation, python, credentials, root = _configuration(slot)
+    release = root / "slots" / str(slot) / "release"
+    _wait_for_release(slot, release, generation, invocation, deadline)
+    worker = _worker_environment(incarnation, credentials)
+    os.execve(str(python), [str(python), "-m", "kdive", "worker"], worker)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
