@@ -49,10 +49,8 @@
   register: live_vm_host_boot_kernels
 
 - name: Make the host kernels kvm-group-readable for the service account
-  # 0640 root:kvm, not 0644: the runner user is in the kvm group (added above), so this is
-  # genuinely group-scoped rather than world-readable — it does not fully undo the distro's
-  # 0600 hardening for every local uid. file+mode reports changed only when the mode/group
-  # actually changes, so a converged re-run is 0-changed (the spec's idempotence bar).
+  # 0640 root:kvm, not 0644: the runner and fixed workers use the distro's KVM provider group,
+  # so this remains group-scoped instead of undoing /boot hardening for every local uid.
   ansible.builtin.file:
     path: "{{ item.path }}"
     group: kvm
@@ -159,7 +157,279 @@
   ansible.builtin.file:
     path: /var/lib/kdive
     state: directory
+    owner: root
+    group: root
     mode: "0755"
+
+- name: Create the fixed live-worker groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop:
+    - "{{ live_vm_host_worker_control_group }}"
+    - "{{ live_vm_host_worker_libvirt_group }}"
+
+- name: Create the fixed live-worker primary groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Add the runner to the live-worker control and libvirt groups
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    groups:
+      - "{{ live_vm_host_worker_control_group }}"
+      - "{{ live_vm_host_worker_libvirt_group }}"
+    append: true
+
+- name: Create the isolated live-worker accounts
+  ansible.builtin.user:
+    name: "{{ item }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+    group: "{{ item }}"
+    groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]
+    append: false
+  loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Look up the live-worker operator account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_user }}"
+
+- name: Record the live-worker operator uid
+  ansible.builtin.set_fact:
+    live_vm_host_worker_operator_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
+
+- name: Create root-owned live-worker installation and credential directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /usr/local/libexec, mode: "0755"}
+    - {path: /etc/kdive, mode: "0755"}
+    - {path: /etc/kdive/credentials, mode: "0700"}
+    - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
+    - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}
+
+- name: Create the shared slots parent
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_state_root }}/slots"
+    state: directory
+    owner: root
+    group: root
+    mode: "0711"
+
+- name: Create root-owned fixed slot directories
+  ansible.builtin.file:
+    path: >-
+      {{ live_vm_host_worker_state_root }}/slots/{{
+      item | regex_replace('^kdive-worker-', '') }}
+    state: directory
+    owner: root
+    group: "{{ item }}"
+    mode: "0750"
+  loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Create the protected runtime parent
+  # The lifecycle control socket lives directly under /run/kdive; systemd creates it on socket
+  # activation, but converging it here pins the root-owned 0755 authority before that.
+  ansible.builtin.file:
+    path: /run/kdive
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Inspect the fixed worker fixture parent without following links
+  ansible.builtin.stat:
+    path: /var/lib/kdive/fixtures
+    follow: false
+  register: live_vm_host_worker_fixture_parent
+
+- name: Require a real fixed worker fixture parent
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_worker_fixture_parent.stat.exists
+      or (
+      live_vm_host_worker_fixture_parent.stat.isdir
+      and not live_vm_host_worker_fixture_parent.stat.islnk
+      )
+
+- name: Create the fixed worker fixture parent
+  ansible.builtin.file:
+    path: /var/lib/kdive/fixtures
+    state: directory
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "0750"
+
+- name: Inspect the fixed worker fixture catalog without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_fixture_catalog }}"
+    follow: false
+  register: live_vm_host_worker_fixture_catalog_stat
+
+- name: Require a real fixed worker fixture catalog
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_worker_fixture_catalog_stat.stat.exists
+      or (
+      live_vm_host_worker_fixture_catalog_stat.stat.isdir
+      and not live_vm_host_worker_fixture_catalog_stat.stat.islnk
+      )
+
+- name: Create the fixed worker fixture catalog
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_fixture_catalog }}"
+    state: directory
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "0750"
+
+- name: Create the fixed worker fixture profiles directory
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_fixture_catalog }}/profiles"
+    state: directory
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "0750"
+
+- name: Find fixed worker fixture catalog entries
+  ansible.builtin.find:
+    paths: "{{ live_vm_host_worker_fixture_catalog }}"
+    recurse: true
+    file_type: any
+    hidden: true
+  register: live_vm_host_worker_fixture_entries
+
+- name: Remove stale fixed worker fixture entries
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ live_vm_host_worker_fixture_entries.files }}"
+  when: >-
+    item.path not in [
+    live_vm_host_worker_fixture_catalog + '/profiles',
+    live_vm_host_worker_fixture_catalog + '/manifest.yaml',
+    live_vm_host_worker_fixture_catalog + '/rootfs_catalog.toml',
+    live_vm_host_worker_fixture_catalog + '/profiles/console-ready_ppc64le.yaml',
+    live_vm_host_worker_fixture_catalog + '/profiles/console-ready_x86_64.yaml'
+    ]
+
+- name: Install exact fixed worker fixture files
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../../fixtures/local-libvirt/{{ item }}"
+    dest: "{{ live_vm_host_worker_fixture_catalog }}/{{ item }}"
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "0640"
+    follow: false
+  loop: "{{ live_vm_host_worker_fixture_files }}"
+
+- name: Install the fixed live-worker executables
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/bin/{{ item.source }}"
+    dest: "/usr/local/libexec/{{ item.destination }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - {source: kdive-live-worker-gate, destination: kdive-live-worker-gate}
+    - {source: kdive-live-worker-lifecycle, destination: kdive-live-worker-lifecycle}
+
+- name: Install the fixed live-worker units
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/system/{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kdive-live-worker@.service
+    - kdive-live-worker-lifecycle.socket
+    - kdive-live-worker-lifecycle@.service
+
+- name: Install the root-only lifecycle service configuration
+  ansible.builtin.copy:
+    dest: /etc/kdive/live-worker-lifecycle.conf
+    content: |
+      KDIVE_LIVE_WORKER_OPERATOR_UID={{ live_vm_host_worker_operator_uid }}
+      KDIVE_LIVE_WORKER_STATE_ROOT={{ live_vm_host_worker_state_root }}
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install the root-only lifecycle witness credential
+  ansible.builtin.copy:
+    dest: /etc/kdive/credentials/live-worker-witness.dsn
+    content: "{{ live_vm_host_worker_witness_dsn }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Create the root-owned lifecycle witness venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} venv --python /usr/bin/python3
+      /opt/kdive-live-worker-lifecycle/.venv
+  args:
+    creates: /opt/kdive-live-worker-lifecycle/.venv/bin/python
+  register: live_vm_host_worker_witness_venv
+
+- name: Install KDIVE into the lifecycle witness venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} pip install --python
+      /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
+  when: live_vm_host_checkout is changed or live_vm_host_worker_witness_venv is changed
+  changed_when: true
+
+- name: Symlink the libguestfs binding into the lifecycle worker venv
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: >-
+      /opt/kdive-live-worker-lifecycle/.venv/lib/python{{ ansible_python.version.major }}.{{
+      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    state: link
+    force: true
+  loop: "{{ live_vm_host_libguestfs_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Keep the lifecycle witness environment root-owned
+  ansible.builtin.file:
+    path: /opt/kdive-live-worker-lifecycle
+    state: directory
+    recurse: true
+    owner: root
+    group: root
+
+- name: Install the lifecycle witness source revision
+  ansible.builtin.copy:
+    dest: /opt/kdive-live-worker-lifecycle/revision
+    content: "{{ live_vm_host_checkout.after }}\n"
+    owner: root
+    group: root
+    mode: "0444"
+
+- name: Enable the live-worker lifecycle control socket
+  ansible.builtin.systemd_service:
+    name: kdive-live-worker-lifecycle.socket
+    daemon_reload: true
+    enabled: true
+    state: started
 
 # No static disk labeling on the Ubuntu target: libvirt confines qemu with AppArmor, and
 # virt-aa-helper adds each domain's disk paths to its per-domain profile dynamically from the
