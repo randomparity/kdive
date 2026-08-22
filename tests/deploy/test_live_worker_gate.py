@@ -221,6 +221,7 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
     environment = cast(dict[str, str], captured["environment"])
     credential = Path(environment["CREDENTIALS_DIRECTORY"]) / "worker-incarnation"
     assert worker_incarnation_credential(credential).get_secret_value() == "systemd-secret"
+    assert worker_incarnation_credential().get_secret_value() == "systemd-secret"
 
 
 @pytest.mark.parametrize("credential_body", [b"", b" \n"])
