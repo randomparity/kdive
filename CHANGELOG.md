@@ -145,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provision distro-adaptive shared session libvirt authority
 - Route host workers through the lifecycle boundary
 - Preserve worker-readable console evidence across boots
+- Capture bounded worker diagnostics before teardown
 
 ### Changed
 
