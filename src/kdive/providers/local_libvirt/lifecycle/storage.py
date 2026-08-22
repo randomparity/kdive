@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import shutil
+import stat
 import subprocess  # noqa: S404 - qemu-img uses fixed argv, no shell  # nosec B404
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,7 +22,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 # ``kdive.providers.local_libvirt`` (the provider-boundary guard).
 from kdive.providers.shared.runtime_paths import ROOTFS_DIR as ROOTFS_DIR
 from kdive.providers.shared.runtime_paths import UPLOADS_DIR as UPLOADS_DIR
-from kdive.providers.shared.runtime_paths import console_log_path
+from kdive.providers.shared.runtime_paths import console_log_path, system_id_from_domain_name
 from kdive.providers.shared.runtime_paths import overlay_name as overlay_name
 from kdive.providers.shared.runtime_paths import overlay_path as overlay_path
 
@@ -228,17 +231,86 @@ type OverlayExists = Callable[[str], bool]
 type PrepareConsoleLog = Callable[[Path], None]
 
 
+def _console_identity_failure(path: Path, reason: str) -> CategorizedError:
+    return CategorizedError(
+        "console log lacks the worker-owned identity the domain start requires",
+        category=ErrorCategory.PROVISIONING_FAILURE,
+        details={"path": str(path), "reason": reason},
+    )
+
+
+def _open_failure_reason(exc: OSError) -> str:
+    if exc.errno == errno.ELOOP:
+        return "path is a symlink"
+    if exc.errno == errno.EISDIR:
+        return "path is a directory"
+    if isinstance(exc, PermissionError):
+        # The shared session daemon recreates the log as root:0600 when a start happens
+        # out-of-band (ADR-0576); the worker cannot open it back.
+        return "open failed with PermissionError; the daemon may have recreated it foreign-owned"
+    return type(exc).__name__
+
+
 def _prepare_console_log(path: Path) -> None:
+    """Ensure ``path`` is a worker-owned regular file holding only the next boot's bytes.
+
+    Creates it mode ``0644`` when absent, opens with ``O_NOFOLLOW``, verifies the opened
+    inode's identity — a regular file owned by this worker with exactly one link — restores
+    ``0644``, then truncates to zero. This worker-side per-start truncate replaces virtlogd's
+    ``append="off"`` truncation (superseded by ADR-0576, #1940): rendered ``append="on"``
+    (``xml.py``), the daemon appends to this surviving worker-owned inode instead of unlinking
+    and recreating the log as ``root:0600``, so fixed non-root workers keep reading their own
+    boot and readiness evidence under the shared session endpoint.
+
+    An unsafe identity fails the start instead of booting against evidence the worker cannot
+    read or trust: a symlinked path, a foreign-owned replacement (the daemon-recreated log
+    left by an out-of-band ``virsh start``), or a hard-linked file.
+
+    Raises:
+        CategorizedError: ``PROVISIONING_FAILURE`` naming the path when the directory cannot
+            be created, the file cannot be opened by this worker, or its identity fails.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(mode=0o644, exist_ok=True)
-        path.chmod(0o644)
-    except OSError as exc:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    except OSError as open_err:
+        raise _console_identity_failure(path, _open_failure_reason(open_err)) from open_err
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise _console_identity_failure(path, "not a regular file")
+        euid = os.geteuid()
+        if st.st_uid != euid:
+            raise _console_identity_failure(path, f"owned by uid {st.st_uid}, not {euid}")
+        if st.st_nlink != 1:
+            raise _console_identity_failure(path, f"carries {st.st_nlink} links")
+        os.fchmod(fd, 0o644)
+        os.ftruncate(fd, 0)
+    except OSError as io_err:
+        raise _console_identity_failure(path, type(io_err).__name__) from io_err
+    finally:
+        os.close(fd)
+
+
+def prepare_console_for_domain(domain_name: str) -> None:
+    """Prepare the console log of the System behind ``kdive-<uuid>`` before a host-side start.
+
+    The name-keyed entry point for planes that hold only a domain name (control power-on,
+    snapshot revert): resolves the encoded System UUID and truncates its log through
+    :func:`_prepare_console_log` (ADR-0576).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` for any name that is not a bare System
+            domain; ``PROVISIONING_FAILURE`` from :func:`_prepare_console_log`.
+    """
+    system_id = system_id_from_domain_name(domain_name)
+    if system_id is None:
         raise CategorizedError(
-            "failed to prepare libvirt console log",
-            category=ErrorCategory.PROVISIONING_FAILURE,
-            details={"path": str(path)},
-        ) from exc
+            f"cannot prepare the console log of non-System domain {domain_name!r}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"domain": domain_name},
+        )
+    _prepare_console_log(console_log_path(system_id))
 
 
 @dataclass(frozen=True, slots=True)

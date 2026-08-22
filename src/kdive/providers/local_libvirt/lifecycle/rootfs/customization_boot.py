@@ -150,16 +150,15 @@ class CustomizationBootSeams:
         The connection is opened once and returned to the caller, which holds it open for the
         whole boot: closing it triggers ``VIR_DOMAIN_START_AUTODESTROY`` cleanup, so an
         opened/closed-per-poll connection would reap the domain mid-customization.
-        ``prepare_console`` creates the console-log directory and worker-owned ``0644`` file
-        *before* the domain starts (``storage._prepare_console_log``), guaranteeing
-        ``/var/lib/kdive/console`` exists on a never-provisioned build host. The completion
-        handshake reads that serial ``<log>``, which virtlogd writes ``root:0600``; whether the
-        pre-touched worker-owned file survives (so a **non-root** reader can read it) is
-        virtlogd-version-dependent — on libvirt 12 virtlogd unlinks+recreates it ``root:0600`` and
-        the truncate-in-place mitigation does not hold, so the reliable readers are the worker
-        running as **root** (the deployment default) or ``KDIVE_LIBVIRT_URI=qemu:///session``
-        (session virtlogd writes the log worker-owned) — see the #1147 proof record. The settled
-        probe is the crashed-aware domstate probe (shut off *or* crashed).
+        ``prepare_console`` creates the console-log directory, verifies the worker-owned
+        identity, and truncates the worker-owned ``0644`` file *before* the domain starts
+        (``storage._prepare_console_log``, ADR-0576), guaranteeing ``/var/lib/kdive/console``
+        exists on a never-provisioned build host. The serial ``<log>`` is rendered
+        ``append="on"``, so the daemon appends to that surviving inode instead of recreating it
+        as ``root:0600`` (the libvirt 12 behavior that locked non-root readers out — #1147
+        proof record) and the completion handshake reads a byte-exact current-boot window even
+        for a fixed **non-root** worker. The settled probe is the crashed-aware domstate probe
+        (shut off *or* crashed).
         """
         uri = config.require(LIBVIRT_URI)
         return cls(

@@ -57,7 +57,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
-from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
+from kdive.providers.local_libvirt.lifecycle.storage import (
+    _prepare_console_log,
+    console_log_path,
+    overlay_path,
+)
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
@@ -172,10 +176,12 @@ class LocalLibvirtBooter:
         connect: Connect,
         readiness: Readiness,
         boot_window_polls: int,
+        prepare_console: Callable[[UUID], None],
     ) -> None:
         self._connect = connect
         self._readiness = readiness
         self._boot_window_polls = boot_window_polls
+        self._prepare_console = prepare_console
 
     def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
         """Power-cycle the domain into the staged kernel and confirm run-readiness.
@@ -197,7 +203,7 @@ class LocalLibvirtBooter:
         conn = _open(self._connect, "to boot")
         try:
             domain = _lookup(conn, domain_name)
-            self._power_cycle(domain, domain_name)
+            self._power_cycle(domain, domain_name, system_id)
         finally:
             _close(conn)
         polls = math.ceil(self._boot_window_polls * tcg_deadline_multiplier(accel))
@@ -224,11 +230,14 @@ class LocalLibvirtBooter:
         finally:
             _close(conn)
 
-    @staticmethod
-    def _power_cycle(domain: _LibvirtDomain, domain_name: str) -> None:
+    def _power_cycle(self, domain: _LibvirtDomain, domain_name: str, system_id: UUID) -> None:
         try:
             if domain.isActive():
                 domain.destroy()
+            # Truncate after destroy, before create: the fresh window must hold only this
+            # boot, and the worker-owned inode must exist before the daemon opens it
+            # (ADR-0576, #1940).
+            self._prepare_console(system_id)
             domain.create()
         except libvirt.libvirtError as exc:
             raise _libvirt_transport_failure("power-cycling", domain_name) from exc
@@ -582,6 +591,7 @@ class LocalLibvirtInstall:
         readiness: Readiness,
         staging_root: Path,
         boot_window_polls: int,
+        prepare_console: Callable[[UUID], None],
         scratch_root: Path | None = None,
         fetch_modules: Fetch | None = None,
         kernel_writer: GuestKernelWriter | None = None,
@@ -590,6 +600,7 @@ class LocalLibvirtInstall:
             connect=connect,
             readiness=readiness,
             boot_window_polls=boot_window_polls,
+            prepare_console=prepare_console,
         )
         self._installer = LocalLibvirtInstaller(
             connect=connect,
@@ -630,6 +641,7 @@ class LocalLibvirtInstall:
             readiness=_real_readiness,
             staging_root=staging_root,
             boot_window_polls=_boot_window_polls(),
+            prepare_console=lambda sid: _prepare_console_log(console_log_path(sid)),
             scratch_root=scratch_root,
             fetch_modules=lambda ref, dest, version_id: _stage_object(
                 store, ref, dest, version_id=version_id
