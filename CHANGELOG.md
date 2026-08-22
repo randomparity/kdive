@@ -147,6 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve worker-readable console evidence across boots
 - Capture bounded worker diagnostics before teardown
 - Keep the session libvirtd boot-persistent via a user unit (#2032)
+- Carry state timeline and terminated-worker journals on red proofs
 
 ### Changed
 
