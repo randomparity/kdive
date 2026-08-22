@@ -49,6 +49,8 @@ _NOT_ENV: frozenset[str] = frozenset(
         # Internal bash array constant in scripts/live-stack/lib.sh (unconditional assignment,
         # never read as an env var by any process; consumers reference the array directly).
         "KDIVE_BACKEND_SERVICES",
+        # Synthetic worker.env value in lifecycle test fixtures; never a real env read.
+        "KDIVE_API_TOKEN",
         # Retired remote-libvirt inventory singletons (M2.6 #395); tests/guards/ asserts they
         # never reappear in code, so they are intentionally undocumented and must stay ignored.
         "KDIVE_REMOTE_LIBVIRT_URI",
