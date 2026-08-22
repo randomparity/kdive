@@ -138,6 +138,17 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    runner-readable, and every fixed worker, direct live test, and cleanup command uses
    the same daemon.
 
+   The dedicated session daemon is **boot-persistent** (#2032): provisioning installs a
+   `systemd --user` unit (`kdive-libvirtd-live.service`) for the runner account and enables it
+   (linger is already on), so the endpoint comes back by itself after a reboot instead of
+   depending on workflow-side starts. If the endpoint is nonetheless unreachable at job time,
+   `scripts/live-stack/up.sh` recovers by starting that same operator-owned daemon directly as
+   the invoking user (`libvirtd --config /etc/kdive/libvirtd-live.conf --pid-file
+   /run/kdive/live-libvirt/libvirt/libvirtd.pid`, idempotent on a live pid) — never `sudo`: the
+   runner service account has no sudoers grant and Debian-family hosts ship no `virtqemud`. If
+   the daemon cannot be started non-interactively, `up.sh` dies loud naming the exact paths
+   rather than degrading to `qemu:///system`.
+
    The fixed workers also use the distro's `kvm` group to read the host kernels that
    libguestfs uses for its appliance and to read and write `/dev/kvm`. Provisioning keeps
    each worker's unique primary group, grants only `kdive-live-libvirt` and `kvm` as
