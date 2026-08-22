@@ -9,6 +9,7 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
 import yaml
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -302,6 +303,48 @@ _APP_TIER_SERVICES = ("server", "worker", "reconciler")
 
 def _job_run_blocks(job: str) -> str:
     return "\n".join(s["run"] for s in _load(_LIVE)["jobs"][job]["steps"] if "run" in s)
+
+
+def _named_step(job: str, name: str) -> tuple[int, dict]:
+    steps = _load(_LIVE)["jobs"][job]["steps"]
+    index = next(index for index, step in enumerate(steps) if step.get("name") == name)
+    return index, steps[index]
+
+
+@pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str) -> None:
+    """Diagnostics are observational and must run before destructive teardown (#1939).
+
+    The diagnostics step never fails the job (`exit 0`), neutralizes workflow-command
+    injection from journal text (::stop-commands:: token), and degrades to a warning when
+    the witness withholds evidence. Cleanup runs on every outcome; diagnostics must have
+    their chance first — after teardown there is nothing left to read.
+    """
+    diagnostic_index, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
+    cleanup_index, cleanup = _named_step(job, "Clean up live stack")
+
+    assert diagnostic["if"] == "failure() || cancelled()"
+    assert "scripts/live-stack/worker-lifecycle.sh diagnostics" in diagnostic["run"]
+    assert "|| diagnostic_status=$?" in diagnostic["run"]
+    assert "::stop-commands::" in diagnostic["run"]
+    assert "printf '::%s::" in diagnostic["run"]
+    assert "::${" not in diagnostic["run"]
+    assert "exit 0" in diagnostic["run"]
+    assert cleanup["if"] == "always()"
+    assert "scripts/live-stack/down.sh" in cleanup["run"]
+    assert diagnostic_index < cleanup_index
+
+
+@pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_keeps_test_step_authoritative_before_diagnostics(job: str) -> None:
+    """The tier's own proof decides the verdict; diagnostics only observe its wreckage."""
+    steps = _load(_LIVE)["jobs"][job]["steps"]
+    diagnostic_index, _ = _named_step(job, "Capture worker lifecycle diagnostics")
+    cleanup_index, _ = _named_step(job, "Clean up live stack")
+    proof = "just test-live-tcg" if job == "tcg" else 'pytest -m "live_vm and not live_vm_tcg"'
+    test_index = next(index for index, step in enumerate(steps) if proof in step.get("run", ""))
+
+    assert test_index < diagnostic_index < cleanup_index
 
 
 def test_both_live_jobs_start_the_app_tier_with_up_sh() -> None:
