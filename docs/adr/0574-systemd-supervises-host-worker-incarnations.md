@@ -90,11 +90,13 @@ provider directories needed by the live topology.
 
 ### Amendment (2026-08-12): fixed workers also use distro KVM authority (#1926)
 
-Amended by the host-workers-use-KVM-provider-authority decision
-([ADR-0575](0575-host-workers-use-kvm-provider-authority.md), #1937): it
-satisfies the forward reference and supersedes only the preceding claim about shared worker
-authority. Fixed workers also use the distro's `kvm` group to read `root:kvm` host kernels and use
-`/dev/kvm`; ADR-0574's lifecycle, credential, witness, and cleanup decisions remain in force.
+Amended by the host-workers-use-KVM-provider-authority decision (lands as ADR-0575 via #1937): it
+supersedes only the preceding claim about shared worker authority. Fixed workers also use the
+distro's `kvm` group to read `root:kvm` host kernels and use `/dev/kvm`; ADR-0574's lifecycle,
+credential, witness, and cleanup decisions remain in force.
+Resolved: ADR-0575 landed as
+[0575-host-workers-use-kvm-provider-authority.md](0575-host-workers-use-kvm-provider-authority.md)
+(#1937).
 
 Failure diagnostics are deliberately non-transactional. Before teardown, the fixed diagnostics
 request reads only the current worker units. Every allowlisted worker setting is classified public
