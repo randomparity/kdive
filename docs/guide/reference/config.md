@@ -282,7 +282,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KDIVE_ACCEPTED_LANES` | `default` | Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request. |
+| `KDIVE_ACCEPTED_LANES` | `default,state-fenced` | Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request. Must match the process default (`core_settings._DEFAULT_ACCEPTED_LANES`): provision jobs route to `state-fenced` (ADR-0550/0574), so a narrower host-side default starves them. |
 | `KDIVE_APT_TIMEOUT_S` | `60` | Positive whole-second wall-clock bound for each `apt-get install` in scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by live.yml for its larger host-dep set (ADR-0566, #1978). |
 | `KDIVE_BOOT_DIR` | `/boot` | Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels (libguestfs build-fs appliance, ADR-0222). |
 | `KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS` | `10` | Positive whole-second PostgreSQL connection bound exported by the protocol cutover wrappers for each database operation. |

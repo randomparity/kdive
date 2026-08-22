@@ -79,8 +79,10 @@ export KDIVE_INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
 export KDIVE_FIXTURE_CATALOG_PATH="${KDIVE_FIXTURE_CATALOG_PATH:-${default_worker_fixture_catalog}}"
 # Inputs the checkout-side lifecycle client folds into each start request. KDIVE_ACCEPTED_LANES
 # bounds what the fixed worker fleet dispatches; KDIVE_LOG_LEVEL is the workers' structured-log
-# level (the registry setting of the same name).
-export KDIVE_ACCEPTED_LANES="${KDIVE_ACCEPTED_LANES:-default}"
+# level (the registry setting of the same name). The lane default must match
+# core_settings._DEFAULT_ACCEPTED_LANES: provision jobs route to state-fenced (ADR-0550/0574), so
+# a default-only fleet never claims them and the spine starves its own provision jobs (#2058).
+export KDIVE_ACCEPTED_LANES="${KDIVE_ACCEPTED_LANES:-default,state-fenced}"
 export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
 # KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
 # verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
