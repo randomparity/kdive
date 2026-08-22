@@ -534,6 +534,19 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "database pool and aux port.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_WORKER_OPERATOR_UID",
+        "script",
+        None,
+        "Provisioner-managed numeric uid authorizing the sole lifecycle socket operator; the "
+        "root service refuses requests when it is absent or invalid.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_WORKER_STATE_ROOT",
+        "script",
+        "/var/lib/kdive/live-workers",
+        "Root-owned fixed-slot state directory used by the lifecycle service and worker gate.",
+    ),
+    ExternalEnvVar(
         "KDIVE_WORKER_PYTHON",
         "script",
         "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
