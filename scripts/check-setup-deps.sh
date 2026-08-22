@@ -391,6 +391,9 @@ probe_all() {
   require_command recommended shfmt "${distro}"
   require_tool recommended just "uv tool install rust-just"
   require_tool recommended prek "uv tool install prek"
+  # `just check-pr-body` scans a PR/issue body before `gh ... --body-file` publishes it.
+  # Most distros do not package gitleaks, so this is a manual hint like just/prek above.
+  require_tool recommended gitleaks "brew install gitleaks (or a pinned release from github.com/gitleaks/gitleaks/releases)"
   require_command recommended docker "${distro}"
   command_exists node || command_exists nodejs ||
     note_package recommended node "$(package_for node "${distro}")"

@@ -190,6 +190,19 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   rule is project-wide): use **Milestone**, never "Sprint"; keep prose plain and factual —
   avoid "critical", "robust", "comprehensive", "elegant". This applies to ADRs, specs,
   commit messages, and code comments.
+- **Never pass a PR or issue body as a shell string.** Write the body to a file and use
+  `gh pr create --body-file FILE` (same for `gh pr edit`, `gh issue create/comment`,
+  `gh pr comment`). A body inside double quotes is shell source, not text: every
+  `` `…` `` span in it runs as a command substitution. PR #2037 was written that way, so
+  its markdown code spans executed — one of them was `env`, and five live API keys landed
+  in a public pull-request body. Editing the body afterwards does **not** unpublish it;
+  GitHub keeps every prior revision in `userContentEdits`, and a public repository mirrors
+  the original to third parties. Never build a body with `--body "$(…)"` or a heredoc
+  spliced into an outer quoted string. Scan the file before you publish it:
+  `just check-pr-body FILE`. The `pr-body-scan` workflow runs the same checker against the
+  live body, but it runs *after* GitHub has the text — it shortens exposure, it does not
+  prevent it. The `detect-secrets` hook does not cover this at all: it scans repository
+  files, and a body never becomes one.
 - **`live_vm` tests** are skipped by default (marker in `pyproject.toml`); they need an
   operator-provided KVM/nested-virt host with libvirt and a kdump-enabled guest image, and
   run only as a manually-dispatched self-hosted CI job. Unit/service tests depend only on
