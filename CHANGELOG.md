@@ -724,6 +724,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record host worker KVM provider authority as ADR-0575
 - Append ADR-0575 resolution banner instead of rewriting 0574
 - Supersede ADR-0258 with worker-owned console inode (0576)
+- Document the installed lifecycle proof surface
+- Cite the renumbered host-worker ADRs
 
 ### Fixed
 
