@@ -299,6 +299,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware virtualization (the latter for its native-arch advisory line). |
 | `KDIVE_LIMIT_KCU` | `1000000` | Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project. |
 | `KDIVE_LIVE_SSH_PORT` | `22` | SSH port `check-ssh-reachable.sh` probes. |
+| `KDIVE_LIVE_WORKER_OPERATOR_UID` | — | Provisioner-managed numeric uid authorizing the sole lifecycle socket operator; the root service refuses requests when it is absent or invalid. |
+| `KDIVE_LIVE_WORKER_STATE_ROOT` | `/var/lib/kdive/live-workers` | Root-owned fixed-slot state directory used by the lifecycle service and worker gate. |
 | `KDIVE_LOCAL_ROLE_BOOTSTRAP` | `1` | Whether the local Compose reference provisions its fixed development-only runtime login members after migration; set to 0 only with externally provisioned role DSNs. |
 | `KDIVE_MAX_ALLOC` | `4` | max_concurrent_allocations quota the setup-*-libvirt.sh scripts set. |
 | `KDIVE_MAX_SYS` | `4` | max_concurrent_systems quota the setup-*-libvirt.sh scripts set. |
