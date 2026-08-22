@@ -1200,6 +1200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fund project and fail loud on empty live_vm_tcg tier (#2048)
 - Native arm installs the lifecycle contract from its checkout
 - Read systemd-unlinked worker cgroups as empty membership
+- Execute live spine scripts from materialized files, not shared stdin (#2054)
 
 ### Build
 
