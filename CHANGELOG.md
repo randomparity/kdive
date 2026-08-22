@@ -135,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Surface reaping-lane budget truncation on report, telemetry, and ops.reconcile_now
 - Make migration-owner bootstrap idempotent on retained databases
 - Route each host process through its own database authority
+- Port bounded worker slot contract and durable state store
 
 ### Changed
 
@@ -708,6 +709,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the repo-wide job timeout rule as ADR-0571 (#1995)
 - Fix ADR-0571's callee-exemption wording and amendment precedent
 - Port host worker lifecycle decision as ADR-0574
+- Accept ADR-0574 as its slot contract ships
 
 ### Fixed
 
@@ -1167,6 +1169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Push by digest, sign, then apply tags (#1991)
 - Use buildx's push-by-digest export; pin it in the guard
 - Wire assembled object store into live kdump proof
+- Document lifecycle handoff env vars and date ADR-0574 acceptance
 
 ### Build
 
