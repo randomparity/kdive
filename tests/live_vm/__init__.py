@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -124,6 +125,21 @@ class EnvResolution[T]:
 
 def _resolved_uri(default_uri: str) -> str:
     return os.environ.get(LIBVIRT_URI_ENV) or default_uri
+
+
+def _is_local_session_uri(uri: str) -> bool:
+    try:
+        parsed = urlsplit(uri)
+        query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    if parsed.netloc or parsed.path != "/session" or parsed.fragment:
+        return False
+    if parsed.scheme == "qemu":
+        return not query
+    if parsed.scheme != "qemu+unix" or len(query) != 1 or query[0][0] != "socket":
+        return False
+    return Path(query[0][1]).is_absolute()
 
 
 def resolve_throwaway_contract(default_uri: str) -> EnvResolution[ThrowawayContract]:
@@ -293,8 +309,9 @@ def require_live_vm_throwaway(
 ) -> ThrowawayContract:
     """Skip if the throwaway env is absent, fail loud if misconfigured, else return the contract.
 
-    When ``session_required`` is set and the resolved URI is not a ``qemu:///session`` URI, fail
-    loud rather than boot a session-only test (#1258 root-readback) into the wrong mode.
+    When ``session_required`` is set, accept only a local session URI: either ``qemu:///session``
+    or ``qemu+unix:///session`` with one absolute socket query. Fail loud rather than boot a
+    session-only test (#1258 root-readback) into the wrong mode.
     """
     resolution = resolve_throwaway_contract(default_uri)
     if resolution.state is LiveVmEnvState.ABSENT:
@@ -303,9 +320,9 @@ def require_live_vm_throwaway(
         pytest.fail(resolution.reason)
     assert resolution.contract is not None
     contract = resolution.contract
-    if session_required and not contract.libvirt_uri.startswith("qemu:///session"):
+    if session_required and not _is_local_session_uri(contract.libvirt_uri):
         pytest.fail(
-            "this test requires a qemu:///session URI (#1258 root-readback); "
+            "this test requires a local qemu session URI (#1258 root-readback); "
             f"{contract.libvirt_uri!r} was resolved from KDIVE_LIBVIRT_URI"
         )
     return contract

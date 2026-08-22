@@ -245,6 +245,51 @@ def test_throwaway_session_required_passes_on_session(
     assert contract.libvirt_uri.startswith("qemu:///session")
 
 
+@pytest.mark.parametrize(
+    "uri",
+    (
+        "qemu:///session",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+        "qemu+unix:///session?socket=/tmp/operator/virtqemud-sock",
+    ),
+)
+def test_throwaway_session_required_accepts_local_session_uris(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, uri: str
+) -> None:
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+    monkeypatch.setenv("KDIVE_LIVE_VM_ROOTFS", str(rootfs))
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", uri)
+
+    assert require_live_vm_throwaway(session_required=True).libvirt_uri == uri
+
+
+@pytest.mark.parametrize(
+    "uri",
+    (
+        "qemu:///system",
+        "qemu+ssh://host/session",
+        "qemu+unix://host/session?socket=/run/libvirt.sock",
+        "qemu+unix:///system?socket=/run/libvirt.sock",
+        "qemu+unix:///session",
+        "qemu+unix:///session?socket=relative.sock",
+        "qemu+unix:///session?socket=/run/a&socket=/run/b",
+        "qemu+unix:///session?socket=/run/libvirt.sock&auth=none",
+        "qemu:///session-extra",
+    ),
+)
+def test_throwaway_session_required_rejects_nonlocal_or_malformed_session_uris(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, uri: str
+) -> None:
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+    monkeypatch.setenv("KDIVE_LIVE_VM_ROOTFS", str(rootfs))
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", uri)
+
+    with pytest.raises(pytest.fail.Exception):
+        require_live_vm_throwaway(session_required=True)
+
+
 def test_provisioned_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KDIVE_LIVE_VM_SYSTEM_ID", raising=False)
     with pytest.raises(pytest.skip.Exception):
