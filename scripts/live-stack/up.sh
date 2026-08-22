@@ -2,8 +2,9 @@
 #
 # Bring up the WHOLE local kdive infrastructure, idempotently and in order:
 #   backends (compose) -> migrations (host) -> libvirt -> host processes -> status.
-# Run as the provisioned lifecycle-control operator (never UID 0); only the libvirt socket
-# bring-up below still elevates, via sudo.
+# Run as the provisioned lifecycle-control operator (never UID 0). Libvirt bring-up is
+# unprivileged on a provisioned host (the dedicated session daemon, #2032); only a bare dev host
+# still elevates, via sudo, to socket-activate the system daemon.
 #
 # Usage:
 #   scripts/live-stack/up.sh                 full bring-up
@@ -117,13 +118,29 @@ fi
 
 if [[ "$skip_libvirt" != "1" ]]; then
   banner "libvirt"
-  # The provider uses user-mode SLIRP networking (no libvirt network), so only virtqemud is
-  # needed — do NOT manage virtnetworkd. virtqemud is socket-activated, so `libvirt_ok` (a
-  # `virsh list`) activates it on connect; gate on that, not `systemctl is-active` (which reports
-  # the *service* inactive on a healthy socket-activated host and would re-sudo every run).
+  # The provider uses user-mode SLIRP networking (no libvirt network), so only the qemu daemon is
+  # needed — do NOT manage virtnetworkd. Gate on `libvirt_ok` (a `virsh list`), not
+  # `systemctl is-active`, which reports the *service* inactive on a healthy socket-activated host.
   if ! libvirt_ok; then
-    echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
-    sudo systemctl enable --now virtqemud.socket
+    if [[ "$KDIVE_LIBVIRT_URI" == *"live-libvirt"* ]]; then
+      # Provisioned-runner recovery (#2032): the dedicated session endpoint is down (fresh boot,
+      # reprovision lag). Start the OPERATOR-OWNED session daemon as the invoking user — the same
+      # daemon shape the live_vm_host role provisions and keeps boot-persistent via its systemd
+      # --user unit. No sudo on this path: the runner service account has none, virtqemud does not
+      # exist on the Debian-family runner, and degrading to qemu:///system would hit the
+      # root-readback wall (ADR-0223) anyway. If the daemon cannot be started non-interactively,
+      # die loud naming the missing paths instead of failing later with a confusing URI error.
+      echo "libvirt unreachable at ${KDIVE_LIBVIRT_URI}; starting the dedicated session daemon ..."
+      ensure_session_libvirtd || {
+        echo "dedicated session daemon could not be started; refusing to fall back to a system daemon" >&2
+        exit 1
+      }
+    else
+      # Bare dev host (qemu:///system default): the system daemon is socket-activated, so enable
+      # --now plus the re-check below is enough.
+      echo "libvirt unreachable; enabling virtqemud.socket (sudo) ..."
+      sudo systemctl enable --now virtqemud.socket
+    fi
   fi
   libvirt_ok || {
     echo "libvirt daemon not reachable at ${KDIVE_LIBVIRT_URI}" >&2

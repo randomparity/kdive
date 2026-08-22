@@ -333,6 +333,39 @@ libvirt_ok() {
   virsh -c "$KDIVE_LIBVIRT_URI" list >/dev/null 2>&1
 }
 
+# Operator-owned dedicated session libvirt daemon (#2032). The live_vm_host role provisions a
+# dedicated session daemon for the runner account (config /etc/kdive/libvirtd-live.conf, runtime
+# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. up.sh's
+# recovery path starts this same daemon directly as the invoking user — the runner service account
+# has no sudo and the Debian-family runner ships no virtqemud, so a system-daemon fallback can
+# never work there.
+#
+# Idempotently ensure the dedicated session daemon is running. A pid file pointing at a live
+# process short-circuits; otherwise start it exactly as the provisioning role does (same binary,
+# config, pid file, and XDG_RUNTIME_DIR). Missing prerequisites fail loud naming each exact path;
+# callers must die rather than fall back to a system daemon on this path. Positional overrides
+# (binary, config, runtime root) exist only so tests can stage the contract.
+ensure_session_libvirtd() {
+  local bin="${1:-/usr/sbin/libvirtd}"
+  local conf="${2:-/etc/kdive/libvirtd-live.conf}"
+  local runtime="${3:-/run/kdive/live-libvirt}"
+  local pidfile="$runtime/libvirt/libvirtd.pid" pid=""
+  if [[ -r "$pidfile" ]]; then
+    pid="$(tr -d '[:space:]' <"$pidfile" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  if [[ ! -x "$bin" || ! -r "$conf" || ! -d "$runtime" ]]; then
+    echo "cannot start the dedicated session libvirt daemon as $(id -un):" >&2
+    echo "  daemon binary: $bin (must be executable)" >&2
+    echo "  config:        $conf (must be readable)" >&2
+    echo "  runtime root:  $runtime (must exist)" >&2
+    return 1
+  fi
+  XDG_RUNTIME_DIR="$runtime" "$bin" --daemon --config "$conf" --pid-file "$pidfile"
+}
+
 # The host prerequisites a local-libvirt provision actually needs. Returns 0 iff all are
 # PRESENT (existence only — ownership/writability is the lifecycle witness's concern, not testable
 # reliably as the invoking user). up.sh creates the dirs before calling this.
