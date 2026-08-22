@@ -1205,6 +1205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native arm installs the lifecycle contract from its checkout
 - Read systemd-unlinked worker cgroups as empty membership
 - Execute live spine scripts from materialized files, not shared stdin (#2054)
+- Default KDIVE_ACCEPTED_LANES to default,state-fenced
 - Document the KDIVE_GITLEAKS script override
 
 ### Build
