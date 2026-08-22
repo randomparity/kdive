@@ -542,8 +542,10 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
     ExternalEnvVar(
         "KDIVE_ACCEPTED_LANES",
         "script",
-        "default",
-        "Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request.",
+        "default,state-fenced",
+        "Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request. "
+        "Must match the process default (`core_settings._DEFAULT_ACCEPTED_LANES`): provision jobs "
+        "route to `state-fenced` (ADR-0550/0574), so a narrower host-side default starves them.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_WORKER_OPERATOR_UID",

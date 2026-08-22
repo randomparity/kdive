@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from kdive.config.core_settings import _DEFAULT_ACCEPTED_LANES
 from kdive.config.external_env import EXTERNAL_ENV_VARS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -668,6 +669,18 @@ def test_live_stack_env_exports_required_defaults() -> None:
     ]
     for name in required:
         assert f"export {name}=" in env
+
+
+def test_live_stack_lane_default_matches_the_process_default() -> None:
+    """env.sh's host-side lane fallback must equal core_settings' process default (#2058).
+
+    Provision jobs route to the state-fenced lane (ADR-0550/0574), so a default-only fleet
+    never claims them and the hosted spine starves its own provision jobs.
+    """
+    env = (ROOT / "scripts/live-stack/env.sh").read_text()
+    assert (
+        f'export KDIVE_ACCEPTED_LANES="${{KDIVE_ACCEPTED_LANES:-{_DEFAULT_ACCEPTED_LANES}}}"' in env
+    )
 
 
 def test_live_stack_rootfs_default_reaches_child_processes() -> None:
