@@ -1198,6 +1198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Create systemd user unit dir before installing libvirtd live unit
 - Alias onboard CLI invocations to their own database authorities
 - Fund project and fail loud on empty live_vm_tcg tier (#2048)
+- Native arm installs the lifecycle contract from its checkout
 
 ### Build
 
