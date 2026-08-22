@@ -892,6 +892,15 @@
           safe: true
       when: item.safe | bool
 
+# systemd does not pre-create ~/.config/systemd/user, and a clean host has no user
+# units for the runner yet, so the copy below is fatal without it (#2044).
+- name: Ensure the runner's systemd user unit directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0700"
 - name: Install the boot-persistent session libvirtd user unit
   ansible.builtin.copy:
     dest: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"

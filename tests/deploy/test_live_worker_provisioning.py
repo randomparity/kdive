@@ -397,11 +397,20 @@ def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
     enable = tasks.index("- name: Enable the boot-persistent session libvirtd user unit")
     start = tasks.index("- name: Start the operator-owned dedicated session libvirtd")
     assert "scope: user" in tasks[enable:start]
+    # The unit's destination directory must exist before the copy: systemd does not
+    # pre-create ~/.config/systemd/user and a clean host has no user units yet (#2044).
+    ensure_dir = tasks.index("- name: Ensure the runner's systemd user unit directory exists")
+    install = tasks.index("- name: Install the boot-persistent session libvirtd user unit")
+    assert ensure_dir < install
+    ensure_block = tasks[ensure_dir:install]
+    assert "state: directory" in ensure_block
+    assert 'mode: "0700"' in ensure_block
+    assert "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user" in (
+        ensure_block
+    )
     # Linger must be provisioned before the unit: it is what keeps the runner's user manager
     # alive from boot with no login session.
-    assert tasks.index("loginctl enable-linger") < tasks.index(
-        "- name: Install the boot-persistent session libvirtd user unit"
-    )
+    assert tasks.index("loginctl enable-linger") < install
     assert enable < start, "the unit enables unconditionally; only the start is stale-gated"
 
 
