@@ -133,6 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-delete this job's stale pcap in local prepare
 - Wire local-libvirt's capture reaper into the sweep
 - Surface reaping-lane budget truncation on report, telemetry, and ops.reconcile_now
+- Make migration-owner bootstrap idempotent on retained databases
+- Route each host process through its own database authority
 
 ### Changed
 
