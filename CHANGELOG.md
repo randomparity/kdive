@@ -1187,6 +1187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Wire assembled object store into live kdump proof
 - Document lifecycle handoff env vars and date ADR-0574 acceptance
 - Use a POSIX test in the lifecycle stub so /bin/sh runners agree
+- Pre-clean stale live-libvirt runtime residue before the hosted tcg install step
 
 ### Build
 
