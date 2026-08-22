@@ -74,6 +74,10 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_ONBOARD_PROBE",
         "KDIVE_ENV_PROBE",
         "KDIVE_RESPONSE",
+        # Bash heredoc DELIMITERS in live.yml's spine steps, quoted back by the #2054 shape
+        # tests: script-text markers a shell never exports, not environment variables.
+        "KDIVE_LIVE_SPINE",
+        "KDIVE_NATIVE_SPINE",
     }
 )
 
