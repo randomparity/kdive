@@ -282,9 +282,11 @@ def _append_root_disk(devices: ET.Element, disk_path: str) -> None:
 def _append_serial_console(devices: ET.Element, system_id: UUID) -> None:
     """Append the serial console and per-System virtlogd log sink."""
     serial = ET.SubElement(devices, "serial", type="pty")
-    # append="off" makes virtlogd truncate the serial log on every power-cycle, so the file holds
-    # only the current boot and each Run's capture reads it whole (ADR-0258, #836).
-    ET.SubElement(serial, "log", file=str(console_log_path(system_id)), append="off")
+    # append="on" keeps virtlogd attached to the worker-created console inode: under
+    # append="off" libvirt 12 unlinks and recreates the log as root:0600, which fixed non-root
+    # workers cannot read. The current-boot-only window ADR-0258 pinned survives through the
+    # worker's own identity-checked truncate before every domain start (ADR-0576, #1940).
+    ET.SubElement(serial, "log", file=str(console_log_path(system_id)), append="on")
     ET.SubElement(serial, "target", port="0")
     console = ET.SubElement(devices, "console", type="pty")
     ET.SubElement(console, "target", type="serial", port="0")

@@ -64,6 +64,7 @@ def throwaway_domain_xml(
     kernel_path: Path | None = None,
     cmdline: str | None = None,
     console_log: Path | None = None,
+    console_append: bool = False,
     ssh_hostfwd_port: int | None = None,
     ssh_netdev_id: str = _DEFAULT_SSH_NETDEV_ID,
 ) -> str:
@@ -97,7 +98,7 @@ def throwaway_domain_xml(
         ET.SubElement(features, "vmcoreinfo", state="on")
     devices = ET.SubElement(domain, "devices")
     _append_root_disk(devices, disk_path)
-    _append_serial(devices, console_log)
+    _append_serial(devices, console_log, append=console_append)
     if ssh_hostfwd_port is not None:
         _append_ssh_netdev(
             domain, ssh_hostfwd_port, netdev_id=ssh_netdev_id, pin_nic_slot=traits.pin_nic_slot
@@ -112,10 +113,12 @@ def _append_root_disk(devices: ET.Element, disk_path: str) -> None:
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
 
 
-def _append_serial(devices: ET.Element, console_log: Path | None) -> None:
+def _append_serial(devices: ET.Element, console_log: Path | None, *, append: bool = False) -> None:
     serial = ET.SubElement(devices, "serial", type="pty")
     if console_log is not None:
-        ET.SubElement(serial, "log", file=str(console_log), append="off")
+        # Default keeps the historical throwaway-proof shape (daemon-truncated log); proofs of
+        # ADR-0576 pass append=True so virtlogd stays attached to a worker-created inode.
+        ET.SubElement(serial, "log", file=str(console_log), append="on" if append else "off")
     ET.SubElement(serial, "target", port="0")
     console = ET.SubElement(devices, "console", type="pty")
     ET.SubElement(console, "target", type="serial", port="0")
@@ -412,6 +415,7 @@ def boot_throwaway_domain(
     kernel_path: Path | None = None,
     cmdline: str | None = None,
     console_log: Path | None = None,
+    console_append: bool = False,
     wait_for: str = "active",
     wait_timeout_s: float = 30.0,
     settle_s: float = 0.0,
@@ -456,6 +460,7 @@ def boot_throwaway_domain(
             kernel_path=kernel_path,
             cmdline=cmdline,
             console_log=console_log,
+            console_append=console_append,
             ssh_hostfwd_port=ssh_hostfwd_port,
             ssh_netdev_id=ssh_netdev_id,
         )

@@ -284,6 +284,14 @@ def _install(
     # existing tests that tune the combined tar via ``fetch`` keep working. The initrd and
     # debuginfo-vmlinux fetches stay the buffered ``_Fetch`` seam.
     stream = stream or _stream_from_fetch(fetch)
+    # The ADR-0576 per-start truncate is observable through the same call log the fake
+    # domain keeps, so boot-ordering tests see destroy → prepare → create in one sequence.
+    console_target = next(iter(conn.lookup.values()), None)
+
+    def _prepare(sid: UUID) -> None:
+        if console_target is not None:
+            console_target.calls.append("prepare")
+
     return LocalLibvirtInstall(
         connect=lambda: conn,
         stream_kernel=stream,
@@ -291,6 +299,7 @@ def _install(
         readiness=seam.readiness,
         staging_root=staging_root,
         boot_window_polls=3,
+        prepare_console=_prepare,
         scratch_root=scratch_root,
         fetch_modules=fetch_modules or fetch,
         kernel_writer=kernel_writer,
@@ -1047,7 +1056,7 @@ def test_boot_powercycles_running_domain_then_readiness(tmp_path: Path) -> None:
     conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
     inst = _install(conn=conn, staging_root=tmp_path)
     inst.boot(_SYS)  # no raise
-    assert domain.calls == ["destroy", "create"]  # running → destroy then create
+    assert domain.calls == ["destroy", "prepare", "create"]  # destroy → truncate → create
 
 
 def test_boot_starts_stopped_domain(tmp_path: Path) -> None:
@@ -1055,7 +1064,19 @@ def test_boot_starts_stopped_domain(tmp_path: Path) -> None:
     conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
     inst = _install(conn=conn, staging_root=tmp_path)
     inst.boot(_SYS)
-    assert domain.calls == ["create"]  # not running → just create
+    assert domain.calls == ["prepare", "create"]  # not running → truncate then create
+
+
+def test_boot_truncates_console_only_after_destroy(tmp_path: Path) -> None:
+    # ADR-0576 ordering: the per-start truncate must land after the prior boot's destroy and
+    # before this boot's create, so the fresh window never mixes boots.
+    domain = _domain(active=True)
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    inst = _install(conn=conn, staging_root=tmp_path)
+    inst.boot(_SYS)
+    assert (
+        domain.calls.index("destroy") < domain.calls.index("prepare") < domain.calls.index("create")
+    )
 
 
 def test_boot_never_answered_is_boot_timeout(tmp_path: Path) -> None:
@@ -1191,6 +1212,7 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,
         boot_window_polls=3,
+        prepare_console=lambda _sid: None,
     )
     # CONSOLE + no initrd_ref: no initrd fetched, no <initrd> rendered.
     installer.install(_request(cmdline="console=ttyS0", method=CaptureMethod.CONSOLE))

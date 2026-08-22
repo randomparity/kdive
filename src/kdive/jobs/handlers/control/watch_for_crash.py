@@ -8,14 +8,15 @@ cannot: catching the crash on the out-of-band console after the panic drops SSH.
 
 The console is polled lock-free: each poll snapshots the log and scans the suffix past the
 watch's start offset (``mark``); the local serial log only grows while the guest is up
-(``append="off"`` truncates only on power-cycle, ADR-0258), so concurrent growth between polls is
-harmless. A power-cycle *during* a watch (a ``panic=N`` auto-reboot, or ``control.power reset``)
-truncates the log; the watch resets ``mark`` to 0 when it observes the shrink (`len(body) <
-mark`). If the new boot regrows past the old ``mark`` within one poll interval the shrink is
-missed and a crash in the new boot's head could be skipped — a narrow gap that mainly affects
-auto-rebooting guests; the tool's target debug guests halt on panic (``panic=0``), preserving the
-console. A boot-identity check (``dev:ino:mtime``) is deliberately **not** used: serial-log mtime
-advances on every append (cf. ``console_rotate._boot_id``), so it would false-reset ``mark``
+(``append="on"`` plus the worker's per-start truncate, ADR-0576), so concurrent growth between
+polls is harmless. A power-cycle *during* a watch (a ``panic=N`` auto-reboot, or
+``control.power reset``) truncates the log; the watch resets ``mark`` to 0 when it observes the
+shrink (`len(body) < mark`). If the new boot regrows past the old ``mark`` within one poll
+interval the shrink is missed and a crash in the new boot's head could be skipped — a narrow
+gap that mainly affects auto-rebooting guests; the tool's target debug guests halt on panic
+(``panic=0``), preserving the console. A boot-identity check (``dev:ino:mtime``) is
+deliberately **not** used: serial-log mtime advances on every append
+(cf. ``console_rotate._boot_id``), so it would false-reset ``mark``
 mid-boot and resurface a pre-watch panic as a false ``fired``.
 
 Because ``mark`` is snapshotted at worker pickup, a panic that landed before it (queue latency,

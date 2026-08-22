@@ -14,25 +14,48 @@ from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 def _control(domain: FakeDomain | None) -> tuple[LocalLibvirtControl, FakeDomain | None]:
     lookup = {domain.domain_name: domain} if domain is not None else {}
     conn = FakeLibvirtConn(lookup=lookup)
-    return LocalLibvirtControl(connect=lambda: conn), domain
+    # The ADR-0576 truncate is observable through the same call log the fake domain keeps.
+    target = domain
+
+    def _prepare(name: str) -> None:
+        if target is not None:
+            target.calls.append("prepare")
+
+    return LocalLibvirtControl(connect=lambda: conn, prepare_console=_prepare), domain
 
 
 @pytest.mark.parametrize(
-    ("action", "expected_call"),
+    ("action", "expected_calls"),
     [
-        (PowerAction.ON, "create"),
-        (PowerAction.OFF, "destroy"),
-        (PowerAction.RESET, "reset"),
-        (PowerAction.CYCLE, "reboot"),
+        # ADR-0576: a power-on that starts a stopped domain truncates its console first, so
+        # the new boot window never carries the prior boot's bytes.
+        (PowerAction.ON, ["prepare", "create"]),
+        (PowerAction.OFF, ["destroy"]),
+        (PowerAction.RESET, ["reset"]),
+        (PowerAction.CYCLE, ["reboot"]),
         # #1254: resume must call virDomainResume, NOT reboot (which would destroy paused state).
-        (PowerAction.RESUME, "resume"),
+        (PowerAction.RESUME, ["resume"]),
     ],
 )
-def test_power_maps_to_libvirt_call(action: PowerAction, expected_call: str) -> None:
+def test_power_maps_to_libvirt_call(action: PowerAction, expected_calls: list[str]) -> None:
     domain = FakeDomain(domain_name="kdive-x", system_id="x")
     control, domain = _control(domain)
     control.power("kdive-x", action)
-    assert domain is not None and domain.calls == [expected_call]
+    assert domain is not None and domain.calls == expected_calls
+
+
+def test_power_on_running_domain_never_truncates() -> None:
+    # A no-op power-on of an already-running guest must not wipe its live boot window
+    # (ADR-0576): the OPERATION_INVALID from create stays swallowed and no truncate ran.
+    domain = FakeDomain(
+        domain_name="kdive-x",
+        system_id="x",
+        active=True,
+        raise_on={"create": libvirt.VIR_ERR_OPERATION_INVALID},
+    )
+    control, domain = _control(domain)
+    control.power("kdive-x", PowerAction.ON)  # no raise
+    assert domain is not None and domain.calls == ["create"]
 
 
 def test_power_on_already_running_swallowed() -> None:
@@ -173,9 +196,17 @@ def test_from_env_connect_opens_configured_uri(monkeypatch: pytest.MonkeyPatch) 
         return FakeLibvirtConn(lookup={"kdive-x": domain})
 
     monkeypatch.setattr(control_module.libvirt, "open", _fake_open)
+    # from_env wires the real name-keyed truncate; record instead of touching the host's
+    # /var/lib/kdive/console in a unit test.
+    prepared: list[str] = []
+    monkeypatch.setattr(
+        control_module, "prepare_console_for_domain", lambda name: prepared.append(name)
+    )
 
     control = LocalLibvirtControl.from_env()
+    assert prepared == []  # the seam is wired but not invoked until the start
     assert opened == []  # not connected yet
     control.power("kdive-x", PowerAction.ON)  # triggers the connect lambda
 
     assert opened == ["qemu+ssh://buildhost/system"]
+    assert prepared == ["kdive-x"]  # the stopped domain was truncated before its create

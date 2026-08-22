@@ -236,11 +236,12 @@ def read_pcap_bytes(path: Path) -> bytes:
 def read_console_log(path: Path) -> bytes:
     """Read a System console log whole; absent logs are treated as empty.
 
-    The local serial ``<log>`` is rendered ``append="off"`` (ADR-0258), so libvirt truncates it
-    on every domain power-cycle: the file holds only the current boot. The whole file is therefore
-    this Run's boot window, with no cross-boot slicing offset (ADR-0241's local byte offset was
-    superseded — its stale prior-boot size dropped this boot's early-boot head off a truncated log,
-    #836).
+    The local serial ``<log>`` is rendered ``append="on"`` and the worker truncates it through
+    its identity-checked prepare before every domain start (ADR-0576): the file holds only the
+    current boot, on a worker-owned inode the shared session daemon appends to instead of
+    recreating. The whole file is therefore this Run's boot window, with no cross-boot slicing
+    offset (ADR-0241's local byte offset was superseded — its stale prior-boot size dropped this
+    boot's early-boot head off a truncated log, #836).
     """
     try:
         return path.read_bytes()

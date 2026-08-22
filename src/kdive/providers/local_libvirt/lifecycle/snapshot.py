@@ -23,6 +23,7 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.storage import prepare_console_for_domain
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import Snapshotter as Snapshotter
 
@@ -42,6 +43,7 @@ class _LibvirtDomain(Protocol):
     def revertToSnapshot(self, snap: _LibvirtSnapshot, flags: int, /) -> int: ...  # noqa: N802
     def snapshotLookupByName(self, name: str, flags: int, /) -> _LibvirtSnapshot: ...  # noqa: N802
     def listAllSnapshots(self, flags: int, /) -> list[_LibvirtSnapshot]: ...  # noqa: N802
+    def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
 
 
 class _LibvirtConn(Protocol):
@@ -63,14 +65,20 @@ def _close(conn: _LibvirtConn) -> None:
 class LocalLibvirtSnapshotter:
     """The `Snapshotter` for the local libvirt host (internal RAM+disk/disk-only snapshots)."""
 
-    def __init__(self, *, connect: Connect) -> None:
+    def __init__(self, *, connect: Connect, prepare_console: Callable[[str], None]) -> None:
         self._connect = connect
+        # Identity-checked per-start console truncate (ADR-0576, #1940): a revert that boots
+        # an inactive domain must not append to the prior boot's window.
+        self._prepare_console = prepare_console
 
     @classmethod
     def from_env(cls) -> LocalLibvirtSnapshotter:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
         host_uri = config.require(LIBVIRT_URI)
-        return cls(connect=lambda: libvirt.open(host_uri))
+        return cls(
+            connect=lambda: libvirt.open(host_uri),
+            prepare_console=prepare_console_for_domain,
+        )
 
     def create(self, domain_name: str, name: str, *, include_memory: bool) -> None:
         """Create a named internal snapshot; pre-deletes any same-name snapshot first.
@@ -108,6 +116,11 @@ class LocalLibvirtSnapshotter:
         try:
             domain = self._lookup_required(conn, domain_name)
             snap = self._lookup_snapshot(domain, domain_name, name)
+            # A revert that boots an inactive domain is a real domain start: truncate the
+            # console first so the window holds only the post-revert boot (ADR-0576). A
+            # revert of a running domain keeps its QEMU process — no new window, no truncate.
+            if not domain.isActive():
+                self._prepare_console(domain_name)
             flags = (
                 libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED
                 if start_paused

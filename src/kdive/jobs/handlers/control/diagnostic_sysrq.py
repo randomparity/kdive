@@ -6,10 +6,11 @@ lock-free between brief per-System-locked transactions: the first snapshots the 
 console-read seam and verifies the System supports SysRq and is READY, then the capture's object
 write happens lock-free between a locked guard read and a locked re-verify + row insert
 (ADR-0519). Correctness allows the lock-free poll because the console only grows
-while the System is READY (local-libvirt's serial log with ``append="off"`` truncates only on
-power-cycle, ADR-0258; remote-libvirt's S3 parts are immutable and assembled cumulatively,
-ADR-0429), so the tail read needs no cross-op exclusion. The console source is provider-gated: a
-worker-local serial log for local-libvirt, the strict S3-part read seam for remote-libvirt.
+while the System is READY (local-libvirt's serial log holds exactly one boot window — the
+worker truncates it at each start on a worker-owned inode, ADR-0576; remote-libvirt's S3 parts
+are immutable and assembled cumulatively, ADR-0429), so the tail read needs no cross-op
+exclusion. The console source is provider-gated: a worker-local serial log for local-libvirt,
+the strict S3-part read seam for remote-libvirt.
 """
 
 from __future__ import annotations

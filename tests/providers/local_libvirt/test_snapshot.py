@@ -36,10 +36,15 @@ class _FakeLibvirtError(libvirt.libvirtError):
 
 
 class _FakeDomain:
-    def __init__(self) -> None:
+    def __init__(self, *, active: bool = False) -> None:
         self.snapshots: dict[str, _FakeSnapshot] = {}
         self.created: list[tuple[str, int]] = []
         self.reverted: list[tuple[str, int]] = []
+        self.active = active
+        self.calls: list[str] = []  # ADR-0576 truncate/revert ordering
+
+    def isActive(self) -> int:  # noqa: N802 - mirrors the libvirt binding name
+        return 1 if self.active else 0
 
     def snapshotCreateXML(self, xml: str, flags: int) -> _FakeSnapshot:  # noqa: N802
         # Extract the <name> from the minimal snapshot XML the snapshotter builds.
@@ -56,6 +61,7 @@ class _FakeDomain:
 
     def revertToSnapshot(self, snap: _FakeSnapshot, flags: int) -> int:  # noqa: N802
         self.reverted.append((snap.getName(), flags))
+        self.calls.append("revert")
         return 0
 
     def listAllSnapshots(self, flags: int) -> list[_FakeSnapshot]:  # noqa: N802
@@ -79,7 +85,12 @@ class _FakeConn:
 
 def _snapshotter(domain: _FakeDomain | None) -> tuple[LocalLibvirtSnapshotter, _FakeConn]:
     conn = _FakeConn(domain)
-    return LocalLibvirtSnapshotter(connect=lambda: conn), conn
+
+    def _prepare(name: str) -> None:
+        if domain is not None:
+            domain.calls.append("prepare")
+
+    return LocalLibvirtSnapshotter(connect=lambda: conn, prepare_console=_prepare), conn
 
 
 def test_create_memory_uses_no_disk_only_flag() -> None:
@@ -117,6 +128,25 @@ def test_revert_running_and_paused_flags() -> None:
         ("cp", libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_RUNNING),
         ("cp", libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED),
     ]
+
+
+def test_revert_of_inactive_domain_truncates_before_the_boot() -> None:
+    # ADR-0576: a revert that boots an inactive domain is a real start — the console is
+    # truncated first so the post-revert window holds only that boot.
+    domain = _FakeDomain(active=False)
+    domain.snapshots["cp"] = _FakeSnapshot("cp")
+    snap, _ = _snapshotter(domain)
+    snap.revert("dom", "cp", start_paused=False)
+    assert domain.calls == ["prepare", "revert"]
+
+
+def test_revert_of_running_domain_never_truncates() -> None:
+    # A running-domain revert keeps its QEMU process: no new boot window, no truncate.
+    domain = _FakeDomain(active=True)
+    domain.snapshots["cp"] = _FakeSnapshot("cp")
+    snap, _ = _snapshotter(domain)
+    snap.revert("dom", "cp", start_paused=False)
+    assert domain.calls == ["revert"]
 
 
 def test_revert_missing_snapshot_is_configuration_error() -> None:

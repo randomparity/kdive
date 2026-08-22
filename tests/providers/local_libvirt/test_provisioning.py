@@ -6,6 +6,7 @@ import copy
 import importlib
 import itertools
 import logging
+import os
 import subprocess
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -161,7 +162,7 @@ _X86_KVM_GOLDEN = (
     '<devices><disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
     '<source file="/var/lib/kdive/rootfs/fedora-40.qcow2" />'
     '<target dev="vda" bus="virtio" /></disk><serial type="pty">'
-    '<log file="/var/lib/kdive/console/11111111-1111-1111-1111-111111111111.log" append="off" />'
+    '<log file="/var/lib/kdive/console/11111111-1111-1111-1111-111111111111.log" append="on" />'
     '<target port="0" /></serial><console type="pty"><target type="serial" port="0" /></console>'
     "</devices><metadata>"
     "<kdive:system>11111111-1111-1111-1111-111111111111</kdive:system></metadata>"
@@ -1736,8 +1737,84 @@ def test_prepare_console_log_oserror_is_provisioning_failure(
         storage_module._prepare_console_log(path)
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
-    assert str(caught.value) == "failed to prepare libvirt console log"
-    assert caught.value.details == {"path": str(path)}
+    assert caught.value.details == {"path": str(path), "reason": "OSError"}
+
+
+def test_prepare_console_log_truncates_in_place_and_keeps_worker_identity(tmp_path: Path) -> None:
+    # ADR-0576: the worker owns one console inode across boots. The prepare truncates the
+    # prior boot's bytes away (the current-boot window starts empty), keeps the same inode
+    # (the daemon appends to it under append='on' instead of recreating it root:0600), and
+    # leaves it mode 0644 so a fixed non-root worker can read its own evidence back.
+    path = tmp_path / f"{_SYS}.log"
+    path.write_bytes(b"prior boot bytes")
+    inode_before = path.stat().st_ino
+
+    storage_module._prepare_console_log(path)
+
+    st = path.stat()
+    assert path.read_bytes() == b""
+    assert st.st_ino == inode_before
+    assert st.st_mode & 0o777 == 0o644
+
+
+def test_prepare_console_log_creates_missing_parents_and_file(tmp_path: Path) -> None:
+    # A never-provisioned build host has no /var/lib/kdive/console yet; the customization
+    # boot's prepare is what guarantees the directory exists before createXML.
+    path = tmp_path / "kdive" / "console" / f"{_SYS}.log"
+
+    storage_module._prepare_console_log(path)
+
+    assert path.is_file()
+    assert path.read_bytes() == b""
+
+
+def test_prepare_console_log_rejects_symlinked_path(tmp_path: Path) -> None:
+    real = tmp_path / "real.log"
+    real.write_bytes(b"x")
+    link = tmp_path / f"{_SYS}.log"
+    link.symlink_to(real)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._prepare_console_log(link)
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert caught.value.details["reason"] == "path is a symlink"
+
+
+def test_prepare_console_log_rejects_foreign_owned_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The shared session daemon recreates the log as root:0600 when a start happens
+    # out-of-band (ADR-0576); the next kdive start must fail fast instead of booting against
+    # evidence the worker cannot read.
+    path = tmp_path / f"{_SYS}.log"
+    path.write_bytes(b"x")
+    owner_uid = path.stat().st_uid
+    monkeypatch.setattr(os, "geteuid", lambda: owner_uid + 1)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._prepare_console_log(path)
+
+    assert caught.value.details["reason"] == f"owned by uid {owner_uid}, not {owner_uid + 1}"
+
+
+def test_prepare_console_log_rejects_hard_linked_file(tmp_path: Path) -> None:
+    path = tmp_path / f"{_SYS}.log"
+    path.write_bytes(b"x")
+    os.link(path, tmp_path / "alias.log")
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._prepare_console_log(path)
+
+    assert caught.value.details["reason"] == "carries 2 links"
+
+
+def test_prepare_console_for_domain_rejects_non_system_domain() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        storage_module.prepare_console_for_domain(f"kdive-build-{_SYS}")
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {"domain": f"kdive-build-{_SYS}"}
 
 
 def test_teardown_removes_the_overlay() -> None:
@@ -2258,9 +2335,10 @@ def test_domain_xml_has_serial_console_with_log() -> None:
     log = serial.find("log")
     assert log is not None
     assert log.get("file") == str(console_log_path(sid))
-    # append='off' (libvirt's default, pinned explicitly) truncates the serial log on every
-    # power-cycle, so each boot's capture is the whole current file (ADR-0258, #836).
-    assert log.get("append") == "off"
+    # append='on' keeps the daemon attached to the worker-created inode (under append='off'
+    # libvirt 12 recreates it root:0600, unreadable to fixed workers); the current-boot-only
+    # window is preserved by the worker's per-start truncate (ADR-0576, #1940).
+    assert log.get("append") == "on"
     # The paired <console> redirect is what makes the serial device usable.
     console = root.find("./devices/console[@type='pty']")
     assert console is not None

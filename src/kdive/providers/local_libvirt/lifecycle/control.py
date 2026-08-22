@@ -25,6 +25,7 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
+from kdive.providers.local_libvirt.lifecycle.storage import prepare_console_for_domain
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import Controller as Controller
 
@@ -50,6 +51,7 @@ _SYSRQ_HOLDTIME_MS = 100
 
 class _LibvirtDomain(Protocol):
     def create(self) -> int: ...
+    def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
     def destroy(self) -> int: ...
     def reset(self, flags: int) -> int: ...
     def reboot(self, flags: int) -> int: ...
@@ -79,8 +81,11 @@ def _close(conn: _LibvirtConn) -> None:
 class LocalLibvirtControl:
     """The `Controller` for the local libvirt host (power + force_crash)."""
 
-    def __init__(self, *, connect: Connect) -> None:
+    def __init__(self, *, connect: Connect, prepare_console: Callable[[str], None]) -> None:
         self._connect = connect
+        # Identity-checked per-start console truncate (ADR-0576, #1940): a power-on that
+        # starts a stopped domain must not append to the prior boot's window.
+        self._prepare_console = prepare_console
 
     @classmethod
     def from_env(cls) -> LocalLibvirtControl:
@@ -88,7 +93,10 @@ class LocalLibvirtControl:
         host_uri = config.require(LIBVIRT_URI)
         # The bound `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol
         # (only `lookupByName`/`close`), so no suppression is needed at this seam (ADR-0025).
-        return cls(connect=lambda: libvirt.open(host_uri))
+        return cls(
+            connect=lambda: libvirt.open(host_uri),
+            prepare_console=prepare_console_for_domain,
+        )
 
     def power(self, domain_name: str, action: PowerAction) -> None:
         """Drive the domain's power state; idempotent ``on``/``off`` swallow the post-state.
@@ -161,6 +169,10 @@ class LocalLibvirtControl:
     def _apply_power(self, domain: _LibvirtDomain, domain_name: str, action: PowerAction) -> None:
         try:
             if action is PowerAction.ON:
+                # Truncate only when this call actually starts the domain: a no-op power-on of
+                # an already-running guest must never wipe its live boot window (ADR-0576).
+                if not domain.isActive():
+                    self._prepare_console(domain_name)
                 self._idempotent(domain.create, "starting", domain_name)
             elif action is PowerAction.OFF:
                 self._idempotent(domain.destroy, "stopping", domain_name)

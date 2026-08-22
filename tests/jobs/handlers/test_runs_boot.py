@@ -594,7 +594,7 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
 
 
 def test_mark_boot_window_local_is_zero_regardless_of_log_size(tmp_path, monkeypatch) -> None:
-    # Local (no snapshotter): no slice is taken. libvirt renders the serial <log> append='off',
+    # Local (no snapshotter): no slice is taken. The serial <log> holds one boot window (the
     # truncating it per power-cycle (ADR-0258), so the whole current file is this boot — the mark
     # is always 0 even when a prior boot left bytes on disk.
     system_id = uuid4()
@@ -633,7 +633,7 @@ def test_local_capture_excludes_prior_boot_panic_via_truncation(tmp_path, monkey
     log = tmp_path / f"{system_id}.log"
     monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: log)
 
-    # Run B power-cycles the domain; libvirt's append='off' serial <log> truncates on start
+    # Run B power-cycles the domain; the worker's per-start truncate resets the serial <log>
     # (ADR-0258), so by capture time the per-System log holds ONLY this boot's bytes — Run A's
     # prior panic is gone from disk, not merely sliced off by an offset.
     log.write_bytes(b"[run B] booted clean READY\n")

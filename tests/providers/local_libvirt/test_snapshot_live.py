@@ -37,7 +37,12 @@ def test_live_vm_snapshotter_create_revert_resume_delete() -> None:  # pragma: n
     )
 
     name = f"kdive-snap-live-{uuid.uuid4().hex[:12]}"
-    snapshotter = LocalLibvirtSnapshotter(connect=lambda: libvirt.open(contract.libvirt_uri))
+    # The live proof boots the throwaway domain itself, so the ADR-0576 per-start truncate
+    # is exercised by boot_throwaway_domain's own lifecycle, not by revert; wire a no-op.
+    snapshotter = LocalLibvirtSnapshotter(
+        connect=lambda: libvirt.open(contract.libvirt_uri),
+        prepare_console=lambda _name: None,
+    )
     with boot_throwaway_domain(
         contract.rootfs, arch="x86_64", name=name, mode=contract.libvirt_uri, settle_s=2.0
     ) as live:

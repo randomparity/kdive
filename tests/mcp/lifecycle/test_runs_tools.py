@@ -3432,7 +3432,7 @@ class _FakeBooter:
     """Records boot() calls; optionally writes the console during boot, then returns or raises.
 
     ``on_boot`` models libvirt writing the serial console *during* the boot. For local-libvirt
-    the serial ``<log>`` is ``append='off'`` and truncated per power-cycle (ADR-0258), so the
+    the serial ``<log>`` holds one boot window (the worker truncates it per start, ADR-0576), so
     whole file is this boot's window (the boot handler takes no local slice). It runs before any
     canned error, matching a crash whose oops reaches the console before readiness fails.
     """
@@ -3467,10 +3467,12 @@ def _append_console(tmp_path: Path, data: bytes) -> Callable[[UUID], None]:
 
 
 def _truncating_console(tmp_path: Path, data: bytes) -> Callable[[UUID], None]:
-    """An ``on_boot`` hook modeling libvirt's ``append='off'`` serial log (ADR-0258).
+    """An ``on_boot`` hook modeling the per-boot console reset (ADR-0576, superseding 0258).
 
-    Each power-cycle opens the log truncating (``wb``), so the file holds only this boot's
+    Each power-cycle rewrites the log from empty, so the file holds only this boot's
     ``data`` — the prior boot's bytes are gone from disk, not merely sliced off by an offset.
+    The mechanism moved from virtlogd's append='off' truncation to the worker's per-start
+    truncate; the observable behavior the handler relies on is unchanged.
     """
 
     def _write(system_id: UUID) -> None:
@@ -5542,8 +5544,8 @@ def test_boot_handler_reboot_preserves_prior_run_console(
                     artifact_store=minio_store,
                 )
 
-            # Second boot of the SAME System (new Run): libvirt's append='off' serial log is
-            # truncated on power-cycle (ADR-0258), so run2's log holds only its own bytes, captured
+            # Second boot of the SAME System (new Run): the per-boot console reset (ADR-0576)
+            # means run2's log holds only its own bytes, captured
             # whole and written under run2's own per-Run object key — run1's row is untouched.
             run2 = await _seed_succeeded_run_on_system(pool, sid)
             await _record_install_step(pool, run2)
