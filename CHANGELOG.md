@@ -1196,6 +1196,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Honor fixed-slot local-systemd worker incarnation id
 - Include capture host in systemd slot authority binding
 - Create systemd user unit dir before installing libvirtd live unit
+- Alias onboard CLI invocations to their own database authorities
 
 ### Build
 
