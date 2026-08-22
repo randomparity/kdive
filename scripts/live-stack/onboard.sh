@@ -13,6 +13,10 @@
 # so a discovery failure (provider unreachable) still leaves a funded project that verify
 # confirms — verify, not the seed exit code, is the funding source of truth.
 #
+# Every kdive CLI invocation here aliases its own database authority (#1929): migrate connects
+# through KDIVE_MIGRATION_DATABASE_URL, the funding steps through KDIVE_SERVER_DATABASE_URL, and
+# each child has the other role DSNs scrubbed from its environment (#2046).
+#
 # DEMO ONLY: the bundled mock-OIDC issuer mints a valid token for any caller. Never run this
 # against a real deployment; production onboards a project with the audited admin tools
 # (docs/operating/project-onboarding.md).
@@ -52,11 +56,20 @@ if ! "${repo_root}/scripts/check-local-libvirt.sh"; then
 fi
 
 banner "migrate (idempotent)"
-"${py[@]}" -m kdive migrate
+# Schema-current migrate still SELECTs schema_migrations inside its advisory-lock transaction
+# (kdive/db/migrate.py), and no migration grants that table to the runtime capability roles, so
+# migrate connects through the migration authority (the apply-migrations.sh shape), not a member's.
+KDIVE_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL}" \
+  env -u KDIVE_SERVER_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  -u KDIVE_RECONCILER_DATABASE_URL \
+  "${py[@]}" -m kdive migrate
 
 banner "seed (funding rows commit before resource discovery)"
 seed_rc=0
-if ! "${py[@]}" -m kdive seed-project \
+if ! KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  -u KDIVE_RECONCILER_DATABASE_URL \
+  "${py[@]}" -m kdive seed-project \
   --project "$PROJECT" \
   --limit-kcu "$LIMIT_KCU" \
   --max-concurrent-allocations "$MAX_ALLOC" \
@@ -65,7 +78,10 @@ if ! "${py[@]}" -m kdive seed-project \
 fi
 
 banner "verify (the hard funding gate)"
-"${py[@]}" -m kdive verify-project --project "$PROJECT"
+KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  -u KDIVE_RECONCILER_DATABASE_URL \
+  "${py[@]}" -m kdive verify-project --project "$PROJECT"
 
 if [[ "$seed_rc" -ne 0 ]]; then
   echo "WARN: seed-project exited non-zero but the funding rows verified — its resource-discovery" >&2
