@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route host workers through the lifecycle boundary
 - Preserve worker-readable console evidence across boots
 - Capture bounded worker diagnostics before teardown
+- Keep the session libvirtd boot-persistent via a user unit (#2032)
 
 ### Changed
 
@@ -726,10 +727,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Supersede ADR-0258 with worker-owned console inode (0576)
 - Document the installed lifecycle proof surface
 - Cite the renumbered host-worker ADRs
+- Describe session-daemon persistence and no-sudo recovery
 
 ### Fixed
 
-- Recover the dedicated session daemon without sudo and keep it boot-persistent (#2032)
 - Build the app image before the live_vm_tcg app tier
 - Raise when visible_next_actions names an unregistered tool
 - Adapt to ty 0.0.59 narrowing and read-only property checks
@@ -1189,6 +1190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document lifecycle handoff env vars and date ADR-0574 acceptance
 - Use a POSIX test in the lifecycle stub so /bin/sh runners agree
 - Pre-clean stale live-libvirt runtime residue before the hosted tcg install step
+- Recover the dedicated session daemon without sudo (#2032)
 
 ### Build
 
