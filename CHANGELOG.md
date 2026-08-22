@@ -705,6 +705,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regenerate tool reference for ops.reconcile_now envelope fields
 - Record the repo-wide job timeout rule as ADR-0571 (#1995)
 - Fix ADR-0571's callee-exemption wording and amendment precedent
+- Port host worker lifecycle decision as ADR-0574
 
 ### Fixed
 
