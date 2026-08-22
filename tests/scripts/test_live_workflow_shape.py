@@ -525,3 +525,51 @@ def test_hosted_lifecycle_proof_refreshes_control_and_libvirt_groups() -> None:
     assert '--user="$operator_name" --group=kdive-live-control' in " ".join(run.split())
     assert "id -G" in run
     assert "kdive-live-control" in run and "kdive-live-libvirt" in run
+
+
+# --- hosted tcg pre-clean: stale /run/kdive/live-libvirt residue (#2033) ----------------------
+#
+# A reused hosted VM can carry an operator-owned session daemon plus socket/pid residue from an
+# earlier run; a self-contradictory scene makes the installer exit 1 by design
+# (_reconcile_libvirt_tuple). The hygiene belongs in the job, before the install step — never
+# behind an installer recovery flag.
+
+_PRECLEAN_STEP = "Pre-clean stale live-libvirt runtime residue"
+_INSTALL_STEP = "Install the fixed live-worker lifecycle host contract"
+
+
+def test_tcg_job_precleans_stale_runtime_before_install() -> None:
+    """Ordering is the whole fix: the installer must reconcile a clean slate."""
+    preclean_index, _ = _named_step("tcg", _PRECLEAN_STEP)
+    install_index, _ = _named_step("tcg", _INSTALL_STEP)
+    assert preclean_index < install_index
+
+
+def test_preclean_is_hosted_tcg_only() -> None:
+    """The native job's box is persistent and operator-managed; it must not gain this step."""
+    assert _PRECLEAN_STEP not in [s.get("name") for s in _load(_LIVE)["jobs"]["native"]["steps"]]
+
+
+def test_preclean_stops_the_recorded_session_daemon_as_its_owner() -> None:
+    """The daemon is operator-owned: stop the recorded pid after identity checks, no sudo kill."""
+    _, preclean = _named_step("tcg", _PRECLEAN_STEP)
+    run = preclean["run"]
+    assert "runtime_root=/run/kdive/live-libvirt" in run
+    assert 'pid_file="$runtime_root/libvirt/libvirtd.pid"' in run
+    assert '--user="$operator_name" --group=kdive-live-libvirt' in " ".join(run.split())
+    # The signal is gated on the recorded process being the operator's own libvirtd...
+    assert 'daemon_comm != "libvirtd"' in run
+    # ...graceful first (SIGTERM with a bounded wait), escalating only on refusal.
+    assert "kill -TERM" in run
+    assert "kill -KILL" in run
+
+
+def test_preclean_never_touches_state_roots_or_follows_symlinks() -> None:
+    """Hygiene scope is the /run runtime hierarchy only; /var/lib/kdive stays untouched."""
+    _, preclean = _named_step("tcg", _PRECLEAN_STEP)
+    run = preclean["run"]
+    assert "/var/lib/kdive" not in run
+    assert "/run/kdive/live-libvirt" in run
+    # A symlink at the hierarchy root is unlinked as a link (rm never traverses one), and the
+    # fresh-host early exit treats a dangling link as residue rather than following it.
+    assert "[[ ! -e $runtime_root && ! -L $runtime_root ]]" in run

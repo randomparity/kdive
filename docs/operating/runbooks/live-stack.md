@@ -61,6 +61,24 @@ deployment (the production-shaped path), see
 
   This root installation is part of disposable-host provisioning, before the operator runs the
   stack. The live-stack commands themselves remain non-root socket clients.
+  On a **reused hosted runner** (the `live_vm_tcg` gate's ephemeral VM image), an earlier job can
+  leave `/run/kdive/live-libvirt` behind: an operator-owned session daemon plus its socket/pid
+  residue. A self-contradictory scene makes the installer exit 1 by design
+  (`_reconcile_libvirt_tuple` refuses a "contradictory selected libvirt tuple") — the installer
+  must never paper over it — so the workflow runs a fail-soft **pre-clean step immediately
+  before the install step** (#2033). What it may do, and why it is safe:
+
+  - It stops the daemon recorded in
+    `/run/kdive/live-libvirt/libvirt/libvirtd.pid` **as the operator who owns it**, and only
+    after verifying the live pid is that operator's own `libvirtd`; anything else is left for
+    the installer to diagnose loudly.
+  - It then removes the stale runtime hierarchy under `/run/kdive/live-libvirt` so the
+    installer's `_lock_libvirt_runtime` recreates it idempotently as a clean slate. The scope is
+    the `/run` runtime hierarchy only: it never touches the `/var/lib/kdive` state roots and
+    never follows symlinks.
+  - It is pre-install hygiene on a single-tenant ephemeral box: removals are logged, missing
+    state is a no-op, and it does not mask install-step failures — the install step itself stays
+    strictly fail-closed.
 - The installed contract publishes one explicit operator-owned session URI:
   `qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock` on the Debian-family
   runner (`virtqemud-sock` is selected on the modular-daemon family). Use the published value from
