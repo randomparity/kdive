@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -299,6 +300,7 @@ def test_authority_binding_returns_the_exact_non_secret_registration() -> None:
         "generation": "a" * 32,
         "boot_id": "01234567-89ab-cdef-0123-456789abcdef",
         "invocation_id": "c" * 32,
+        "host": socket.gethostname(),
     }
 
 

@@ -7,6 +7,7 @@ import os
 import pwd
 import secrets
 import shlex
+import socket
 import stat
 import warnings
 from contextlib import suppress
@@ -102,6 +103,7 @@ with warnings.catch_warnings():
                 "generation": self.generation,
                 "boot_id": self.boot_id,
                 "invocation_id": self.invocation_id,
+                "host": socket.gethostname(),
             }
 
 
