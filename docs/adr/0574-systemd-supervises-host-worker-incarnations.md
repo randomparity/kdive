@@ -94,6 +94,9 @@ Amended by the host-workers-use-KVM-provider-authority decision (lands as ADR-05
 supersedes only the preceding claim about shared worker authority. Fixed workers also use the
 distro's `kvm` group to read `root:kvm` host kernels and use `/dev/kvm`; ADR-0574's lifecycle,
 credential, witness, and cleanup decisions remain in force.
+Resolved: ADR-0575 landed as
+[0575-host-workers-use-kvm-provider-authority.md](0575-host-workers-use-kvm-provider-authority.md)
+(#1937).
 
 Failure diagnostics are deliberately non-transactional. Before teardown, the fixed diagnostics
 request reads only the current worker units. Every allowlisted worker setting is classified public

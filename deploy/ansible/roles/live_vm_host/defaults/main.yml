@@ -56,10 +56,19 @@ live_vm_host_worker_accounts:
 live_vm_host_worker_control_group: kdive-live-control
 live_vm_host_worker_libvirt_group: kdive-live-libvirt
 live_vm_host_worker_state_root: /var/lib/kdive/live-workers
+live_vm_host_worker_libvirt_runtime: /run/kdive/live-libvirt
+live_vm_host_worker_libvirt_uri: >-
+  qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock
 # Local development default only; production inventory must override it with the bootstrapped
 # lifecycle-witness member DSN. Provisioning keeps the resulting file root-only.
 live_vm_host_worker_witness_dsn: >-  # pragma: allowlist secret
   postgresql://kdive-witness-member:kdive-witness-local@localhost:5432/kdive
+live_vm_host_worker_shared_directories:
+  - /var/lib/kdive/rootfs
+  - /var/lib/kdive/console
+  - /var/lib/kdive/pcap
+  - /var/lib/kdive/build
+  - /var/lib/kdive/install
 live_vm_host_worker_fixture_catalog: /var/lib/kdive/fixtures/local-libvirt
 live_vm_host_worker_fixture_files:
   - manifest.yaml

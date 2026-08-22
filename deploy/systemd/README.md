@@ -32,10 +32,10 @@ Full prerequisites, the external-backend ordering note, and the env-file details
 
 ## Fixed live-worker lifecycle contract
 
-The live-VM workflows use the separate fixed-slot contract from ADR-0555. It installs eight
-retained worker templates, a root socket-activated lifecycle witness, isolated slot accounts,
-and the `kdive-live-libvirt` supplemental group wiring. It does not convert the server or
-reconciler into system units.
+The live-VM workflows use the separate fixed-slot contract from ADR-0555 and ADR-0575. It
+installs eight retained worker templates, a root socket-activated lifecycle witness, isolated
+slot accounts, and a dedicated group-accessible session-libvirt endpoint. It does not convert
+the server or reconciler into system units.
 
 On a disposable hosted runner, install the contract after the checkout's `uv sync`. Supply the
 lifecycle-witness member DSN on standard input so it is absent from the installer command line:
@@ -48,11 +48,37 @@ printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
 unset witness_dsn
 ```
 
-The installer is idempotent for one checkout on a fresh disposable host. It requires the
-distro's `kvm` group and fails before activation when it is missing. Persistent self-hosted
-runners receive the equivalent accounts, groups, files, modes, socket, witness environment,
-revision stamp, and fixture catalog from the Ubuntu/Debian-only `live_vm_host` role; both paths
-converge the same end state on a clean host.
+The installer is idempotent for one checkout on a fresh disposable host. It selects the host
+distro's supported session daemon: Debian-family hosts use monolithic `libvirtd` and
+`libvirt-sock`; Red Hat-family hosts use modular `virtqemud` and `virtqemud-sock`. An unsupported
+distro, missing selected daemon, or missing distro `kvm` group fails before activation.
+Persistent self-hosted runners receive the Debian-family tuple and the equivalent accounts,
+files, modes, socket, witness environment, revision stamp, and session-libvirt resources from
+the Ubuntu/Debian-only `live_vm_host` role.
+
+The selected non-secret endpoint is published as `KDIVE_LIBVIRT_URI` in the root-owned,
+world-readable `/etc/kdive/live-worker-libvirt.env`. The possible values are:
+
+```text
+qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock
+qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock
+```
+
+Exactly one daemon tuple is activated; the installer does not create a compatibility socket alias.
+`/run/kdive` is root-owned mode `0755`. Its `live-libvirt` and `live-libvirt/libvirt`
+subdirectories are operator-owned mode `0750`, so workers can traverse to the explicit mode-`0770`
+libvirt socket but cannot unlink or replace either control socket. Only provider data directories
+are group-writable mode `2770`.
+
+An existing endpoint is adopted only when its pid file names a live operator-owned process with
+the selected daemon identity and its socket has the selected owner, group, mode, and a live
+listener. A dead pid and refused, correctly owned selected socket are removed as exact stale
+residues before restart. Contradictory process, type, ownership, or listener evidence is left
+untouched; inspect the two paths named by the installer, correct that evidence, and rerun.
+Before privileged inspection, the installer temporarily locks the runtime hierarchy as root,
+rejects symlink or non-directory entries without following them, and restores operator ownership
+on every exit. Stale removal rechecks file identity, process state, and the listener while locked;
+any unlink or postcondition failure blocks startup and names the exact paths to inspect.
 
 Only the configured operator belongs to `kdive-live-control`. Worker accounts keep distinct
 primary groups and receive the `kdive-live-libvirt` and `kvm` supplemental groups; they never
@@ -61,11 +87,6 @@ belong to the control, sudo, or Docker groups. The distro `kvm` authority lets e
 world-accessible. The witness credential and service configuration are root-only beneath
 `/etc/kdive`; per-slot state is root-owned beneath `/var/lib/kdive/live-workers`, and each slot
 account can neither traverse nor replace a sibling slot.
-
-The dedicated session-libvirt daemon configuration, its protected `/run/kdive/live-libvirt`
-runtime hierarchy with no-follow stale-tuple recovery, and the published `KDIVE_LIBVIRT_URI`
-endpoint land with the libvirt provider-authority change (#1937); until then workers hold the
-group membership but there is no session-libvirt socket to connect to.
 
 Adding the operator to `kdive-live-control` does not refresh an already-running process's kernel
 group list. Interactive operators must start a new login session after installation before using
