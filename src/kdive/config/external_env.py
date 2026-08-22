@@ -224,6 +224,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Docker as a failure.",
     ),
     ExternalEnvVar(
+        "KDIVE_RUN_SYSTEMD_WORKER_PROOF",
+        "test",
+        None,
+        "Presence gate for the real-host systemd worker proof (tests/live_vm/"
+        "test_systemd_worker_lifecycle.py); the hosted live.yml proof step sets it to 1 after "
+        "installing the fixed lifecycle contract. Must be exactly 1 when present.",
+    ),
+    ExternalEnvVar(
         "KDIVE_IMAGE",
         "test",
         None,
@@ -513,14 +521,6 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "0",
         "When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability "
         "tier; the essential backend services (postgres, minio, oidc) still start.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_WORKER_AS_ROOT",
-        "script",
-        "1",
-        "Retired worker-launch selector. Host workers now run exclusively as fixed systemd units "
-        "through the lifecycle witness, so live-stack scripts no longer read this; the native CI "
-        "job still sets it until its workflow wiring is updated.",
     ),
     ExternalEnvVar(
         "KDIVE_WORKER_COUNT",
