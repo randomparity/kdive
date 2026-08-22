@@ -756,6 +756,43 @@ def test_up_starts_prometheus_independently_of_grafana() -> None:
     assert "#1261" in text, "the skip must be traceable to its tracking issue"
 
 
+def test_bring_up_converges_runtime_roles_after_migrations() -> None:
+    """The live-stack path never runs the compose app tier (its backend set excludes the
+    role-bootstrap one-shot), so up.sh itself must converge the runtime login members — after
+    migrations create the NOLOGIN capabilities and before the host processes (and the installed
+    worker fleet they activate) authenticate (#2036)."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    assert (
+        text.index('banner "migrations')
+        < text.index("docker compose run --rm --no-deps role-bootstrap")
+        < text.index('banner "host processes"')
+    ), "role-bootstrap must run after migrations and before host processes"
+    assert "runtime-role bootstrap failed" in text, (
+        "a failed convergence must fail bring-up loudly, not leave members silently missing"
+    )
+
+
+def test_role_bootstrap_keeps_the_external_provisioning_escape_hatch() -> None:
+    """KDIVE_LOCAL_ROLE_BOOTSTRAP=0 (externally provisioned, retained hosts) must keep its
+    no-database-mutation contract: up.sh skips the one-shot entirely instead of running it and
+    relying on the script's own =0 no-op (#2036)."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    assert '[[ "${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}" == "1" ]]' in text, (
+        "bring-up must honor the external-provisioning escape hatch"
+    )
+
+
+def test_role_bootstrap_runs_with_the_container_internal_migration_dsn() -> None:
+    """env.sh exports the host-facing migration DSN (localhost), which is unreachable from
+    inside the compose network; up.sh must unset it for the one-shot so the compose default
+    (postgres:5432) applies, without duplicating the development credential literal."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    assert "env -u KDIVE_MIGRATION_DATABASE_URL" in text
+    assert "postgresql://kdive-migration" not in text, (
+        "up.sh must not re-declare the migration DSN literal; the compose default owns it"
+    )
+
+
 def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]:
     """Source the real lib.sh and run ensure_session_libvirtd against staged paths."""
     (tmp_path / "lib.sh").write_text(

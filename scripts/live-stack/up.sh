@@ -115,6 +115,27 @@ if ! bash "${here}/apply-migrations.sh"; then
   echo "    scripts/live-stack/up.sh --reset-db" >&2
   exit 1
 fi
+banner "runtime-role bootstrap"
+# The compose app tier gates on the role-bootstrap one-shot (its depends_on in
+# docker-compose.yml), but this path runs the app tier as HOST processes and the backend set
+# above excludes the one-shot — so without running it here the four runtime login members never
+# come to exist and every daemon and installed worker fails closed with dependency_unavailable
+# at fleet start (#2036). The one-shot is idempotent (guarded CREATE plus revoke/grant
+# convergence), so bring-up runs it on every pass while local bootstrap is enabled;
+# KDIVE_LOCAL_ROLE_BOOTSTRAP=0 keeps the external-provisioning contract: no database mutation,
+# the operator supplies every member. `env -u` drops env.sh's host-facing migration DSN
+# (localhost), which is unreachable from inside the compose network, so the one-shot
+# interpolates its own container-internal postgres:5432 default.
+if [[ "${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}" == "1" ]]; then
+  if ! env -u KDIVE_MIGRATION_DATABASE_URL \
+    docker compose run --rm --no-deps role-bootstrap; then
+    echo >&2
+    echo "runtime-role bootstrap failed; the runtime login members are missing" >&2
+    exit 1
+  fi
+else
+  echo "KDIVE_LOCAL_ROLE_BOOTSTRAP=0; using externally provisioned login members"
+fi
 
 if [[ "$skip_libvirt" != "1" ]]; then
   banner "libvirt"
