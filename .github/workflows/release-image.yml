@@ -1,10 +1,12 @@
 name: release-image
 
-# Build and publish the kdive container image on a SemVer tag, then attach an SBOM,
-# generate provenance, and cosign-sign the immutable digest keyless/OIDC (ADR-0088
-# decision 8). The PR build-without-push lives in ci.yml; this is the release path.
-# A main push builds linux/amd64 only so :edge stays cheap (ADR-0572); a v* tag adds
-# the emulated linux/ppc64le leg for a multi-arch release manifest (ADR-0359).
+# Build, push, sign, then tag the kdive container image on a SemVer tag: the build pushes
+# by digest only, cosign signs that immutable digest keyless/OIDC (ADR-0088 decision 8),
+# and only then are the human-facing tags applied to that signed digest (ADR-0573) — no
+# digest is reachable under a release tag before it is signed (#1991). The PR
+# build-without-push lives in ci.yml; this is the release path. A main push builds
+# linux/amd64 only so :edge stays cheap (ADR-0572); a v* tag adds the emulated
+# linux/ppc64le leg for a multi-arch release manifest (ADR-0359).
 on:
   push:
     branches: [main]
@@ -37,14 +39,13 @@ jobs:
     # itself provisional against a future release doing more work. Sized 300 = max observed
     # plus ~25% headroom, clear of the 360-minute default it replaces; both figures follow the
     # #1983 convention of an observed figure with its basis, re-sized when observation improves.
-    #
-    # A fired timeout here is not merely a red check: `Build and push` runs with `push: true`,
-    # so a cut-off that lands after it leaves the digest and its :X.Y.Z, :X.Y and :latest tags
-    # in GHCR with `Sign the published digest` never reached — a published, :latest-tagged,
-    # unsigned release image, which nothing in this workflow cleans up and which costs an
-    # uncached multi-hour rebuild to replace. That gap is not new (the 350- and 360-minute
-    # ceilings ended the job the same way) and #1991 owns closing it; this value only decides
-    # how wide the window is.
+    # A fired timeout here costs a red check and an uncached multi-hour rebuild — nothing
+    # worse: the build step pushes by digest only (ADR-0573), so a cut-off at any point
+    # before `Apply tags to the signed digest` leaves at most an untagged digest no release
+    # tag references. Before #1991 restructured the ordering the same cut-off stranded a
+    # fully tagged, unsigned release digest (:latest included) that nothing cleaned up and
+    # no re-run superseded (`cancel-in-progress: false`); the bound below now only decides
+    # how much work a cut-off wastes.
     timeout-minutes: 300
     steps:
       - name: Checkout
@@ -113,12 +114,19 @@ jobs:
           [ -n "$sha" ] || { echo "::error::empty provenance SHA from git rev-parse" >&2; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      # Push by digest only (ADR-0573): the `outputs:` form is buildx's documented
+      # push-by-digest export — a bare `push: true` with no tag errors out ("tag is needed
+      # when pushing to registry"), and this form publishes an untagged manifest at an
+      # immutable @sha256 digest and reports it in `steps.build.outputs.digest`. The
+      # human-facing tags are applied by a later step, after cosign signs this digest — so a
+      # run cut off before then strands nothing reachable (#1991). Labels are baked into the
+      # image config here; they are metadata, not reachability.
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          push: true
+          outputs: type=image,name=ghcr.io/randomparity/kdive,push-by-digest=true,name-canonical=true,push=true
           # Bake honest version provenance into the running image (ADR-0370): a v* tag is a
           # release (X.Y.Z+g<sha>), a main push is not (X.Y.Z-dev+g<sha>).
           build-args: |
@@ -129,7 +137,6 @@ jobs:
           # from source and is the slow leg of the job. A main push builds amd64 only so :edge
           # stays cheap (ADR-0572); between releases a POWER host pins the newest :X.Y.Z.
           platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/ppc64le' || 'linux/amd64' }}
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # SBOM + max provenance are release artifacts; a per-commit (:edge) SBOM is
           # cost with little value. Emit them only on a v* tag.
@@ -139,11 +146,12 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign the published digest
+      - name: Sign the pushed digest
         # Sign the immutable @sha256 digest, not the mutable tag (:edge floats; a tag can
         # be retargeted after signing, the digest cannot). Runs on every push — main and
-        # tags — so every published digest is signed. Fail fast if the build emitted no
-        # digest rather than signing an empty subject.
+        # tags — and, because it precedes tag application (ADR-0573), a digest becomes
+        # reachable under any human-facing tag only once its signature exists. Fail fast if
+        # the build emitted no digest rather than signing an empty subject.
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -153,3 +161,32 @@ jobs:
             exit 1
           fi
           cosign sign --yes "ghcr.io/randomparity/kdive@${DIGEST}"
+
+      - name: Apply tags to the signed digest
+        # The last leg of the push → sign → tag ordering (ADR-0573): only now do the
+        # metadata-action tags (:edge/:sha-<short> on main; :X.Y.Z/:X.Y/:latest on a v* tag)
+        # point at the digest — which the previous step already signed. `imagetools create`
+        # with a single source is a carbon copy of an index/manifest-list and, with
+        # --prefer-index=false, preserves the single-platform manifest format on main pushes,
+        # so each tag lands on exactly the signed digest: no rebuild, no new manifest, and
+        # the referrer-attached SBOM/provenance stay bound to it.
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::build step produced no image digest — refusing to tag" >&2
+            exit 1
+          fi
+          args=()
+          while IFS= read -r tag; do
+            [[ -n "${tag}" ]] || continue
+            args+=(-t "${tag}")
+          done <<< "${TAGS}"
+          if [[ ${#args[@]} -eq 0 ]]; then
+            echo "::error::metadata step produced no tags — refusing to leave the release untagged" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --prefer-index=false "${args[@]}" \
+            "ghcr.io/randomparity/kdive@${DIGEST}"

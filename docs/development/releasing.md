@@ -44,9 +44,14 @@ produces both the wheel/sdist GitHub Release and the release image — and also 
 
 - **Every push to `main`** → a rolling `:edge` tag and an immutable `:sha-<short>`.
 - **Every `vX.Y.Z` tag** → `:X.Y.Z`, `:X.Y`, `:latest`, with an SBOM and max provenance.
-- **Every published digest** (main *and* tags) gets a cosign keyless/OIDC signature on the
-  immutable `@sha256` digest ([ADR-0088](../adr/0088-deployment-packaging.md) decision 8).
-  The SBOM and provenance are release-only; the signature is not.
+- **Sign before tag** ([ADR-0573](../adr/0573-publish-by-digest-sign-then-tag.md)): every
+  published digest gets a cosign keyless/OIDC signature on the immutable `@sha256`
+  ([ADR-0088](../adr/0088-deployment-packaging.md) decision 8) **before any tag points at
+  it**. The workflow pushes the built image by digest only, signs that digest, and applies
+  the tags to it as a final step — so a digest is reachable under `:X.Y.Z`/`:X.Y`/`:latest`
+  (or `:edge`/`:sha-<short>`) only once its signature exists, and an interrupted run strands
+  at most an untagged digest no release tag references. The SBOM and provenance are
+  release-only; the signature is not.
 
 **Multi-arch.** A `vX.Y.Z` tag build produces a `linux/amd64,linux/ppc64le` manifest
 ([ADR-0359](../adr/0359-multiarch-app-image.md)), so a POWER host pulls the same tag as an
