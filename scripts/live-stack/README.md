@@ -2,12 +2,14 @@
 
 Two entry points, by audience. Pick by whether you need real VM provisioning.
 
-## Full local-libvirt host — `scripts/live-stack/up.sh` (needs sudo)
+## Full local-libvirt host — `scripts/live-stack/up.sh`
 
 Brings up EVERYTHING needed to provision real VMs, in order: compose backends (+ observability),
 DB migrations (this checkout is the authoritative migrator), libvirt (`virtqemud`), and the host
-kdive processes (server + reconciler as you, worker as root). Self-elevates with `sudo`; run via
-the `!` prefix in the agent or directly in a shell.
+kdive processes. Server and reconciler run as the configured operator; workers run as isolated
+fixed accounts in `kdive-live-worker@1..8.service` through the provisioned lifecycle socket.
+Install that host contract first with the `live_vm_host` Ansible role. The supported worker URI is
+the explicit operator-owned session socket published in `/etc/kdive/live-worker-libvirt.env`.
 
 | Command | What it does |
 |---------|--------------|
@@ -17,10 +19,18 @@ the `!` prefix in the agent or directly in a shell.
 | `up.sh --reset-db` | full `down.sh --wipe` first, then bring up (recovery from migration drift) |
 | `down.sh` | stop host processes + backends, **keep** state |
 | `down.sh --wipe` | full reset: drop DB/MinIO volumes AND reap `kdive-*` domains + overlays |
-| `status.sh` | read-only health of every layer |
+| `status.sh` | read-only health of every layer and retained worker slots |
 
-No-VM, no-sudo dev loop (just poke the MCP API against backends):
-`KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`.
+`up.sh --skip-libvirt` skips VM provisioning checks but still requires and uses the installed
+systemd worker contract. There is no direct-worker fallback.
+
+Run only one live-stack flow per host from `up` through `down`. The lifecycle request lock
+serializes individual requests, not whole flows; a later `start` replaces the current fleet.
+`worker-lifecycle.sh diagnostics` is bounded to 30 seconds of acquisition, 320 KiB read and
+256 KiB emitted per slot, and 1.25 MiB read and 1 MiB emitted per request. If a dependency is
+unavailable, restore it and retry the same `status` or `stop`; the retained unit, credential,
+state, and database fence are intentional. `down.sh --force` can clear host processes but cannot
+publish termination evidence, so it may strand artifact fences.
 
 ### Capture publication protocol 4
 

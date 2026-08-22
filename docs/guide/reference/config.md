@@ -281,6 +281,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `KDIVE_ACCEPTED_LANES` | `default` | Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request. |
 | `KDIVE_APT_TIMEOUT_S` | `60` | Positive whole-second wall-clock bound for each `apt-get install` in scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by live.yml for its larger host-dep set (ADR-0566, #1978). |
 | `KDIVE_BOOT_DIR` | `/boot` | Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels (libguestfs build-fs appliance, ADR-0222). |
 | `KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS` | `10` | Positive whole-second PostgreSQL connection bound exported by the protocol cutover wrappers for each database operation. |
@@ -290,6 +291,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_DEMO_FULLNAME` | `kdive-kdive` | Chart fullname (`<release>-kdive`) `demo-token.sh` uses to address the server/oidc pods. |
 | `KDIVE_DEMO_NAMESPACE` | `kdive-demo` | Release namespace `demo-token.sh` targets when minting a bundled-demo bearer token. |
 | `KDIVE_EFFECTIVE_UID` | `$EUID` | Effective uid `check-local-libvirt.sh` uses for its non-root-worker readability advisory (ADR-0223); overrides `$EUID` so the gate is testable independent of the runner's uid. |
+| `KDIVE_EXPECTED_SLOTS` | — | Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; unset or empty disables the assertion. |
 | `KDIVE_GRAFANA_PORT` | `3000` | Host port the compose `grafana` service publishes (obs profile). |
 | `KDIVE_GUESTFS_SYS_SITE` | `/usr/lib/python3/dist-packages` | System dir `check-setup-deps.sh` looks in for the libguestfs binding (guestfs.py) when deciding its three-state guestfs remedy and performing the venv symlink (ADR-0393). |
 | `KDIVE_GUEST_HELPERS_DIR` | `deploy/remote-libvirt-guest-helpers` | Guest-helper source directory `check-remote-libvirt.sh` inspects. |
@@ -297,6 +299,10 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_KERNEL_REF` | `v6.9` | Kernel ref (tag/branch/sha) `fetch-kernel-tree.sh` checks out. |
 | `KDIVE_KERNEL_REPO` | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` | Kernel git remote `fetch-kernel-tree.sh` clones. |
 | `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware virtualization (the latter for its native-arch advisory line). |
+| `KDIVE_LIFECYCLE_COUNT` | — | Internal request-construction handoff carrying start's validated slot count; it is empty for non-start operations. |
+| `KDIVE_LIFECYCLE_EXPECTED_SLOTS` | — | Internal status-check count set by live-stack bring-up after start; unset omits the started-slot count assertion. |
+| `KDIVE_LIFECYCLE_LIBVIRT_URI` | — | Internal request-construction handoff carrying the validated published session URI on start; it is empty for non-start operations. |
+| `KDIVE_LIFECYCLE_OPERATION` | — | Internal request-construction handoff derived from the worker-lifecycle.sh command; operators use start, status, stop, or diagnostics arguments instead. |
 | `KDIVE_LIMIT_KCU` | `1000000` | Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project. |
 | `KDIVE_LIVE_SSH_PORT` | `22` | SSH port `check-ssh-reachable.sh` probes. |
 | `KDIVE_LIVE_WORKER_OPERATOR_UID` | — | Provisioner-managed numeric uid authorizing the sole lifecycle socket operator; the root service refuses requests when it is absent or invalid. |
@@ -313,14 +319,15 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_PROJECT` | `demo` | Project the setup-*-libvirt.sh scripts and `scripts/live-stack/onboard.sh` onboard. |
 | `KDIVE_PROMETHEUS_PORT` | `9090` | Host port the compose `prometheus` service publishes (obs profile); an off-host grafana points at this port (#1261). |
 | `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
-| `KDIVE_RECONCILER_DATABASE_URL` | `local Compose reconciler-member DSN` | Database login DSN supplied only to the Compose reconciler service; external deployments override the local development member. |
+| `KDIVE_RECONCILER_DATABASE_URL` | `local Compose reconciler-member DSN` | Database login DSN supplied only to the host reconciler process (and the Compose reference reconciler service); external deployments override the local development member. |
 | `KDIVE_REMOTE_PKI_DIR` | `/etc/pki/libvirt` | TLS PKI directory `check-remote-libvirt.sh` validates. |
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
 | `KDIVE_ROLE` | `admin` | Role `scripts/live-stack/onboard.sh` writes into the minted token's `roles` claim and the printed binding contract; a sub-CONTRIBUTOR value warns (allocations.request needs CONTRIBUTOR+). |
 | `KDIVE_ROOTFS_DIR` | `/var/lib/kdive/rootfs` | Per-System qcow2 overlay directory for the local-libvirt provider; `scripts/live-stack/lib.sh` reads this to locate and create guest disk overlays. |
-| `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the Compose server service; external deployments override the local development member. |
+| `KDIVE_SERVER_DATABASE_URL` | `local Compose server-member DSN` | Database login DSN supplied only to the host server process (and the Compose reference server service); external deployments override the local development member. |
 | `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
+| `KDIVE_SOURCE_ROOT` | — | Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root setting; start fails when it is not an existing absolute directory. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
 | `KDIVE_STACK_PID_FILE` | `~/.local/state/kdive/local-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to `$XDG_STATE_HOME/kdive/local-stack.pid`. |
 | `KDIVE_SYSTEM_PY_MINOR` | `$(python3 --version)` | System Python `X.Y` minor `check-setup-deps.sh` compares against the venv's for the libguestfs ABI check before symlinking the binding (ADR-0393). |
@@ -332,8 +339,8 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_WARM_STORE_FORCE` | `0` | When `1`, `warm-store.sh` skips the warm fast-path and rebuilds — the escape hatch for a distro that rebuilt the kernel under an unchanged NVR. |
 | `KDIVE_WARM_STORE_IMAGE` | — | Catalog rootfs image `warm-store.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |
 | `KDIVE_WARM_STORE_TARGET_NVR` | — | Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the operator/CI computes it from the base image; no live distro query). Unset → the script dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`. |
-| `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
-| `KDIVE_WORKER_COUNT` | `1` | How many `kdive worker` processes `restart_host_processes()` in `scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the local stack's only job-concurrency knob; raise it to exercise cross-worker paths such as the rootfs fetch advisory lock. Each worker past the first gets its own aux health port and log file. Values above 8 are refused at bring-up (`MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`), because every worker is a root process with its own database pool and aux port. |
+| `KDIVE_WORKER_AS_ROOT` | `1` | Retired worker-launch selector. Host workers now run exclusively as fixed systemd units through the lifecycle witness, so live-stack scripts no longer read this; the native CI job still sets it until its workflow wiring is updated. |
+| `KDIVE_WORKER_COUNT` | `1` | How many fixed lifecycle-worker slots `scripts/live-stack/worker-lifecycle.sh` starts (live-stack bring-up forwards it to the witness). A worker runs one job at a time, so this is the local stack's job-concurrency knob. Values above 8 are refused before a lifecycle request is sent (`MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`). |
 | `KDIVE_WORKER_INCARNATION_NONCE` | — | Ephemeral 128-bit nonce generated by the reference Compose lifecycle gate and passed only to the never-started managed worker create; operators do not set it manually. |
 | `KDIVE_WORKER_PYTHON` | `/opt/kdive-live-worker-lifecycle/.venv/bin/python` | Lifecycle-generated handoff naming the installed Python executable that the worker gate executes; operators do not set it directly. |
 | `KDIVE_WORKER_SOURCE_ROOT` | — | Lifecycle-generated worker environment value carrying the validated absolute kernel source root from the current start request; operators set KDIVE_KERNEL_SRC instead. |

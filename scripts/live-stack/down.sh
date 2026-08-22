@@ -53,6 +53,14 @@ if [[ "$wipe" == "1" && "$assume_yes" != "1" ]]; then
 fi
 
 echo "=== stopping host processes ==="
+if ! "${here}/worker-lifecycle.sh" stop; then
+  if [[ "$force" != "1" ]]; then
+    echo "worker lifecycle stop left unresolved evidence; backends remain up" >&2
+    echo "restore the failed dependency and retry, or use --force to accept stranded fences" >&2
+    exit 1
+  fi
+  echo "WARNING: --force cannot publish worker termination evidence and may strand fences." >&2
+fi
 stop_daemons
 if [[ "$force" == "1" ]]; then
   echo "=== force-stopping host processes still running ==="

@@ -518,20 +518,24 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_WORKER_AS_ROOT",
         "script",
         "1",
-        "Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker "
-        "as root via sudo (1) or as the current user (0).",
+        "Retired worker-launch selector. Host workers now run exclusively as fixed systemd units "
+        "through the lifecycle witness, so live-stack scripts no longer read this; the native CI "
+        "job still sets it until its workflow wiring is updated.",
     ),
     ExternalEnvVar(
         "KDIVE_WORKER_COUNT",
         "script",
         "1",
-        "How many `kdive worker` processes `restart_host_processes()` in "
-        "`scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the "
-        "local stack's only job-concurrency knob; raise it to exercise cross-worker paths such "
-        "as the rootfs fetch advisory lock. Each worker past the first gets its own aux health "
-        "port and log file. Values above 8 are refused at bring-up (`MAX_WORKER_COUNT` in "
-        "`scripts/live-stack/lib.sh`), because every worker is a root process with its own "
-        "database pool and aux port.",
+        "How many fixed lifecycle-worker slots `scripts/live-stack/worker-lifecycle.sh` starts "
+        "(live-stack bring-up forwards it to the witness). A worker runs one job at a time, so "
+        "this is the local stack's job-concurrency knob. Values above 8 are refused before a "
+        "lifecycle request is sent (`MAX_WORKER_COUNT` in `scripts/live-stack/lib.sh`).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_ACCEPTED_LANES",
+        "script",
+        "default",
+        "Comma-separated worker lanes `env.sh` passes into each fixed worker lifecycle request.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_WORKER_OPERATOR_UID",
@@ -554,6 +558,48 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "executes; operators do not set it directly.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIFECYCLE_EXPECTED_SLOTS",
+        "script",
+        None,
+        "Internal status-check count set by live-stack bring-up after start; unset omits the "
+        "started-slot count assertion.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_OPERATION",
+        "script",
+        None,
+        "Internal request-construction handoff derived from the worker-lifecycle.sh command; "
+        "operators use start, status, stop, or diagnostics arguments instead.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_COUNT",
+        "script",
+        None,
+        "Internal request-construction handoff carrying start's validated slot count; it is empty "
+        "for non-start operations.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIFECYCLE_LIBVIRT_URI",
+        "script",
+        None,
+        "Internal request-construction handoff carrying the validated published session URI on "
+        "start; it is empty for non-start operations.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SOURCE_ROOT",
+        "script",
+        None,
+        "Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root "
+        "setting; start fails when it is not an existing absolute directory.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_EXPECTED_SLOTS",
+        "script",
+        None,
+        "Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; "
+        "unset or empty disables the assertion.",
+    ),
+    ExternalEnvVar(
         "KDIVE_WORKER_SOURCE_ROOT",
         "script",
         None,
@@ -571,15 +617,16 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_SERVER_DATABASE_URL",
         "script",
         "local Compose server-member DSN",
-        "Database login DSN supplied only to the Compose server service; external deployments "
-        "override the local development member.",
+        "Database login DSN supplied only to the host server process (and the Compose reference "
+        "server service); external deployments override the local development member.",
     ),
     ExternalEnvVar(
         "KDIVE_RECONCILER_DATABASE_URL",
         "script",
         "local Compose reconciler-member DSN",
-        "Database login DSN supplied only to the Compose reconciler service; external deployments "
-        "override the local development member.",
+        "Database login DSN supplied only to the host reconciler process (and the Compose "
+        "reference reconciler service); external deployments override the local development "
+        "member.",
     ),
     # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
     # (the publish side) and `scripts/live-stack/env.sh` (the client-facing DSN/endpoint), so an

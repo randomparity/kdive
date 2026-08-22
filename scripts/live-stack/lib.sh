@@ -19,7 +19,7 @@ KDIVE_BACKEND_SERVICES=(postgres minio minio-init oidc)
 # stores per-System qcow2 overlays under KDIVE_ROOTFS_DIR. It uses user-mode SLIRP networking
 # and qemu-img overlays — NO libvirt network or storage pool is involved.
 KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
-KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
+export KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
 # Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships
 # amd64 + arm64 only. On a listed arch, up.sh skips grafana and brings prometheus (which does
@@ -37,9 +37,9 @@ grafana_supports_arch() {
   return 0
 }
 
-# Matches the real daemon argv, e.g. ".venv/bin/python -m kdive server". `[.]` is a literal
+# Matches ordinary host daemon argv, e.g. ".venv/bin/python -m kdive server". `[.]` is a literal
 # dot, so awk's dynamic-regex engine does not warn about an unescaped metacharacter.
-_daemon_match='[.]venv/bin/python -m kdive (server|worker|reconciler)'
+_daemon_match='[.]venv/bin/python -m kdive (server|reconciler)'
 
 # `-ww` is required, not cosmetic: ps truncates each line to COLUMNS when that is set, and a
 # checkout path plus " -m kdive reconciler" runs past 80 characters for any ordinary worktree. In
@@ -48,25 +48,12 @@ _daemon_match='[.]venv/bin/python -m kdive (server|worker|reconciler)'
 # shellcheck disable=SC2054 # the commas are ps's own -o field separator, not array separators
 _PS_WIDE=(ps -ww -eo "pid=,comm=,args=")
 
-# PIDs of the real python daemons only — comm must be python, so a `bash -c '... kdive worker'`
-# launcher wrapper (whose argv also matches) is excluded.
+# PIDs of the real python daemons only — comm must be python, so a `bash -c` launcher
+# wrapper (whose argv also matches) is excluded. Workers are NOT matched: they are systemd units
+# (`kdive-live-worker@1..8.service`) owned by the lifecycle witness and invisible to this scan by
+# construction; the witness's stop/status/diagnostics operations are their lifecycle surface.
 daemon_pids() {
   "${_PS_WIDE[@]}" | awk -v re="$_daemon_match" '$2 ~ /^python/ && $0 ~ re {print $1}'
-}
-
-# The worker subset of daemon_pids(), one pid per line. There is no per-worker identity in the
-# argv — every worker runs the same `-m kdive worker` — so this counts them rather than naming
-# them, which is all the build-stamp header needs to expose a stale log.
-#
-# Scoped to THIS checkout's interpreter, unlike daemon_pids: the two want opposite things. A
-# bring-up must stop every kdive daemon on the host whatever checkout started it, so daemon_pids
-# stays deliberately broad. A build-stamp count compared against rows of THIS log dir must not be
-# inflated by a worker from a sibling worktree — several run on this host — or a dead worker's
-# stale log reads as a live, graded process. `index()` is a literal match, so the interpreter path
-# needs no regex escaping.
-worker_pids() {
-  "${_PS_WIDE[@]}" | awk -v needle="${py} -m kdive worker" \
-    '$2 ~ /^python/ && index($0, needle) {print $1}'
 }
 
 # Does signalling every pid in <pid-csv> need sudo? Returns 0 (yes) or 1 (a bare kill suffices).
@@ -119,7 +106,7 @@ stop_daemons() {
   fi
   # One scan per poll, reused by the WARN. A second `daemon_pids` down there was a separate `ps`,
   # so the set it printed was not the set that decided to warn — the same double-scan skew fixed
-  # in require_workers_alive later in this file, and this list is likewise what an operator would
+  # in wait_for_daemons_to_settle later in this file, and this list is likewise what an operator would
   # act on. Sleep FIRST so the surviving scan is the last thing observed rather than one already
   # half a second stale. The price is one extra 0.5s poll when every daemon exits immediately; the
   # gain is that the pids the WARN hands the operator were still there when it decided to warn.
@@ -205,10 +192,8 @@ require_free_http_port() {
 # per-(investigation, checksum) rootfs fetch advisory lock is the one the live-testing runbook
 # drives. Default 1 keeps the ordinary stack byte-identical to the single-worker shape.
 #
-# Ceilinged because every worker is a root process with its own database pool and its own aux
-# port, and the loop that starts them asks for no confirmation. A transposition typo — the aux
-# port 9470 typed into the count — would fork thousands of root processes on the operator's host.
-# Every documented use is 2 or 3.
+# Ceilinged because every worker has its own database pool and auxiliary health port. A
+# transposition typo must not ask the lifecycle witness to activate thousands of slots.
 MAX_WORKER_COUNT=8
 
 configured_worker_count() {
@@ -233,126 +218,35 @@ configured_worker_count() {
   ((${#count} <= ${#MAX_WORKER_COUNT} && count <= MAX_WORKER_COUNT)) || {
     echo "KDIVE_WORKER_COUNT=${count} is outside 1..${MAX_WORKER_COUNT}. A value past the ceiling —" >&2
     echo "or one so large it wraps bash's signed 64-bit arithmetic — is refused: each worker is a" >&2
-    echo "root process with its own database pool and aux health port; the live-testing runbook's" >&2
+    echo "worker process with its own database pool and aux health port; the live-testing runbook's" >&2
     echo "contention arm needs 2. Raise MAX_WORKER_COUNT in lib.sh if you genuinely need more." >&2
     return 1
   }
   printf '%s' "$count"
 }
 
-# Aux health/metrics listener bind (ADR-0090 §5) for worker <index>, empty for worker 1.
-#
-# uvicorn's bind is exclusive, so a second worker inheriting the first one's port dies at startup
-# instead of claiming jobs — the failure this override exists to prevent. Worker 1 keeps the
-# untouched environment so it lands on the registered per-process default 9465, where the ADR-0482
-# skew preflight probes for it. Extras are numbered from their own base, clear of the whole
-# registered block (server 9464, worker 9465, reconciler 9466), so worker 2 does not land on the
-# reconciler.
-#
-# This is a fixed base rather than an offset from worker 1's *resolved* port because an explicit
-# KDIVE_HEALTH_BIND_ADDR is refused outright above one worker (see restart_host_processes) — so
-# worker 1's resolved port is always this default, and deriving from it would only add a way for
-# an operator-chosen base to walk the extras onto the server's and reconciler's ports.
-EXTRA_WORKER_HEALTH_PORT_BASE=9470
-
-extra_worker_health_bind() {
-  local index="$1"
-  ((index > 1)) || return 0
-  printf '127.0.0.1:%s' "$((EXTRA_WORKER_HEALTH_PORT_BASE + index - 2))"
-}
-
-# Log file for worker <index>. Worker 1 keeps the historical unsuffixed name so the runbooks and
-# recorded proof runs that name `worker-root.log` still point at a real file; each additional
-# worker gets its own so an observation is attributable to one process rather than an interleave.
-worker_log_path() {
-  local index="$1" suffix="" stem="worker"
-  ((index > 1)) && suffix="-${index}"
-  [[ "${KDIVE_WORKER_AS_ROOT:-1}" == "1" && "$(id -un)" != "root" ]] && stem="worker-root"
-  printf '%s/%s%s.log' "$log_dir" "$stem" "$suffix"
-}
-
-# Start ONE `kdive worker`, indexed from 1. Split out of restart_host_processes so the root and
-# non-root launches stay a single branch while the caller loops over the configured worker count.
-start_worker() {
-  local index="$1" build_user="$2" kernel_src="$3"
-  local log health_bind health_export=""
-  log="$(worker_log_path "$index")"
-  health_bind="$(extra_worker_health_bind "$index")"
-  if [[ "${KDIVE_WORKER_AS_ROOT:-1}" == "1" && "$(id -un)" != "root" ]]; then
-    # The worker needs root (install staging + libvirt/VM ops). sudo resets the environment, so any
-    # override the invoking user set is stripped before env.sh re-runs under sudo and re-defaults it.
-    # Forward the vars the root worker actually consumes so env.sh honors them verbatim (via its
-    # `:-` defaults) instead of silently reverting: KDIVE_KERNEL_SRC (else HOME=/root points at a
-    # nonexistent /root/src/linux), the WORKER database authority, and KDIVE_S3_ENDPOINT_URL —
-    # without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would leave the worker
-    # connecting to the default host ports (nothing published there) while the same-user
-    # server/reconciler use the overridden ones. The health-bind export lands AFTER the env.sh
-    # source so the export is the last writer. That ordering is INERT today — env.sh never
-    # mentions KDIVE_HEALTH_BIND_ADDR — and it is kept only because it costs nothing and would
-    # become load-bearing the moment env.sh grew a `:-` default for it, like the vars above.
-    # After sourcing, the worker is handed ONLY its own authority: KDIVE_DATABASE_URL aliases the
-    # member DSN and every other role's DSN is unset (#1929).
-    [[ -n "$health_bind" ]] && health_export="export KDIVE_HEALTH_BIND_ADDR='${health_bind}' && "
-    sudo bash -c "cd '${repo_root}' \
-      && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
-      && export KDIVE_WORKER_DATABASE_URL='${KDIVE_WORKER_DATABASE_URL}' KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}' \
-      && source scripts/live-stack/env.sh \
-      && export KDIVE_DATABASE_URL=\"\${KDIVE_WORKER_DATABASE_URL}\" \
-      && unset KDIVE_MIGRATION_DATABASE_URL KDIVE_SERVER_DATABASE_URL KDIVE_RECONCILER_DATABASE_URL \
-      && ${health_export}setsid nohup '${py}' -m kdive worker >>'${log}' 2>&1 </dev/null &"
-  else
-    local -a worker_env=(KDIVE_KERNEL_SRC="$kernel_src")
-    [[ -n "$health_bind" ]] && worker_env+=(KDIVE_HEALTH_BIND_ADDR="$health_bind")
-    KDIVE_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL}" \
-      env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
-      -u KDIVE_RECONCILER_DATABASE_URL \
-      "${worker_env[@]}" setsid nohup "$py" -m kdive worker >"$log" 2>&1 </dev/null &
-  fi
-}
-
-# Restart the host-run kdive daemons with the code in THIS checkout: server + reconciler as the
-# invoking user, worker as root (unless KDIVE_WORKER_AS_ROOT=0) for install-staging + VM ops.
-# Stops live daemons found in the process table first. Assumes env.sh is already sourced and the
-# compose backends are up. Env: KDIVE_WORKER_AS_ROOT (default 1), KDIVE_BUILD_USER (default
-# invoking user; a root worker REFUSES the local build lane without it — ADR-0214), KDIVE_KERNEL_SRC,
-# KDIVE_WORKER_COUNT (default 1; see configured_worker_count).
+# Restart ordinary host daemons and route every worker through the fixed lifecycle witness.
+# Assumes env.sh is sourced and compose backends are up. KDIVE_WORKER_COUNT stays within 1..8.
 restart_host_processes() {
-  local build_user="${KDIVE_BUILD_USER:-$(id -un)}"
-  local kernel_src="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
-  local worker_count index
+  local worker_count
   worker_count="$(configured_worker_count)" || return 1
-  # An explicit KDIVE_HEALTH_BIND_ADDR reaches the daemons unevenly here, so a multi-worker aux
-  # layout cannot be placed deterministically under one. ADR-0090 §5 says an explicit value wins
-  # for every process, but this bring-up does not deliver it to every process: the default root
-  # worker is launched through `sudo bash -c`, which strips the environment and re-forwards only
-  # the four variables named below — not this one — so a root worker 1 silently falls back to the
-  # registered 9465, while a KDIVE_WORKER_AS_ROOT=0 worker 1 honours the operator's port. Worker 1
-  # therefore lands somewhere that depends on a *different* knob, and the extras are numbered from
-  # their own base regardless. Refuse rather than place ports on that footing.
-  #
-  # (An explicit bind is already unsound for the same-user server and reconciler at any count —
-  # both do inherit it and both race one port. That is pre-existing and not gated here; this guard
-  # covers only the multi-worker layout this file added.)
-  if ((worker_count > 1)) && [[ -n "${KDIVE_HEALTH_BIND_ADDR:-}" ]]; then
-    {
-      echo "ERROR: KDIVE_WORKER_COUNT=${worker_count} and KDIVE_HEALTH_BIND_ADDR are incompatible."
-      echo "  An explicit health bind does not reach every daemon here — sudo strips it from the"
-      echo "  root worker, so worker 1's port depends on KDIVE_WORKER_AS_ROOT while the extra"
-      echo "  workers are numbered from ${EXTRA_WORKER_HEALTH_PORT_BASE} regardless. Unset KDIVE_HEALTH_BIND_ADDR to run"
-      echo "  more than one worker; every worker then takes a port this bring-up chose."
-    } >&2
-    return 1
-  fi
   [[ -x "$py" ]] || {
     echo "no venv python at ${py}; run 'just setup' first" >&2
     return 1
   }
   mkdir -p "$log_dir"
+  # The witness owns the whole worker fleet, so bring-up asks it to sweep before starting anything:
+  # `diagnostics` proves the control plane answers, then `stop` retires any retained slots so the
+  # start below replaces the fleet instead of racing a survivor from a previous stack.
+  "${repo_root}/scripts/live-stack/worker-lifecycle.sh" diagnostics || return 1
+  "${repo_root}/scripts/live-stack/worker-lifecycle.sh" stop || return 1
   stop_daemons
   # Stopped our own daemons above; anything still on KDIVE_HTTP_PORT is foreign — fail loudly rather
   # than let the new server lose the bind race and die silently.
   require_free_http_port || return 1
-  echo "starting kdive host processes (${worker_count} worker(s)) @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
+  local revision
+  revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  echo "starting kdive host processes (${worker_count} lifecycle worker(s)) @ ${revision} ..."
   KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
     env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL \
@@ -361,12 +255,13 @@ restart_host_processes() {
     env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_WORKER_DATABASE_URL \
     setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
-  for ((index = 1; index <= worker_count; index++)); do
-    start_worker "$index" "$build_user" "$kernel_src"
-  done
-  DAEMON_COUNT="$((2 + worker_count))"
+  "${repo_root}/scripts/live-stack/worker-lifecycle.sh" start "$worker_count"
+  DAEMON_COUNT=2
   wait_for_daemons_to_settle || return 1
-  require_workers_alive "$worker_count"
+  # Exact-fleet gate: status must report exactly the requested slots in the started phase, so a
+  # slot the witness failed to activate fails bring-up instead of degrading to a silent shortfall.
+  KDIVE_LIFECYCLE_EXPECTED_SLOTS="$worker_count" \
+    "${repo_root}/scripts/live-stack/worker-lifecycle.sh" status
 }
 
 # Host processes have no supervisor — unlike the systemd units and the compose/Helm surfaces,
@@ -375,13 +270,12 @@ restart_host_processes() {
 # connection and exits if it cannot get one, plus a bounded pool teardown (ADR-0449, ~11s total).
 # The former flat `sleep 5` returned while a doomed daemon was still in the process table, so
 # status.sh reported three healthy processes and up.sh exited 0 for a stack that vanished seconds
-# later. The most reachable trigger is the sudo-root-worker env footgun above: a KDIVE_DATABASE_URL
-# the root worker cannot reach now kills it outright instead of showing up as a not-ready /readyz.
+# later. The most reachable trigger is an unavailable role-specific database: that kills a daemon
+# outright instead of showing up as a not-ready /readyz.
 DAEMON_SETTLE_SECONDS=15
-# server + reconciler + KDIVE_WORKER_COUNT workers. restart_host_processes() recomputes this from
-# the count it resolved; the initializer is the one-worker stack so a consumer that only reads it
-# still sees the ordinary shape.
-DAEMON_COUNT=3
+# server + reconciler. Workers are systemd units gated by the lifecycle status check, not counted
+# in this host-wide total; restart_host_processes() keeps this at the ordinary two-daemon shape.
+DAEMON_COUNT=2
 
 wait_for_daemons_to_settle() {
   local elapsed alive
@@ -392,123 +286,19 @@ wait_for_daemons_to_settle() {
       echo "kdive host processes exited during startup (${alive}/${DAEMON_COUNT} alive)" >&2
       echo "check ${log_dir}/*.log — 'no database connection within' means the backend was" >&2
       echo "unreachable, or its credentials or database name are wrong" >&2
-      # Above one worker there is a second cause with a very different remedy, and each worker
-      # writes its own log so the failing one is identifiable. A worker whose aux port is held by
-      # something foreign dies on an exclusive uvicorn bind, which leaves a bind traceback rather
-      # than a database message — and the stack silently comes up with fewer workers than asked
-      # for, which is the single-worker serialization a multi-worker run exists to escape.
-      echo "on a multi-worker stack, an 'address already in use' traceback at the END of one" >&2
-      echo "worker's own log (the root launch appends) means its aux health port" >&2
-      echo "(${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is taken, not that the backend is down" >&2
       return 1
     fi
   done
 }
 
-# Assert the stack really has the workers that were asked for, from THIS checkout.
-#
-# wait_for_daemons_to_settle counts a host-wide total against DAEMON_COUNT, and daemon_pids is
-# deliberately checkout-agnostic, so a leftover daemon from another worktree — or a survivor of
-# stop_daemons, which warns and returns 0 after ten seconds rather than failing — makes the total
-# add up while one of this checkout's workers is missing. That is the silent degradation to fewer
-# workers the whole knob exists to escape: bring-up would exit 0 and the contention arm would
-# quietly measure serialization. Count workers specifically, and scoped, so the total cannot cover
-# for the shortfall.
-require_workers_alive() {
-  local want="$1" have
-  # ONE scan, reused. Counting with one `ps` and printing the pid list with a second let a worker
-  # exit between them, so the message could report a count its own pid list contradicted — and
-  # that list is what the remedy below tells the operator to act on.
-  local -a pids
-  mapfile -t pids < <(worker_pids)
-  have="${#pids[@]}"
-  ((have == want)) && return 0
-  # Exact, not `>=`. A surplus is the failure this function was written about: stop_daemons warns
-  # and returns 0 after ten seconds, and a worker does not act on SIGTERM until its job ends — so
-  # a worker parked inside a multi-GiB fetch (which the contention arm creates deliberately)
-  # routinely outlives it. That survivor is from THIS checkout and is counted here, so a `>=`
-  # comparison lets it stand in for a new worker that died, which is exactly the substitution the
-  # count exists to prevent. The two directions need different remedies, so they say different
-  # things.
-  if ((have > want)); then
-    local pid_csv stopped_pid worker_pid
-    local -a unsignalled_workers=()
-    printf -v pid_csv '%s,' "${pids[@]}"
-    pid_csv="${pid_csv%,}"
-    for stopped_pid in "${STOP_DAEMONS_UNSIGNALLED[@]}"; do
-      for worker_pid in "${pids[@]}"; do
-        [[ "$stopped_pid" == "$worker_pid" ]] && unsignalled_workers+=("$stopped_pid")
-      done
-    done
-    # Forced teardown owns escalation. Keeping it out of stop_daemons preserves bring-up's
-    # graceful-only contract while giving this error one supported, ownership-aware remedy.
-    {
-      echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
-      echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
-      echo "  until its current job ends, and the ten-second wait only warns. It may be running"
-      echo "  older code, and it masks a new worker that failed to start."
-      echo "  Live worker pids: ${pids[*]}"
-      echo "  That list is every worker running under ${py}, INCLUDING the ones this run started."
-      echo "  The survivors are whichever have the older start times. This step is diagnostic"
-      echo "  only — the kill below ends every pid in the list, survivor or not:"
-      echo "    ps -ww -o pid,lstart,etime,args -p ${pid_csv}"
-      if ((${#unsignalled_workers[@]})); then
-        echo "  SIGTERM was not delivered to: ${unsignalled_workers[*]}. Waiting cannot end"
-        echo "  those pids; use the forced teardown below."
-      else
-        echo "  Either wait for the in-flight job to finish, then re-run, or end the stack with:"
-      fi
-      echo "    scripts/live-stack/down.sh --force"
-      echo "  Killing abandons those jobs mid-flight: another worker reclaims each one once its"
-      echo "  lease lapses, spending one of its bounded attempts."
-    } >&2
-    return 1
-  fi
-  {
-    echo "ERROR: asked for ${want} worker(s) but only ${have} from this checkout are running."
-    echo "  Each worker writes its own log under ${log_dir}. The root launch APPENDS, so look at"
-    echo "  each log's tail: the failing one ends in a traceback rather than in this run's startup"
-    echo "  line. An 'address already in use' there means that worker's aux health port"
-    echo "  (${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is held by something else — a local port conflict, not a backend"
-    echo "  problem."
-  } >&2
-  return 1
-}
-
-# worker-root.log is append-only, so report the LAST stamp of each service's own log. EVERY worker
-# log present gets its own row: a skew check that reported one worker's stamp would pass on a
-# multi-worker stack whose other workers are running different code (ADR-0482).
-#
-# The worker set comes from the log directory, not from KDIVE_WORKER_COUNT. status.sh is a bare
-# read-only command an operator runs in a fresh shell long after bring-up, where that variable is
-# gone — reading it there would report one worker for a stack started with several, which is the
-# exact blind spot this per-worker reporting exists to close.
-#
-# Logs outlive processes, though: nothing prunes them, and the root launch appends, so a stack
-# brought up with two workers and then with one leaves a `worker-root-2.log` whose last stamp still
-# reads. Enumerating files alone would report that dead worker as live — the same blindness in the
-# other direction. So the header states how many worker processes are ACTUALLY running: a row count
-# above it means at least one row is a stale log, not a worker.
+# Worker startup lines live in the journald journals owned by the lifecycle witness (one unit per
+# fixed slot), so only the ordinary host daemons have checkout-side logs to grade here.
 report_build_stamps() {
-  local head_sha log found=0 name live
-  local -A seen=()
+  local head_sha
   head_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
-  live="$(worker_pids | grep -c . || true)"
-  echo "=== build stamps (expect g${head_sha}; ${live} worker process(es) live) ==="
+  echo "=== build stamps (expect g${head_sha}) ==="
   _report_build_stamp server "${log_dir}/server.log"
   _report_build_stamp reconciler "${log_dir}/reconciler.log"
-  # Each row is labelled by its own log's name rather than by a running counter, so it names the
-  # file to read when a stamp looks wrong. Worker 1's two possible names lead, because the glob
-  # alone sorts `worker-root-2.log` ahead of `worker-root.log`; `seen` dedupes the overlap.
-  for log in "${log_dir}"/worker.log "${log_dir}"/worker-root.log "${log_dir}"/worker-*.log; do
-    [[ -f "$log" ]] || continue
-    [[ -n "${seen[$log]:-}" ]] && continue
-    seen["$log"]=1
-    found=1
-    name="${log##*/}"
-    _report_build_stamp "${name%.log}" "$log"
-  done
-  ((found)) || _report_build_stamp worker "$(worker_log_path 1)"
 }
 
 _report_build_stamp() {
@@ -544,7 +334,7 @@ libvirt_ok() {
 }
 
 # The host prerequisites a local-libvirt provision actually needs. Returns 0 iff all are
-# PRESENT (existence only — ownership/writability is the root worker's concern, not testable
+# PRESENT (existence only — ownership/writability is the lifecycle witness's concern, not testable
 # reliably as the invoking user). up.sh creates the dirs before calling this.
 provision_prereqs_ok() {
   local rc=0 staging="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"

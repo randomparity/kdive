@@ -24,6 +24,8 @@ ps -ww -eo pid,user,args | awk -v re="$_daemon_match" '$0 ~ re && $1 ~ /^[0-9]+$
 echo
 report_build_stamps
 
+echo "=== worker lifecycle ==="
+"${here}/worker-lifecycle.sh" status || true
 echo
 echo "=== app health ==="
 server_health || true
