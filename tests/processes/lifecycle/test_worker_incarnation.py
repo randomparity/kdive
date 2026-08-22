@@ -136,6 +136,45 @@ def test_worker_incarnation_credential_rejects_blank_handoff(tmp_path: Path) -> 
         worker_incarnations.worker_incarnation_credential(path)
 
 
+def test_worker_incarnation_credential_prefers_explicit_path_over_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    explicit = tmp_path / "explicit-credential"
+    explicit.write_text("explicit-credential\n", encoding="utf-8")
+    systemd = tmp_path / "systemd"
+    systemd.mkdir()
+    (systemd / "worker-incarnation").write_text("systemd-credential\n", encoding="utf-8")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(systemd))
+
+    credential = worker_incarnations.worker_incarnation_credential(explicit)
+
+    assert credential.get_secret_value() == "explicit-credential"
+
+
+def test_worker_incarnation_credential_reads_systemd_credential_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    (tmp_path / "worker-incarnation").write_text("systemd-secret\n", encoding="utf-8")
+
+    credential = worker_incarnations.worker_incarnation_credential()
+
+    assert credential.get_secret_value() == "systemd-secret"
+
+
+def test_worker_incarnation_credential_fails_loud_when_no_location_yields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="checked location") as exc_info:
+        worker_incarnations.worker_incarnation_credential()
+
+    message = str(exc_info.value)
+    assert str(tmp_path / "worker-incarnation") in message
+    assert "/run/kdive/worker-incarnation-credential" in message
+
+
 def test_kubernetes_identity_binds_pod_uid_and_accepts_only_same_uid_terminal_pod(
     monkeypatch,
 ) -> None:

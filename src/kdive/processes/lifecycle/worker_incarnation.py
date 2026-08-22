@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
 import ssl
@@ -76,12 +77,31 @@ def worker_incarnation_id(
     return f"{socket.gethostname()}:{pid}:{boot_id}:{_start_ticks(stat)}"
 
 
-def worker_incarnation_credential(path: Path = _INCARNATION_CREDENTIAL) -> SecretStr:
-    """Load the authority-delivered credential from its init-only runtime handoff."""
-    value = path.read_text(encoding="utf-8").strip()
-    if not value:
-        raise RuntimeError("worker incarnation credential handoff is empty")
-    return SecretStr(value)
+def worker_incarnation_credential(path: Path | None = None) -> SecretStr:
+    """Load the authority-delivered credential from systemd LoadCredential or the handoff."""
+    if path is not None:
+        value = path.read_text(encoding="utf-8").strip()
+        if not value:
+            raise RuntimeError("worker incarnation credential handoff is empty")
+        return SecretStr(value)
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    locations = [Path(directory) / "worker-incarnation" if directory else _INCARNATION_CREDENTIAL]
+    if directory:
+        locations.append(_INCARNATION_CREDENTIAL)
+    failures: list[str] = []
+    for location in locations:
+        try:
+            value = location.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            failures.append(f"{location}: {exc.strerror or exc}")
+            continue
+        if not value:
+            failures.append(f"{location}: empty")
+            continue
+        return SecretStr(value)
+    raise RuntimeError(
+        "worker incarnation credential not found at any checked location: " + "; ".join(failures)
+    )
 
 
 @dataclass(frozen=True, slots=True)
