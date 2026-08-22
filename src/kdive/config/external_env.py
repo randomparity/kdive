@@ -563,7 +563,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "5432",
         "Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it "
-        "into the default `KDIVE_DATABASE_URL`.",
+        "into the default role database DSNs (#1929).",
     ),
     ExternalEnvVar(
         "KDIVE_MINIO_PORT",

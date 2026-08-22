@@ -59,6 +59,12 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_REMOTE_LIBVIRT_GDB_PORT_MIN",
         "KDIVE_REMOTE_LIBVIRT_GDB_PORT_MAX",
         "KDIVE_REMOTE_LIBVIRT_ALLOCATION_CAP",
+        # Test-only probe file-path carriers in tests/scripts/test_live_stack_scripts.py: each
+        # names a temp file a stubbed child writes its observed environment into; no process
+        # reads them as configuration (#1929 role-DSN scrub tests).
+        "KDIVE_MIGRATE_PROBE",
+        "KDIVE_STATUS_PROBE",
+        "KDIVE_DAEMON_PROBE",
     }
 )
 

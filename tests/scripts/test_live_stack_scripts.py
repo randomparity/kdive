@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -794,7 +795,7 @@ def test_root_worker_launch_splices_the_health_bind_after_sourcing_env(tmp_path:
         "start_worker 3 builduser /src/linux\n",
         PATH=f"{tmp_path}:{os.environ['PATH']}",
         KDIVE_WORKER_AS_ROOT="1",
-        KDIVE_DATABASE_URL="postgresql://x/y",
+        KDIVE_WORKER_DATABASE_URL="postgresql://x/y",
         KDIVE_S3_ENDPOINT_URL="http://x",
     )
     assert result.returncode == 0, result.stderr
@@ -817,7 +818,11 @@ def test_root_worker_launch_splices_the_health_bind_after_sourcing_env(tmp_path:
 def test_live_stack_env_exports_required_defaults() -> None:
     env = (ROOT / "scripts/live-stack/env.sh").read_text()
     required = [
-        "KDIVE_DATABASE_URL",
+        # One export per host database authority (#1929); no shared DSN default remains.
+        "KDIVE_MIGRATION_DATABASE_URL",
+        "KDIVE_SERVER_DATABASE_URL",
+        "KDIVE_WORKER_DATABASE_URL",
+        "KDIVE_RECONCILER_DATABASE_URL",
         "KDIVE_OIDC_ISSUER",
         "KDIVE_OIDC_JWKS_URI",
         "KDIVE_OIDC_AUDIENCE",
@@ -872,14 +877,179 @@ def test_restart_host_processes_starts_all_three() -> None:
 
 
 def test_sudo_root_worker_forwards_backend_endpoints() -> None:
-    # sudo resets the environment, so the root worker re-sources env.sh and would re-default any
-    # relocated backend port. The resolved DB + S3 endpoints must be forwarded into the sudo shell
-    # so a KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT override reaches the worker, not just the same-user
-    # server/reconciler. The forward must appear inside the `sudo bash -c` block.
     text = (ROOT / "scripts/live-stack/lib.sh").read_text()
     sudo_block = text[text.index("sudo bash -c") : text.index("-m kdive worker >>")]
-    assert "KDIVE_DATABASE_URL='${KDIVE_DATABASE_URL}'" in sudo_block
+    assert "KDIVE_WORKER_DATABASE_URL='${KDIVE_WORKER_DATABASE_URL}'" in sudo_block
+    assert r"KDIVE_DATABASE_URL=\"\${KDIVE_WORKER_DATABASE_URL}\"" in sudo_block
+    assert (
+        "unset KDIVE_MIGRATION_DATABASE_URL KDIVE_SERVER_DATABASE_URL "
+        "KDIVE_RECONCILER_DATABASE_URL" in sudo_block
+    )
     assert "KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}'" in sudo_block
+
+
+def test_host_migrations_default_to_the_compose_migration_owner() -> None:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"KDIVE_DATABASE_URL", "KDIVE_MIGRATION_DATABASE_URL"}
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; printf "%s\\n" "$KDIVE_MIGRATION_DATABASE_URL"',
+            "bash",
+            str(ROOT / "scripts/live-stack/env.sh"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    expected_login = "kdive-migration:kdive-migration-local"  # pragma: allowlist secret
+    assert result.stdout == f"postgresql://{expected_login}@localhost:5432/kdive\n"
+
+
+def test_apply_migrations_runs_with_runtime_role_dsns_scrubbed(tmp_path: Path) -> None:
+    """The host migrator must connect through the migration authority alone (#1929).
+
+    A stub `uv` records which KDIVE_*DATABASE_URL variables survive into the migration process:
+    only the migration owner's may. Any runtime role DSN present would let a migration-side
+    regression silently run against (or leak) a server/worker/reconciler authority.
+    """
+    uv = tmp_path / "uv"
+    uv.write_text(
+        '#!/bin/sh\nenv | grep "^KDIVE_.*DATABASE_URL=" | sort > "$KDIVE_MIGRATE_PROBE"\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    probe = tmp_path / "environment"
+    pg_port = _free_port()
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("KDIVE_") or not key.endswith("DATABASE_URL")
+    }
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/live-stack/apply-migrations.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **environment,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "KDIVE_MIGRATE_PROBE": str(probe),
+            "KDIVE_POSTGRES_PORT": str(pg_port),
+            "KDIVE_SERVER_DATABASE_URL": "server-canary",
+            "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+            "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    expected_login = "kdive-migration:kdive-migration-local"  # pragma: allowlist secret
+    assert probe.read_text(encoding="utf-8").splitlines() == [
+        f"KDIVE_MIGRATION_DATABASE_URL=postgresql://{expected_login}@localhost:{pg_port}/kdive"
+    ]
+
+
+def test_role_database_dsns_are_never_env_program_arguments() -> None:
+    for relative_path in (
+        "scripts/live-stack/apply-migrations.sh",
+        "scripts/live-stack/lib.sh",
+        "scripts/live-stack/status.sh",
+        "scripts/live-stack/up.sh",
+    ):
+        logical_lines = (ROOT / relative_path).read_text(encoding="utf-8").replace("\\\n", " ")
+        for line in logical_lines.splitlines():
+            # `env.sh` must not read as an `env` invocation: the look-ahead excludes a name that
+            # continues into a path/component, so only a real `env` program call can match.
+            if re.search(r"\benv(?![.\w-]).*DATABASE_URL=", line):
+                pytest.fail(f"database DSN exposed in env argv: {relative_path}: {line.strip()}")
+
+
+def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> None:
+    status = tmp_path / "status.sh"
+    source = (ROOT / "scripts/live-stack/status.sh").read_text()
+    setup = source[: source.index('echo "=== compose')]
+    database = source[source.index('echo "=== database') : source.index('echo "=== libvirt')]
+    status.write_text(setup + database + "exit 0\n", encoding="utf-8")
+    for name in ("lib.sh", "env.sh"):
+        (tmp_path / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
+    probe = tmp_path / "environment"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\nenv | grep '^KDIVE_.*DATABASE_URL=' > \"$KDIVE_STATUS_PROBE\"\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(status)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "KDIVE_PYTHON": str(python),
+            "KDIVE_STATUS_PROBE": str(probe),
+            "KDIVE_SERVER_DATABASE_URL": "server-canary",
+            "KDIVE_MIGRATION_DATABASE_URL": "migration-canary",
+            "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+            "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert set(probe.read_text(encoding="utf-8").splitlines()) == {
+        "KDIVE_DATABASE_URL=server-canary",
+        "KDIVE_SERVER_DATABASE_URL=server-canary",
+    }
+
+
+def test_host_daemon_children_receive_only_their_role_database_authority(tmp_path: Path) -> None:
+    """Each spawned daemon sees exactly one authority: its own role's member DSN (#1929)."""
+    probe = tmp_path / "environment"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$*\" "
+        '"${KDIVE_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_MIGRATION_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_SERVER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_WORKER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" >> "$KDIVE_DAEMON_PROBE"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    result = _lib(
+        f'py="{python}"\n'
+        f'log_dir="{tmp_path / "logs"}"\n'
+        "stop_daemons() { :; }\n"
+        "require_free_http_port() { :; }\n"
+        "wait_for_daemons_to_settle() { :; }\n"
+        "require_workers_alive() { :; }\n"
+        "restart_host_processes\n",
+        KDIVE_WORKER_COUNT="1",
+        KDIVE_WORKER_AS_ROOT="0",
+        KDIVE_DAEMON_PROBE=str(probe),
+        KDIVE_MIGRATION_DATABASE_URL="migration-canary",
+        KDIVE_SERVER_DATABASE_URL="server-canary",
+        KDIVE_WORKER_DATABASE_URL="worker-canary",
+        KDIVE_RECONCILER_DATABASE_URL="reconciler-canary",
+    )
+    assert result.returncode == 0, result.stderr
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and (
+        not probe.exists() or len(probe.read_text(encoding="utf-8").splitlines()) < 3
+    ):
+        time.sleep(0.05)
+    rows = set(probe.read_text(encoding="utf-8").splitlines())
+    assert rows == {
+        "-m kdive server|server-canary|<missing>|server-canary|<missing>|<missing>",
+        "-m kdive reconciler|reconciler-canary|<missing>|<missing>|<missing>|reconciler-canary",
+        "-m kdive worker|worker-canary|<missing>|<missing>|worker-canary|<missing>",
+    }
 
 
 def test_grafana_gate_skips_ppc64le_and_keeps_other_arches() -> None:

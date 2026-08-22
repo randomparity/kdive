@@ -257,6 +257,19 @@ def _apply_migrations_when_stable(admin_dsn: str, *, through: str | None = None)
             time.sleep(0.1)
 
 
+def _assert_migration_owner_converged(admin_dsn: str) -> None:
+    with psycopg.connect(admin_dsn) as conn:
+        owners = conn.execute(
+            "SELECT tableowner FROM pg_tables "
+            "WHERE schemaname = 'public' AND tablename IN ('resources', 'schema_migrations') "
+            "UNION ALL "
+            "SELECT pg_get_userbyid(proowner) FROM pg_proc "
+            "WHERE oid = 'public.set_updated_at()'::regprocedure"
+        ).fetchall()
+    assert len(owners) == 3
+    assert {str(row[0]) for row in owners} == {"kdive-migration"}
+
+
 @contextmanager
 def _isolated_stack(
     tmp_path: Path, *, through: str | None = None
@@ -281,7 +294,33 @@ def _isolated_stack(
     try:
         _run(("docker", "build", "--tag", image, "."), env, timeout=600)
         _compose(env, "up", "-d", "--wait", "--wait-timeout", "60", "postgres")
+        # Isolated local proof credentials.
+        legacy_admin_dsn = (
+            "postgresql://kdive:kdive@"  # pragma: allowlist secret
+            f"127.0.0.1:{port}/kdive"
+        )
+        # Retained-database path (#1929): the volume predates the five-authority split, so every
+        # relation and function is owned by the legacy shared `kdive` superuser. Apply migrations
+        # as that user, converge ownership with the idempotent bootstrap script (the same file
+        # initdb.d runs on a clean volume), and only then continue as the migration owner.
+        _apply_migrations_when_stable(legacy_admin_dsn, through=through)
+        _compose(
+            env,
+            "exec",
+            "-T",
+            "postgres",
+            "psql",
+            "--username",
+            "kdive",
+            "--dbname",
+            "kdive",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--file",
+            "/docker-entrypoint-initdb.d/010-migration-owner.sql",
+        )
         _apply_migrations_when_stable(admin_dsn, through=through)
+        _assert_migration_owner_converged(admin_dsn)
         _compose(env, "--profile", "bootstrap", "run", "--rm", "--no-deps", "role-bootstrap")
         yield env, admin_dsn, str(credential_path)
     finally:

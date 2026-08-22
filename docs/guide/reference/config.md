@@ -307,7 +307,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_MINIO_PORT` | `9000` | Host port the compose `minio` S3 API publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_S3_ENDPOINT_URL`. |
 | `KDIVE_OIDC_PORT` | `8090` | Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`. |
 | `KDIVE_OS_RELEASE` | `/etc/os-release` | os-release file `check-setup-deps.sh` reads to detect the host distro. |
-| `KDIVE_POSTGRES_PORT` | `5432` | Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it into the default `KDIVE_DATABASE_URL`. |
+| `KDIVE_POSTGRES_PORT` | `5432` | Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it into the default role database DSNs (#1929). |
 | `KDIVE_PROJECT` | `demo` | Project the setup-*-libvirt.sh scripts and `scripts/live-stack/onboard.sh` onboard. |
 | `KDIVE_PROMETHEUS_PORT` | `9090` | Host port the compose `prometheus` service publishes (obs profile); an off-host grafana points at this port (#1261). |
 | `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
