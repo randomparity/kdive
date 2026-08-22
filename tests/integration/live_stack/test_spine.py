@@ -141,6 +141,34 @@ def test_await_system_state_polls_until_target(monkeypatch: pytest.MonkeyPatch) 
     asyncio.run(_run())
 
 
+def test_await_system_state_logs_distinct_status_transitions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every DISTINCT observed status is logged once with its elapsed offset (#2056).
+
+    A red proof must carry its own state timeline on stderr — "stuck provisioning" vs
+    "cycling states" — without a hand-instrumented re-run; repeated identical statuses
+    stay silent so the log reads as transitions, not poll ticks.
+    """
+    monkeypatch.setattr(spine.asyncio, "sleep", _no_sleep)
+    client = _client([_system("provisioning"), _system("provisioning"), _system("ready")])
+
+    async def _run() -> None:
+        await await_system_state(_live_client(client), "ppc64le:provision", "system-1", "ready")
+
+        transitions = [
+            line
+            for line in capsys.readouterr().err.splitlines()
+            if line.startswith("ppc64le:provision:")
+        ]
+        assert transitions == [
+            "ppc64le:provision: t+0s provisioning",
+            "ppc64le:provision: t+0s ready",
+        ]
+
+    asyncio.run(_run())
+
+
 def test_await_system_state_classifies_error_envelope() -> None:
     """Error envelopes from systems.get keep their category on the phase failure."""
     client = _client([_system("error", category=ErrorCategory.NOT_FOUND)])
