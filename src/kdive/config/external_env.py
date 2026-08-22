@@ -534,6 +534,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "database pool and aux port.",
     ),
     ExternalEnvVar(
+        "KDIVE_WORKER_PYTHON",
+        "script",
+        "/opt/kdive-live-worker-lifecycle/.venv/bin/python",
+        "Lifecycle-generated handoff naming the installed Python executable that the worker gate "
+        "executes; operators do not set it directly.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WORKER_SOURCE_ROOT",
+        "script",
+        None,
+        "Lifecycle-generated worker environment value carrying the validated absolute kernel "
+        "source root from the current start request; operators set KDIVE_KERNEL_SRC instead.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LOCAL_ROLE_BOOTSTRAP",
         "script",
         "1",
