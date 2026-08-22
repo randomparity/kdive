@@ -1,0 +1,19 @@
+[Unit]
+Description=KDIVE retained live worker slot %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kdive-worker-%i
+SupplementaryGroups=kdive-live-libvirt
+EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env
+LoadCredential=worker-incarnation:/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential
+ExecStart=/usr/local/libexec/kdive-live-worker-gate %i
+Restart=no
+KillMode=control-group
+ExitType=cgroup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

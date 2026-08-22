@@ -1,0 +1,15 @@
+[Unit]
+Description=KDIVE live-worker lifecycle control socket
+
+[Socket]
+ListenStream=/run/kdive/live-worker-lifecycle.sock
+SocketUser=root
+SocketGroup=kdive-live-control
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=2
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

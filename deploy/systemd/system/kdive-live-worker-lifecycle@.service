@@ -1,0 +1,15 @@
+[Unit]
+Description=KDIVE live-worker lifecycle request
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+EnvironmentFile=/etc/kdive/live-worker-lifecycle.conf
+LoadCredential=witness-dsn:/etc/kdive/credentials/live-worker-witness.dsn
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/usr/local/libexec/kdive-live-worker-lifecycle
