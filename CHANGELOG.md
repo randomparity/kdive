@@ -137,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route each host process through its own database authority
 - Port bounded worker slot contract and durable state store
 - Add systemd worker runtime adapter
+- Coordinate multi-worker systemd lifecycle reconciliation
 
 ### Changed
 
