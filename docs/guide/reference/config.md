@@ -293,6 +293,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_DEMO_NAMESPACE` | `kdive-demo` | Release namespace `demo-token.sh` targets when minting a bundled-demo bearer token. |
 | `KDIVE_EFFECTIVE_UID` | `$EUID` | Effective uid `check-local-libvirt.sh` uses for its non-root-worker readability advisory (ADR-0223); overrides `$EUID` so the gate is testable independent of the runner's uid. |
 | `KDIVE_EXPECTED_SLOTS` | — | Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; unset or empty disables the assertion. |
+| `KDIVE_GITLEAKS` | `gitleaks` | gitleaks binary `check-pr-body.sh` runs for its credential-pattern pass (the pr-body-scan workflow points this at the release archive it unpacks, and the tests point it at a stub). |
 | `KDIVE_GRAFANA_PORT` | `3000` | Host port the compose `grafana` service publishes (obs profile). |
 | `KDIVE_GUESTFS_SYS_SITE` | `/usr/lib/python3/dist-packages` | System dir `check-setup-deps.sh` looks in for the libguestfs binding (guestfs.py) when deciding its three-state guestfs remedy and performing the venv symlink (ADR-0393). |
 | `KDIVE_GUEST_HELPERS_DIR` | `deploy/remote-libvirt-guest-helpers` | Guest-helper source directory `check-remote-libvirt.sh` inspects. |
