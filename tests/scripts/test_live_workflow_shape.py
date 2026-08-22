@@ -646,3 +646,48 @@ def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
     spine = _tcg_spine()
     assert "[1-9][0-9]* passed" in spine
     assert "ran ZERO live_vm_tcg proofs" in spine
+
+
+# --- spine stdin hygiene: materialize the script, never share bash's stdin (#2054) -----------
+#
+# A stdin-fed spine (`bash -s` over a heredoc, or GitHub piping the run block to `bash {0}`)
+# is consumed incrementally: any child that drains stdin swallows the not-yet-read script
+# bytes. Run 32589578907's tcg tier exited 0 right after up.sh's banner — a
+# libvirt-provisioning child had drained the heredoc feeding `bash -s`, so onboard,
+# preflight-tcg and pytest NEVER ran while the job read green.
+
+_TCG_SPINE_FILE = "$RUNNER_TEMP/spine-tcg.sh"
+_NATIVE_SPINE_FILE = "$RUNNER_TEMP/spine-native.sh"
+
+
+def test_tcg_spine_is_executed_from_a_materialized_file() -> None:
+    """The tcg spine must write its body to a file and execute that file — no `bash -s`."""
+    spine = _tcg_spine()
+    assert f"cat >\"{_TCG_SPINE_FILE}\" <<'KDIVE_LIVE_SPINE'" in spine
+    assert f'/bin/bash -e -u -o pipefail "{_TCG_SPINE_FILE}"' in spine
+    assert "bash -s" not in spine
+
+
+def test_native_spine_is_executed_from_a_materialized_file() -> None:
+    """Same hardening for the native family shell: no stdin-sharing with its children."""
+    spine = _native_spine()
+    assert f"cat >\"{_NATIVE_SPINE_FILE}\" <<'KDIVE_NATIVE_SPINE'" in spine
+    assert f'/bin/bash -e -u -o pipefail "{_NATIVE_SPINE_FILE}"' in spine
+    assert "bash -s" not in spine
+
+
+@pytest.mark.parametrize(
+    ("spine_of", "file", "delimiter"),
+    (
+        (_tcg_spine, "$RUNNER_TEMP/spine-tcg.sh", "KDIVE_LIVE_SPINE"),
+        (_native_spine, "$RUNNER_TEMP/spine-native.sh", "KDIVE_NATIVE_SPINE"),
+    ),
+    ids=("tcg", "native"),
+)
+def test_spine_body_is_delimited_before_execution(spine_of, file: str, delimiter: str) -> None:
+    """The heredoc must be closed before anything executes the materialized file."""
+    spine = spine_of()
+    closing = re.search(rf"^{delimiter}$", spine, flags=re.MULTILINE)
+    assert closing is not None
+    execute = f'/bin/bash -e -u -o pipefail "{file}"'
+    assert closing.end() < spine.index(execute)

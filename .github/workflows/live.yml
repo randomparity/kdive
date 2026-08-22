@@ -308,18 +308,12 @@ jobs:
         # and the mapped spine env must live in the same shell as the preflight and the suite.
         run: |
           set -euo pipefail
-          # The installer updates /etc/group after this job process starts. Reinitialize the
-          # operator's complete supplementary group set once, then drop back to the original uid.
-          # Nested sg calls lose the outer newly-added group on an already-running process.
-          operator_name="$(id -un)"
-          preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
-          preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
-          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
-          exec sudo --preserve-env="$preserve_names" \
-            --user="$operator_name" --group=kdive-live-control \
-            env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
-            /bin/bash -s -e -u -o pipefail \
-            <<'KDIVE_LIVE_SPINE'
+          # #2054: this run block reaches bash over stdin, and a script read from stdin is
+          # consumed incrementally — up.sh's libvirt-provisioning leg once ran a child that
+          # drained stdin to EOF, swallowing every not-yet-read spine byte, so the tier exited
+          # 0 right after up.sh's banner with onboard/preflight/pytest never reached.
+          # Materialize the body to a file and execute THAT file, removing the class outright.
+          cat >"$RUNNER_TEMP/spine-tcg.sh" <<'KDIVE_LIVE_SPINE'
 
           control_gid="$(getent group kdive-live-control | cut -d: -f3)"
           libvirt_gid="$(getent group kdive-live-libvirt | cut -d: -f3)"
@@ -436,6 +430,17 @@ jobs:
           fi
           exit "$rc"
           KDIVE_LIVE_SPINE
+          # The installer updates /etc/group after this job process starts. Reinitialize the
+          # operator's complete supplementary group set once, then drop back to the original uid.
+          # Nested sg calls lose the outer newly-added group on an already-running process.
+          operator_name="$(id -un)"
+          preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
+          preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
+          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
+          exec sudo --preserve-env="$preserve_names" \
+            --user="$operator_name" --group=kdive-live-control \
+            env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
+            /bin/bash -e -u -o pipefail "$RUNNER_TEMP/spine-tcg.sh"
 
       - name: Capture worker lifecycle diagnostics
         if: failure() || cancelled()
@@ -517,6 +522,11 @@ jobs:
           DEBUGINFOD_VAR: ${{ vars.KDIVE_DEBUGINFOD_URLS }}
         run: |
           set -euo pipefail
+          # #2054: this run block reaches bash over stdin, and a stdin-fed script is consumed
+          # incrementally — the tcg twin was truncated at up.sh when a libvirt-provisioning
+          # child drained stdin. Materialize the body to a file and execute THAT file, so no
+          # child can ever swallow unread spine bytes.
+          cat >"$RUNNER_TEMP/spine-native.sh" <<'KDIVE_NATIVE_SPINE'
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
           # Use the exact dedicated session endpoint published by provisioning for the fixed
@@ -586,6 +596,8 @@ jobs:
           # native live_vm test imports drgn in-process). /opt/kdive already has drgn + guestfs, so
           # this also needs no `just` on the self-hosted runner.
           "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q
+          KDIVE_NATIVE_SPINE
+          exec /bin/bash -e -u -o pipefail "$RUNNER_TEMP/spine-native.sh"
 
       - name: Capture worker lifecycle diagnostics
         if: failure() || cancelled()
