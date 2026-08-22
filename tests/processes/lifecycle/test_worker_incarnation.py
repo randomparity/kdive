@@ -30,6 +30,30 @@ def test_worker_incarnation_id_includes_boot_and_process_start(tmp_path: Path, m
     assert identity == "host-a:42:boot-123:987"
 
 
+def test_local_systemd_identity_is_exactly_the_configured_holder(monkeypatch) -> None:
+    holder = "local-systemd:kdive-live-worker@3.service:" + "a" * 32
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "local")
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_ID", holder)
+
+    assert worker_incarnation_id(42) == holder
+
+
+@pytest.mark.parametrize(
+    "holder",
+    [
+        "local-systemd:kdive-live-worker@0.service:" + "a" * 32,
+        "local-systemd:other@1.service:" + "a" * 32,
+        "local-systemd:kdive-live-worker@1.service:not-hex",
+    ],
+)
+def test_local_systemd_identity_rejects_malformed_holder(monkeypatch, holder: str) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_KIND", "local")
+    monkeypatch.setenv("KDIVE_WORKER_INCARNATION_ID", holder)
+
+    with pytest.raises(RuntimeError, match="local-systemd"):
+        worker_incarnation_id(42)
+
+
 def test_verifier_proves_exact_incarnation_dead_when_pid_start_changed(
     tmp_path: Path, monkeypatch
 ) -> None:
