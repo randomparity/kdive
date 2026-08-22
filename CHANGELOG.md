@@ -1163,6 +1163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the ADR-0359 supersession and qualify :edge arch claims
 - Push by digest, sign, then apply tags (#1991)
 - Use buildx's push-by-digest export; pin it in the guard
+- Wire assembled object store into live kdump proof
 
 ### Build
 
