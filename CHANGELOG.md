@@ -1161,6 +1161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cover lane budget metric in dashboard, refresh tool reference, drop ADR ref from tool surface
 - Restore the KDIVE_RELEASE build-arg a range edit dropped
 - Record the ADR-0359 supersession and qualify :edge arch claims
+- Push by digest, sign, then apply tags (#1991)
+- Use buildx's push-by-digest export; pin it in the guard
 
 ### Build
 
