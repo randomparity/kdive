@@ -61,6 +61,10 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_REMOTE_LIBVIRT_GDB_PORT_MIN",
         "KDIVE_REMOTE_LIBVIRT_GDB_PORT_MAX",
         "KDIVE_REMOTE_LIBVIRT_ALLOCATION_CAP",
+        # Retired worker-launch selector (#1941): no script or workflow reads it any more; the
+        # only remaining reference is the shape-test regression guard that live.yml never sets
+        # it again, so it is intentionally undocumented.
+        "KDIVE_WORKER_AS_ROOT",
         # Test-only carriers in tests/scripts/test_live_stack_scripts.py: each names a temp file
         # or wire payload a stubbed child reads or writes inside a test; no process treats them
         # as configuration (#1929 role-DSN scrub tests, #1938 lifecycle protocol tests).

@@ -172,20 +172,31 @@ def test_tcg_input_default_and_schedule_fallback_agree() -> None:
     assert _tcg_image_input_default() == _tcg_image_run_fallback()
 
 
-def test_native_block_boots_provisioned_family_under_session() -> None:
-    # The non-root, no-sudo runner cannot read qemu:///system's root-owned console log (ADR-0223);
-    # the provisioned family must boot under qemu:///session (worker-owned QEMU) so console-reading
-    # tests pass. A regression to qemu:///system would silently re-break every such test.
-    steps = _load(_LIVE)["jobs"]["native"]["steps"]
-    run = next(s["run"] for s in steps if "run" in s)
-    # Scope to KDIVE_LIBVIRT_URI assignments: the reaper legitimately sweeps qemu:///system too
-    # (legacy leftovers), so a blanket qemu:///system search would false-positive on the reaper.
-    uri_assignments = [ln for ln in run.splitlines() if "KDIVE_LIBVIRT_URI=" in ln]
-    assert uri_assignments, "the native block must set KDIVE_LIBVIRT_URI"
-    assert all("qemu:///session" in ln for ln in uri_assignments), (
-        "the provisioned family must boot under qemu:///session, not qemu:///system "
-        "(the non-root, no-sudo runner cannot read a root-owned console log — ADR-0223)"
+@pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_loads_the_provisioned_libvirt_uri_without_hardcoding(job: str) -> None:
+    runs = _job_run_blocks(job)
+    assert "load_published_libvirt_uri" in runs
+    assert "scripts/live-stack/libvirt-uri.sh" in runs
+    parser = (_ROOT / "scripts/live-stack/libvirt-uri.sh").read_text()
+    assert "readonly LIBVIRT_ENV=/etc/kdive/live-worker-libvirt.env" in parser
+    assert 'KDIVE_LIBVIRT_URI="qemu:///session"' not in runs
+    assert "KDIVE_LIBVIRT_URI=qemu:///session" not in runs
+
+
+@pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_propagates_the_published_uri_through_spine_and_cleanup(job: str) -> None:
+    steps = _load(_LIVE)["jobs"][job]["steps"]
+    test_run = next(
+        step["run"]
+        for step in steps
+        if "run" in step and ("test-live-tcg" in step["run"] or "not live_vm_tcg" in step["run"])
     )
+    cleanup = next(step["run"] for step in steps if step.get("name") == "Clean up live stack")
+    loader = 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"'
+    assert loader in test_run
+    assert loader in cleanup
+    assert "export KDIVE_LIBVIRT_URI" in test_run
+    assert "export KDIVE_LIBVIRT_URI" in cleanup
 
 
 def test_tcg_job_makes_the_host_kernel_readable_for_supermin() -> None:
@@ -257,13 +268,55 @@ def test_tcg_job_installs_the_libvirt_daemon_not_just_the_headers() -> None:
         assert pkg in joined, f"the tcg job must install {pkg}"
 
 
-def test_tcg_job_pins_the_session_libvirt_uri() -> None:
-    """Session mode, as the native job uses: worker-owned QEMU with a readable console (ADR-0223).
+def test_tcg_job_uses_the_published_session_libvirt_uri() -> None:
+    """Every actor must use the same dedicated session daemon as the fixed workers."""
+    assert 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"' in _tcg_spine()
+    assert "export KDIVE_LIBVIRT_URI" in _tcg_spine()
 
-    It also sidesteps libvirt group membership, which a `usermod` inside a job cannot grant to the
-    already-running shell.
-    """
-    assert 'KDIVE_LIBVIRT_URI="qemu:///session"' in _tcg_spine()
+
+def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    sync = next(i for i, step in enumerate(steps) if "uv sync --locked" in step.get("run", ""))
+    install = next(
+        i
+        for i, step in enumerate(steps)
+        if "install-live-worker-lifecycle.sh" in step.get("run", "")
+    )
+    assert sync < install
+    command = steps[install]["run"]
+    assert '--operator "$(id -un)" --source "$GITHUB_WORKSPACE"' in command
+    assert "printf" in command and "| sudo" in command
+    assert "kdive-witness-member" in command
+    assert "kdive-witness-local" in command
+    assert "KDIVE_DATABASE_URL" not in command
+    assert "--witness-dsn" not in command
+
+
+def test_hosted_spine_enters_refreshed_control_group_and_probes_socket() -> None:
+    spine = _tcg_spine()
+    assert "sudo --preserve-env" in spine
+    assert '--user="$operator_name" --group=kdive-live-control' in " ".join(spine.split())
+    assert "id -G" in spine
+    assert "kdive-live-control" in spine and "kdive-live-libvirt" in spine
+    assert "live-worker-lifecycle.sock" in spine
+    assert ".connect(" in spine
+
+
+@pytest.mark.parametrize(
+    ("step_name", "job"),
+    (
+        ("Prove systemd worker lifecycle against disposable Postgres", "tcg"),
+        ("Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)", "tcg"),
+    ),
+)
+def test_hosted_tcg_shell_reinitializes_all_operator_groups_once(step_name: str, job: str) -> None:
+    _, step = _named_step(job, step_name)
+    run = step["run"]
+    assert "sudo --preserve-env" in run
+    assert '--user="$operator_name" --group=kdive-live-control' in " ".join(run.split())
+    assert "kdive-live-control" in run and "kdive-live-libvirt" in run
+    assert "sg kdive-live-libvirt" not in run
+    assert "sg kdive-live-control" not in run
 
 
 def test_tcg_job_preflights_the_host_before_staging() -> None:
@@ -284,6 +337,19 @@ def test_tcg_job_provisions_the_hardcoded_runtime_directories() -> None:
     joined = "\n".join(s["run"] for s in steps if "run" in s)
     for path in ("/var/lib/kdive/console", "/var/lib/kdive/pcap", "/var/lib/kdive/rootfs"):
         assert path in joined, f"the tcg job must provision {path}"
+
+
+def test_tcg_runtime_dirs_become_fixed_worker_writable_after_account_install() -> None:
+    _, install = _named_step("tcg", "Install the fixed live-worker lifecycle host contract")
+    run = install["run"]
+
+    for path in ("/var/lib/kdive/console", "/var/lib/kdive/pcap", "/mnt/kdive-rootfs"):
+        assert path in run
+    assert ":kdive-live-libvirt" in run
+    assert "chmod 2770" in run
+    assert "--user=kdive-worker-1 --group=kdive-live-libvirt test -w" in " ".join(run.split())
+    assert "fixed worker cannot write provider data directory" in run
+    assert "--user=kdive-worker-1 --group=kdive-live-libvirt id" in " ".join(run.split())
 
 
 # --- app-tier topology: host processes, never containers -------------------------------------
@@ -380,16 +446,9 @@ def test_tcg_job_does_not_containerize_the_app_tier() -> None:
             )
 
 
-def test_tcg_job_runs_the_worker_unprivileged() -> None:
-    """KDIVE_WORKER_AS_ROOT=0, as the native job does.
-
-    A root worker would take up.sh's sudo path and own the domain, putting the console log back
-    behind the ADR-0223 root-readback wall that qemu:///session exists to avoid.
-    """
-    assert "KDIVE_WORKER_AS_ROOT=0" in _tcg_spine(), (
-        "the tcg job must run the worker as the runner user so its qemu:///session domain "
-        "and console log stay readable (ADR-0223)"
-    )
+def test_live_jobs_do_not_restore_the_retired_root_worker_mode() -> None:
+    assert "KDIVE_WORKER_AS_ROOT" not in _job_run_blocks("tcg")
+    assert "KDIVE_WORKER_AS_ROOT" not in _job_run_blocks("native")
 
 
 def test_tcg_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
@@ -403,3 +462,66 @@ def test_tcg_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
     assert spine.index("fetch-kernel-tree.sh") < spine.index("scripts/live-stack/up.sh"), (
         "KDIVE_KERNEL_SRC must be resolved before up.sh forks the worker, which captures it"
     )
+    assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in spine
+
+
+def test_native_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
+    native = _job_run_blocks("native")
+    assert native.index("fetch-kernel-tree.sh") < native.index("scripts/live-stack/up.sh"), (
+        "KDIVE_KERNEL_SRC must be resolved before native up.sh forks the fixed worker"
+    )
+    assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in native
+
+
+def test_hosted_lifecycle_proof_is_a_separate_no_skip_step_before_tcg() -> None:
+    proof_index, proof = _named_step(
+        "tcg", "Prove systemd worker lifecycle against disposable Postgres"
+    )
+    spine_index, _ = _named_step(
+        "tcg", "Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)"
+    )
+    install_index, _ = _named_step("tcg", "Install the fixed live-worker lifecycle host contract")
+    run = proof["run"]
+
+    assert install_index < proof_index < spine_index
+    assert "if" not in proof
+    assert "scripts/live-stack/up.sh --reset-db --skip-obs --skip-libvirt" in run
+    assert "source scripts/live-stack/env.sh" in run
+    assert "KDIVE_RUN_SYSTEMD_WORKER_PROOF=1" in run
+    assert "tests/live_vm/test_systemd_worker_lifecycle.py" in run
+    assert "-m live_vm --strict-markers -q" in " ".join(run.split())
+
+
+def test_hosted_lifecycle_proof_uses_worker_accessible_absolute_kernel_source() -> None:
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = proof["run"]
+    fetch = "scripts/fetch-kernel-tree.sh /var/lib/kdive/build/"
+    assert fetch in run
+    assert "export KDIVE_KERNEL_SRC" in run
+    assert run.index(fetch) < run.index("scripts/live-stack/up.sh")
+
+
+def test_hosted_lifecycle_proof_cleanup_preserves_failure_diagnostics() -> None:
+    proof_index, _ = _named_step(
+        "tcg", "Prove systemd worker lifecycle against disposable Postgres"
+    )
+    cleanup_index, cleanup = _named_step("tcg", "Clean up lifecycle proof stack")
+    spine_index, _ = _named_step(
+        "tcg", "Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)"
+    )
+    diagnostic_index, _ = _named_step("tcg", "Capture worker lifecycle diagnostics")
+    final_index, final = _named_step("tcg", "Clean up live stack")
+
+    assert proof_index < cleanup_index < spine_index < diagnostic_index < final_index
+    assert cleanup["if"] == "success()"
+    assert "scripts/live-stack/down.sh" in cleanup["run"]
+    assert final["if"] == "always()"
+
+
+def test_hosted_lifecycle_proof_refreshes_control_and_libvirt_groups() -> None:
+    _, proof = _named_step("tcg", "Prove systemd worker lifecycle against disposable Postgres")
+    run = proof["run"]
+    assert "sudo --preserve-env" in run
+    assert '--user="$operator_name" --group=kdive-live-control' in " ".join(run.split())
+    assert "id -G" in run
+    assert "kdive-live-control" in run and "kdive-live-libvirt" in run
