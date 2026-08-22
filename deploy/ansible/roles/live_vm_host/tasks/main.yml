@@ -892,17 +892,54 @@
           safe: true
       when: item.safe | bool
 
-- name: Start the operator-owned dedicated session libvirtd
-  ansible.builtin.command:
-    cmd: >-
-      /usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf
-      --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
+- name: Install the boot-persistent session libvirtd user unit
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
+    content: |
+      [Unit]
+      Description=kdive dedicated session libvirt daemon (operator-owned)
+
+      [Service]
+      Type=forking
+      # The daemon's sockets and pid live under the dedicated runtime root, not /run/user.
+      Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt
+      ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
+      PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid
+      Restart=on-failure
+      RestartSec=5s
+
+      [Install]
+      WantedBy=default.target
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0644"
+
+# Linger is enabled at the top of this role, so the runner's user manager runs from boot with no
+# login session and this unit keeps the dedicated session endpoint up across reboots (#2032)
+# instead of relying on workflow-side starts. The module reaches the user manager through
+# XDG_RUNTIME_DIR; no dbus login session is involved. daemon_reload picks up unit edits; enable is
+# idempotent.
+- name: Enable the boot-persistent session libvirtd user unit
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-live.service
+    scope: user
+    enabled: true
+    daemon_reload: true
   environment:
-    XDG_RUNTIME_DIR: /run/kdive/live-libvirt
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+
+- name: Start the operator-owned dedicated session libvirtd
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-live.service
+    scope: user
+    state: started
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_worker_operator_uid }}"
   become: true
   become_user: "{{ github_runner_user }}"
   when: live_vm_host_worker_libvirtd_should_start
-  changed_when: true
 
 - name: Enable the live-worker lifecycle control socket
   ansible.builtin.systemd_service:
