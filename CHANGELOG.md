@@ -140,6 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coordinate multi-worker systemd lifecycle reconciliation
 - Expose peer-authenticated lifecycle control socket
 - Add worker release gate and root lifecycle wrapper
+- Add fixed live-worker units and standalone host installer
+- Converge fixed worker accounts in the live_vm_host role
 
 ### Changed
 
