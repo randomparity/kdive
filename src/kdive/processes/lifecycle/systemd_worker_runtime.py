@@ -774,6 +774,12 @@ class SystemdRuntime:
         try:
             with path.open("rb") as stream:
                 data = stream.read(_CGROUP_EVENTS_LIMIT + 1)
+        except FileNotFoundError:
+            # systemd unlinks a unit's cgroup directory exactly once its last process
+            # exits (#2051), so with the invocation still retained an absent
+            # cgroup.events carries the same fact as populated=0. Any other read
+            # failure stays unknown and keeps failing closed.
+            return "empty"
         except OSError:
             return "unknown"
         if len(data) > _CGROUP_EVENTS_LIMIT:
