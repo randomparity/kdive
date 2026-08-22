@@ -148,6 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Capture bounded worker diagnostics before teardown
 - Keep the session libvirtd boot-persistent via a user unit (#2032)
 - Carry state timeline and terminated-worker journals on red proofs
+- Gate PR and issue body text on leaked credentials
 
 ### Changed
 
@@ -729,6 +730,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document the installed lifecycle proof surface
 - Cite the renumbered host-worker ADRs
 - Describe session-daemon persistence and no-sudo recovery
+- Require --body-file for PR and issue bodies
+- Regenerate config reference for KDIVE_GITLEAKS
 
 ### Fixed
 
@@ -1202,6 +1205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native arm installs the lifecycle contract from its checkout
 - Read systemd-unlinked worker cgroups as empty membership
 - Execute live spine scripts from materialized files, not shared stdin (#2054)
+- Document the KDIVE_GITLEAKS script override
 
 ### Build
 
