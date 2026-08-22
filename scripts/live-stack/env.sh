@@ -17,9 +17,24 @@ export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-8090}"
 export KDIVE_PROMETHEUS_PORT="${KDIVE_PROMETHEUS_PORT:-9090}"
 export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
-default_database_url="postgresql://kdive:kdive@localhost:${KDIVE_POSTGRES_PORT}/kdive" # pragma: allowlist secret
-
-export KDIVE_DATABASE_URL="${KDIVE_DATABASE_URL:-${default_database_url}}"
+database_host="localhost:${KDIVE_POSTGRES_PORT}/kdive"
+# One DSN per host database authority (#1929): the migration owner plus one login member per
+# runtime process. No process may receive another authority's DSN, so there is deliberately no
+# shared KDIVE_DATABASE_URL default here; every consumer names its own variable and
+# apply-migrations.sh scrubs the runtime DSNs from the migration process environment.
+# The following four values are development credentials. # pragma: allowlist secret
+default_migration_login="kdive-migration:kdive-migration-local" # pragma: allowlist secret
+default_migration_url="postgresql://${default_migration_login}@${database_host}"
+default_server_login="kdive-server-member:kdive-server-local" # pragma: allowlist secret
+default_server_url="postgresql://${default_server_login}@${database_host}"
+default_worker_login="kdive-worker-member:kdive-worker-local" # pragma: allowlist secret
+default_worker_url="postgresql://${default_worker_login}@${database_host}"
+reconciler_login="kdive-reconciler-member:kdive-reconciler-local" # pragma: allowlist secret
+default_reconciler_url="postgresql://${reconciler_login}@${database_host}"
+export KDIVE_MIGRATION_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL:-${default_migration_url}}"
+export KDIVE_SERVER_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL:-${default_server_url}}"
+export KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-${default_worker_url}}"
+export KDIVE_RECONCILER_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL:-${default_reconciler_url}}"
 export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://localhost:${KDIVE_OIDC_PORT}/default}"
 export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://localhost:${KDIVE_OIDC_PORT}/default/jwks}"
 export KDIVE_OIDC_AUDIENCE="${KDIVE_OIDC_AUDIENCE:-kdive}"

@@ -283,23 +283,30 @@ start_worker() {
     # override the invoking user set is stripped before env.sh re-runs under sudo and re-defaults it.
     # Forward the vars the root worker actually consumes so env.sh honors them verbatim (via its
     # `:-` defaults) instead of silently reverting: KDIVE_KERNEL_SRC (else HOME=/root points at a
-    # nonexistent /root/src/linux) and the resolved backend endpoints KDIVE_DATABASE_URL +
-    # KDIVE_S3_ENDPOINT_URL — without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would
-    # leave the worker connecting to the default host ports (nothing published there) while the
-    # same-user server/reconciler use the overridden ones. The health-bind export lands AFTER the
-    # env.sh source so the export is the last writer. That ordering is INERT today — env.sh never
+    # nonexistent /root/src/linux), the WORKER database authority, and KDIVE_S3_ENDPOINT_URL —
+    # without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would leave the worker
+    # connecting to the default host ports (nothing published there) while the same-user
+    # server/reconciler use the overridden ones. The health-bind export lands AFTER the env.sh
+    # source so the export is the last writer. That ordering is INERT today — env.sh never
     # mentions KDIVE_HEALTH_BIND_ADDR — and it is kept only because it costs nothing and would
     # become load-bearing the moment env.sh grew a `:-` default for it, like the vars above.
+    # After sourcing, the worker is handed ONLY its own authority: KDIVE_DATABASE_URL aliases the
+    # member DSN and every other role's DSN is unset (#1929).
     [[ -n "$health_bind" ]] && health_export="export KDIVE_HEALTH_BIND_ADDR='${health_bind}' && "
     sudo bash -c "cd '${repo_root}' \
       && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
-      && export KDIVE_DATABASE_URL='${KDIVE_DATABASE_URL}' KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}' \
+      && export KDIVE_WORKER_DATABASE_URL='${KDIVE_WORKER_DATABASE_URL}' KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}' \
       && source scripts/live-stack/env.sh \
+      && export KDIVE_DATABASE_URL=\"\${KDIVE_WORKER_DATABASE_URL}\" \
+      && unset KDIVE_MIGRATION_DATABASE_URL KDIVE_SERVER_DATABASE_URL KDIVE_RECONCILER_DATABASE_URL \
       && ${health_export}setsid nohup '${py}' -m kdive worker >>'${log}' 2>&1 </dev/null &"
   else
     local -a worker_env=(KDIVE_KERNEL_SRC="$kernel_src")
     [[ -n "$health_bind" ]] && worker_env+=(KDIVE_HEALTH_BIND_ADDR="$health_bind")
-    env "${worker_env[@]}" setsid nohup "$py" -m kdive worker >"$log" 2>&1 </dev/null &
+    KDIVE_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL}" \
+      env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+      -u KDIVE_RECONCILER_DATABASE_URL \
+      "${worker_env[@]}" setsid nohup "$py" -m kdive worker >"$log" 2>&1 </dev/null &
   fi
 }
 
@@ -346,8 +353,14 @@ restart_host_processes() {
   # than let the new server lose the bind race and die silently.
   require_free_http_port || return 1
   echo "starting kdive host processes (${worker_count} worker(s)) @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
-  setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
-  setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
+  KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+    -u KDIVE_RECONCILER_DATABASE_URL \
+    setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
+  KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
+    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+    -u KDIVE_WORKER_DATABASE_URL \
+    setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
   for ((index = 1; index <= worker_count; index++)); do
     start_worker "$index" "$build_user" "$kernel_src"
   done
