@@ -152,6 +152,72 @@ jobs:
       - name: Sync dependencies against the system interpreter (ABI-match python3-guestfs)
         run: uv sync --locked --group live --python /usr/bin/python3
 
+      # #2033: a reused hosted VM can carry leftover /run/kdive/live-libvirt state from an
+      # earlier run — an operator-owned session daemon plus its socket/pid residue. When that
+      # scene contradicts itself, the installer is correct to refuse it
+      # (_reconcile_libvirt_tuple exits 1: "contradictory selected libvirt tuple"); the gap was
+      # that no hosted-job pre-clean existed. This step IS that hygiene, and it must precede the
+      # install step. Fail-soft posture: best-effort cleanup with logged removals on an ephemeral
+      # single-tenant runner — it never masks the install step, which stays strictly fail-closed.
+      # It touches only the /run/kdive/live-libvirt runtime hierarchy (the installer's
+      # _lock_libvirt_runtime recreates it idempotently), never the /var/lib/kdive state roots,
+      # and never follows symlinks (rm on a link argument unlinks the link itself).
+      - name: Pre-clean stale live-libvirt runtime residue
+        run: |
+          set -euo pipefail
+          runtime_root=/run/kdive/live-libvirt
+          operator_name="$(id -un)"
+
+          # A fresh VM has neither residue nor the installer-created group: nothing to reconcile.
+          if [[ ! -e $runtime_root && ! -L $runtime_root ]]; then
+            echo "no stale ${runtime_root} state; pre-clean is a no-op"
+            exit 0
+          fi
+
+          # Phase 1 — stop the recorded session daemon AS THE OPERATOR who owns it. Residue
+          # implies a previous run installed the contract, so kdive-live-libvirt exists on disk
+          # even though this job's shells predate it; enter one shell with the group refreshed,
+          # exactly like the spine steps do. The pid file is read as literal data and the live
+          # process is identity-checked (operator uid + libvirtd comm) before any signal;
+          # anything else is left in place for the installer to diagnose loudly.
+          if getent group kdive-live-libvirt >/dev/null; then
+            sudo --preserve-env=PATH \
+              --user="$operator_name" --group=kdive-live-libvirt \
+              /bin/bash -s -u -o pipefail <<'KDIVE_PRECLEAN_STOP'
+          runtime_root=/run/kdive/live-libvirt
+          pid_file="$runtime_root/libvirt/libvirtd.pid"
+          [[ -f $pid_file && ! -L $pid_file ]] || exit 0
+          recorded_pid="$(<"$pid_file")"
+          [[ $recorded_pid =~ ^[1-9][0-9]*$ ]] || exit 0
+          kill -0 "$recorded_pid" 2>/dev/null || exit 0
+          owner_uid="$(ps -o uid= -p "$recorded_pid" 2>/dev/null | tr -d '[:space:]')" || exit 0
+          daemon_comm="$(ps -o comm= -p "$recorded_pid" 2>/dev/null)" || exit 0
+          if [[ $owner_uid != "$(id -u)" || $daemon_comm != "libvirtd" ]]; then
+            echo "pre-clean refuses to signal pid ${recorded_pid}" \
+                 "(uid=${owner_uid}, comm=${daemon_comm}): not the operator-owned libvirtd" >&2
+            exit 0
+          fi
+          kill -TERM "$recorded_pid"
+          for _ in $(seq 1 50); do
+            kill -0 "$recorded_pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$recorded_pid" 2>/dev/null; then
+            echo "libvirtd pid ${recorded_pid} ignored SIGTERM within 5s; escalating to SIGKILL" >&2
+            kill -KILL "$recorded_pid" || true
+          fi
+          KDIVE_PRECLEAN_STOP
+          else
+            echo "kdive-live-libvirt group absent while ${runtime_root} exists;" \
+                 "leaving diagnosis to the installer" >&2
+          fi
+
+          # Phase 2 — clear the residue so the installer reconciles a clean slate. The hierarchy
+          # directories are root-owned 0750 (group bits r-x only), so unlinking needs root.
+          # Literal paths only; a symlink at either level is removed as a link, never traversed.
+          sudo rm -rf -- "$runtime_root"
+          echo "removed stale live-libvirt runtime hierarchy ${runtime_root}"
+
       - name: Install the fixed live-worker lifecycle host contract
         run: |
           set -euo pipefail
