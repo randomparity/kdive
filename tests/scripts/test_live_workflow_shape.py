@@ -434,6 +434,29 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str) -> Non
 
 
 @pytest.mark.parametrize("job", ("tcg", "native"))
+def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> None:
+    """Diagnostics must read the worker journal even when the fleet already stopped (#2056).
+
+    The witness reports ``diagnostics=null`` for a phase=terminated fleet, which is exactly
+    the state a red proof reaches — so the step also reads the worker units' journal
+    directly (system units per ADR-0574, so a ``--user`` read would see nothing), inside
+    the ::stop-commands:: guard because journal text can carry workflow-command-shaped
+    lines, and best-effort like every other capture (#1939).
+    """
+    _, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
+    run = diagnostic["run"]
+    assert "journalctl -u 'kdive-live-worker@*'" in run
+    assert "--no-pager" in run
+    assert "--since" in run
+    assert (
+        run.index("printf '::stop-commands::%s\\n'")
+        < run.index("journalctl -u")
+        < run.index("printf '::%s::\\n'")
+    )
+    assert "worker journal capture was unavailable or withheld" in run
+
+
+@pytest.mark.parametrize("job", ("tcg", "native"))
 def test_live_job_keeps_test_step_authoritative_before_diagnostics(job: str) -> None:
     """The tier's own proof decides the verdict; diagnostics only observe its wreckage."""
     steps = _load(_LIVE)["jobs"][job]["steps"]

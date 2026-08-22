@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import AsyncIterator, Iterable
@@ -229,11 +230,22 @@ async def await_system_state(
     *,
     deadline_s: float = DRAIN_DEADLINE_S,
 ) -> None:
-    """Poll systems.get until the System reaches ``target`` state (or the deadline)."""
-    deadline = time.monotonic() + deadline_s
+    """Poll systems.get until the System reaches ``target`` state (or the deadline).
+
+    Each DISTINCT observed status is logged once with its elapsed offset (#2056), so a red
+    proof carries its own state timeline: "stuck in provisioning" vs "cycling between
+    states" is readable straight from CI logs instead of costing a hand-instrumented re-run.
+    """
+    started = time.monotonic()
+    deadline = started + deadline_s
+    seen_status: str | None = None
     while True:
         env = await client.call_tool("systems.get", system_id=system_id)
         assert isinstance(env, ToolResponse)
+        if env.status != seen_status:
+            elapsed_s = round(time.monotonic() - started)
+            print(f"{phase_name}: t+{elapsed_s}s {env.status}", file=sys.stderr, flush=True)
+            seen_status = env.status
         if env.status == target:
             return
         if env.status in {"error", "failed"}:
