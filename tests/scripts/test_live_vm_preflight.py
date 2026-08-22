@@ -11,6 +11,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "live-vm" / "preflight-env.sh"
 # Absolute bash so the child launches even when a test strips PATH (the tcg emulator-absent case).
 _BASH = shutil.which("bash") or "/usr/bin/bash"
@@ -98,6 +100,20 @@ def test_provisioned_fails_without_system_id() -> None:
     assert "KDIVE_LIVE_VM_SYSTEM_ID" in r.stderr
 
 
+# Post-split (#1929), env.sh exports one DSN per authority instead of a shared
+# KDIVE_DATABASE_URL; the tcg family gates on that four-authority set (#2046).
+_ROLE_DSN_VARS = (
+    "KDIVE_MIGRATION_DATABASE_URL",
+    "KDIVE_SERVER_DATABASE_URL",
+    "KDIVE_WORKER_DATABASE_URL",
+    "KDIVE_RECONCILER_DATABASE_URL",
+)
+
+
+def _role_dsn_env() -> dict[str, str]:
+    return {name: "postgresql://canary" for name in _ROLE_DSN_VARS}
+
+
 def test_tcg_fails_without_ppc64le_emulator(tmp_path: Path) -> None:
     img = tmp_path / "img.qcow2"
     img.write_bytes(b"x")
@@ -114,7 +130,7 @@ def test_tcg_fails_without_ppc64le_emulator(tmp_path: Path) -> None:
     env = {
         "KDIVE_STACK_BASE_URL": "http://x",
         "KDIVE_OIDC_ISSUER": "http://x",
-        "KDIVE_DATABASE_URL": "postgresql://x",
+        **_role_dsn_env(),
         "KDIVE_S3_ENDPOINT_URL": "http://x",
         "KDIVE_S3_BUCKET": "b",
         "AWS_ACCESS_KEY_ID": "k",
@@ -126,6 +142,23 @@ def test_tcg_fails_without_ppc64le_emulator(tmp_path: Path) -> None:
     r = _run(["tcg"], env)
     assert r.returncode != 0
     assert "qemu-system-ppc64" in r.stderr
+
+
+@pytest.mark.parametrize("missing", _ROLE_DSN_VARS)
+def test_tcg_fails_when_a_role_database_authority_is_unset(missing: str) -> None:
+    env = {
+        "KDIVE_STACK_BASE_URL": "http://x",
+        "KDIVE_OIDC_ISSUER": "http://x",
+        **_role_dsn_env(),
+        "KDIVE_S3_ENDPOINT_URL": "http://x",
+        "KDIVE_S3_BUCKET": "b",
+        "AWS_ACCESS_KEY_ID": "k",
+        "AWS_SECRET_ACCESS_KEY": "s",
+    }
+    del env[missing]
+    r = _run(["tcg"], env)
+    assert r.returncode != 0
+    assert missing in r.stderr
 
 
 def test_unknown_family_fails_loud() -> None:

@@ -71,6 +71,7 @@ _NOT_ENV: frozenset[str] = frozenset(
         "KDIVE_MIGRATE_PROBE",
         "KDIVE_STATUS_PROBE",
         "KDIVE_DAEMON_PROBE",
+        "KDIVE_ONBOARD_PROBE",
         "KDIVE_ENV_PROBE",
         "KDIVE_RESPONSE",
     }

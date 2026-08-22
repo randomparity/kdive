@@ -1093,6 +1093,90 @@ def test_status_database_probe_scrubs_unrelated_role_dsns(tmp_path: Path) -> Non
     }
 
 
+def test_onboard_aliases_each_cli_invocation_to_its_own_authority(tmp_path: Path) -> None:
+    """onboard.sh must hand each kdive CLI child only its own database authority (#2046).
+
+    env.sh stopped exporting a shared KDIVE_DATABASE_URL (#1929), so a bare `-m kdive ...`
+    invocation dies at config validation (the setting is required-always for runnable
+    processes). A stub interpreter records the argv and the five DSN variables it was handed:
+    migrate must see the migration authority (schema-current migrate still SELECTs
+    schema_migrations, granted to no runtime role), seed/verify the server authority, and the
+    OIDC-only mint step no database authority at all.
+    """
+    onboard_dir = tmp_path / "scripts/live-stack"
+    onboard_dir.mkdir(parents=True)
+    (onboard_dir / "env.sh").write_text(
+        (ROOT / "scripts/live-stack/env.sh").read_text(), encoding="utf-8"
+    )
+    onboard = onboard_dir / "onboard.sh"
+    source = (ROOT / "scripts/live-stack/onboard.sh").read_text()
+    # The mint heredoc imports kdive; the stub never sees it, so end the script after the last
+    # database-touching invocation — the aliasing contract under test is fully recorded by then.
+    onboard.write_text(source[: source.index('banner "token + contract"')], encoding="utf-8")
+    probe = tmp_path / "environment"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        "printf '%s|%s|%s|%s|%s|%s\n' \"$*\" "
+        '"${KDIVE_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_MIGRATION_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_SERVER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_WORKER_DATABASE_URL:-<missing>}" '
+        '"${KDIVE_RECONCILER_DATABASE_URL:-<missing>}" >> "$KDIVE_ONBOARD_PROBE"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("KDIVE_") or not key.endswith("DATABASE_URL")
+    }
+    result = subprocess.run(
+        ["bash", str(onboard)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **environment,
+            "KDIVE_PYTHON": str(python),
+            "KDIVE_ONBOARD_PROBE": str(probe),
+            "KDIVE_MIGRATION_DATABASE_URL": "migration-canary",
+            "KDIVE_SERVER_DATABASE_URL": "server-canary",
+            "KDIVE_WORKER_DATABASE_URL": "worker-canary",
+            "KDIVE_RECONCILER_DATABASE_URL": "reconciler-canary",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    missing = "<missing>"
+    observed = {}
+    for row in probe.read_text(encoding="utf-8").splitlines():
+        argv, dsns = row.split("|", 1)
+        observed[argv.split(" --", 1)[0]] = dsns.split("|")
+    assert observed == {
+        "-m kdive migrate": [
+            "migration-canary",
+            "migration-canary",
+            missing,
+            missing,
+            missing,
+        ],
+        "-m kdive seed-project": [
+            "server-canary",
+            missing,
+            "server-canary",
+            missing,
+            missing,
+        ],
+        "-m kdive verify-project": [
+            "server-canary",
+            missing,
+            "server-canary",
+            missing,
+            missing,
+        ],
+    }
+
+
 def test_host_daemon_children_receive_only_their_role_database_authority(tmp_path: Path) -> None:
     lifecycle = tmp_path / "scripts/live-stack"
     lifecycle.mkdir(parents=True)
