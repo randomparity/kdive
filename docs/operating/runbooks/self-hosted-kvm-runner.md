@@ -143,7 +143,7 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    each worker's unique primary group, grants only `kdive-live-libvirt` and `kvm` as
    supplemental provider groups, rejects control/sudo/Docker membership, and verifies
    both resources for every slot. See
-   [ADR-0556](../../adr/0556-host-workers-use-kvm-provider-authority.md).
+   [ADR-0575](../../adr/0575-host-workers-use-kvm-provider-authority.md).
 
 ## ppc64le runner (drop-in)
 

@@ -1,4 +1,4 @@
-"""Real-host proof for retained systemd worker incarnations (ADR-0555)."""
+"""Real-host proof for retained systemd worker incarnations (ADR-0574)."""
 
 from __future__ import annotations
 

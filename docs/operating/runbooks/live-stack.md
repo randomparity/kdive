@@ -9,7 +9,7 @@ The suite drives the full kdive spine over the real MCP HTTP transport against a
 The `server` and `reconciler` run as ordinary operator-owned host processes. Workers run in the
 fixed `kdive-live-worker@1..8.service` units through the installed lifecycle socket. All use the
 `docker-compose.yml` backends, so qemu disk-image and kernel-tree paths resolve on the libvirt
-host. The supported worker path has no direct-process fallback (ADR-0555).
+host. The supported worker path has no direct-process fallback (ADR-0574).
 
 For the **remote** `qemu+tls://` variant — driving the spine against a host the worker tier does
 not share a filesystem with — see [remote-live-stack.md](remote-live-stack.md); it reuses this
