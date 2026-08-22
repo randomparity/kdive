@@ -246,6 +246,31 @@ jobs:
           scripts/live-vm/preflight-env.sh tcg
           just test-live-tcg
 
+      - name: Capture worker lifecycle diagnostics
+        if: failure() || cancelled()
+        # Observational only: the workflow verdict belongs to the spine step above. The
+        # ::stop-commands:: token keeps a journal-sourced "::error::" line from being parsed as
+        # workflow commands, and every failure path degrades to a warning + exit 0 — diagnostics
+        # are best-effort evidence, never a gate (#1939).
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          diagnostic_status=0
+          sg kdive-live-control -c \
+            'scripts/live-stack/worker-lifecycle.sh diagnostics' || diagnostic_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((diagnostic_status != 0)); then
+            echo "worker lifecycle diagnostics were unavailable or withheld" >&2
+          fi
+          exit 0
+
+      - name: Clean up live stack
+        if: always()
+        run: |
+          export KDIVE_LIBVIRT_URI="qemu:///session"
+          scripts/live-stack/down.sh
+
   native:
     name: live_vm (self-hosted KVM)
     # POSITIVE allowlist — NOT `!= 'pull_request'`, which would admit push and fire the
@@ -344,3 +369,25 @@ jobs:
           # native live_vm test imports drgn in-process). /opt/kdive already has drgn + guestfs, so
           # this also needs no `just` on the self-hosted runner.
           "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q
+
+      - name: Capture worker lifecycle diagnostics
+        if: failure() || cancelled()
+        # Same observational contract as the tcg step: bounded, redacted, best-effort — the
+        # operator reads the log; the workflow verdict stays with the test step above.
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          diagnostic_status=0
+          scripts/live-stack/worker-lifecycle.sh diagnostics || diagnostic_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((diagnostic_status != 0)); then
+            echo "worker lifecycle diagnostics were unavailable or withheld" >&2
+          fi
+          exit 0
+
+      - name: Clean up live stack
+        if: always()
+        run: |
+          export KDIVE_LIBVIRT_URI="qemu:///session"
+          scripts/live-stack/down.sh
