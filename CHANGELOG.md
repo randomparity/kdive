@@ -138,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Port bounded worker slot contract and durable state store
 - Add systemd worker runtime adapter
 - Coordinate multi-worker systemd lifecycle reconciliation
+- Expose peer-authenticated lifecycle control socket
+- Add worker release gate and root lifecycle wrapper
 
 ### Changed
 
@@ -712,6 +714,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix ADR-0571's callee-exemption wording and amendment precedent
 - Port host worker lifecycle decision as ADR-0574
 - Accept ADR-0574 as its slot contract ships
+- Register live-worker operator and state-root variables
 
 ### Fixed
 
