@@ -1194,6 +1194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Converge runtime login members on bring-up
 - Resolve worker incarnation credential from CREDENTIALS_DIRECTORY
 - Honor fixed-slot local-systemd worker incarnation id
+- Include capture host in systemd slot authority binding
 
 ### Build
 
