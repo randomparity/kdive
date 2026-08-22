@@ -1193,6 +1193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recover the dedicated session daemon without sudo (#2032)
 - Converge runtime login members on bring-up
 - Resolve worker incarnation credential from CREDENTIALS_DIRECTORY
+- Honor fixed-slot local-systemd worker incarnation id
 
 ### Build
 
