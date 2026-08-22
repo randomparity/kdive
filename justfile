@@ -387,6 +387,12 @@ docs-links:
 docs-paths:
     ./scripts/check-doc-paths.sh
 
+# Scan a pull-request or issue body file for credentials and pasted process environments,
+# before `gh pr create --body-file` publishes it. The pr-body-scan workflow runs this same
+# script against the live body, so local and CI share one definition. Needs gitleaks.
+check-pr-body +FILES:
+    ./scripts/check-pr-body.sh {{ FILES }}
+
 # Fail when a served doc (DOC_RESOURCES) cites another served doc by a relative link instead
 # of its resource:// URI — a relative link is filesystem-valid but unfetchable over MCP.
 served-doc-links:
