@@ -401,9 +401,40 @@ jobs:
           export KDIVE_GUEST_IMAGE_PPC64LE="$KDIVE_LIVE_VM_ROOTFS"
           # KDIVE_PPC64LE_BUNDLE is the opt-in fourth proof; unset -> the three core proofs run.
           [ -n "${BUNDLE_INPUT:-}" ] && export KDIVE_PPC64LE_BUNDLE="$BUNDLE_INPUT"
+          # Fund a project BEFORE the proofs (#2048): run 32577345199 concluded SUCCESS without
+          # ever invoking pytest because nothing failed on "proofs could not run". onboard.sh
+          # (#2047) self-aliases each authority DSN internally; on success it prints an
+          # `export KDIVE_TOKEN=...` line and only a WARN otherwise — capture it the way
+          # mint-system does and die loudly when the mint failed, so an unfunded tier can never
+          # read as green. Point KDIVE_PYTHON at this job's venv instead of onboard.sh's
+          # `uv run` fallback.
+          export KDIVE_PYTHON="$PWD/.venv/bin/python"
+          onboard_wiring="$(scripts/live-stack/onboard.sh)"
+          if ! grep -q '^export KDIVE_TOKEN=' <<<"$onboard_wiring"; then
+            echo "hosted live_vm_tcg spine: onboard.sh minted no KDIVE_TOKEN (funding incomplete); refusing to green-light an unproven tier" >&2
+            exit 1
+          fi
+          eval "$(grep '^export KDIVE_TOKEN=' <<<"$onboard_wiring")"
+          # env.sh exports one DSN per authority since #2021/#1929, but the proof suite's
+          # _spine_preflight / _reachability_preflight read bare KDIVE_DATABASE_URL: without this
+          # alias every ppc64le proof silently skips and the tier still exits green. The server
+          # member holds SELECT/INSERT/UPDATE on budgets+quotas (migration 0107), fitting the
+          # suite's out-of-band seeding.
+          export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"
 
           scripts/live-vm/preflight-env.sh tcg
-          just test-live-tcg
+          # Run pytest directly — not through the justfile recipe, whose exit-5 tolerance ("no
+          # tests collected -> clean skip") is exactly the silent-green hole #2048 closes: a
+          # zero-collect or all-skip run must be RED here, naming the tier, never green.
+          rc=0
+          tcg_summary="$(mktemp)"
+          .venv/bin/python -m pytest -m live_vm_tcg --strict-markers -q | tee "$tcg_summary" \
+            || rc=$?
+          if ! grep -Eq '(^|[[:space:],])[1-9][0-9]* passed' "$tcg_summary"; then
+            echo "hosted live_vm_tcg spine: ran ZERO live_vm_tcg proofs (no '<N> passed' summary); a skipped tier must never read green" >&2
+            exit 1
+          fi
+          exit "$rc"
           KDIVE_LIVE_SPINE
 
       - name: Capture worker lifecycle diagnostics

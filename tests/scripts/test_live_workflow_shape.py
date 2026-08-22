@@ -189,7 +189,7 @@ def test_live_job_propagates_the_published_uri_through_spine_and_cleanup(job: st
     test_run = next(
         step["run"]
         for step in steps
-        if "run" in step and ("test-live-tcg" in step["run"] or "not live_vm_tcg" in step["run"])
+        if "run" in step and ("-m live_vm_tcg" in step["run"] or "not live_vm_tcg" in step["run"])
     )
     cleanup = next(step["run"] for step in steps if step.get("name") == "Clean up live stack")
     loader = 'KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"'
@@ -407,7 +407,7 @@ def test_live_job_keeps_test_step_authoritative_before_diagnostics(job: str) -> 
     steps = _load(_LIVE)["jobs"][job]["steps"]
     diagnostic_index, _ = _named_step(job, "Capture worker lifecycle diagnostics")
     cleanup_index, _ = _named_step(job, "Clean up live stack")
-    proof = "just test-live-tcg" if job == "tcg" else 'pytest -m "live_vm and not live_vm_tcg"'
+    proof = "-m live_vm_tcg" if job == "tcg" else 'pytest -m "live_vm and not live_vm_tcg"'
     test_index = next(index for index, step in enumerate(steps) if proof in step.get("run", ""))
 
     assert test_index < diagnostic_index < cleanup_index
@@ -573,3 +573,44 @@ def test_preclean_never_touches_state_roots_or_follows_symlinks() -> None:
     # A symlink at the hierarchy root is unlinked as a link (rm never traverses one), and the
     # fresh-host early exit treats a dangling link as residue rather than following it.
     assert "[[ ! -e $runtime_root && ! -L $runtime_root ]]" in run
+
+
+# --- hosted tcg spine: fund, alias, and never green-light an empty tier (#2048) ---------------
+#
+# Run 32577345199 concluded SUCCESS without ever invoking pytest: the spine ended at up.sh's
+# "next: fund a project" advisory and nothing failed on "proofs could not run". And once funded,
+# the proof suite reads bare KDIVE_DATABASE_URL, which env.sh stopped exporting post-#2021 — so
+# every ppc64le proof would silently SKIP and the tier would still exit green.
+
+
+def test_hosted_spine_onboards_the_project_before_the_proofs() -> None:
+    """The proofs need a funded project; funding must precede pytest, not follow it."""
+    spine = _tcg_spine()
+    assert spine.index("scripts/live-stack/onboard.sh") < spine.index("-m live_vm_tcg")
+
+
+def test_hosted_spine_exports_a_minted_token_and_dies_when_the_mint_fails() -> None:
+    """onboard.sh prints `export KDIVE_TOKEN=...` on success and only a WARN otherwise."""
+    spine = _tcg_spine()
+    assert '''eval "$(grep '^export KDIVE_TOKEN=' <<<"$onboard_wiring")"''' in spine
+    assert "onboard.sh minted no KDIVE_TOKEN" in spine
+
+
+def test_hosted_spine_aliases_the_bare_database_url_for_the_proof_suite() -> None:
+    """The suite's preflights read bare KDIVE_DATABASE_URL, which env.sh no longer exports."""
+    assert 'export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"' in _tcg_spine()
+
+
+def test_hosted_spine_runs_the_tcg_tier_directly_not_just_test_live_tcg() -> None:
+    """`just test-live-tcg` tolerates exit 5 ("no tests collected") as a clean skip — exactly
+    the silent-green hole: run pytest directly so the summary is inspectable in the spine."""
+    assert "just test-live-tcg" not in _tcg_spine()
+    assert "-m live_vm_tcg --strict-markers -q" in " ".join(_tcg_spine().split())
+
+
+def test_hosted_spine_fails_loud_on_a_zero_proof_tier() -> None:
+    """pytest exits 0 when every test skips; pin the '<N> passed' summary gate that makes an
+    all-skip or zero-collect live_vm_tcg tier RED naming the tier instead of green."""
+    spine = _tcg_spine()
+    assert "[1-9][0-9]* passed" in spine
+    assert "ran ZERO live_vm_tcg proofs" in spine
