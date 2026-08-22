@@ -144,6 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Converge fixed worker accounts in the live_vm_host role
 - Provision distro-adaptive shared session libvirt authority
 - Route host workers through the lifecycle boundary
+- Preserve worker-readable console evidence across boots
 
 ### Changed
 
@@ -721,6 +722,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Register live-worker operator and state-root variables
 - Record host worker KVM provider authority as ADR-0575
 - Append ADR-0575 resolution banner instead of rewriting 0574
+- Supersede ADR-0258 with worker-owned console inode (0576)
 
 ### Fixed
 
