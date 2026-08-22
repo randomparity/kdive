@@ -1191,6 +1191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use a POSIX test in the lifecycle stub so /bin/sh runners agree
 - Pre-clean stale live-libvirt runtime residue before the hosted tcg install step
 - Recover the dedicated session daemon without sudo (#2032)
+- Converge runtime login members on bring-up
 
 ### Build
 
