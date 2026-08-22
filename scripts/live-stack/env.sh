@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck disable=SC2034 # callers source env.sh and use the resolved checkout root
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Host-published ports for the compose backends. Each is the single source of truth for BOTH the
@@ -64,9 +65,23 @@ export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-minioadmin}"
 export KDIVE_HTTP_HOST="${KDIVE_HTTP_HOST:-127.0.0.1}"
 export KDIVE_HTTP_PORT="${KDIVE_HTTP_PORT:-8000}"
 export KDIVE_STACK_BASE_URL="${KDIVE_STACK_BASE_URL:-http://${KDIVE_HTTP_HOST}:${KDIVE_HTTP_PORT}/mcp}"
-export KDIVE_BUILD_WORKSPACE="${KDIVE_BUILD_WORKSPACE:-${repo_root}/.live-build}"
-export KDIVE_BUILD_COMPONENT_ROOTS="${KDIVE_BUILD_COMPONENT_ROOTS:-${repo_root}/fixtures/local-libvirt:${repo_root}/.live-components}"
+default_worker_workspace="/var/lib/kdive/build"
+default_worker_fixture_catalog="/var/lib/kdive/fixtures/local-libvirt"
+# Worker provider paths live under the group-provisioned /var/lib/kdive tree (live_vm_host role),
+# not inside the checkout: the lifecycle worker units run as fixed accounts whose only write
+# access to the checkout is the group mode the provisioner grants. KDIVE_FIXTURE_CATALOG_PATH is
+# the same catalog named separately because the lifecycle request schema carries it as its own
+# field (the witness validates each provider path's accessibility per worker account).
+export KDIVE_BUILD_WORKSPACE="${KDIVE_BUILD_WORKSPACE:-${default_worker_workspace}}"
+build_component_roots="${KDIVE_BUILD_COMPONENT_ROOTS:-${default_worker_fixture_catalog}}"
+export KDIVE_BUILD_COMPONENT_ROOTS="$build_component_roots"
 export KDIVE_INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+export KDIVE_FIXTURE_CATALOG_PATH="${KDIVE_FIXTURE_CATALOG_PATH:-${default_worker_fixture_catalog}}"
+# Inputs the checkout-side lifecycle client folds into each start request. KDIVE_ACCEPTED_LANES
+# bounds what the fixed worker fleet dispatches; KDIVE_LOG_LEVEL is the workers' structured-log
+# level (the registry setting of the same name).
+export KDIVE_ACCEPTED_LANES="${KDIVE_ACCEPTED_LANES:-default}"
+export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
 # KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
 # verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
 # ($HOME -> /root) would silently re-point it to a nonexistent /root/src/linux and every build would

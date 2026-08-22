@@ -2,7 +2,8 @@
 #
 # Bring up the WHOLE local kdive infrastructure, idempotently and in order:
 #   backends (compose) -> migrations (host) -> libvirt -> host processes -> status.
-# Run via the `!` prefix; it self-elevates with sudo for libvirt and the root worker.
+# Run as the provisioned lifecycle-control operator (never UID 0); only the libvirt socket
+# bring-up below still elevates, via sudo.
 #
 # Usage:
 #   scripts/live-stack/up.sh                 full bring-up
@@ -10,7 +11,6 @@
 #   scripts/live-stack/up.sh --skip-obs      skip prometheus/grafana
 #   scripts/live-stack/up.sh --skip-libvirt  backends + host processes only (no VM provisioning)
 #
-# No-VM, no-sudo dev loop: KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +34,10 @@ for arg in "$@"; do
     ;;
   esac
 done
+if ((EUID == 0)); then
+  echo "up.sh must run as the provisioned lifecycle-control operator, not UID 0" >&2
+  exit 1
+fi
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
@@ -126,11 +130,8 @@ if [[ "$skip_libvirt" != "1" ]]; then
     exit 1
   }
   # Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.
-  # Own them to the invoking user with mode 0755: the root worker (default) can still write,
-  # a KDIVE_WORKER_AS_ROOT=0 worker can now write too, and 0755 keeps the qemu user's traverse
-  # bit — needed so the domain can read staged kernels back at boot (ADR-0222/#694). `mkdir -p`
-  # left prior runs root:root:0755, tripping the preflight's writable-by-worker check on a
-  # non-root worker even though the actual runtime worked. `install -d` is idempotent.
+  # Group-provisioned worker accounts need these directories beneath a QEMU-traversable path.
+  # `install -d` is idempotent and avoids inheriting a stale root-only directory from older flows.
   # Skip the sudo elevation when the dir already exists writable by the invoking user: a
   # pre-provisioned CI runner (ansible-created, owned by the runner user) has them, and that
   # service account may lack passwordless sudo (#1293) — only a bare host needs the elevation.
@@ -159,8 +160,12 @@ banner "inventory reconcile (register images + upload kernel-config siblings to 
 # up so a transient reconcile error surfaces (non-zero exit = configs not guaranteed) without tearing
 # down a running stack the daemon would otherwise reconcile on its next loop. The CLI resolves the
 # inventory path itself (`KDIVE_SYSTEMS_TOML`, else the XDG default) and no-ops on an absent file, so
-# no path is recomputed here — a fresh host with no systems.toml is a clean exit-0 pass.
-"$py" -m kdive reconcile-systems || {
+# no path is recomputed here — a fresh host with no systems.toml is a clean exit-0 pass. Runs with
+# only the reconciler's own authority in the environment (#1929 per-daemon pattern).
+KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  -u KDIVE_WORKER_DATABASE_URL \
+  "$py" -m kdive reconcile-systems || {
   echo "inventory reconcile failed; the catalog may be missing images or kernel configs" >&2
   exit 1
 }
