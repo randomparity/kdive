@@ -5,11 +5,16 @@ Two entry points, by audience. Pick by whether you need real VM provisioning.
 ## Full local-libvirt host — `scripts/live-stack/up.sh`
 
 Brings up EVERYTHING needed to provision real VMs, in order: compose backends (+ observability),
-DB migrations (this checkout is the authoritative migrator), libvirt (`virtqemud`), and the host
+DB migrations (this checkout is the authoritative migrator), libvirt, and the host
 kdive processes. Server and reconciler run as the configured operator; workers run as isolated
 fixed accounts in `kdive-live-worker@1..8.service` through the provisioned lifecycle socket.
 Install that host contract first with the `live_vm_host` Ansible role. The supported worker URI is
 the explicit operator-owned session socket published in `/etc/kdive/live-worker-libvirt.env`.
+
+Libvirt bring-up follows the configured endpoint: against the published dedicated session
+endpoint, `up.sh` recovers a down daemon by starting the operator-owned session daemon as the
+invoking user — no sudo (#2032). Only a bare dev host on the `qemu:///system` default still
+elevates via sudo to socket-activate the system daemon.
 
 | Command | What it does |
 |---------|--------------|

@@ -370,7 +370,7 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         assert 'unix_sock_dir = "/run/kdive/live-libvirt/libvirt"' in config
     tasks = _text(MAIN_TASKS)
     provisioning = tasks + _text(DEFAULTS)
-    assert "XDG_RUNTIME_DIR: /run/kdive/live-libvirt" in tasks
+    assert "XDG_RUNTIME_DIR=/run/kdive/live-libvirt" in tasks
     assert "/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf" in tasks
     assert "virtqemud" not in provisioning
     for path in (
@@ -383,6 +383,26 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         "/var/lib/kdive/fixtures/local-libvirt",
     ):
         assert path in provisioning
+
+
+def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
+    """The dedicated session daemon survives reboots (#2032): linger + an enabled user unit."""
+    tasks = _text(MAIN_TASKS)
+    assert "kdive-libvirtd-live.service" in tasks
+    assert (
+        "ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
+        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid" in tasks
+    )
+    # The user manager is reached through the runner's XDG_RUNTIME_DIR (no login session needed).
+    enable = tasks.index("- name: Enable the boot-persistent session libvirtd user unit")
+    start = tasks.index("- name: Start the operator-owned dedicated session libvirtd")
+    assert "scope: user" in tasks[enable:start]
+    # Linger must be provisioned before the unit: it is what keeps the runner's user manager
+    # alive from boot with no login session.
+    assert tasks.index("loginctl enable-linger") < tasks.index(
+        "- name: Install the boot-persistent session libvirtd user unit"
+    )
+    assert enable < start, "the unit enables unconditionally; only the start is stale-gated"
 
 
 def test_ansible_provisions_and_verifies_worker_accessible_fixture_catalog() -> None:

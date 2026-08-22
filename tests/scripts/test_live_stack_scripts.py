@@ -756,6 +756,106 @@ def test_up_starts_prometheus_independently_of_grafana() -> None:
     assert "#1261" in text, "the skip must be traceable to its tracking issue"
 
 
+def _ensure_session_libvirtd(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Source the real lib.sh and run ensure_session_libvirtd against staged paths."""
+    (tmp_path / "lib.sh").write_text(
+        (ROOT / "scripts/live-stack/lib.sh").read_text(), encoding="utf-8"
+    )
+    args = (
+        f'"{tmp_path / "libvirtd-stub"}" "{tmp_path / "libvirtd-live.conf"}" '
+        f'"{tmp_path / "run/kdive/live-libvirt"}"'
+    )
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "$1"; ensure_session_libvirtd {args}',
+            "bash",
+            str(tmp_path / "lib.sh"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=dict(os.environ),
+    )
+
+
+@contextmanager
+def _session_daemon_stage(tmp_path: Path) -> Generator[Path]:
+    """Stage conf + runtime root and a libvirtd stub recording argv and XDG_RUNTIME_DIR."""
+    (tmp_path / "libvirtd-live.conf").write_text("# staged config\n", encoding="utf-8")
+    (tmp_path / "run" / "kdive" / "live-libvirt").mkdir(parents=True)
+    calls = tmp_path / "libvirtd.calls"
+    stub = tmp_path / "libvirtd-stub"
+    stub.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >>"$(dirname "$0")/libvirtd.calls"\n'
+        'env | grep \'^XDG_RUNTIME_DIR=\' >>"$(dirname "$0")/libvirtd.calls"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    yield calls
+
+
+def test_ensure_session_libvirtd_starts_the_operator_owned_daemon(tmp_path: Path) -> None:
+    """No pid: start exactly what provisioning starts, as the invoking user (#2032)."""
+    with _session_daemon_stage(tmp_path) as calls:
+        result = _ensure_session_libvirtd(tmp_path)
+        assert result.returncode == 0, result.stderr
+        recorded = calls.read_text(encoding="utf-8").splitlines()
+        expected_pid = str(tmp_path / "run/kdive/live-libvirt/libvirt/libvirtd.pid")
+        assert recorded == [
+            f"--daemon --config {tmp_path / 'libvirtd-live.conf'} --pid-file {expected_pid}",
+            f"XDG_RUNTIME_DIR={tmp_path / 'run/kdive/live-libvirt'}",
+        ]
+
+
+def test_ensure_session_libvirtd_is_idempotent_on_a_live_pid(tmp_path: Path) -> None:
+    """A pid file pointing at a live process short-circuits without spawning anything."""
+    with _session_daemon_stage(tmp_path) as calls:
+        pid_dir = tmp_path / "run/kdive/live-libvirt/libvirt"
+        pid_dir.mkdir()
+        (pid_dir / "libvirtd.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        result = _ensure_session_libvirtd(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert not calls.exists(), "a live daemon must not be started a second time"
+
+
+def test_ensure_session_libvirtd_recovers_from_a_stale_pid_file(tmp_path: Path) -> None:
+    """A dead pid is not a daemon: the fallback must still bring the endpoint up."""
+    with _session_daemon_stage(tmp_path) as calls:
+        pid_dir = tmp_path / "run/kdive/live-libvirt/libvirt"
+        pid_dir.mkdir()
+        (pid_dir / "libvirtd.pid").write_text("999999999\n", encoding="utf-8")
+        result = _ensure_session_libvirtd(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert calls.exists()
+
+
+def test_ensure_session_libvirtd_fails_loud_naming_the_exact_paths(tmp_path: Path) -> None:
+    """Missing prerequisites die with every path named — no silent degradation (#2032)."""
+    (tmp_path / "run" / "kdive" / "live-libvirt").mkdir(parents=True)
+    result = _ensure_session_libvirtd(tmp_path)
+    assert result.returncode != 0
+    for path in (
+        tmp_path / "libvirtd-stub",
+        tmp_path / "libvirtd-live.conf",
+    ):
+        assert str(path) in result.stderr
+    assert "sudo" not in result.stderr
+
+
+def test_up_session_recovery_path_never_sudos_and_keeps_the_bare_host_fallback() -> None:
+    """#2032: the dedicated-session branch recovers unprivileged; sudo stays bare-host-only."""
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    gate = text.index('*"live-libvirt"*')
+    bare_host_branch = text.index("# Bare dev host")
+    recovery = text[gate:bare_host_branch]
+    assert "ensure_session_libvirtd" in recovery
+    executed = [line for line in recovery.splitlines() if not line.lstrip().startswith("#")]
+    assert "sudo" not in "\n".join(executed), "the runner service account has no sudo (#2032)"
+    assert "sudo systemctl enable --now virtqemud.socket" in text
+
+
 def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> None:
     text = (ROOT / "scripts/live-stack/worker-lifecycle.sh").read_text()
     parser = LIBVIRT_URI.read_text()

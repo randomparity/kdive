@@ -729,6 +729,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recover the dedicated session daemon without sudo and keep it boot-persistent (#2032)
 - Build the app image before the live_vm_tcg app tier
 - Raise when visible_next_actions names an unregistered tool
 - Adapt to ty 0.0.59 narrowing and read-only property checks
