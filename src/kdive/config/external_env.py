@@ -461,6 +461,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "os-release file `check-setup-deps.sh` reads to detect the host distro.",
     ),
     ExternalEnvVar(
+        "KDIVE_GITLEAKS",
+        "script",
+        "gitleaks",
+        "gitleaks binary `check-pr-body.sh` runs for its credential-pattern pass (the "
+        "pr-body-scan workflow points this at the release archive it unpacks, and the tests "
+        "point it at a stub).",
+    ),
+    ExternalEnvVar(
         "KDIVE_GUESTFS_SYS_SITE",
         "script",
         "/usr/lib/python3/dist-packages",
