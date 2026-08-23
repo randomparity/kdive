@@ -28,14 +28,36 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
 | `just test` | the suite, excluding the gated `live_vm` marker |
+| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
-| `just ci` | the full PR gate: lint, type, lint-shell, lint-workflows, check-mermaid, test |
+| `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, mermaid + doc-link guards, all generated-artifact checks, then the suite |
 | `just compose-up` / `compose-down` | Postgres + MinIO + mock-OIDC backing services for a live run |
 | `just stack-up` | bring the live-stack backends up healthy + print host-process env (see runbook) |
 | `just test-live-stack` | the `live_stack` suite; skips cleanly when the stack/fixtures are absent |
 
-Run a single test: `uv run python -m pytest tests/mcp/test_allocations_tools.py::test_name -q`
+Run a single test: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py::test_request_under_cap_grants -q`
+
+Smaller-than-suite selections, all direct pytest against a path:
+
+- **One block** — any node-ID prefix: a parametrized family
+  (`tests/domain/test_errors.py::test_name` runs every parameter), a class
+  (`.../test_mod.py::TestClass`), one file, or one directory.
+- **Keyword expression** across files — `-k "taxonomy and not round_trips"`.
+
+Both compose with the recipes below (`just test-verbose <path>::<block>` for full error
+output on just that block).
+
+**Choosing how to run the suite (agent guidance):** iterate on changed code with
+`just test-changed`, rerun failures with `just test-lf`, and treat `just test` as the
+pre-push gate. Default recipes run quietly (`-q` plus `-ra` from `addopts`): pass/fail
+counts and the short failure summary — enough to see what broke without flooding the
+terminal. When a failure needs full detail, escalate only the affected paths
+(`just test-verbose tests/<dir>` or a single file) instead of re-running everything loud.
+For one known test, direct pytest stays fine (see above). Run gate recipes bare — never
+piped through `tail`/`head` or with output redirected — so exit codes stay truthful.
+Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you
+need (`just lint`, `just type`, `prek run`).
 
 **Running the live tiers** — before re-deriving how to run a live test, read
 [`docs/operating/runbooks/live-testing.md`](docs/operating/runbooks/live-testing.md).
