@@ -83,6 +83,11 @@ format:
 type:
     uv run ty check
 
+# Shared selection for `test` / `test-verbose`: the gated-tier exclusion, xdist parallelism,
+# and the worker cap described below, defined once so the quiet and verbose invocations
+# cannot drift apart.
+_TEST_SELECT := '-m "not live_vm and not live_stack and not agent_smoke" -n auto --maxprocesses=16 --dist worksteal'
+
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
 #
@@ -105,7 +110,14 @@ type:
 # PYTHONHASHSEED=random to surface any new ordering-dependent test the pinned seed would
 # otherwise mask.
 test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" -n auto --maxprocesses=16 --dist worksteal -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_SELECT}} -q
+
+# Same selection as `test:` with full error output for inspection: `-vv` restores complete
+# assertion introspection and diffs, `--tb=long` keeps every frame, where `-q` trims both.
+# Optional path arguments scope the run to the failing files, so a failure can be escalated
+# to readable output without re-running the whole suite loudly or hand-assembling flags.
+test-verbose *PATHS:
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_SELECT}} -vv --tb=long {{PATHS}}
 
 # Rerun the tests that failed on the previous run, failures first — the fast inner loop
 # (#1334, ADR-0420). Additive: `just test` stays the full pre-push gate and this never runs
