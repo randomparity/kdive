@@ -737,6 +737,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Describe --tb=short output precisely and drop the duplicated command
 - State pytest's --tb=auto baseline and share the worker cap
 - Settle the mutating hooks before committing
+- Record that a zero-test JUnit report is a signal, not a result
+- Replace the per-call-site fix with a conftest-wide scrub
+- Scrub PYTEST_ADDOPTS in a session fixture, not at import
+- Scrub PYTEST_ADDOPTS in pytest_collection, not a session fixture
+- Correct why the hook preserves worker configuration
+- Fix six blocking findings from the spec review
+- Implementation plan for the CI summary false-clean fix
+- Fix nine findings from the plan review
+- Disposition the scope audit's five findings
+- Stage the paths you staged, not the whole tree
+- Reconcile the spec, ADR, and plan with what was built
+- Record the threat model for the report-parsing boundary
 
 ### Fixed
 
@@ -1217,6 +1229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Guard parallelism drift and single-source the fallback command
 - Pin the tier literal and PYTHONHASHSEED in the guard
 - Detach the summary tests from the live job summary
+- Fail closed when the pytest report totals zero tests
 
 ### Build
 
@@ -1246,6 +1259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apply ruff format to the new surplus-remedy test
 - Merge the split ports.traffic imports into two plain lines
 - Adopt ruff 0.16 formatter output (ADR-0569)
+- Format the plan's fenced python to match the shipped test
 
 ## [0.4.0] - 2026-07-23
 
