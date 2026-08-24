@@ -46,6 +46,7 @@ Transcribed from the spec and ADR — values exactly as written there.
 | `AGENTS.md` | modify | commit-ordering guidance |
 | `tests/guards/test_commit_hook_guidance.py` | modify | that guidance's anchor |
 | `.github/workflows/ci.yml` | modify | `--no-sync` on the summary step |
+| `tests/scripts/test_ci_test_summary_wiring.py` | modify | the assertion pinning that step's `run` |
 
 ---
 
@@ -185,8 +186,20 @@ def _fresh(tmp_path: Path, name: str) -> Path:
 ```
 
 **Verify:** `uv run python -m pytest tests/scripts/test_pytest_summary.py -q`
-**Expect:** the five new tests fail. The truncated one fails with `UnicodeDecodeError`, not an
-assertion — that is the defect. The argv-table test fails the same way.
+**Expect:** **three** of the five new tests fail, plus the argv table. Confirmed against the
+unfixed module — do not expect all five:
+
+| test | before the fix | why |
+|---|---|---|
+| `..._zero_test_report_is_not_reported_as_a_clean_run` | **fails** (assert) | no floor yet |
+| `..._zero_test_reason_is_distinguishable_...` | **fails** (assert) | no floor yet |
+| `..._truncated_non_ascii_report_says_so...` | **fails** (`UnicodeDecodeError`) | the decode defect |
+| `..._unparseable_count_with_real_failures_still_lists_them` | **passes** | regression guard: today there is no floor to discard the list, so this pins behaviour the fix must not break |
+| `..._zero_byte_report_says_so` | **passes** | regression guard: `read_text("")` already raises `ParseError: no element found` |
+
+A test that is green before the change proves nothing about the change; both are here to stay
+green through it. Say so in their comments so a later reader does not mistake them for
+TDD-red tests.
 
 ### Step 1.2 — Read the report as bytes
 
@@ -218,8 +231,8 @@ def summarize(report: str | Path) -> str:
 ```
 
 **Verify:** `uv run python -m pytest tests/scripts/test_pytest_summary.py -q`
-**Expect:** the two decode tests and the argv table pass; the three floor tests still fail on
-assertions (not exceptions).
+**Expect:** the truncated test and the argv table now pass; **two** floor tests still fail on
+assertions (not exceptions). The two regression guards stay green throughout.
 
 ### Step 1.3 — Floor the renderer
 
@@ -278,8 +291,16 @@ def _render(root: ET.Element, path: Path) -> str:
     return rendered
 ```
 
-Also update the module docstring's contract paragraph — it currently lists only "missing" and
-"truncated". Add the zero-test case to the sentence beginning "so this decides nothing".
+Also update the module docstring's contract paragraph. It currently reads:
+
+> :func:`main` returns 0 for every input, including a report that is missing (pytest
+> killed before writing one) or truncated (killed mid-write).
+
+Replace the parenthetical list with, verbatim:
+
+> :func:`main` returns 0 for every input, including a report that is missing (pytest
+> killed before writing one), truncated (killed mid-write), or well-formed but describing
+> no tests at all (an empty selection, or a report another process left behind).
 
 **Verify:** `uv run python -m pytest tests/scripts/test_pytest_summary.py -q`
 **Expect:** all tests pass, including the pre-existing ones (`_GREEN` describes a real run and
@@ -368,9 +389,21 @@ def _run_nested(tmp_path: Path, module: str) -> subprocess.CompletedProcess[str]
     environment = dict(os.environ)
     environment["PYTEST_ADDOPTS"] = "--tb=long"
     return subprocess.run(
-        (sys.executable, "-m", "pytest", str(tmp_path / "test_inner.py"), "-q",
-         "-p", "no:cacheprovider"),
-        cwd=_ROOT, env=environment, capture_output=True, text=True, check=False, timeout=120,
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            str(tmp_path / "test_inner.py"),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ),
+        cwd=_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
     )
 
 
@@ -395,6 +428,11 @@ def test_a_process_spawned_at_module_import_does_not_inherit_addopts(tmp_path: P
     result = _run_nested(tmp_path, module)
     assert result.returncode == 0, result.stdout + result.stderr
 ```
+
+**Transcribe the block above verbatim — it is already `ruff format` output.** Everything else
+in this plan is format-clean as written; this one file was not, because ruff explodes the
+`subprocess.run` argument tuple one element per line. `just lint` runs
+`ruff format --check`, so an un-formatted transcription fails `just ci` at the first gate.
 
 `tests/guards/test_collection_hook_ordering.py`:
 
@@ -430,9 +468,14 @@ def test_the_scrub_hook_is_not_ordered_ahead_of_xdist() -> None:
 ```
 
 **Verify:** `uv run python -m pytest tests/scripts/test_addopts_scrub.py tests/guards/test_collection_hook_ordering.py -q`
-**Expect:** all three fail — the guard with `AttributeError: module 'tests.conftest' has no
-attribute 'pytest_collection'`, and both scrub tests because the nested run's grandchild sees
-`--tb=long`.
+**Expect:** all three fail, but read the *reason* — it is not the one you would guess. The
+guard fails with `AttributeError: module 'tests.conftest' has no attribute
+'pytest_collection'`. Both scrub tests fail because the nested conftest's
+`from tests.conftest import pytest_collection` raises `ImportError`, so the nested run exits
+**4** (usage error) before any grandchild is spawned.
+
+That means these two go green the instant the *name* exists, whatever its body does — they do
+not yet prove the pop. Step 2.4 is what closes that gap; do not skip it.
 
 ### Step 2.2 — Add the hook
 
@@ -474,9 +517,17 @@ mistake here would suppress or duplicate collection rather than fail loudly.
 
 ### Step 2.4 — Mutation-verify
 
-Mark the hook `@pytest.hookimpl(tryfirst=True)`, confirm the guard reddens with its message,
-restore. Change the pop to `os.environ.pop("PYTEST_ADDOPTS")` (no default) and confirm the
-suite errors, restore — that is the `KeyError` the default prevents.
+Three probes, each reverted before the next. Copy the file to a scratchpad first; do **not**
+use `git checkout --` to restore, and clear `__pycache__` afterwards.
+
+1. **Prove the pop, not just the name.** Replace the hook's body with a bare `return None`
+   (keep the function). Both scrub tests must fail with `assert '--tb=long' == 'None'` — the
+   grandchild inheriting the value. This is the assertion Step 2.1 could not make, because
+   there the tests were red for an `ImportError` instead.
+2. **Prove the guard.** Mark the hook `@pytest.hookimpl(tryfirst=True)`; the guard must redden
+   with its own message. Repeat with `wrapper=True`.
+3. **Prove the default matters.** Change the pop to `os.environ.pop("PYTEST_ADDOPTS")` with no
+   default and confirm the suite errors with `KeyError` on a run where the variable is unset.
 
 **Acceptance:** a grandchild spawned from a test body and one spawned at module import both
 see no `PYTEST_ADDOPTS`; the guard fails if the hook is reordered; collection counts unchanged
@@ -493,21 +544,49 @@ serial and under xdist.
 
 ### Step 3.1 — `AGENTS.md`: stage the paths you staged
 
-The guidance currently ends in `git add -A`, which stages every untracked and unstaged file
-`prek run` just restored — turning a targeted commit into a whole-tree one, against this
-repo's one-logical-change-per-commit rule. `git add -u` is **not** the fix; it is still
-whole-tree over tracked files. Replace the closing instruction with: capture the staged set
-first (`git diff --cached --name-only`), then re-add exactly those paths with
-`git add -- <the paths you staged>`.
+The guidance's closing sentence (`AGENTS.md:84`) currently reads:
 
-The existing guard asserts `"git add" in paragraph`, which survives this.
+> Then `git add -A` and commit, which now has nothing left to rewrite.
+
+`git add -A` stages every untracked and unstaged file `prek run` just restored, turning a
+targeted commit into a whole-tree one, against this repo's one-logical-change-per-commit rule.
+`git add -u` is **not** the fix — it is still whole-tree over tracked files. Replace that
+sentence with, verbatim:
+
+> Record the staged set first (`git diff --cached --name-only`), then re-add exactly those
+> paths — `git add -- <the paths you staged>` — and commit, which now has nothing left to
+> rewrite. Not `git add -A` or `git add -u`: `prek run` restored every unrelated unstaged
+> file when it finished, and both would sweep those into this commit.
+
+The replacement still contains `git add`, so the guard's
+`assert "git add" in paragraph` continues to hold.
 
 ### Step 3.2 — `tests/guards/test_commit_hook_guidance.py`: anchor the slice
 
-`_paragraph()` at line 36 splits on `"\n\n"`, so a routine reflow that splits today's single
+`_paragraph()` at line 33 splits on `"\n\n"`, so a routine reflow that splits today's single
 unbroken paragraph fails the guard on intact guidance. Anchor the slice on the next bold
-lead-in, `**Running the live tiers**`. Assert the anchor was found *before* slicing on it, so a
-rename fails loudly instead of silently widening the slice to the rest of the file.
+lead-in instead — `**Running the live tiers**`, present at `AGENTS.md:86`. Replace the body:
+
+```python
+#: The bold lead-in that follows the guidance. Slicing to it rather than to the first blank
+#: line means a routine reflow that splits the paragraph in two does not fail the guard on
+#: intact guidance (#2068).
+_END = "**Running the live tiers**"
+
+
+def _paragraph() -> str:
+    text = _AGENTS.read_text(encoding="utf-8")
+    assert _ANCHOR in text, "the pre-commit ordering guidance is gone from AGENTS.md (#2062)"
+    after = text.split(_ANCHOR, 1)[1]
+    assert _END in after, (
+        f"the guidance's closing anchor {_END!r} is gone from AGENTS.md, so this guard can no "
+        "longer bound its slice and would silently check the rest of the file (#2068)"
+    )
+    return after.split(_END, 1)[0]
+```
+
+The `assert _END in after` is the point: without it a renamed lead-in would widen the slice to
+the rest of the file and the guard would keep passing while checking the wrong text.
 
 **Verify:** `uv run python -m pytest tests/guards/test_commit_hook_guidance.py -q`
 **Expect:** passes. Then temporarily reflow the guidance paragraph in two, confirm it still
@@ -523,13 +602,44 @@ installs no Python — `setup-uv` is called with no `python-version` and there i
 or trigger a download, against the script's own docstring. `--no-sync` keeps the project
 environment and skips only the resolve. Update the step's comment to say which and why.
 
-**Verify:** `just lint-workflows`
-**Expect:** actionlint clean.
+`tests/scripts/test_ci_test_summary_wiring.py:100` pins this step's command:
+
+```python
+    assert _summary_step()["run"].startswith("uv run python ")
+```
+
+`--no-sync` fails it. Widen it to keep the intent — that the step runs the summary script
+through `uv` — without pinning the flags:
+
+```python
+    run = _summary_step()["run"]
+    assert run.startswith("uv run "), run
+    assert " python scripts/pytest_summary.py" in run, run
+```
+
+Also note in the step's comment that `--no-sync` has a failure mode `uv run python` does not:
+`if: always()` fires this step even when `Sync dependencies` (`ci.yml:53`) failed, and with no
+`.venv` present `uv run --no-sync` errors out. `continue-on-error` swallows it, so the result
+is no summary rather than a red job. That is the correct trade — the alternative resolves a
+fresh environment on a runner whose install already failed — but it should be written down.
+
+**Verify:** `uv run python -m pytest tests/scripts/test_ci_test_summary_wiring.py -q` then
+`just lint-workflows`
+**Expect:** the wiring test passes. Note `just lint-workflows` alone is **not** a verification
+of this step: zizmor and actionlint do not parse `uv`'s flags, so it is equally clean before
+and after the edit.
 
 **Acceptance:** guidance names path-scoped staging; the guard tolerates a reflow and fails on a
 renamed anchor; the summary step uses `--no-sync`.
 
-**Commit:** `docs(agents): stage the paths you staged, not the whole tree`
+**Commits — three, not one.** Task 3's own justification is the
+one-logical-change-per-commit rule, so it does not land as a single bundle:
+
+1. `docs(agents): stage the paths you staged, not the whole tree` — `AGENTS.md`
+2. `test(guards): anchor the commit-guidance slice on its closing lead-in` —
+   `tests/guards/test_commit_hook_guidance.py`
+3. `ci: run the summary script with --no-sync, not a bare uv run` — `.github/workflows/ci.yml`
+   and `tests/scripts/test_ci_test_summary_wiring.py`
 
 ---
 
