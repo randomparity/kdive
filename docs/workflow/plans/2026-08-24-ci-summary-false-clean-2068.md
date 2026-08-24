@@ -40,7 +40,8 @@ Transcribed from the spec and ADR — values exactly as written there.
 |---|---|---|
 | `scripts/pytest_summary.py` | modify | reading the report as bytes; the zero-test floor |
 | `tests/scripts/test_pytest_summary.py` | modify | renderer + decode behaviour |
-| `tests/conftest.py` | modify | the `pytest_collection` scrub hook |
+| `tests/_addopts_scrub.py` | create | the `pytest_collection` scrub hook itself |
+| `tests/conftest.py` | modify | re-exporting that hook so pytest registers it |
 | `tests/scripts/test_addopts_scrub.py` | create | the scrub's behaviour, via nested pytest |
 | `tests/guards/test_collection_hook_ordering.py` | create | the `tryfirst`/wrapper constraint |
 | `AGENTS.md` | modify | commit-ordering guidance |
@@ -347,8 +348,10 @@ timeout — the summary step reads that leftover and reports a clean run.
 These are nested-pytest runs because the behaviour cannot be observed in-process: the hook
 pops at collection, before any test body runs, so a test that sets the variable itself and
 spawns a child watches the child inherit it, and one that does not set it proves nothing.
-The nested conftest imports the *real* hook from `tests.conftest`, so this exercises the
-shipped implementation rather than a copy of it.
+The nested conftest imports the *real* hook from `tests._addopts_scrub`, so this exercises
+the shipped implementation rather than a copy of it — and imports only that module, not
+`tests.conftest`, which pulls the whole `kdive` package in (measured: 1.45s versus 0.03s
+baseline, per nested run, and it would couple these tests to product-package import health).
 """
 
 from __future__ import annotations
@@ -363,7 +366,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _CONFTEST = """
 import sys
 sys.path.insert(0, {root!r})
-from tests.conftest import pytest_collection  # noqa: F401  the hook under test
+from tests._addopts_scrub import pytest_collection  # noqa: F401  the hook under test
 """
 
 _GRANDCHILD = """
@@ -452,11 +455,14 @@ metadata: `pytest_impl` is `{}` on an undecorated function and carries the flags
 
 from __future__ import annotations
 
-import tests.conftest
+import importlib
+from importlib.metadata import distributions
+
+import tests._addopts_scrub
 
 
 def test_the_scrub_hook_is_not_ordered_ahead_of_xdist() -> None:
-    hook = tests.conftest.pytest_collection
+    hook = tests._addopts_scrub.pytest_collection
     impl = getattr(hook, "pytest_impl", {})
     for flag in ("tryfirst", "wrapper", "hookwrapper"):
         assert not impl.get(flag), (
@@ -465,6 +471,28 @@ def test_the_scrub_hook_is_not_ordered_ahead_of_xdist() -> None:
             "workers are spawned and every worker silently loses its PYTEST_ADDOPTS options "
             "(ADR-0578)."
         )
+
+
+def test_no_installed_plugin_preempts_the_collection_hook() -> None:
+    # `pytest_collection` is `firstresult`, so the first implementation to return non-None
+    # ends the chain. xdist's DSession does exactly that on the controller, which is what the
+    # design relies on — but a *third* plugin doing the same would silently disable the scrub
+    # in the workers too, with no failing test anywhere (#2068, ADR-0578).
+    offenders = []
+    for distribution in distributions():
+        for entry in (e for e in distribution.entry_points if e.group == "pytest11"):
+            try:
+                module = importlib.import_module(entry.value.split(":")[0])
+            except Exception:  # noqa: BLE001 - an unimportable plugin cannot preempt anything
+                continue
+            if hasattr(module, "pytest_collection"):
+                offenders.append(f"{distribution.metadata['Name']} ({entry.value})")
+    assert not offenders, (
+        f"these installed plugins implement pytest_collection: {sorted(set(offenders))}. "
+        "The hookspec is firstresult, so one of them may now preempt "
+        "tests/_addopts_scrub.pytest_collection and silently disable the PYTEST_ADDOPTS "
+        "scrub (ADR-0578). Confirm ordering before assuming the scrub still runs."
+    )
 ```
 
 **Verify:** `uv run python -m pytest tests/scripts/test_addopts_scrub.py tests/guards/test_collection_hook_ordering.py -q`
@@ -479,14 +507,28 @@ not yet prove the pop. Step 2.4 is what closes that gap; do not skip it.
 
 ### Step 2.2 — Add the hook
 
-In `tests/conftest.py`, after the imports and before the first fixture:
+Create `tests/_addopts_scrub.py`:
 
 ```python
-def pytest_collection(session: pytest.Session) -> None:
-    """Stop this process handing ``PYTEST_ADDOPTS`` to anything it spawns (#2068, ADR-0578).
+"""Stop a pytest process handing ``PYTEST_ADDOPTS`` to anything it spawns (#2068, ADR-0578).
 
-    CI sets it for the whole ``Test`` step to ask for a JUnit report, so a nested pytest would
-    inherit ``--junit-xml=<shared path>`` and overwrite the run's own report.
+CI sets it for the whole ``Test`` step to ask for a JUnit report, so a nested pytest would
+inherit ``--junit-xml=<shared path>`` and overwrite the run's own report.
+
+This lives beside ``conftest.py`` rather than inside it so the scrub's own tests can import
+the shipped hook without importing ``tests.conftest``, which pulls in the whole ``kdive``
+package (1.45s per nested run, and it would couple those tests to product-import health).
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+
+def pytest_collection(session: pytest.Session) -> None:
+    """Pop ``PYTEST_ADDOPTS`` before this process imports any test module.
 
     The timing is the decision. This has to run after the process has configured itself from
     the variable and before it imports any test module, and ``pytest_collection`` is the only
@@ -503,7 +545,12 @@ def pytest_collection(session: pytest.Session) -> None:
     return None
 ```
 
-`os` and `pytest` are already imported in that module.
+Then re-export it from `tests/conftest.py` so pytest registers it — a name bound in the
+conftest namespace is collected as a hook, verified. Add beside the existing imports:
+
+```python
+from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
+```
 
 **Verify:** `uv run python -m pytest tests/scripts/test_addopts_scrub.py tests/guards/test_collection_hook_ordering.py -q`
 **Expect:** 3 passed.
@@ -615,6 +662,9 @@ through `uv` — without pinning the flags:
     run = _summary_step()["run"]
     assert run.startswith("uv run "), run
     assert " python scripts/pytest_summary.py" in run, run
+    # --no-project would satisfy the two assertions above while resolving a fresh
+    # environment against a runner that installs no Python (ADR-0578 rejects it by name).
+    assert "--no-sync" in run, run
 ```
 
 Also note in the step's comment that `--no-sync` has a failure mode `uv run python` does not:

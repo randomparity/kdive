@@ -101,6 +101,12 @@ cause, and part 1 is the only thing covering exit 5.
   inside a test, on a worker. Accepted as prose rather than machinery.
 - Reading bytes rather than text means a report in a non-UTF-8 encoding now parses instead of
   raising. Strictly wider; nothing depended on the previous narrowing.
+- **Residual: a zero-total report that still carries failing cases keeps its totals line**,
+  so it prints `0 failed` above a real failure list. That shape does not take the floor —
+  deliberately, since discarding the failures would be worse — but it means the "never renders
+  `0 failed`" property holds for the floor's own branch, not for every possible report. pytest
+  does not write such a report; only a foreign or corrupt one could, and reachability is
+  unproven. Accepted: the failure list beside it is the disambiguating signal.
 
 ## Considered & rejected
 
@@ -108,7 +114,11 @@ cause, and part 1 is the only thing covering exit 5.
 > `testpaths = ["tests"]`, not in this tree, so the commands are not re-runnable here as
 > written. Three transfer conditions were checked against this repo: `tests/conftest.py`
 > defines no `pytest_*` hooks, no `pytest_collection` implementation exists anywhere in the
-> tree, and no plugins beyond `pytest-xdist` are installed.
+> tree, and **no installed plugin implements `pytest_collection`**. That last one is the
+> precondition that matters, and it is narrower than "only `pytest-xdist` is installed" —
+> `anyio` and `hypothesis` also declare `pytest11` entry points here. Neither implements this
+> hook, but `firstresult` means one that did would silently preempt the scrub, so the
+> ordering guard asserts it at runtime rather than leaving it to this note.
 
 
 - **Fix each nested-pytest call site with an explicit `env=`, enforced by an AST guard over
