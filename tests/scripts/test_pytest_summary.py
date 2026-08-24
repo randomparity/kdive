@@ -87,6 +87,20 @@ classname="tests.sample.test_sample" name="test_passes" time="0.000" /></testsui
 </testsuites>"""
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_step_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Detach every test here from the job summary CI is really writing.
+
+    `just test` runs as a step, so on a GitHub runner `GITHUB_STEP_SUMMARY` is set for the whole
+    suite — including for these tests and for anything they spawn. Without this, a test that
+    calls :func:`main` appends its *fixture's* totals to the live job summary of the step it is
+    running inside, and a test asserting on stdout sees nothing because the script correctly
+    wrote to the file instead. Both happened on this branch's first CI run. Tests that want a
+    destination set one explicitly.
+    """
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+
 def _report(tmp_path: Path, raw: str) -> Path:
     path = tmp_path / "pytest-junit.xml"
     path.write_text(raw, encoding="utf-8")
@@ -271,13 +285,32 @@ def test_main_appends_to_the_step_summary_when_one_is_set(
 
 
 def test_main_falls_back_to_stdout_outside_actions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Run by hand against a local `--junit-xml` report there is no summary file; printing
-    # nothing would make the script look broken.
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    # nothing would make the script look broken. The autouse fixture supplies the bare
+    # environment this describes.
     assert main(["pytest_summary.py", str(_report(tmp_path, _XUNIT1))]) == 0
     assert "tests/sample/test_sample.py::test_fails" in capsys.readouterr().out
+
+
+def test_writing_to_the_step_summary_leaves_a_trace_in_the_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The summary file is not readable back through the GitHub API, so a step that wrote an
+    # empty one and a step that wrote a useful one look identical from outside. This line is
+    # the only evidence in the job log that the mechanism did anything, which is what makes a
+    # silently-empty summary noticeable rather than something a reader discovers when they
+    # next need it.
+    destination = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(destination))
+
+    assert main(["pytest_summary.py", str(_report(tmp_path, _XUNIT1))]) == 0
+
+    stderr = capsys.readouterr().err
+    assert "pytest_summary:" in stderr
+    assert str(len(destination.read_text(encoding="utf-8").encode("utf-8"))) in stderr
+    assert "4 failed" in stderr
 
 
 def test_the_script_runs_as_a_subprocess_and_exits_zero(tmp_path: Path) -> None:
@@ -291,3 +324,22 @@ def test_the_script_runs_as_a_subprocess_and_exits_zero(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "tests/sample/test_sample.py::test_fails" in result.stdout
+
+
+def test_a_subprocess_writes_to_the_step_summary_it_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The invocation ci.yml actually makes: a separate process that finds the destination in
+    # its inherited environment. In-process coverage of that path would not catch an import
+    # or an interpreter problem, and the subprocess case above cannot see the file path.
+    destination = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(destination))
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), str(_report(tmp_path, _XUNIT1))],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "tests/sample/test_sample.py::test_fails" in destination.read_text(encoding="utf-8")
+    assert "tests/sample/test_sample.py::test_fails" not in result.stdout

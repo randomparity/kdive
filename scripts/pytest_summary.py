@@ -202,11 +202,25 @@ def main(argv: list[str]) -> int:
         try:
             with open(destination, "a", encoding="utf-8") as handle:
                 handle.write(summary)
-            return 0
         except OSError as error:
             print(f"pytest_summary: cannot write {destination}: {error}", file=sys.stderr)
+        else:
+            # The summary file cannot be read back through the GitHub API, so from outside a
+            # step that wrote an empty one and a step that wrote a useful one are the same
+            # step. This line in the job log is what distinguishes them.
+            print(
+                f"pytest_summary: wrote {len(summary.encode('utf-8'))} bytes to the job "
+                f"summary — {_headline(summary)}",
+                file=sys.stderr,
+            )
+            return 0
     print(summary)
     return 0
+
+
+def _headline(summary: str) -> str:
+    """The first line of substance — the totals, or the prose explaining their absence."""
+    return next((line for line in summary.splitlines() if line and not line.startswith("#")), "")
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via ci.yml
