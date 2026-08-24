@@ -59,16 +59,27 @@ one of:
 | report state | before | after |
 |---|---|---|
 | missing | prose | prose (unchanged) |
-| XML does not parse | prose | prose (unchanged) |
+| XML does not parse (includes a zero-byte file: `no element found`) | prose | prose (unchanged) |
 | truncated mid-multibyte | **raises, exit 1** | prose |
-| parses, describes zero tests | **`0 failed`** | prose, with its own reason |
+| parses, sums to zero tests, no failing cases | **`0 failed`** | prose, with its own reason |
+| `tests` attribute unparseable **but failing cases present** | totals wrong, failures listed | unchanged — must NOT hit the floor |
+| root is not a testsuite (e.g. an HTML error page) | `0 failed` | prose |
+| valid report describing only skips | totals | unchanged (a real result) |
 | parses, describes a real run | totals + failures | unchanged |
+
+`_int` returns `0` for an unparseable attribute, so `tests="abc"` sums to zero while
+`_failing_cases` still finds the failures. A naive `tests == 0` floor would therefore discard
+a real failure list and claim the report describes no tests — a second false-clean, in the
+opposite direction. **The floor condition is `tests == 0 and not _failing_cases(root)`.**
 
 ## Components
 
-**`tests/conftest.py`** — a `pytest_collection` hook that pops `PYTEST_ADDOPTS` from
-`os.environ` and returns `None` so normal collection proceeds, with a comment naming #2068
-and the timing reason.
+**`tests/conftest.py`** — a `pytest_collection` hook that calls
+`os.environ.pop("PYTEST_ADDOPTS", None)` and returns `None` so normal collection proceeds,
+with a comment naming #2068 and the timing reason.
+
+The `None` default is load-bearing: the variable is unset on every local run, and a bare
+`pop("PYTEST_ADDOPTS")` would raise `KeyError` and break `just test` for everyone.
 
 The hook must be `pytest_collection`, and the timing is the whole point. It has to run late
 enough that the process has configured itself from the variable, and early enough that
@@ -105,51 +116,99 @@ and no plugins beyond `pytest-xdist` are installed — all three checked.
   the XML encoding declaration and a truncated multibyte tail arrives as the `ET.ParseError`
   already handled. Verified: `ET.fromstring` on a report cut mid-character raises
   `ParseError: partial character`; a well-formed non-ASCII report parses from bytes.
-- `_render()` returns `_no_report(...)` prose when the summed test count is zero, with its own
-  `why` naming the actual condition — the report is present and well-formed and describes no
-  tests. The two existing reasons ("the test step wrote none", "its XML did not parse") are
-  both false for an exit-5 report, so reusing either would replace a misleading totals line
-  with a misleading cause.
+- `_render()` returns `_no_report(...)` prose when `tests == 0 and not _failing_cases(root)`,
+  with this exact `why`:
+
+  > `it parsed but totals zero tests — the run collected nothing, or the report is not this run's`
+
+  Worded as what the code *observed*, not as a claim about the run: the renderer cannot tell
+  an exit-5 collection from a foreign report, and must not assert either. The two existing
+  reasons ("the test step wrote none", "its XML did not parse") are both false here, so
+  reusing either would replace a misleading totals line with a misleading cause.
 
 **`tests/scripts/test_pytest_summary.py`** — cases for the zero-test floor and the truncated
 non-ASCII report, and the non-ASCII case added to `test_main_returns_zero_for_every_input`'s
 argv table so that property stops being true by construction of its own inputs.
 
-**One new test for the scrub** — that a subprocess spawned from a test does not see
-`PYTEST_ADDOPTS`, asserted with the variable actually set in the parent. This is the
-behaviour, so it is what gets asserted; asserting that `tests/conftest.py` contains a `pop`
-call would be testing the implementation.
+**Two new tests for the scrub, both nested-pytest runs.** A direct in-process test cannot
+express this: the hook pops at collection, before any test body runs, so a test that
+`monkeypatch.setenv`s the variable and spawns a child sees the child inherit it (the test
+fails), and one that does not set it passes vacuously (the test proves nothing).
+
+The construction is an outer test that writes a small fixture module to `tmp_path`, then runs
+`pytest` on it as a subprocess with `PYTEST_ADDOPTS` present in an explicit `env=`, and
+asserts on that nested run's exit code. The inner module is what carries the real assertion,
+against a *grandchild* process:
+
+- one inner test spawns a grandchild from inside a test body and asserts it sees no
+  `PYTEST_ADDOPTS`;
+- one inner module spawns a grandchild **at module import time** and asserts the same. This is
+  the case that distinguishes `pytest_collection` from a session fixture, so it is the one
+  worth pinning.
+
+The nested run needs `tests/conftest.py`'s hook in scope — run it with the repo root as
+`cwd` and the fixture module under `tmp_path` inside the repo's `tests/` tree, or copy the
+hook into a conftest beside the fixture module and assert the mechanism rather than the
+repo wiring. Pick one and say which in the implementation; do not leave it to the reader.
+
+**One guard for the `tryfirst` constraint** — `tests/guards/`. It asserts on pluggy's runtime
+metadata, not on source text: `getattr(hook, "pytest_impl", {})` is `{}` for an undecorated
+function and carries the flags when marked (verified on pytest 9.1.1). Assert that
+`tryfirst` is falsey **and** that `wrapper` and `hookwrapper` are falsey — a wrapper reorders
+ahead of `DSession.pytest_collection` exactly as `tryfirst` does, so guarding only `tryfirst`
+leaves the same regression reachable.
+
+This is guarded rather than tested behaviourally because the observable it would need — a
+worker process's option state — is not reachable from an assertion in this change's own
+tests without a second nested `-n 2` run. A nested run *could* catch it; the guard is chosen
+as the cheaper instrument for the same defect, and `tests/guards/` already holds several
+source- and metadata-inspecting guards.
 
 **Three corrections carried from the same review** (non-blocking, same subsystem):
 
 - `AGENTS.md` — the commit guidance ends in `git add -A`, which stages every untracked and
   unstaged file `prek run` just restored, turning a targeted commit into a whole-tree one.
-  Contradicts the repo's one-logical-change-per-commit rule. Becomes path-scoped.
-- `tests/guards/test_commit_hook_guidance.py` — slices to the first blank line, so a routine
-  reflow splitting today's single 959-char paragraph fails the guard on intact guidance.
-  Anchor on the next bold lead-in instead.
+  Contradicts the repo's one-logical-change-per-commit rule. The replacement is **not**
+  `git add -u`, which is still whole-tree over tracked files. The guidance must say: capture
+  the staged set *before* running the hooks (`git diff --cached --name-only`), then re-add
+  exactly those paths — `git add -- <the paths you staged>`. The existing guard's
+  `assert "git add" in paragraph` survives this, so no guard change is needed for it.
+- `tests/guards/test_commit_hook_guidance.py` — `_paragraph()` at line 36 splits on `"\n\n"`,
+  so a routine reflow splitting today's single unbroken paragraph fails the guard on intact
+  guidance. Anchor the slice on the next bold lead-in, which is `**Running the live tiers**`.
+  If that lead-in is ever renamed the guard must fail loudly rather than silently widening its
+  slice to the rest of the file — assert the anchor was found before slicing on it.
 - `.github/workflows/ci.yml` — the summary step runs `uv run python`, which attempts a project
-  sync for a stdlib-only script. `uv run --no-project python` avoids a re-resolve on a runner
-  where the install step already failed, which is exactly when the summary matters most.
+  sync. Use **`uv run --no-sync python`**, not `--no-project`. `--no-sync` keeps the project
+  environment and its interpreter while skipping the resolve; `--no-project` discards the
+  project entirely, and since `pyproject.toml` pins `requires-python = "==3.14.*"` while
+  `ci.yml` installs no Python (`setup-uv` is called with no `python-version`, and there is no
+  `actions/setup-python`), it would fall back to the runner's ambient interpreter or trigger a
+  download — the opposite of the goal, and against the script's own docstring, which records
+  that it is not portable to an arbitrary interpreter.
 
 ## Testing
 
 Every case below is a test in this change, not a manual check.
 
-- Zero-test report → prose naming the path, and *not* containing `0 failed`. Asserting the
-  absence matters: asserting only that prose appears would pass if both were emitted.
-- Zero-test prose is distinguishable from the missing-report and unparseable-report prose.
+- Zero-test report → the output contains the floor's exact `why` phrase, and does **not**
+  contain the totals line. Assert the totals' absence by its separator `" tests · "`, not by
+  the literal `0 failed`: a renderer emitting `0 failures` would slip that assertion.
+- The floor's `why` phrase appears in the zero-test prose and in **neither** the
+  missing-report nor the unparseable-report prose. `assert a != b` is not sufficient — it
+  passes on any one-word difference.
+- A report whose `tests` attribute is unparseable **but which carries failing cases** renders
+  its failures and does *not* hit the floor. This is the regression the floor could introduce.
 - Report truncated mid-multibyte → `summarize()` returns prose, `main` returns 0.
+- Zero-byte report → prose (`ParseError: no element found`), `main` returns 0.
 - Well-formed non-ASCII report → parses, and the failure's reason text survives to the output.
 - Real report with failures → unchanged rendering (regression guard for the floor).
-- A subprocess spawned from a test does not see `PYTEST_ADDOPTS`, asserted with the variable
-  actually set in the parent.
-- A subprocess spawned at test-module import time does not see it either — this is the case
-  that distinguishes the chosen hook from a session fixture, so it is the one worth pinning.
-- The hook implementation is not marked `tryfirst`. Worth a guard assertion: marking it would
-  silently move the pop onto the controller and strip every worker's configuration, which no
-  behavioural test in this change would catch.
+- Nested-pytest run: a grandchild spawned from a test body sees no `PYTEST_ADDOPTS`.
+- Nested-pytest run: a grandchild spawned at module import time sees none either.
+- Guard: the hook carries no `tryfirst`, `wrapper`, or `hookwrapper` in its `pytest_impl`.
 - Each new assertion mutation-verified: break the behaviour, watch the test redden, restore.
+  For the floor, that includes reverting the `and not _failing_cases(root)` clause and
+  confirming the unparseable-attribute test reddens.
 
 ## Residual, accepted
 
