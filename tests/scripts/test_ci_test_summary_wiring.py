@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+from collections.abc import Callable
 
 import yaml
 
@@ -33,7 +34,7 @@ def _steps() -> list[dict]:
     return workflow["jobs"]["lint-type-test"]["steps"]
 
 
-def _step(predicate) -> dict:
+def _step(predicate: Callable[[dict], bool]) -> dict:
     matches = [step for step in _steps() if predicate(step)]
     assert len(matches) == 1, f"expected exactly one matching step, found {len(matches)}"
     return matches[0]

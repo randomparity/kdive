@@ -190,6 +190,27 @@ def test_the_failure_list_is_bounded(tmp_path: Path) -> None:
     assert len(summary.encode("utf-8")) < 900_000
 
 
+def test_enormous_node_ids_hit_the_byte_ceiling(tmp_path: Path) -> None:
+    # Capping the count and each reason still leaves the node ids unbounded: a parametrized id
+    # is built from the parameter's repr, so a test over a large fixture produces a single very
+    # long id, and 50 of those clear a megabyte between them. Node ids are deliberately not
+    # truncated — a cut id is no longer pasteable — so the byte ceiling is what holds, and
+    # GitHub drops an oversized summary outright rather than trimming it.
+    cases = "".join(
+        f'<testcase classname="tests.bulk.test_bulk" name="test[{"q" * 40_000}-{index}]" '
+        f'file="tests/bulk/test_bulk.py" line="1" time="0.0">'
+        f'<failure message="AssertionError">frame</failure></testcase>'
+        for index in range(MAX_FAILURES)
+    )
+    report = (
+        f'<testsuites><testsuite name="pytest" errors="0" failures="{MAX_FAILURES}" '
+        f'skipped="0" tests="{MAX_FAILURES}" time="1.0">{cases}</testsuite></testsuites>'
+    )
+    summary = summarize(_report(tmp_path, report))
+    assert len(summary.encode("utf-8")) <= 900_100
+    assert "summary truncated" in summary
+
+
 def test_one_enormous_reason_cannot_blow_the_budget(tmp_path: Path) -> None:
     # `CI` being set disables pytest's assertion-explanation truncation (ADR-0577), so a single
     # failure comparing two large structures carries a reason with no upper bound of its own.

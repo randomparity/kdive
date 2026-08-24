@@ -72,10 +72,11 @@ need (`just lint`, `just type`, `prek run`).
 
 **Before `git commit` (agent guidance):** let the mutating hooks rewrite the tree *before* the
 commit attempt rather than during it. Four hooks in `.pre-commit-config.yaml` rewrite files in
-place — `ruff check --fix` and `ruff-format` (Python only), `end-of-file-fixer` and
-`trailing-whitespace` (any text file). When one of them changes something, `git commit` aborts
-with the tree modified and the same commit has to be re-staged and retried, so that round trip
-is guaranteed rather than occasional for any commit touching a file a hook rewrites.
+place — `ruff-check` (which runs with `--fix`) and `ruff-format` (Python only),
+`end-of-file-fixer` and `trailing-whitespace` (any text file). When one of them changes
+something, `git commit` aborts with the tree modified and the same commit has to be re-staged
+and retried, so that round trip is guaranteed rather than occasional for any commit touching a
+file a hook rewrites.
 `just format` settles the ruff pair, which is all a Python-only change needs. For anything
 else (Markdown, YAML, shell), stage first and run `prek run`: it builds its file list from
 the staged paths, stashes everything unstaged while it works, rewrites the staged files in

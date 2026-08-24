@@ -21,8 +21,9 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _AGENTS = _ROOT / "AGENTS.md"
 _CONFIG = _ROOT / ".pre-commit-config.yaml"
 
-#: The hooks the pre-commit ordering paragraph tells an agent to settle first.
-_NAMED_HOOKS = ("ruff check --fix", "ruff-format", "end-of-file-fixer", "trailing-whitespace")
+#: The hooks the pre-commit ordering paragraph tells an agent to settle first, spelled as the
+#: ids `.pre-commit-config.yaml` declares — which is what makes the prose greppable against it.
+_NAMED_HOOKS = ("ruff-check", "ruff-format", "end-of-file-fixer", "trailing-whitespace")
 
 #: The sentence the paragraph opens with, used to locate it rather than search the whole file —
 #: `just format` and `prek run` appear elsewhere in AGENTS.md for unrelated reasons.
@@ -41,17 +42,13 @@ def _hook_ids() -> set[str]:
 
 
 def test_every_hook_the_guidance_names_still_exists() -> None:
-    # `ruff check --fix` is how the paragraph refers to the `ruff-check` hook's effect; the
-    # others are hook ids verbatim. Both spellings are resolved to the id before the check, so
-    # the assertion is over what `.pre-commit-config.yaml` actually declares.
     ids = _hook_ids()
     paragraph = _paragraph()
-    for named in _NAMED_HOOKS:
-        assert named in paragraph, f"the guidance no longer names {named!r}"
-    for hook_id in ("ruff-check", "ruff-format", "end-of-file-fixer", "trailing-whitespace"):
+    for hook_id in _NAMED_HOOKS:
+        assert hook_id in paragraph, f"the guidance no longer names {hook_id!r}"
         assert hook_id in ids, (
             f"AGENTS.md tells an agent to settle {hook_id!r} before committing, but "
-            f".pre-commit-config.yaml has no such hook — the advice now names nothing"
+            ".pre-commit-config.yaml has no such hook — the advice now names nothing"
         )
 
 
