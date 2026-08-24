@@ -49,6 +49,7 @@ import kdive.jobs.assembly as job_assembly_module
 import kdive.mcp.assembly.app as mcp_app_module
 from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
 from kdive.store.objectstore import ObjectStore
+from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
 
 # Direct object-store boundary tests still need a complete configuration at collection time.
 # ``setdefault`` yields to a real ``KDIVE_S3_*`` in the developer's shell.

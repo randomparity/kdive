@@ -81,7 +81,10 @@ file a hook rewrites.
 else (Markdown, YAML, shell), stage first and run `prek run`: it builds its file list from
 the staged paths, stashes everything unstaged while it works, rewrites the staged files in
 the working tree, and exits non-zero when it changed one — a rewrite, not a gate failure.
-Then `git add -A` and commit, which now has nothing left to rewrite.
+Record the staged set first (`git diff --cached --name-only`), then re-add exactly those
+paths — `git add -- <the paths you staged>` — and commit, which now has nothing left to
+rewrite. Not `git add -A` or `git add -u`: `prek run` restored every unrelated unstaged
+file when it finished, and both would sweep those into this commit.
 
 **Running the live tiers** — before re-deriving how to run a live test, read
 [`docs/operating/runbooks/live-testing.md`](docs/operating/runbooks/live-testing.md).

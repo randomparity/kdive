@@ -278,11 +278,21 @@ jobs:
         # `uv run python` rather than the ambient python3 for the reason scripts/audit_report.py
         # records: ruff lints scripts/ at py314, so the file is not portable to an older
         # interpreter.
+        #
+        # `--no-sync` skips the resolve this step has no use for — `Sync dependencies` above
+        # already installed the environment, and the script is stdlib-only. Not `--no-project`:
+        # pyproject pins `requires-python = "==3.14.*"` and this workflow installs no Python
+        # (setup-uv takes no `python-version`, and there is no actions/setup-python), so it
+        # would fall back to the runner's ambient interpreter or trigger a download — the very
+        # thing the paragraph above rules out (ADR-0578 rejects it by name). The trade
+        # `--no-sync` carries: `if: always()` fires this step even when `Sync dependencies`
+        # failed, and with no `.venv` present `uv run --no-sync` errors out. `continue-on-error`
+        # swallows that, so the result is no summary rather than a red job.
         if: always()
         continue-on-error: true
         env:
           PYTEST_JUNIT_REPORT: ${{ runner.temp }}/pytest-junit.xml
-        run: uv run python scripts/pytest_summary.py "$PYTEST_JUNIT_REPORT"
+        run: uv run --no-sync python scripts/pytest_summary.py "$PYTEST_JUNIT_REPORT"
 
       - name: Compose data-volume persistence proof
         # The structural guard in `just test` only reads `docker compose config`; this drives

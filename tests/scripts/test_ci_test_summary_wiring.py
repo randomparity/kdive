@@ -97,7 +97,12 @@ def test_the_summary_step_cannot_fail_the_job() -> None:
 def test_the_summary_step_uses_the_project_interpreter() -> None:
     # scripts/ is linted at the project's py314 target, so the ambient python3 on the runner
     # can die on a SyntaxError — which `continue-on-error` would then hide completely.
-    assert _summary_step()["run"].startswith("uv run python ")
+    run = _summary_step()["run"]
+    assert run.startswith("uv run "), run
+    assert " python scripts/pytest_summary.py" in run, run
+    # --no-project would satisfy the two assertions above while resolving a fresh
+    # environment against a runner that installs no Python (ADR-0578 rejects it by name).
+    assert "--no-sync" in run, run
 
 
 def test_the_summary_script_exists() -> None:

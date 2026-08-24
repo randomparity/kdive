@@ -107,6 +107,45 @@ def _report(tmp_path: Path, raw: str) -> Path:
     return path
 
 
+def _report_bytes(tmp_path: Path, raw: bytes) -> Path:
+    path = tmp_path / "pytest-junit.xml"
+    path.write_bytes(raw)
+    return path
+
+
+def _fresh(tmp_path: Path, name: str) -> Path:
+    # `_report`/`_report_bytes` write one fixed filename, so a caller building several reports
+    # in one test needs a directory each — see `test_main_returns_zero_for_every_input`.
+    directory = tmp_path / name
+    directory.mkdir()
+    return directory
+
+
+#: A well-formed report describing nothing. pytest writes exactly this on an empty selection,
+#: where it also exits 5 — a red gate (#2068, ADR-0578).
+_ZERO = (
+    '<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests">'
+    '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="0" time="0.016" />'
+    "</testsuites>"
+)
+
+#: `tests` is unparseable, so `_int` reads it as 0 — but the report carries a real failure.
+#: The floor must not take this shape, or it would discard the failure list (#2068).
+_UNPARSEABLE_COUNT_WITH_FAILURE = (
+    '<?xml version="1.0" encoding="utf-8"?><testsuite name="pytest" tests="abc" '
+    'failures="1" errors="0" skipped="0" time="1.0">'
+    '<testcase classname="tests.domain.test_x" name="test_boom" file="tests/domain/test_x.py">'
+    '<failure message="AssertionError: boom" /></testcase></testsuite>'
+)
+
+#: A report cut mid-`é`. `read_text(encoding="utf-8")` raises UnicodeDecodeError on this — a
+#: ValueError, which neither of `summarize`'s handlers catches (#2068).
+_TRUNCATED_NON_ASCII = (
+    b'<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" '
+    b'tests="1" failures="1"><testcase classname="t" name="caf\xc3'
+)
+
+
 def _bulk(count: int, *, reason: str = "AssertionError: assert 0") -> str:
     cases = "".join(
         f'<testcase classname="tests.bulk.test_bulk" name="test_{index}" '
@@ -193,6 +232,54 @@ def test_unparseable_xml_says_so_rather_than_reporting_a_clean_run(tmp_path: Pat
     assert "0 failed" not in summary
 
 
+def test_a_zero_test_report_is_not_reported_as_a_clean_run(tmp_path: Path) -> None:
+    # The defect this floor exists for. pytest exits 5 on an empty selection having written a
+    # well-formed zero-test report, and a killed run can leave a foreign one behind; either
+    # way the gate is red and must not render as totals (#2068, ADR-0578).
+    summary = summarize(_report(tmp_path, _ZERO))
+    assert "totals zero tests" in summary
+    # Asserted by the totals line's own separator rather than by "0 failed": a renderer
+    # emitting "0 failures" would slip a literal match while still reading as a clean run.
+    assert " tests · " not in summary
+
+
+def test_the_zero_test_reason_is_distinguishable_from_the_other_two(tmp_path: Path) -> None:
+    # `assert a != b` would pass on any one-word difference. The floor's own phrase has to be
+    # present in its prose and absent from both neighbours, or a reader cannot tell an
+    # exit-5 collection from a report the test step never wrote.
+    zero = summarize(_report(_fresh(tmp_path, "zero"), _ZERO))
+    missing = summarize(tmp_path / "absent.xml")
+    unparseable = summarize(_report(_fresh(tmp_path, "bad"), "not xml at all"))
+    assert "totals zero tests" in zero
+    assert "totals zero tests" not in missing
+    assert "totals zero tests" not in unparseable
+
+
+def test_an_unparseable_count_with_real_failures_still_lists_them(tmp_path: Path) -> None:
+    # Regression guard, green before the floor exists and required to stay green after it.
+    # `_int` returns 0 for a non-integer attribute, so this report sums to zero tests while
+    # carrying a real failure. Flooring on `tests == 0` alone would throw the failure list
+    # away and claim the report described nothing — a false-clean in the other direction.
+    summary = summarize(_report(tmp_path, _UNPARSEABLE_COUNT_WITH_FAILURE))
+    assert "totals zero tests" not in summary
+    assert "tests/domain/test_x.py::test_boom" in summary
+
+
+def test_a_truncated_non_ascii_report_says_so_rather_than_raising(tmp_path: Path) -> None:
+    # The killed-mid-write case the module docstring already claims to cover. `read_text`
+    # raises UnicodeDecodeError past both handlers; reading bytes makes it the ParseError the
+    # unparseable branch already owns (#2068).
+    summary = summarize(_report_bytes(tmp_path, _TRUNCATED_NON_ASCII))
+    assert "did not parse" in summary
+
+
+def test_a_zero_byte_report_says_so(tmp_path: Path) -> None:
+    # Regression guard, green throughout: `ET.fromstring` already raises on an empty document.
+    # Here so the contract table's rows are each pinned by a test rather than by prose.
+    summary = summarize(_report_bytes(tmp_path, b""))
+    assert "did not parse" in summary
+
+
 def test_the_failure_list_is_bounded(tmp_path: Path) -> None:
     # The artifact exists because 75 KB of log is unreadable; a summary that reproduces it at
     # the same size has bought nothing. GitHub also drops a step summary over 1 MiB outright,
@@ -256,14 +343,22 @@ def test_angle_brackets_in_a_node_id_survive_verbatim(tmp_path: Path) -> None:
 def test_main_returns_zero_for_every_input(tmp_path: Path) -> None:
     # The property the CI step depends on. `render` deciding nothing is what lets the summary
     # be additive to a gate whose exit code is the verdict.
-    for argv in (
-        ["pytest_summary.py", str(_report(tmp_path, _XUNIT1))],
-        ["pytest_summary.py", str(_report(tmp_path, _GREEN))],
-        ["pytest_summary.py", str(_report(tmp_path, "not xml at all"))],
-        ["pytest_summary.py", str(tmp_path / "absent.xml")],
-        ["pytest_summary.py"],
-        ["pytest_summary.py", "a", "b"],
-    ):
+    #
+    # Each report gets its own directory. `_report`/`_report_bytes` write one fixed filename
+    # and this table used to be a tuple literal, so every entry resolved to the last file
+    # written — the run was three passes over "not xml at all", and the entries naming _XUNIT1
+    # and _GREEN asserted nothing at all (#2068).
+    reports = {
+        "xunit1": _report(_fresh(tmp_path, "xunit1"), _XUNIT1),
+        "green": _report(_fresh(tmp_path, "green"), _GREEN),
+        "unparseable": _report(_fresh(tmp_path, "unparseable"), "not xml at all"),
+        "zero": _report(_fresh(tmp_path, "zero"), _ZERO),
+        "truncated": _report_bytes(_fresh(tmp_path, "truncated"), _TRUNCATED_NON_ASCII),
+        "absent": tmp_path / "absent.xml",
+    }
+    for name, report in reports.items():
+        assert main(["pytest_summary.py", str(report)]) == 0, f"non-zero exit for {name}"
+    for argv in (["pytest_summary.py"], ["pytest_summary.py", "a", "b"]):
         assert main(argv) == 0, f"non-zero exit for {argv[1:]}"
 
 
