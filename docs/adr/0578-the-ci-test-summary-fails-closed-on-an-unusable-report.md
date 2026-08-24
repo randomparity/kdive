@@ -48,18 +48,18 @@ own distinct reason, naming the actual condition (the report is present and well
 describes no tests); reusing the "wrote none" or "did not parse" wording would replace a
 misleading totals line with a misleading cause, since both are false for an exit-5 report.
 
-**2. `PYTEST_ADDOPTS` is scrubbed from the environment once per pytest process**, by a
-session-scoped autouse fixture in `tests/conftest.py`, rather than each nested-pytest call
-site passing an explicit `env=`. One fixture neutralises every subprocess a test spawns —
-from a test, a helper, or `src/` — and it holds even against `env=os.environ.copy()`,
-because the variable is gone from the source.
+**2. `PYTEST_ADDOPTS` is scrubbed from the environment in a `pytest_collection` hook** in
+`tests/conftest.py`, rather than each nested-pytest call site passing an explicit `env=`. One
+hook neutralises every subprocess a test spawns — from a test, a helper, or `src/` — and it
+holds even against `env=os.environ.copy()`, because the variable is gone from the source.
 
-The pop is a session fixture rather than a module-level statement because of *when* it runs.
-A module-level pop executes at conftest import, which on the xdist controller is **before**
-the workers are spawned, so the workers never see the variable and silently lose every option
-supplied only that way. A session-scoped autouse fixture runs once per process after startup,
-so the controller and every worker configure themselves from the variable first and only then
-stop passing it on.
+The hook is `pytest_collection` specifically, and the timing is the whole decision. It has to
+run **late enough** that the process has already configured itself from the variable, and
+**early enough** that nothing has spawned a subprocess yet. `pytest_collection` is the only
+one of the candidates that is both: on the xdist controller it runs after the workers are
+spawned, and in each worker it runs before any test module is imported. Because
+`testpaths = ["tests"]`, `tests/conftest.py` is an initial conftest, so the hook is registered
+before collection begins.
 
 **3. The report is read as bytes and parsed from bytes.** `Path.read_bytes()` into
 `ET.fromstring` lets the parser honour the XML encoding declaration instead of assuming
@@ -77,17 +77,17 @@ cause, and part 1 is the only thing covering exit 5.
   `continue-on-error: true`, so none of this can move the gate's verdict either way.
 - **Residual: the floor covers only zero.** A nested pytest that runs N>0 tests and passes
   writes a plausible `N passed` report, and nothing here detects that. The scrub is what
-  prevents it, so the residual is any pytest spawned by a process where that fixture never
-  ran — a separate tool invoked by the workflow step, not a test. Accepted:
+  prevents it, so the residual is any pytest spawned by a process that never ran the hook —
+  a separate tool invoked by the workflow step, not a test. Accepted:
   no such caller exists in `ci.yml` today, and the totals would have to be independently
   attested to catch it, which costs more than the exposure.
 - The scrub is action at a distance: a test that wanted the parent's `PYTEST_ADDOPTS`
   propagated to a child would silently not get one. No test does, and a test that needs
   specific addopts in a child can pass them explicitly.
-- **Residual: a subprocess spawned during collection or at module import** — before the
-  session fixture runs — still inherits the variable. Narrower than the alternative it
-  replaces, and no such spawn exists in this tree; the offending call spawns from inside a
-  test.
+- **Residual: a subprocess spawned before collection begins** — from a conftest at import, or
+  from a `pytest_configure` hook — still inherits the variable. Nothing in this tree does
+  that; the offending call spawns from inside a test, and test modules are imported during
+  collection, after the hook has run.
 - Reading bytes rather than text means a report in a non-UTF-8 encoding now parses instead of
   raising. Strictly wider; nothing depended on the previous narrowing.
 
@@ -101,14 +101,27 @@ cause, and part 1 is the only thing covering exit 5.
   `--junit-xml=… -o junit_family=xunit1`. The guard's scope is the test tree, so a pytest
   spawned from `src/` would defeat it while the scrub covers it. (A fixture would *not* defeat
   it — fixtures live in the test tree.)
-- **Pop `PYTEST_ADDOPTS` at conftest import rather than in a session fixture.** verified:
-  measured A/B on `-n 2`, pytest 9.1.1 / xdist 3.8.0, with
-  `PYTEST_ADDOPTS="--tb=line -o junit_family=xunit1 --junit-xml=…"`. Import-time pop: the
-  worker reports `tb=auto junit_family=xunit2 xmlpath=None` — it lost the options entirely,
-  because the controller pops before spawning it. Session-fixture pop: the worker reports
-  `tb=line junit_family=xunit1`, and the child subprocess still sees `None`. Both write the
-  outer report. The fixture gets the isolation without the worker regression, so the
-  import-time form is strictly worse.
+- **Scrub in a session-scoped autouse fixture.** verified: it fires only in a process that is
+  assigned at least one test, and it fires after test modules are imported. Measured with
+  `MODE=fixture pytest tests -n 4 -q` over a two-test suite (pytest 9.1.1, xdist 3.8.0): the
+  pop ran in `gw0` and `gw1` only — `gw2` and `gw3` imported every test module and never
+  popped. Serially, a module-level `subprocess.run` in a test module saw the full
+  `--tb=line --junit-xml=…`, where the `pytest_collection` hook gave it `None`. Its ordering
+  against sibling session-scoped autouse fixtures is also unspecified by pytest, and
+  `tests/conftest.py` already defines one.
+- **Pop `PYTEST_ADDOPTS` at conftest import.** verified: a tradeoff, not a worse-on-every-axis
+  option — it has no collection-time residual at all, because it runs before anything. It
+  loses on worker configuration: measured
+  `MODE=import pytest tests/test_a.py tests/test_b.py -n 2 -q` with
+  `PYTEST_ADDOPTS="--tb=line -o junit_family=xunit1 --junit-xml=…"`, the workers report
+  `tb=auto junit_family=xunit2 xmlpath=None` — the controller pops before spawning them, so
+  they lose every option supplied only that way. `pytest_collection` wins both axes at once,
+  which is why it is chosen over both this and the fixture.
+- **Scrub in `pytest_configure` or `pytest_sessionstart`.** verified: both reproduce the
+  import-time worker regression. Same command at `-n 2`, workers report
+  `tb=auto junit_family=xunit2` under each, because the xdist controller runs both hooks
+  before it spawns the workers. This is why the hook has to be `pytest_collection` and not
+  merely "a hook".
 - **Leave `_render` alone and fix only the subprocess leak.** verified: on pytest 9.1.1,
   `pytest tests/domain/test_errors.py -m nosuchmarker --junit-xml=… -o junit_family=xunit1`
   exits **5** having written a well-formed report whose sole `<testsuite>` carries

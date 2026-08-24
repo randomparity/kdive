@@ -39,19 +39,17 @@ claims to cover.
 Two independent parts, plus the decode fix. They are not redundant: the scrub removes the
 foreign-write path at its cause, and the floor is the only thing covering exit 5.
 
-1. **Scrub `PYTEST_ADDOPTS` from the environment once per pytest process**, via a
-   session-scoped autouse fixture in `tests/conftest.py`. Each process configures itself from
-   the variable first and only then stops passing it on.
+1. **Scrub `PYTEST_ADDOPTS` from the environment in a `pytest_collection` hook** in
+   `tests/conftest.py`. It runs after each process has configured itself from the variable
+   and before that process imports any test module.
 2. **Floor the renderer.** `_render` treats zero total tests as an unusable report.
 3. **Parse from bytes**, so a truncated multibyte tail is a `ParseError` rather than an
    uncaught `UnicodeDecodeError`.
 
 An earlier draft fixed each nested-pytest call site with an explicit `env=` and enforced it
-with an AST guard over the test tree. ADR-0578 records why the scrub replaced it: one fixture
+with an AST guard over the test tree. ADR-0578 records why the scrub replaced it: one hook
 instead of a per-site obligation plus a guard, and it covers a pytest spawned from `src/`,
-which a test-tree guard cannot see. A/B verified on this branch — with the scrub a child
-process reports `PYTEST_ADDOPTS` as `None`; without it the child inherits
-`--junit-xml=… -o junit_family=xunit1`.
+which a test-tree guard cannot see.
 
 ## Failure contract
 
@@ -68,16 +66,26 @@ one of:
 
 ## Components
 
-**`tests/conftest.py`** — a session-scoped autouse fixture that pops `PYTEST_ADDOPTS` from
-`os.environ`, with a comment naming #2068 and the reason.
+**`tests/conftest.py`** — a `pytest_collection` hook that pops `PYTEST_ADDOPTS` from
+`os.environ` and returns `None` so normal collection proceeds, with a comment naming #2068
+and the timing reason.
 
-It must be a session fixture, **not** a module-level statement. A module-level pop runs at
-conftest import, which on the xdist controller is before the workers spawn, so the workers
-never see the variable and silently lose every option supplied only that way. Measured A/B on
-`-n 2` with `PYTEST_ADDOPTS="--tb=line -o junit_family=xunit1 --junit-xml=…"`: import-time pop
-gives a worker `tb=auto junit_family=xunit2 xmlpath=None`; the session fixture gives it
-`tb=line junit_family=xunit1`, and the child subprocess still sees `None` either way. Both
-write the outer report.
+The hook must be `pytest_collection`, and the timing is the whole point. It has to run late
+enough that the process has configured itself from the variable, and early enough that
+nothing has spawned a subprocess. Measured (pytest 9.1.1, xdist 3.8.0), with
+`PYTEST_ADDOPTS="--tb=line -o junit_family=xunit1 --junit-xml=…"`:
+
+| where the pop runs | worker config | fires in a worker with no tests | module-import spawn |
+|---|---|---|---|
+| conftest import | `tb=auto`, `xunit2` — **lost** | n/a | covered |
+| `pytest_configure` | `tb=auto`, `xunit2` — **lost** | — | covered |
+| `pytest_sessionstart` | `tb=auto`, `xunit2` — **lost** | — | covered |
+| session autouse fixture | `tb=line`, `xunit1` | **no** — `gw0`/`gw1` of 4 only | **leaks** |
+| `pytest_collection` | `tb=line`, `xunit1` | **yes** — all 4 | covered |
+
+The three early hooks lose worker configuration because the xdist controller runs them before
+spawning workers. The fixture runs too late: only in a process assigned at least one test, and
+only after test modules are imported.
 
 **`scripts/pytest_summary.py`**
 
@@ -124,16 +132,18 @@ Every case below is a test in this change, not a manual check.
 - Real report with failures → unchanged rendering (regression guard for the floor).
 - A subprocess spawned from a test does not see `PYTEST_ADDOPTS`, asserted with the variable
   actually set in the parent.
+- A subprocess spawned at test-module import time does not see it either — this is the case
+  that distinguishes the chosen hook from a session fixture, so it is the one worth pinning.
 - Each new assertion mutation-verified: break the behaviour, watch the test redden, restore.
 
 ## Residual, accepted
 
 The floor covers only *zero*. A nested pytest that runs N>0 tests and passes would write a
 plausible `N passed` report that nothing here detects. The scrub is what prevents that, so
-the residual is a pytest spawned where the session fixture never ran — a separate tool
-invoked by the workflow step, or a spawn during collection or module import, rather than from
-inside a test. Neither exists in this tree today, and catching them would require
-independently attesting the totals, which costs more than the exposure.
+the residual is a pytest spawned before collection begins — from a conftest at import, or
+from a `pytest_configure` hook — or by a separate tool the workflow step invokes. None exists
+in this tree today, and catching them would require independently attesting the totals, which
+costs more than the exposure.
 
 ## Out of scope
 
