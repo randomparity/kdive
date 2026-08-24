@@ -9,9 +9,10 @@ report into a short list of *which* node ids failed and *why*, readable on the r
 
 It is a reporting step, not a gate. ``just test``'s exit code is the verdict, so this decides
 nothing: :func:`main` returns 0 for every input, including a report that is missing (pytest
-killed before writing one) or truncated (killed mid-write). Reading a summary is never the
-reason a job goes red, and — more importantly — an unreadable report must never render as a
-run with no failures.
+killed before writing one), truncated (killed mid-write), or well-formed but describing no
+tests at all (an empty selection, or a report another process left behind). Reading a summary
+is never the reason a job goes red, and — more importantly — an unreadable report must never
+render as a run with no failures.
 
 Output is bounded twice over. Listing 3,000 failures would rebuild the 75 KB problem inside
 the summary, and GitHub drops a step summary larger than 1 MiB outright, so an unbounded list
@@ -54,16 +55,21 @@ def summarize(report: str | Path) -> str:
     """
     path = Path(report)
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except OSError:
         return _no_report(path, "the test step wrote none — it may have been killed first")
     try:
+        # Bytes rather than text so the parser honours the report's own encoding declaration,
+        # and so a tail cut mid-character arrives as ParseError instead of the
+        # UnicodeDecodeError that slipped past both handlers — a ValueError, which neither
+        # `except` here catches (#2068, ADR-0578).
+        #
         # The report is pytest's own output, written by this job moments earlier — not
         # attacker-controlled input, so the stdlib parser is the right one to reach for.
         root = ET.fromstring(raw)
     except ET.ParseError:
         return _no_report(path, "its XML did not parse — the report is truncated or corrupt")
-    return _render(root)
+    return _render(root, path)
 
 
 def _no_report(path: Path, why: str) -> str:
@@ -73,7 +79,7 @@ def _no_report(path: Path, why: str) -> str:
     )
 
 
-def _render(root: ET.Element) -> str:
+def _render(root: ET.Element, path: Path) -> str:
     suites = root.iter("testsuite")
     tests = failures = errors = skipped = 0
     duration = 0.0
@@ -85,6 +91,22 @@ def _render(root: ET.Element) -> str:
         duration += _float(suite, "time")
     passed = max(tests - failures - errors - skipped, 0)
 
+    bad = _failing_cases(root)
+    if tests == 0 and not bad:
+        # The gate never legitimately runs zero tests: an empty selection is pytest exit 5,
+        # which is red. So a zero-test report is a signal, not a result — an exit-5 run, or a
+        # foreign report a nested pytest left behind (ADR-0578). Worded as what was observed,
+        # because this cannot tell those two apart and must not claim to.
+        #
+        # `and not bad` is load-bearing. `_int` returns 0 for an unparseable `tests`
+        # attribute, so without it a report carrying real failures would be discarded here —
+        # a false-clean in the opposite direction from the one this floor exists to stop.
+        return _no_report(
+            path,
+            "it parsed but totals zero tests — the run collected nothing, "
+            "or the report is not this run's",
+        )
+
     lines = [
         _HEADING,
         "",
@@ -92,7 +114,6 @@ def _render(root: ET.Element) -> str:
         f"{errors} {'error' if errors == 1 else 'errors'} — {duration:.1f}s",
     ]
 
-    bad = _failing_cases(root)
     if bad:
         lines.append("")
         for node_id, reason in bad[:MAX_FAILURES]:

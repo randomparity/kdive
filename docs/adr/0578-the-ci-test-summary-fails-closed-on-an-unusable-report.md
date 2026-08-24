@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -117,8 +117,12 @@ cause, and part 1 is the only thing covering exit 5.
 > tree, and **no installed plugin implements `pytest_collection`**. That last one is the
 > precondition that matters, and it is narrower than "only `pytest-xdist` is installed" —
 > `anyio` and `hypothesis` also declare `pytest11` entry points here. Neither implements this
-> hook, but `firstresult` means one that did would silently preempt the scrub, so the
-> ordering guard asserts it at runtime rather than leaving it to this note.
+> hook, but `firstresult` means one that did would silently preempt the scrub. That hazard is
+> covered behaviourally rather than by a plugin inventory: the nested runs in
+> `tests/scripts/test_addopts_scrub.py` fail whenever the pop does not happen, whatever
+> preempted it. A metadata check over `pytest11` entry points was written and removed — it
+> inspects module attributes, so it could not see a class-registered hookimpl, xdist's own
+> `DSession.pytest_collection` included, and passed in a tree where the hazard was present.
 
 
 - **Fix each nested-pytest call site with an explicit `env=`, enforced by an AST guard over
@@ -165,6 +169,13 @@ cause, and part 1 is the only thing covering exit 5.
   what a reader skims, and `0 failed` beside a warning still reads as clean at a glance. The
   failure mode is misreading, so the remedy has to remove the misleading line, not annotate
   it.
+- **Run the summary step with `uv run --no-project`.** verified: `pyproject.toml` pins
+  `requires-python = "==3.14.*"` and `.github/workflows/ci.yml` installs no Python —
+  `astral-sh/setup-uv` is called with no `python-version` and there is no
+  `actions/setup-python` — so `--no-project` discards the project environment and falls back to
+  the runner's ambient interpreter or triggers a download. `scripts/pytest_summary.py`'s own
+  docstring records that it is not portable to an arbitrary interpreter. `--no-sync` keeps the
+  environment and skips only the resolve.
 - **Move `--junit-xml` from `PYTEST_ADDOPTS` into the `just test` recipe.** judgment: it would
   write a JUnit file into every developer's tree on every local run, and CI invoking
   `just test` verbatim — so the gate's command keeps its single definition in the justfile —
