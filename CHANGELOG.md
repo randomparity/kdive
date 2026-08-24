@@ -736,6 +736,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct what the default test recipes actually print
 - Describe --tb=short output precisely and drop the duplicated command
 - State pytest's --tb=auto baseline and share the worker cap
+- Settle the mutating hooks before committing
 
 ### Fixed
 
@@ -1215,6 +1216,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound the inner-loop recipes and correct the -k claim
 - Guard parallelism drift and single-source the fallback command
 - Pin the tier literal and PYTHONHASHSEED in the guard
+- Detach the summary tests from the live job summary
 
 ### Build
 
