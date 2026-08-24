@@ -24,6 +24,12 @@ enters a process argv and so cannot collide.
 
 A deliberately malformed constant is also fine: the product's own validator refuses it, and
 it can never match a live child, which by construction carries a well-formed token.
+
+The check folds constants, so a token *computed* at run time from a fixed input — a hard-coded
+``sha256(...).hexdigest()``, say — would still slip through. That is accepted: the defect this
+guards against is a literal copied from a neighbouring test, and widening the check to
+interpret arbitrary expressions would cost more than the residual risk. The fixture's docstring
+carries the reason a test must not mint its own token.
 """
 
 from __future__ import annotations
@@ -42,8 +48,9 @@ _DIGEST_NAMES = frozenset({"request_digest"})
 def _folded_text(node: ast.expr) -> str | None:
     """Fold the constant expressions tests actually write, or return None.
 
-    Covers plain ``str``/``bytes`` literals and the ``"a" * 64`` repetition form that caused
-    #2063 — ``ast.literal_eval`` rejects the latter, so fold it here rather than reach for it.
+    Covers plain ``str``/``bytes`` literals, the ``"a" * 64`` repetition form that caused
+    #2063, and concatenation of the two, so a token cannot be reassembled past the check.
+    ``ast.literal_eval`` folds none of those, so fold them here rather than reach for it.
     Bytes are decoded because an argv assertion spells the token as ``b"a" * 64``.
     """
     if isinstance(node, ast.Constant):
@@ -52,12 +59,17 @@ def _folded_text(node: ast.expr) -> str | None:
         if isinstance(node.value, bytes):
             return node.value.decode("ascii", "replace")
         return None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+    if not isinstance(node, ast.BinOp):
+        return None
+    if isinstance(node.op, ast.Add):
+        left, right = _folded_text(node.left), _folded_text(node.right)
+        return None if left is None or right is None else left + right
+    if isinstance(node.op, ast.Mult):
         for text_node, count_node in ((node.left, node.right), (node.right, node.left)):
             count = getattr(count_node, "value", None)
             if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 1024:
                 continue
-            text = _folded_text(text_node) if isinstance(text_node, ast.Constant) else None
+            text = _folded_text(text_node)
             if text is not None:
                 return text * count
     return None
@@ -121,6 +133,8 @@ def test_guard_rejects_the_token_literals_that_caused_the_defect() -> None:
     assert _offending_lines('assert vars(args) == {"launch_token": "d" * 64}') == [1]
     assert _offending_lines('child.run_capture_child("e" * 64, -1)') == [1]
     assert _offending_lines('token = "0123456789abcdef" * 4\nscan(token)') == [1]
+    # Reassembling a token from pieces does not get it past the check.
+    assert _offending_lines('_operation(launch_token="f" * 32 + "0" * 32)') == [1]
 
     # A token taken from the fixture, or from the operation being restated, is the fix.
     assert _offending_lines("_operation(launch_token=launch_token)") == []
