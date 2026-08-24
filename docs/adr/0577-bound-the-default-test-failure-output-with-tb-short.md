@@ -41,7 +41,8 @@ cost about 3x more and `--tb=short` saves about 55% of them, so the option that 
 dismissed is the one the real measurement selects.
 
 The escalation path had its own defect. `test-verbose` took its flags from a single
-`_TEST_SELECT` that bundled the marker exclusion with `-n auto --maxprocesses=16`, so the
+`_TEST_SELECT` that bundled the marker exclusion with `-n auto --maxprocesses=16 --dist
+worksteal`, so the
 recipe you reach for in order to *read* a failure interleaved up to 16 workers' output. That
 bundling was deliberate — it is what stops the two recipes' *selection* from drifting — so
 the fix has to keep selection shared while letting parallelism differ.
@@ -72,7 +73,8 @@ selection/parallelism seam.
 5. `_TEST_SELECT` splits into `_TEST_MARKERS` (the gated-tier marker expression) and
    `_TEST_XDIST` (parallelism and the worker cap). `test`, `test-verbose`, `test-lf`, and
    `test-changed` all take the marker expression from `_TEST_MARKERS`, so selection cannot
-   drift between them — three of those carried their own literal copy before. `test-lf`
+   drift between them — `test-lf` and `test-changed` each carried their own literal copy
+   before. `test-lf`
    keeps its own parallelism flags, without `--dist worksteal`: worksteal shortens the
    straggler tail of a full run, and `--lf` reruns a handful of tests with no tail to
    shorten. Only parallelism and output flags differ per recipe.
@@ -99,6 +101,11 @@ is unreadable at any level of per-frame detail, and the readable-but-thinner run
 better failure mode. A CI-only `--tb` override would be a second mechanism doing the job of
 the first, which is what the last rejected option below argues against.
 
+One CI job has no rerun to fall back on: `test-ordering.yml` runs `just test` with
+`PYTHONHASHSEED: random` and does not record the seed it drew, so a rerun is a different run,
+not a reproduction. `--tb=short` makes its failures thinner without making them repeatable.
+Recording that seed is worth doing on its own merits and is filed as #2065.
+
 A failure whose diagnosis needs a full frame or an assertion diff now takes a second command.
 That is the trade accepted: it taxes the uncommon case rather than the common one, where
 `--tb=no` would have taxed every single-failure run. The escalation is one recipe away and
@@ -108,8 +115,8 @@ The escalation no longer runs the gate's topology. A failure caused by xdist its
 worker-scoped container resources, cross-worker contention, worksteal ordering, the class
 #2063 was — can pass under `just test-verbose <paths>` and keep failing under `just test`.
 The fallback is direct pytest with the gate's parallelism and verbose output
-(`uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist worksteal -vv`); the
-justfile comment and `AGENTS.md` both name it, because the trap is that escalation looks
+(the flags `_TEST_XDIST` holds, plus `-vv`); the justfile comment spells the command out next
+to that variable and `AGENTS.md` points at it, because the trap is that escalation looks
 green.
 
 The `test` and `test-verbose` recipes no longer share one variable, so a reviewer must check

@@ -92,6 +92,11 @@ _TEST_MARKERS := 'not live_vm and not live_stack and not agent_smoke'
 # xdist parallelism and the worker cap, both explained under `test:` below. `test-lf` does not
 # use it: `--dist worksteal` shortens the straggler tail of a full run, and `--lf` reruns a
 # handful of tests where there is no tail to shorten.
+#
+# This is also the authoritative copy of the "reproduce the gate's topology" command that
+# `test-verbose` below and AGENTS.md both point at — a scoped `test-verbose` is serial, so an
+# xdist-caused failure can vanish under it. Run that case as:
+#   uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist worksteal -vv
 _TEST_XDIST := '-n auto --maxprocesses=16 --dist worksteal'
 
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
@@ -147,8 +152,7 @@ test:
 # Serial execution is a different topology from the gate's, so a failure caused by xdist
 # itself — worker-scoped container resources, cross-worker contention, worksteal ordering —
 # can vanish under escalation. For that case run pytest directly with the gate's parallelism
-# and verbose output: `uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist
-# worksteal -vv`.
+# and verbose output — the command is spelled out beside `_TEST_XDIST` above.
 #
 # The marker exclusion is `_TEST_MARKERS` either way, so selection stays identical to `test:`.
 test-verbose *PATHS:

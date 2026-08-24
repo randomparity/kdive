@@ -58,9 +58,11 @@ the assertion message, so every failure stays individually diagnosable at roughl
 bytes. When a failure needs a full frame or an assertion
 diff, escalate only the affected paths (`just test-verbose tests/<dir>` or a single file)
 instead of re-running everything loud; passing `test-verbose` any argument drops xdist, so
-its output is serial and readable top to bottom. That is a different topology from the
-gate's, so a failure caused by xdist itself can vanish under escalation — reproduce those
-with `uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist worksteal -vv`.
+its output is serial and readable top to bottom. Name paths when you can: any argument drops
+xdist, so one that does not narrow the run (`-x`, `--pdb`, a broad `-k`) runs the whole suite
+single-process. Serial is also a different topology from the gate's, so a failure caused by
+xdist itself can vanish under escalation — reproduce those with direct pytest carrying the
+gate's parallelism flags (`_TEST_XDIST` in the justfile, which spells out the command).
 For one known test, direct pytest stays fine (see above). Run gate recipes bare — never
 piped through `tail`/`head` or with output redirected — so exit codes stay truthful.
 Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you

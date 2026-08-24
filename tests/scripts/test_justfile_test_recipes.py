@@ -1,7 +1,7 @@
 # tests/scripts/test_justfile_test_recipes.py
 """Guard the `test` / `test-verbose` / `test-lf` / `test-changed` flag split (#2007, ADR-0577).
 
-Three properties the recipes' prose asserts and nothing else enforced. Each has already
+Four properties the recipes' prose asserts and nothing else enforced. Each has already
 drifted or was one edit from drifting:
 
 1. Every suite recipe bounds its failure output with ``--tb=short``. Without it every failing
@@ -12,7 +12,10 @@ drifted or was one edit from drifting:
 2. `just test-verbose` with *any* argument runs serially. It is the recipe you reach for in
    order to read a failure, so interleaving up to 16 xdist workers' output defeats it. Bare,
    it keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
-3. All four suite recipes select the same tier. They deliberately differ on parallelism and
+3. Every whole-suite recipe still runs under xdist. Splitting the shared variable put
+   parallelism on its own axis, so losing it is a one-line edit that changes nothing a test
+   would otherwise notice — only how long the gate takes.
+4. All four suite recipes select the same tier. They deliberately differ on parallelism and
    output, which is what makes a divergent marker expression easy to introduce by hand.
 
 Read through ``just --dry-run``, which expands the variables exactly as a real run does, so
@@ -45,7 +48,7 @@ pytestmark = pytest.mark.skipif(_JUST is None, reason="just is required to expan
 _TB = re.compile(r"--tb[= ](\w+)")
 #: Both spellings of the xdist worker-count flag, plus the flags that only make sense with it.
 _PARALLEL = re.compile(
-    r"(?:^|\s)(?:-n\s+\S+|--numprocesses[= ]\S+|--maxprocesses[= ]\S+|--dist[= ]\S+)"
+    r"(?:^|\s)(?:-n\s*\S+|--numprocesses[= ]?\S+|--maxprocesses[= ]?\S+|--dist[= ]?\S+)"
 )
 #: The marker expression as `-m "…"` passes it, captured without its quotes.
 _DASH_M = re.compile(r'-m "([^"]*)"')
@@ -68,6 +71,17 @@ def _expand(*args: str) -> str:
 
 
 @pytest.mark.parametrize("recipe", ["test", "test-lf"])
+def test_the_suite_recipes_stay_parallel(recipe: str) -> None:
+    # The mirror of the bare-verbose assertion. Splitting _TEST_SELECT put parallelism on its
+    # own axis, so losing xdist from a suite recipe is now a one-line edit that changes only
+    # how long the gate takes — nothing else here would notice.
+    assert _PARALLEL.search(_expand(recipe)) is not None, (
+        f"`just {recipe}` must run under xdist: it is a whole-suite recipe, and serially the "
+        "suite is not a gate anyone waits on"
+    )
+
+
+@pytest.mark.parametrize("recipe", ["test", "test-lf"])
 def test_the_suite_recipes_bound_their_failure_output(recipe: str) -> None:
     assert _TB.findall(_expand(recipe)) == ["short"], (
         f"`just {recipe}` must pass exactly one --tb, and it must be short (ADR-0577): -q "
@@ -80,10 +94,15 @@ def test_the_changed_test_recipe_bounds_every_invocation() -> None:
     # A bash recipe with two pytest invocations — the changed-target one and the full-suite
     # fallback. The fallback is the one that can run all 13,000 tests, so it needs the bound
     # at least as much as the gate does.
-    lines = [line for line in _expand("test-changed").splitlines() if "python -m pytest" in line]
+    lines = [
+        line
+        for line in _expand("test-changed").splitlines()
+        if "python -m pytest" in line and not line.lstrip().startswith("#")
+    ]
     assert len(lines) == 2, f"expected two pytest invocations in test-changed, got {len(lines)}"
     for line in lines:
         assert _TB.findall(line) == ["short"], f"unbounded pytest invocation: {line.strip()}"
+        assert _PARALLEL.search(line) is not None, f"serial pytest invocation: {line.strip()}"
 
 
 def test_the_verbose_recipe_keeps_every_frame() -> None:
