@@ -39,9 +39,10 @@ claims to cover.
 Two independent parts, plus the decode fix. They are not redundant: the scrub removes the
 foreign-write path at its cause, and the floor is the only thing covering exit 5.
 
-1. **Scrub `PYTEST_ADDOPTS` from the environment in a `pytest_collection` hook** in
-   `tests/conftest.py`. It runs after each process has configured itself from the variable
-   and before that process imports any test module.
+1. **Scrub `PYTEST_ADDOPTS` from the environment in a `pytest_collection` hook**, defined in
+   `tests/_addopts_scrub.py` and re-exported from `tests/conftest.py` so pytest registers it.
+   It runs after each process has configured itself from the variable and before that process
+   imports any test module.
 2. **Floor the renderer.** `_render` treats zero total tests as an unusable report.
 3. **Parse from bytes**, so a truncated multibyte tail is a `ParseError` rather than an
    uncaught `UnicodeDecodeError`.
@@ -74,9 +75,16 @@ opposite direction. **The floor condition is `tests == 0 and not _failing_cases(
 
 ## Components
 
-**`tests/conftest.py`** — a `pytest_collection` hook that calls
+**`tests/_addopts_scrub.py`** — a `pytest_collection` hook that calls
 `os.environ.pop("PYTEST_ADDOPTS", None)` and returns `None` so normal collection proceeds,
-with a comment naming #2068 and the timing reason.
+with a comment naming #2068 and the timing reason. `tests/conftest.py` re-exports it
+(`from tests._addopts_scrub import pytest_collection`), which is what registers it: a
+conftest hook has to be an attribute of the conftest module.
+
+It lives in its own module rather than inline in the conftest so the scrub's own nested-pytest
+tests can import the *shipped* hook without importing `tests.conftest`, which pulls in the
+whole `kdive` package — 1.45s per nested run against a 0.03s baseline, and it would couple
+those tests to product-package import health.
 
 The `None` default is load-bearing: the variable is unset on every local run, and a bare
 `pop("PYTEST_ADDOPTS")` would raise `KeyError` and break `just test` for everyone.
@@ -106,9 +114,11 @@ order it ahead of `DSession` and restore the regression), and the controller kee
 `PYTEST_ADDOPTS` for the whole session, so a controller-side spawn is outside what this
 covers.
 
-The table was measured in a minimal synthetic repo. It transfers because this repo's
-`tests/conftest.py` defines no `pytest_*` hooks, no `pytest_collection` exists in the tree,
-and no plugins beyond `pytest-xdist` are installed — all three checked.
+The table was measured in a minimal synthetic repo. It transfers because, in the tree this
+change starts from, `tests/conftest.py` defined no `pytest_*` hooks, no `pytest_collection`
+existed anywhere, and no plugins beyond `pytest-xdist` are installed — all three checked. The
+hook this change adds is the only `pytest_collection` in the tree, so nothing competes with it
+for the `firstresult` chain.
 
 **`scripts/pytest_summary.py`**
 
@@ -146,10 +156,17 @@ against a *grandchild* process:
   the case that distinguishes `pytest_collection` from a session fixture, so it is the one
   worth pinning.
 
-The nested run needs `tests/conftest.py`'s hook in scope — run it with the repo root as
-`cwd` and the fixture module under `tmp_path` inside the repo's `tests/` tree, or copy the
-hook into a conftest beside the fixture module and assert the mechanism rather than the
-repo wiring. Pick one and say which in the implementation; do not leave it to the reader.
+The nested run needs the hook in scope. **Chosen:** write a conftest beside the fixture module
+under `tmp_path` that imports the shipped hook from `tests._addopts_scrub` (with the repo root
+on `sys.path`), so the nested run exercises the real implementation rather than a copy of it.
+Doing so means these tests assert the *mechanism*, not the repo wiring — the hook works when
+registered, not that this repo registers it. That second half is a separate guard, below;
+without it, deleting the re-export from `tests/conftest.py` leaves every test here green while
+real runs leak again.
+
+**One guard for the registration** — `tests/guards/`. Assert
+`tests.conftest.pytest_collection is tests._addopts_scrub.pytest_collection`. This is the half
+the nested runs structurally cannot cover, per the paragraph above.
 
 **One guard for the `tryfirst` constraint** — `tests/guards/`. It asserts on pluggy's runtime
 metadata, not on source text: `getattr(hook, "pytest_impl", {})` is `{}` for an undecorated

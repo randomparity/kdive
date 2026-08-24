@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (2026-08-24)
 
 ## Context
 
@@ -48,8 +48,9 @@ own distinct reason, naming the actual condition (the report is present and well
 describes no tests); reusing the "wrote none" or "did not parse" wording would replace a
 misleading totals line with a misleading cause, since both are false for an exit-5 report.
 
-**2. `PYTEST_ADDOPTS` is scrubbed from the environment in a `pytest_collection` hook** in
-`tests/conftest.py`, rather than each nested-pytest call site passing an explicit `env=`. One
+**2. `PYTEST_ADDOPTS` is scrubbed from the environment in a `pytest_collection` hook** —
+defined in `tests/_addopts_scrub.py`, re-exported from `tests/conftest.py` so pytest registers
+it — rather than each nested-pytest call site passing an explicit `env=`. One
 hook neutralises every subprocess a test spawns — from a test, a helper, or `src/` — and it
 holds even against `env=os.environ.copy()`, because the variable is gone from the source.
 
@@ -62,7 +63,12 @@ the hookspec is `firstresult`, so the chain stops before this implementation —
 therefore keeps the variable and hands it to every worker, and each worker runs the hook
 itself, before importing any test module. Serially there is no `DSession`, so the hook runs
 normally. Because `testpaths = ["tests"]`, `tests/conftest.py` is an initial conftest and the
-hook is registered before collection begins.
+hook is registered before collection begins — the re-export is what puts it there, since a
+conftest hook must be an attribute of the conftest module. The definition sits in a sibling
+module so the scrub's own nested-pytest tests can import the shipped hook without importing
+`tests.conftest`, which pulls in the whole `kdive` package (1.45s per nested run against a
+0.03s baseline). That split costs a guard: nothing in those nested tests observes the
+re-export, so a separate guard asserts `tests.conftest.pytest_collection` is the same object.
 
 **The implementation must not be marked `tryfirst`.** Under pluggy that would order it ahead
 of `DSession.pytest_collection`, the controller would pop before spawning workers, and the
@@ -112,9 +118,10 @@ cause, and part 1 is the only thing covering exit 5.
 
 > The A/B measurements below were taken in a minimal synthetic repo with
 > `testpaths = ["tests"]`, not in this tree, so the commands are not re-runnable here as
-> written. Three transfer conditions were checked against this repo: `tests/conftest.py`
-> defines no `pytest_*` hooks, no `pytest_collection` implementation exists anywhere in the
-> tree, and **no installed plugin implements `pytest_collection`**. That last one is the
+> written. Three transfer conditions were checked against this repo as it stood before this
+> change: `tests/conftest.py` defined no `pytest_*` hooks, no `pytest_collection`
+> implementation existed anywhere in the tree, and **no installed plugin implements
+> `pytest_collection`**. That last one is the
 > precondition that matters, and it is narrower than "only `pytest-xdist` is installed" —
 > `anyio` and `hypothesis` also declare `pytest11` entry points here. Neither implements this
 > hook, but `firstresult` means one that did would silently preempt the scrub. That hazard is
@@ -126,7 +133,7 @@ cause, and part 1 is the only thing covering exit 5.
 
 
 - **Fix each nested-pytest call site with an explicit `env=`, enforced by an AST guard over
-  the test tree.** verified: this was the original design; the conftest scrub replaces it
+  the test tree.** verified: this was the original design; the collection-hook scrub replaces it
   because it is one line instead of a per-site obligation plus a guard, and it covers strictly
   more. A/B on this branch, pytest 9.1.1: with the scrub a child process reports
   `PYTEST_ADDOPTS` as `None`; without it the child inherits

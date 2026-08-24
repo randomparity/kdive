@@ -325,13 +325,14 @@ them; `main` returns 0 for every entry in the argv table.
 
 ## Task 2 — Scrub `PYTEST_ADDOPTS` so no nested pytest inherits the report path
 
-**Files:** modify `tests/conftest.py`; create `tests/scripts/test_addopts_scrub.py` and
-`tests/guards/test_collection_hook_ordering.py`.
+**Files:** create `tests/_addopts_scrub.py`; modify `tests/conftest.py`; create
+`tests/scripts/test_addopts_scrub.py` and `tests/guards/test_collection_hook_ordering.py`.
 
-**Interfaces.** Adds one module-level function `pytest_collection(session)` to
-`tests/conftest.py`. It is a pytest hook, called by pytest, not by repo code.
-`tests/conftest.py` currently defines **no** `pytest_*` hooks, and no `pytest_collection`
-exists anywhere in the tree — verified.
+**Interfaces.** Adds one module-level function `pytest_collection(session)` in
+`tests/_addopts_scrub.py`, re-exported from `tests/conftest.py` — the re-export is what
+registers it, since a conftest hook must be an attribute of the conftest module. It is a
+pytest hook, called by pytest, not by repo code. `tests/conftest.py` currently defines **no**
+`pytest_*` hooks, and no `pytest_collection` exists anywhere in the tree — verified.
 
 ### Step 2.1 — Write the failing tests
 
@@ -455,10 +456,21 @@ metadata: `pytest_impl` is `{}` on an undecorated function and carries the flags
 
 from __future__ import annotations
 
-import importlib
-from importlib.metadata import distributions
-
 import tests._addopts_scrub
+import tests.conftest
+
+
+def test_the_scrub_hook_is_registered_by_the_root_conftest() -> None:
+    # tests/scripts/test_addopts_scrub.py imports the hook into a conftest of its own, so it
+    # proves the hook works when registered — not that *this* repo registers it. Without this
+    # assertion, deleting the re-export from tests/conftest.py leaves every scrub test green
+    # while real runs go back to leaking PYTEST_ADDOPTS into every nested pytest (#2068).
+    registered = getattr(tests.conftest, "pytest_collection", None)
+    assert registered is tests._addopts_scrub.pytest_collection, (
+        "tests/conftest.py no longer re-exports pytest_collection from tests/_addopts_scrub.py, "
+        "so pytest does not register the scrub hook and a nested pytest inherits the run's "
+        "--junit-xml path again (ADR-0578)."
+    )
 
 
 def test_the_scrub_hook_is_not_ordered_ahead_of_xdist() -> None:
@@ -466,44 +478,36 @@ def test_the_scrub_hook_is_not_ordered_ahead_of_xdist() -> None:
     impl = getattr(hook, "pytest_impl", {})
     for flag in ("tryfirst", "wrapper", "hookwrapper"):
         assert not impl.get(flag), (
-            f"tests.conftest.pytest_collection is marked {flag}=True. That orders it ahead of "
-            "DSession.pytest_collection, so the pop lands on the xdist controller before the "
-            "workers are spawned and every worker silently loses its PYTEST_ADDOPTS options "
-            "(ADR-0578)."
+            f"tests/_addopts_scrub.py's pytest_collection is marked {flag}=True. That orders "
+            "it ahead of DSession.pytest_collection, so the pop lands on the xdist controller "
+            "before the workers are spawned and every worker silently loses its "
+            "PYTEST_ADDOPTS options (ADR-0578)."
         )
-
-
-def test_no_installed_plugin_preempts_the_collection_hook() -> None:
-    # `pytest_collection` is `firstresult`, so the first implementation to return non-None
-    # ends the chain. xdist's DSession does exactly that on the controller, which is what the
-    # design relies on — but a *third* plugin doing the same would silently disable the scrub
-    # in the workers too, with no failing test anywhere (#2068, ADR-0578).
-    offenders = []
-    for distribution in distributions():
-        for entry in (e for e in distribution.entry_points if e.group == "pytest11"):
-            try:
-                module = importlib.import_module(entry.value.split(":")[0])
-            except Exception:  # noqa: BLE001 - an unimportable plugin cannot preempt anything
-                continue
-            if hasattr(module, "pytest_collection"):
-                offenders.append(f"{distribution.metadata['Name']} ({entry.value})")
-    assert not offenders, (
-        f"these installed plugins implement pytest_collection: {sorted(set(offenders))}. "
-        "The hookspec is firstresult, so one of them may now preempt "
-        "tests/_addopts_scrub.pytest_collection and silently disable the PYTEST_ADDOPTS "
-        "scrub (ADR-0578). Confirm ordering before assuming the scrub still runs."
-    )
 ```
 
-**Verify:** `uv run python -m pytest tests/scripts/test_addopts_scrub.py tests/guards/test_collection_hook_ordering.py -q`
-**Expect:** all three fail, but read the *reason* — it is not the one you would guess. The
-guard fails with `AttributeError: module 'tests.conftest' has no attribute
-'pytest_collection'`. Both scrub tests fail because the nested conftest's
-`from tests.conftest import pytest_collection` raises `ImportError`, so the nested run exits
-**4** (usage error) before any grandchild is spawned.
+**A third guard was drafted here and removed during implementation.** It enumerated `pytest11`
+entry points and flagged any whose module had a `pytest_collection` attribute, against the
+`firstresult` preemption hazard. It cannot work: `hasattr(module, ...)` inspects module
+attributes, so it does not see a class-registered hookimpl — including xdist's own
+`DSession.pytest_collection`, the exact mechanism it was written to guard against. It passed
+in a tree where the hazard was present, which is worse than no guard. Preemption is covered
+behaviourally instead: the nested runs fail with `'--tb=long' == 'None'` whenever the pop does
+not happen, whatever the reason, which is what preemption looks like from outside. The
+reasoning is recorded as a comment at the foot of the guard file so it is not re-attempted.
 
-That means these two go green the instant the *name* exists, whatever its body does — they do
-not yet prove the pop. Step 2.4 is what closes that gap; do not skip it.
+**`test_the_scrub_hook_is_registered_by_the_root_conftest` was not in the drafted plan
+either.** It was added after running Step 2.2 and noticing both scrub tests went green
+immediately: the nested conftest imports the hook directly, so nothing on that path observes
+the re-export. Confirmed red first by deleting the import from `tests/conftest.py`.
+
+**Verify:** `uv run python -m pytest tests/scripts/test_addopts_scrub.py tests/guards/test_collection_hook_ordering.py -q`
+**Expect:** all four fail, but read the *reason* — it is not the one you would guess. Both
+guards fail at import, because `tests/_addopts_scrub.py` does not exist yet. Both scrub tests
+fail because the nested conftest's `from tests._addopts_scrub import pytest_collection` raises
+`ImportError`, so the nested run exits **4** (usage error) before any grandchild is spawned.
+
+That means the two scrub tests go green the instant the *name* exists, whatever its body does
+— they do not yet prove the pop. Step 2.4 is what closes that gap; do not skip it.
 
 ### Step 2.2 — Add the hook
 
@@ -553,7 +557,7 @@ from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as 
 ```
 
 **Verify:** `uv run python -m pytest tests/scripts/test_addopts_scrub.py tests/guards/test_collection_hook_ordering.py -q`
-**Expect:** 3 passed.
+**Expect:** 4 passed.
 
 ### Step 2.3 — Prove the hook did not disturb collection
 
