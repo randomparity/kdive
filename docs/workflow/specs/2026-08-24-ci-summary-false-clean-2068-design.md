@@ -39,18 +39,18 @@ claims to cover.
 Two independent parts, plus the decode fix. They are not redundant: the scrub removes the
 foreign-write path at its cause, and the floor is the only thing covering exit 5.
 
-1. **Scrub `PYTEST_ADDOPTS` from the environment once**, in `tests/conftest.py`. pytest parses
-   the variable at startup, before conftest import, so the outer run keeps its own
-   `--junit-xml`; the pop only affects processes spawned afterwards.
+1. **Scrub `PYTEST_ADDOPTS` from the environment once per pytest process**, via a
+   session-scoped autouse fixture in `tests/conftest.py`. Each process configures itself from
+   the variable first and only then stops passing it on.
 2. **Floor the renderer.** `_render` treats zero total tests as an unusable report.
 3. **Parse from bytes**, so a truncated multibyte tail is a `ParseError` rather than an
    uncaught `UnicodeDecodeError`.
 
 An earlier draft fixed each nested-pytest call site with an explicit `env=` and enforced it
-with an AST guard over the test tree. ADR-0578 records why the scrub replaced it: one line
-instead of a per-site obligation plus a guard, and it covers a pytest spawned from a fixture
-or from `src/`, which a test-tree guard cannot see. A/B verified on this branch — with the
-scrub a child process reports `PYTEST_ADDOPTS` as `None`; without it the child inherits
+with an AST guard over the test tree. ADR-0578 records why the scrub replaced it: one fixture
+instead of a per-site obligation plus a guard, and it covers a pytest spawned from `src/`,
+which a test-tree guard cannot see. A/B verified on this branch — with the scrub a child
+process reports `PYTEST_ADDOPTS` as `None`; without it the child inherits
 `--junit-xml=… -o junit_family=xunit1`.
 
 ## Failure contract
@@ -68,10 +68,16 @@ one of:
 
 ## Components
 
-**`tests/conftest.py`** — pop `PYTEST_ADDOPTS` from `os.environ` at module level, with a
-comment naming #2068 and the reason. It must run at import, not in a fixture: a fixture runs
-per test, after collection, and the point is that nothing spawned from this process ever sees
-the variable.
+**`tests/conftest.py`** — a session-scoped autouse fixture that pops `PYTEST_ADDOPTS` from
+`os.environ`, with a comment naming #2068 and the reason.
+
+It must be a session fixture, **not** a module-level statement. A module-level pop runs at
+conftest import, which on the xdist controller is before the workers spawn, so the workers
+never see the variable and silently lose every option supplied only that way. Measured A/B on
+`-n 2` with `PYTEST_ADDOPTS="--tb=line -o junit_family=xunit1 --junit-xml=…"`: import-time pop
+gives a worker `tb=auto junit_family=xunit2 xmlpath=None`; the session fixture gives it
+`tb=line junit_family=xunit1`, and the child subprocess still sees `None` either way. Both
+write the outer report.
 
 **`scripts/pytest_summary.py`**
 
@@ -90,8 +96,9 @@ non-ASCII report, and the non-ASCII case added to `test_main_returns_zero_for_ev
 argv table so that property stops being true by construction of its own inputs.
 
 **One new test for the scrub** — that a subprocess spawned from a test does not see
-`PYTEST_ADDOPTS`. This is the behaviour, so it is what gets asserted; asserting that
-`tests/conftest.py` contains a `pop` call would be testing the implementation.
+`PYTEST_ADDOPTS`, asserted with the variable actually set in the parent. This is the
+behaviour, so it is what gets asserted; asserting that `tests/conftest.py` contains a `pop`
+call would be testing the implementation.
 
 **Three corrections carried from the same review** (non-blocking, same subsystem):
 
@@ -123,10 +130,10 @@ Every case below is a test in this change, not a manual check.
 
 The floor covers only *zero*. A nested pytest that runs N>0 tests and passes would write a
 plausible `N passed` report that nothing here detects. The scrub is what prevents that, so
-the residual is a pytest spawned by a process that never loaded `tests/conftest.py` — a
-separate tool invoked by the workflow step, not a test. No such caller exists in `ci.yml`
-today, and catching it would require independently attesting the totals, which costs more
-than the exposure.
+the residual is a pytest spawned where the session fixture never ran — a separate tool
+invoked by the workflow step, or a spawn during collection or module import, rather than from
+inside a test. Neither exists in this tree today, and catching them would require
+independently attesting the totals, which costs more than the exposure.
 
 ## Out of scope
 

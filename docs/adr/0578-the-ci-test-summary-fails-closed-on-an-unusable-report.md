@@ -48,12 +48,18 @@ own distinct reason, naming the actual condition (the report is present and well
 describes no tests); reusing the "wrote none" or "did not parse" wording would replace a
 misleading totals line with a misleading cause, since both are false for an exit-5 report.
 
-**2. `PYTEST_ADDOPTS` is scrubbed from the environment once, in `tests/conftest.py`**, rather
-than each nested-pytest call site passing an explicit `env=`. pytest parses the variable at
-startup, before conftest import, so the outer run keeps its own `--junit-xml`; the pop only
-affects processes spawned afterwards. One line neutralises every in-process subprocess spawn
-— from a test, a fixture, a helper, or `src/` — and it holds even against
-`env=os.environ.copy()`, because the variable is gone from the source.
+**2. `PYTEST_ADDOPTS` is scrubbed from the environment once per pytest process**, by a
+session-scoped autouse fixture in `tests/conftest.py`, rather than each nested-pytest call
+site passing an explicit `env=`. One fixture neutralises every subprocess a test spawns —
+from a test, a helper, or `src/` — and it holds even against `env=os.environ.copy()`,
+because the variable is gone from the source.
+
+The pop is a session fixture rather than a module-level statement because of *when* it runs.
+A module-level pop executes at conftest import, which on the xdist controller is **before**
+the workers are spawned, so the workers never see the variable and silently lose every option
+supplied only that way. A session-scoped autouse fixture runs once per process after startup,
+so the controller and every worker configure themselves from the variable first and only then
+stop passing it on.
 
 **3. The report is read as bytes and parsed from bytes.** `Path.read_bytes()` into
 `ET.fromstring` lets the parser honour the XML encoding declaration instead of assuming
@@ -71,13 +77,17 @@ cause, and part 1 is the only thing covering exit 5.
   `continue-on-error: true`, so none of this can move the gate's verdict either way.
 - **Residual: the floor covers only zero.** A nested pytest that runs N>0 tests and passes
   writes a plausible `N passed` report, and nothing here detects that. The scrub is what
-  prevents it, so the residual is any pytest spawned by a process that never loaded
-  `tests/conftest.py` — a separate tool invoked by the workflow step, not a test. Accepted:
+  prevents it, so the residual is any pytest spawned by a process where that fixture never
+  ran — a separate tool invoked by the workflow step, not a test. Accepted:
   no such caller exists in `ci.yml` today, and the totals would have to be independently
   attested to catch it, which costs more than the exposure.
 - The scrub is action at a distance: a test that wanted the parent's `PYTEST_ADDOPTS`
   propagated to a child would silently not get one. No test does, and a test that needs
   specific addopts in a child can pass them explicitly.
+- **Residual: a subprocess spawned during collection or at module import** — before the
+  session fixture runs — still inherits the variable. Narrower than the alternative it
+  replaces, and no such spawn exists in this tree; the offending call spawns from inside a
+  test.
 - Reading bytes rather than text means a report in a non-UTF-8 encoding now parses instead of
   raising. Strictly wider; nothing depended on the previous narrowing.
 
@@ -89,7 +99,16 @@ cause, and part 1 is the only thing covering exit 5.
   more. A/B on this branch, pytest 9.1.1: with the scrub a child process reports
   `PYTEST_ADDOPTS` as `None`; without it the child inherits
   `--junit-xml=… -o junit_family=xunit1`. The guard's scope is the test tree, so a pytest
-  spawned from a fixture or from `src/` would defeat it while the scrub covers both.
+  spawned from `src/` would defeat it while the scrub covers it. (A fixture would *not* defeat
+  it — fixtures live in the test tree.)
+- **Pop `PYTEST_ADDOPTS` at conftest import rather than in a session fixture.** verified:
+  measured A/B on `-n 2`, pytest 9.1.1 / xdist 3.8.0, with
+  `PYTEST_ADDOPTS="--tb=line -o junit_family=xunit1 --junit-xml=…"`. Import-time pop: the
+  worker reports `tb=auto junit_family=xunit2 xmlpath=None` — it lost the options entirely,
+  because the controller pops before spawning it. Session-fixture pop: the worker reports
+  `tb=line junit_family=xunit1`, and the child subprocess still sees `None`. Both write the
+  outer report. The fixture gets the isolation without the worker regression, so the
+  import-time form is strictly worse.
 - **Leave `_render` alone and fix only the subprocess leak.** verified: on pytest 9.1.1,
   `pytest tests/domain/test_errors.py -m nosuchmarker --junit-xml=… -o junit_family=xunit1`
   exits **5** having written a well-formed report whose sole `<testsuite>` carries
@@ -109,7 +128,7 @@ cause, and part 1 is the only thing covering exit 5.
   `just test` verbatim — so the gate's command keeps its single definition in the justfile —
   is the property #2062 chose the environment variable to preserve (`ci.yml:254-266`). Note
   the recipe guard `tests/scripts/test_justfile_test_recipes.py` would *not* catch the change:
-  its assertions are presence and effective-value checks (`_TB = --tb[= ](\w+)` cannot match
+  its assertions are presence and effective-value checks (its `_TB` pattern matches only `--tb=WORD` or `--tb WORD`, never
   `--junit-xml`), so this rests on the two grounds above and not on that guard.
 - **Give each pytest session a unique report path.** verified: `pytest --help` documents
   `--junit-xml` as "create junit-xml style report file at given path" — a literal path with no
