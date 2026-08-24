@@ -48,35 +48,56 @@ the fix has to keep selection shared while letting parallelism differ.
 
 ## Decision
 
-We will bound the default failure path with `--tb=short` and make a scoped `test-verbose`
-run serial, splitting the shared justfile variable along the selection/parallelism seam.
+We will bound the default failure path with `--tb=short` and make an argument-carrying
+`test-verbose` run serial, splitting the shared justfile variable along the
+selection/parallelism seam.
 
 1. `just test` runs `-q --tb=short`. Every failure keeps its `file:line`, the failing
    expression, the assertion message with introspection, the call chain at one line per
-   frame, and captured logs — individually diagnosable, at roughly half the bytes.
+   frame — individually diagnosable, at roughly half the bytes. Captured log and stdout
+   sections are not affected by `--tb` style and print either way.
 2. `just test-verbose` stays the escalation to `-vv --tb=long`: full frames and full
    assertion diffs, on the paths you name.
-3. `just test-verbose <paths>` drops xdist and runs serially. An unscoped `just test-verbose`
-   keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
-4. `_TEST_SELECT` splits into `_TEST_MARKERS` (the gated-tier exclusion) and `_TEST_XDIST`
-   (parallelism and the worker cap). `test`, `test-verbose`, and `test-lf` all take the
-   marker exclusion from `_TEST_MARKERS`, so selection cannot drift between them — including
-   the third literal copy `test-lf` previously carried. Only parallelism and output flags
-   differ per recipe.
+3. `just test-verbose` drops xdist and runs serially whenever it is given **any** argument,
+   not only a path. `-x`, `--pdb`, and `-k` narrow nothing or narrow differently, and every
+   one of them wants the same serial ordering; the recipe's condition therefore tests for
+   arguments, and the documentation says so rather than describing a paths-only rule the
+   recipe does not implement. A bare `just test-verbose` keeps the parallelism, because the
+   whole suite serially is not a loop anyone waits on.
+4. `_TEST_SELECT` splits into `_TEST_MARKERS` (the gated-tier marker expression) and
+   `_TEST_XDIST` (parallelism and the worker cap). `test`, `test-verbose`, `test-lf`, and
+   `test-changed` all take the marker expression from `_TEST_MARKERS`, so selection cannot
+   drift between them — three of those carried their own literal copy before. `test-lf`
+   keeps its own parallelism flags, without `--dist worksteal`: worksteal shortens the
+   straggler tail of a full run, and `--lf` reruns a handful of tests with no tail to
+   shorten. Only parallelism and output flags differ per recipe.
 5. `AGENTS.md` and the `justfile` comments describe what `-q` actually does and what bounds
    the failure path.
 
 ## Consequences
 
 A red `just test` costs about half what it did, and the cost per additional failure falls
-with it, so a mass failure degrades more slowly. The same applies in CI, which runs the same
-recipe: the #1913-shaped run gets shorter, though it stays long — `--tb=short` bounds the
+with it, so a mass failure degrades more slowly. It stays long — `--tb=short` bounds the
 per-failure cost, not the failure count.
+
+CI runs the same recipe and gains less than the local measurement above. The measurement is
+local, where pytest truncates a long assertion explanation to 8 lines; with `CI` set in the
+environment it does not truncate at all
+(`_pytest/assertion/truncate.py`), and no `--tb` style bounds that explanation. What CI saves
+is the frame and source-context share only — real, but smaller than 55%.
 
 A failure whose diagnosis needs a full frame or an assertion diff now takes a second command.
 That is the trade accepted: it taxes the uncommon case rather than the common one, where
 `--tb=no` would have taxed every single-failure run. The escalation is one recipe away and
 its output is now readable, which it was not before.
+
+The escalation no longer runs the gate's topology. A failure caused by xdist itself —
+worker-scoped container resources, cross-worker contention, worksteal ordering, the class
+#2063 was — can pass under `just test-verbose <paths>` and keep failing under `just test`.
+The fallback is direct pytest with the gate's parallelism and verbose output
+(`uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist worksteal -vv`); the
+justfile comment and `AGENTS.md` both name it, because the trap is that escalation looks
+green.
 
 The `test` and `test-verbose` recipes no longer share one variable, so a reviewer must check
 that a new selection flag goes into `_TEST_MARKERS` rather than into one recipe. That is the

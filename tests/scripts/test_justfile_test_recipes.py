@@ -1,5 +1,5 @@
 # tests/scripts/test_justfile_test_recipes.py
-"""Guard the `test` / `test-verbose` / `test-lf` flag split (#2007, ADR-0577).
+"""Guard the `test` / `test-verbose` / `test-lf` / `test-changed` flag split (#2007, ADR-0577).
 
 Three properties the recipes' prose asserts and nothing else enforced. Each has already
 drifted or was one edit from drifting:
@@ -7,13 +7,19 @@ drifted or was one edit from drifting:
 1. `just test` bounds its failure output with ``--tb=short``. Without it every failing test
    prints a full traceback — ``-q`` trims neither tracebacks nor assertion introspection —
    and a mass failure buries its own cause (#1913).
-2. A *scoped* `just test-verbose <paths>` runs serially. It is the recipe you reach for in
-   order to read a failure, so interleaving up to 16 xdist workers' output defeats it.
-3. All three recipes select the same tier. They deliberately differ on parallelism and
+2. `just test-verbose` with *any* argument runs serially. It is the recipe you reach for in
+   order to read a failure, so interleaving up to 16 xdist workers' output defeats it. Bare,
+   it keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
+3. All four suite recipes select the same tier. They deliberately differ on parallelism and
    output, which is what makes a divergent marker expression easy to introduce by hand.
 
 Read through ``just --dry-run``, which expands the variables exactly as a real run does, so
 this holds over the command the recipe actually issues rather than over justfile source text.
+
+Assertions are over the *effective* flag, never over substring presence: pytest takes the
+last ``--tb`` on the line, so ``--tb=short --tb=long`` contains "--tb=short" and does not do
+it. Likewise xdist is looked for under both spellings, so renaming ``-n`` to
+``--numprocesses`` cannot satisfy a negative assertion by accident.
 """
 
 from __future__ import annotations
@@ -33,8 +39,16 @@ _JUST = shutil.which("just")
 # never skips in CI; the guard is for a `just`-less direct-pytest invocation.
 pytestmark = pytest.mark.skipif(_JUST is None, reason="just is required to expand a recipe")
 
-#: The marker expression, captured with its quotes so a change in quoting is a difference too.
-_MARKERS = re.compile(r'-m "[^"]*"')
+#: Every traceback style on the line, so the *effective* (last) one can be asserted.
+_TB = re.compile(r"--tb[= ](\w+)")
+#: Both spellings of the xdist worker-count flag, plus the flags that only make sense with it.
+_PARALLEL = re.compile(
+    r"(?:^|\s)(?:-n\s+\S+|--numprocesses[= ]\S+|--maxprocesses[= ]\S+|--dist[= ]\S+)"
+)
+#: The marker expression as `-m "…"` passes it, captured without its quotes.
+_DASH_M = re.compile(r'-m "([^"]*)"')
+#: `test-changed` is a bash recipe: it takes the same expression as a shell variable.
+_MARKS_VAR = re.compile(r'marks="([^"]*)"')
 
 
 def _expand(*args: str) -> str:
@@ -52,34 +66,63 @@ def _expand(*args: str) -> str:
 
 
 def test_the_default_suite_bounds_its_failure_output() -> None:
-    assert "--tb=short" in _expand("test"), (
-        "`just test` must pass --tb=short (ADR-0577): -q bounds nothing on the failure path, "
-        "so without it one broken fixture prints a full traceback per failing test"
+    assert _TB.findall(_expand("test")) == ["short"], (
+        "`just test` must pass exactly one --tb, and it must be short (ADR-0577): -q bounds "
+        "nothing on the failure path, so without it one broken fixture prints a full "
+        "traceback per failing test"
     )
 
 
-def test_a_scoped_verbose_run_is_serial() -> None:
-    expanded = _expand("test-verbose", "tests/domain/test_errors.py")
-    assert " -n " not in expanded, (
-        "a scoped `just test-verbose <paths>` must drop xdist (ADR-0577): it is the recipe for "
-        f"reading a failure, and interleaved worker output defeats that; got: {expanded}"
+def test_the_verbose_recipe_keeps_every_frame() -> None:
+    assert _TB.findall(_expand("test-verbose")) == ["long"], (
+        "`just test-verbose` is the escalation from `just test`'s --tb=short, so it must pass "
+        "exactly one --tb and it must be long"
     )
 
 
-def test_an_unscoped_verbose_run_keeps_the_parallelism() -> None:
+@pytest.mark.parametrize(
+    "argument",
+    [
+        pytest.param("tests/domain/test_errors.py", id="path"),
+        # Any argument drops xdist, not only a path: `-x` and `--pdb` narrow nothing but want
+        # serial ordering just as much, and the recipe's condition tests for arguments.
+        pytest.param("-x", id="flag"),
+    ],
+)
+def test_a_verbose_run_with_arguments_is_serial(argument: str) -> None:
+    expanded = _expand("test-verbose", argument)
+    assert _PARALLEL.search(expanded) is None, (
+        "`just test-verbose <args>` must drop xdist (ADR-0577): it is the recipe for reading a "
+        f"failure, and interleaved worker output defeats that; got: {expanded}"
+    )
+
+
+def test_a_bare_verbose_run_keeps_the_parallelism() -> None:
     assert " -n auto " in _expand("test-verbose"), (
-        "`just test-verbose` with no paths runs the whole suite, which is not a loop anyone "
-        "waits on serially — it keeps xdist"
+        "bare `just test-verbose` runs the whole suite, which is not a loop anyone waits on "
+        "serially — it keeps xdist"
     )
 
 
 @pytest.mark.parametrize("recipe", ["test-verbose", "test-lf"])
 def test_every_recipe_selects_the_same_tier(recipe: str) -> None:
-    gate = _MARKERS.search(_expand("test"))
+    gate = _DASH_M.search(_expand("test"))
     assert gate is not None, "`just test` no longer carries a -m expression"
-    other = _MARKERS.search(_expand(recipe))
+    other = _DASH_M.search(_expand(recipe))
     assert other is not None, f"`just {recipe}` no longer carries a -m expression"
-    assert other.group(0) == gate.group(0), (
-        f"`just {recipe}` selects {other.group(0)} but `just test` selects {gate.group(0)} — "
-        "the gated-tier exclusion is shared through _TEST_MARKERS so it cannot drift"
+    assert other.group(1) == gate.group(1), (
+        f"`just {recipe}` selects {other.group(1)!r} but `just test` selects {gate.group(1)!r} "
+        "— the gated-tier exclusion is shared through _TEST_MARKERS so it cannot drift"
+    )
+
+
+def test_the_changed_test_recipe_selects_the_same_tier() -> None:
+    gate = _DASH_M.search(_expand("test"))
+    assert gate is not None, "`just test` no longer carries a -m expression"
+    # A bash-shebang recipe: --dry-run echoes its body, where the expression is a shell value.
+    marks = _MARKS_VAR.search(_expand("test-changed"))
+    assert marks is not None, "`just test-changed` no longer assigns a marks= expression"
+    assert marks.group(1) == gate.group(1), (
+        f"`just test-changed` selects {marks.group(1)!r} but `just test` selects "
+        f"{gate.group(1)!r} — both take it from _TEST_MARKERS so it cannot drift"
     )

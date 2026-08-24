@@ -28,7 +28,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
 | `just test` | the suite, excluding the gated `live_vm` marker |
-| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and a scoped run is serial |
+| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
 | `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, mermaid + doc-link guards, all generated-artifact checks, then the suite |
@@ -53,11 +53,13 @@ output on just that block).
 pre-push gate. Default recipes run quietly (`-q` plus `-ra` from `addopts`), but that only
 drops the per-test progress line and the header — it bounds nothing on the failure path.
 What bounds it is `--tb=short` on `just test` (ADR-0577): one line per frame, plus the
-failing expression, the assertion message, and captured output, so every failure stays
-individually diagnosable at roughly half the bytes. When a failure needs a full frame or an
-assertion diff, escalate only the affected paths (`just test-verbose tests/<dir>` or a
-single file) instead of re-running everything loud; a scoped `test-verbose` run drops xdist
-so its output is serial and readable top to bottom.
+failing expression and the assertion message, so every failure stays individually
+diagnosable at roughly half the bytes. When a failure needs a full frame or an assertion
+diff, escalate only the affected paths (`just test-verbose tests/<dir>` or a single file)
+instead of re-running everything loud; passing `test-verbose` any argument drops xdist, so
+its output is serial and readable top to bottom. That is a different topology from the
+gate's, so a failure caused by xdist itself can vanish under escalation — reproduce those
+with `uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist worksteal -vv`.
 For one known test, direct pytest stays fine (see above). Run gate recipes bare — never
 piped through `tail`/`head` or with output redirected — so exit codes stay truthful.
 Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you
