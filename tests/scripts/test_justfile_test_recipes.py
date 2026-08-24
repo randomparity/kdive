@@ -55,6 +55,11 @@ _PARALLEL = re.compile(
 _DASH_M = re.compile(r'-m "([^"]*)"')
 #: `test-changed` is a bash recipe: it takes the same expression as a shell variable.
 _MARKS_VAR = re.compile(r'marks="([^"]*)"')
+#: The tier every suite recipe selects. Pinned to the literal, not only compared across
+#: recipes: sharing one variable makes the recipes agree with each other by construction, so
+#: a narrowing edit to it would keep every relative assertion green while the gate silently
+#: stopped covering a tier.
+_TIER = "not live_vm and not live_stack and not agent_smoke"
 
 
 def _expand(*args: str) -> str:
@@ -69,6 +74,25 @@ def _expand(*args: str) -> str:
     )
     # --dry-run echoes the expanded line to stderr, leaving stdout for the recipe's own output.
     return result.stderr.strip()
+
+
+def test_the_gate_selects_the_expected_tier() -> None:
+    gate = _DASH_M.search(_expand("test"))
+    assert gate is not None, "`just test` no longer carries a -m expression"
+    assert gate.group(1) == _TIER, (
+        f"`just test` selects {gate.group(1)!r}, not {_TIER!r} — widening or narrowing the "
+        "gated tier is a deliberate two-place edit, not a one-line justfile change"
+    )
+
+
+@pytest.mark.parametrize("recipe", ["test", "test-lf", "test-verbose"])
+def test_every_suite_recipe_pins_the_hash_seed(recipe: str) -> None:
+    # xdist aborts with "Different tests were collected" when workers disagree on the order a
+    # set-backed parametrize yields, so the pin is load-bearing wherever xdist runs.
+    assert 'PYTHONHASHSEED="${PYTHONHASHSEED:-0}"' in _expand(recipe), (
+        f"`just {recipe}` no longer pins PYTHONHASHSEED, so its xdist workers can disagree "
+        "on collection order"
+    )
 
 
 @pytest.mark.parametrize("recipe", ["test", "test-lf"])

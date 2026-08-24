@@ -100,7 +100,8 @@ _TEST_WORKERS := '-n auto --maxprocesses=16'
 #
 # With `_TEST_MARKERS` above, this is also how you reproduce the gate's topology by hand: a
 # `test-verbose` run with arguments is serial, so an xdist-caused failure can vanish under it.
-# Run that case as direct pytest carrying `-m "<_TEST_MARKERS>"` and these flags, plus
+# Run that case as direct pytest under `PYTHONHASHSEED=0` (xdist workers must agree on
+# collection order — see `test:` below) carrying `-m "<_TEST_MARKERS>"` and these flags, plus
 # `-vv --tb=long` — no fourth copy of the flag list, which is what this split exists to end.
 _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 
