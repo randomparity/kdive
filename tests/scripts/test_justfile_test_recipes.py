@@ -5,10 +5,11 @@ Four properties the recipes' prose asserts and nothing else enforced. Each has a
 drifted or was one edit from drifting:
 
 1. Every suite recipe bounds its failure output with ``--tb=short``. Without it every failing
-   test prints a full traceback — ``-q`` trims neither tracebacks nor assertion introspection
-   — and a mass failure buries its own cause (#1913). `test-lf` and `test-changed` are
-   included because both fall back to the whole suite: an empty ``--lf`` cache, an unmappable
-   change.
+   test prints a traceback under pytest's ``--tb=auto`` default, whose first and last frames
+   carry full source context and argument values — ``-q`` trims neither those nor assertion
+   introspection — and a mass failure buries its own cause (#1913). `test-lf` and
+   `test-changed` are included because both fall back to the whole suite: an empty ``--lf``
+   cache, an unmappable change.
 2. `just test-verbose` with *any* argument runs serially. It is the recipe you reach for in
    order to read a failure, so interleaving up to 16 xdist workers' output defeats it. Bare,
    it keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
@@ -103,6 +104,9 @@ def test_the_changed_test_recipe_bounds_every_invocation() -> None:
     for line in lines:
         assert _TB.findall(line) == ["short"], f"unbounded pytest invocation: {line.strip()}"
         assert _PARALLEL.search(line) is not None, f"serial pytest invocation: {line.strip()}"
+        # The tier check below reads the `marks=` assignment; this is what ties the two pytest
+        # invocations to it, so dropping `-m "$marks"` from one cannot pass both.
+        assert '-m "$marks"' in line, f"invocation does not use the shared tier: {line.strip()}"
 
 
 def test_the_verbose_recipe_keeps_every_frame() -> None:

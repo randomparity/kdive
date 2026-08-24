@@ -11,9 +11,11 @@ and it is the command an agent runs most often. Its green path is already minima
 path is not bounded at all.
 
 The belief that it was bounded came from `-q`. It is wrong: `-q` drops the per-test progress
-line and the run header, and nothing else. Tracebacks print in full, with complete assertion
-introspection, one per failing test. Over a suite that collects 13,382 tests, one broken
-conftest or shared fixture therefore emits a full traceback per failing test. This has
+line and the run header, and nothing else. Every failure still prints a traceback with
+complete assertion introspection, under pytest's default `--tb=auto` — which long-styles the
+first and last frame, with their full source context and argument values, and short-styles
+only the frames between them (`_pytest/python.py`, issue364). Over a suite that collects
+13,382 tests, one broken shared fixture therefore emits one of those per failing test. This has
 already happened — `.github/workflows/ci.yml:240` records a run of `3 failed, 8938 passed,
 3448 errors` with the real cause several screens down (#1913). The fix there was pre-pulling
 the testcontainer images, which treats one cause of a mass failure, not the class.
@@ -76,11 +78,11 @@ selection/parallelism seam.
    `test-changed` all take the marker expression from `_TEST_MARKERS`, so selection cannot
    drift between them — `test-lf` and `test-changed` each carried their own literal copy
    before. `test-lf`
-   keeps its own parallelism flags, without `--dist worksteal`: on a warm cache `--lf` reruns
-   a handful of tests, where there is no straggler tail to shorten. A cold or stale cache
-   makes it a full run under the default `load` scheduler, which is the cost of matching the
-   flags to the recipe's normal case rather than its fallback. Only parallelism and output
-   flags differ per recipe.
+   takes the worker count and cap from `_TEST_WORKERS` but not `--dist worksteal`: on a warm
+   cache `--lf` reruns a handful of tests, where there is no straggler tail to shorten. A cold
+   or stale cache makes it a full run under xdist's default `load` scheduler, which is the
+   cost of matching the flags to the recipe's normal case rather than its fallback. Only
+   parallelism and output flags differ per recipe.
 6. `AGENTS.md` and the `justfile` comments describe what `-q` actually does and what bounds
    the failure path.
 
