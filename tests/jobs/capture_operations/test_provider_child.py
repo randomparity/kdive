@@ -85,7 +85,7 @@ def _write_private(path: Path, data: bytes) -> None:
     path.chmod(0o600)
 
 
-def _operation(request: CaptureRequest) -> CaptureOperation:
+def _operation(request: CaptureRequest, launch_token: str) -> CaptureOperation:
     now = datetime.now(UTC)
     return CaptureOperation(
         id=uuid4(),
@@ -97,7 +97,7 @@ def _operation(request: CaptureRequest) -> CaptureOperation:
         system_id=request.system_id,
         domain_name=request.domain_name,
         request_digest=request.digest,
-        launch_token="a" * 64,
+        launch_token=launch_token,
         host_instance="provider-child-host",
         boot_id=None,
         pid=None,
@@ -310,12 +310,13 @@ async def _run_gated_provider_child(
     manifest: Path,
     overlay: Path,
     provider_kind: str,
+    launch_token: str,
     *,
     failure: str | None = None,
     size: int = len(_PCAP_HEADER),
 ) -> tuple[CaptureResult, bytes, Path, list[str], int]:
     request = _request(provider_kind)
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     monkeypatch.setattr(
         launcher_module,
         "__file__",
@@ -372,6 +373,7 @@ def test_child_dispatches_provider_only_after_inputs_are_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     provider_kind: str,
+    launch_token: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     request = _request(provider_kind)
@@ -383,7 +385,7 @@ def test_child_dispatches_provider_only_after_inputs_are_read(
     monkeypatch.setattr(child, "build_capture_executor", lambda req, cfg: executor)
     monkeypatch.setattr(child, "_write_private_result", lambda _fd, data: written.append(data))
 
-    assert child.run_capture_child("a" * 64, -1) == 0
+    assert child.run_capture_child(launch_token, -1) == 0
 
     assert executor.calls == [(request, tmp_path)]
     result = CaptureResult.from_canonical_json(written[0])
@@ -392,7 +394,7 @@ def test_child_dispatches_provider_only_after_inputs_are_read(
 
 
 def test_child_serializes_categorized_failure_without_arbitrary_details(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
     request = _request()
@@ -413,7 +415,7 @@ def test_child_serializes_categorized_failure_without_arbitrary_details(
     monkeypatch.setattr(child, "build_capture_executor", lambda req, cfg: executor)
     monkeypatch.setattr(child, "_write_private_result", lambda _fd, data: written.append(data))
 
-    assert child.run_capture_child("a" * 64, -1) == 0
+    assert child.run_capture_child(launch_token, -1) == 0
 
     assert b"secret-host" not in written[0]
     assert b"PRIVATE KEY" not in written[0]
@@ -435,6 +437,7 @@ def test_child_runs_each_real_provider_dispatch_failure_after_release(
     provider_overlay: Path,
     provider_kind: str,
     method: str,
+    launch_token: str,
 ) -> None:
     result, result_bytes, attempt_dir, calls, samples = asyncio.run(
         _run_gated_provider_child(
@@ -443,6 +446,7 @@ def test_child_runs_each_real_provider_dispatch_failure_after_release(
             capture_manifest,
             provider_overlay,
             provider_kind,
+            launch_token,
             failure=method,
         )
     )
@@ -482,6 +486,7 @@ def test_child_real_provider_dispatch_rejects_invalid_capture_results(
     provider_kind: str,
     size: int,
     category: ErrorCategory,
+    launch_token: str,
 ) -> None:
     result, result_bytes, attempt_dir, calls, samples = asyncio.run(
         _run_gated_provider_child(
@@ -490,6 +495,7 @@ def test_child_real_provider_dispatch_rejects_invalid_capture_results(
             capture_manifest,
             provider_overlay,
             provider_kind,
+            launch_token,
             size=size,
         )
     )
@@ -513,6 +519,7 @@ def test_child_real_provider_dispatch_writes_bounded_success_without_descendants
     capture_manifest: Path,
     provider_overlay: Path,
     provider_kind: str,
+    launch_token: str,
 ) -> None:
     result, result_bytes, attempt_dir, calls, samples = asyncio.run(
         _run_gated_provider_child(
@@ -521,6 +528,7 @@ def test_child_real_provider_dispatch_writes_bounded_success_without_descendants
             capture_manifest,
             provider_overlay,
             provider_kind,
+            launch_token,
         )
     )
 
@@ -537,7 +545,7 @@ def test_child_real_provider_dispatch_writes_bounded_success_without_descendants
 
 
 def test_child_fails_closed_when_configuration_is_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
     request = _request()
@@ -547,7 +555,7 @@ def test_child_fails_closed_when_configuration_is_absent(
     monkeypatch.setattr(child, "read_capture_inputs", lambda _fd: (request, None))
     monkeypatch.setattr(child, "_write_private_result", lambda _fd, data: written.append(data))
 
-    assert child.run_capture_child("a" * 64, -1) == 0
+    assert child.run_capture_child(launch_token, -1) == 0
 
     result = CaptureResult.from_canonical_json(written[0])
     assert result.outcome == "failure"

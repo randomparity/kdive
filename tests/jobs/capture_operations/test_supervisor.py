@@ -63,7 +63,9 @@ def _request(job: Job) -> CaptureRequest:
     )
 
 
-def _operation(job: Job, request: CaptureRequest, state: str = "launching") -> CaptureOperation:
+def _operation(
+    job: Job, request: CaptureRequest, launch_token: str, state: str = "launching"
+) -> CaptureOperation:
     return CaptureOperation(
         id=uuid4(),
         job_id=job.id,
@@ -74,7 +76,7 @@ def _operation(job: Job, request: CaptureRequest, state: str = "launching") -> C
         system_id=request.system_id,
         domain_name=request.domain_name,
         request_digest=request.digest,
-        launch_token="a" * 64,
+        launch_token=launch_token,
         host_instance="host-a",
         boot_id=None if state == "launching" else "boot-a",
         pid=None if state == "launching" else 123,
@@ -250,15 +252,21 @@ def _patch_repository(
 
     async def identity(*args: object, **kwargs: object) -> CaptureOperation:
         events.append("identity")
-        return _operation(_job_for(operation), _request_for(operation), "gated")
+        return _operation(
+            _job_for(operation), _request_for(operation), operation.launch_token, "gated"
+        )
 
     async def running(*args: object, **kwargs: object) -> CaptureOperation:
         events.append("running")
-        return _operation(_job_for(operation), _request_for(operation), "running")
+        return _operation(
+            _job_for(operation), _request_for(operation), operation.launch_token, "running"
+        )
 
     async def cancel(*args: object, **kwargs: object) -> CaptureOperation:
         events.append("cancel_requested")
-        return _operation(_job_for(operation), _request_for(operation), "cancel_requested")
+        return _operation(
+            _job_for(operation), _request_for(operation), operation.launch_token, "cancel_requested"
+        )
 
     async def acknowledge(*args: object, **kwargs: object) -> CaptureOperation:
         events.append("ack")
@@ -328,11 +336,12 @@ def _request_for(operation: CaptureOperation) -> CaptureRequest:
 
 def test_execute_stages_then_probes_releases_and_acks_before_reading_result(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -366,11 +375,12 @@ def test_execute_stages_then_probes_releases_and_acks_before_reading_result(
 
 def test_lock_loss_before_release_cancels_without_releasing(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -401,12 +411,13 @@ def test_lock_loss_before_release_cancels_without_releasing(
 
 def test_authority_loss_during_publication_closes_recovery_before_returning(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     publication_gate = asyncio.Event()
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -440,11 +451,12 @@ def test_authority_loss_during_publication_closes_recovery_before_returning(
 
 def test_spool_disposal_failure_leaves_published_result_unacknowledged(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -476,11 +488,12 @@ def test_spool_disposal_failure_leaves_published_result_unacknowledged(
 
 def test_provider_failure_after_exit_closes_publication_before_propagating(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(
@@ -518,6 +531,7 @@ def test_provider_failure_after_exit_closes_publication_before_propagating(
 
 def test_repeated_cancellation_waits_for_post_exit_publication_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     async def _run() -> list[str]:
         events: list[str] = []
@@ -525,7 +539,7 @@ def test_repeated_cancellation_waits_for_post_exit_publication_cleanup(
         recovery_gate = asyncio.Event()
         job = _job()
         request = _request(job)
-        operation = _operation(job, request)
+        operation = _operation(job, request, launch_token)
         launched = _Launched(
             events,
             CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -565,11 +579,12 @@ def test_repeated_cancellation_waits_for_post_exit_publication_cleanup(
 
 def test_stalled_release_probe_uses_one_second_client_timeout(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -602,12 +617,13 @@ def test_stalled_release_probe_uses_one_second_client_timeout(
 
 def test_recurring_lock_loss_after_release_cancels_and_bars_result(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     wait_gate = asyncio.Event()
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -638,6 +654,7 @@ def test_recurring_lock_loss_after_release_cancels_and_bars_result(
 
 def test_tied_process_exit_and_lock_loss_prioritizes_authority(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import supervisor as supervisor_module
 
@@ -655,7 +672,7 @@ def test_tied_process_exit_and_lock_loss_prioritizes_authority(
 
         job = _job()
         request = _request(job)
-        operation = _operation(job, request)
+        operation = _operation(job, request, launch_token)
         launched = _Launched(
             events,
             CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -698,13 +715,14 @@ def test_tied_process_exit_and_lock_loss_prioritizes_authority(
 
 def test_transition_failure_immediately_after_release_still_cancels_child(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import supervisor as supervisor_module
 
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -738,13 +756,14 @@ def test_transition_failure_immediately_after_release_still_cancels_child(
 
 def test_durable_cancel_failure_does_not_skip_child_termination(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import supervisor as supervisor_module
 
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -778,13 +797,14 @@ def test_durable_cancel_failure_does_not_skip_child_termination(
 
 def test_cancellation_waits_for_cleanup_and_reraises(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     async def _run() -> list[str]:
         events: list[str] = []
         wait_gate = asyncio.Event()
         job = _job()
         request = _request(job)
-        operation = _operation(job, request)
+        operation = _operation(job, request, launch_token)
         launched = _Launched(
             events,
             CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -819,11 +839,12 @@ def test_cancellation_waits_for_cleanup_and_reraises(
 
 def test_child_surviving_term_and_kill_remains_cancel_requested(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     events: list[str] = []
     job = _job()
     request = _request(job)
-    operation = _operation(job, request)
+    operation = _operation(job, request, launch_token)
     launched = _Launched(
         events,
         CaptureResult(outcome="success", size_bytes=4, truncated=False),
@@ -854,6 +875,7 @@ def test_child_surviving_term_and_kill_remains_cancel_requested(
 
 def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import supervisor as supervisor_module
     from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
@@ -902,7 +924,9 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
 
     async def recover(*args: object) -> CaptureOperation:
         events.append("recover")
-        return _operation(_job_for_candidate(candidate), _request_for_candidate(candidate))
+        return _operation(
+            _job_for_candidate(candidate), _request_for_candidate(candidate), launch_token
+        )
 
     monkeypatch.setattr(supervisor_module, "list_recovery_candidates", candidates)
     monkeypatch.setattr(supervisor_module, "LinuxIdentity", lambda **kwargs: _Identity())
@@ -963,6 +987,7 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
 
 def test_startup_recovery_sends_exited_operation_directly_to_publication(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import supervisor as supervisor_module
     from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
@@ -984,7 +1009,9 @@ def test_startup_recovery_sends_exited_operation_directly_to_publication(
         start_ticks=456,
         state="exited",
     )
-    operation = _operation(_job_for_candidate(candidate), _request_for_candidate(candidate))
+    operation = _operation(
+        _job_for_candidate(candidate), _request_for_candidate(candidate), launch_token
+    )
     events: list[str] = []
 
     async def candidates(*args: object) -> tuple[CaptureRecoveryCandidate, ...]:

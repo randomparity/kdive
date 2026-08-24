@@ -43,7 +43,7 @@ def _request() -> CaptureRequest:
     )
 
 
-def _operation(request: CaptureRequest) -> CaptureOperation:
+def _operation(request: CaptureRequest, launch_token: str) -> CaptureOperation:
     now = datetime.now(UTC)
     return CaptureOperation(
         id=uuid4(),
@@ -55,7 +55,7 @@ def _operation(request: CaptureRequest) -> CaptureOperation:
         system_id=request.system_id,
         domain_name=request.domain_name,
         request_digest=request.digest,
-        launch_token="a" * 64,
+        launch_token=launch_token,
         host_instance="test-host",
         boot_id=None,
         pid=None,
@@ -118,10 +118,10 @@ def manifest(tmp_path: Path) -> Path:
 
 
 def test_real_child_is_gated_and_has_exact_process_contract(
-    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://forbidden")
     monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///forbidden-before-release")
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_MACHINE", "forbidden-before-release")
@@ -148,7 +148,7 @@ def test_real_child_is_gated_and_has_exact_process_contract(
                 b"-m",
                 b"kdive.capture_bootstrap",
                 b"--launch-token",
-                b"a" * 64,
+                operation.launch_token.encode(),
                 b"--gate-fd",
                 child.argv[-1].encode(),
             ]
@@ -181,14 +181,14 @@ def test_real_child_is_gated_and_has_exact_process_contract(
 
 
 def test_real_launch_uses_libc_when_python_omits_pidfd_wrappers(
-    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     monkeypatch.delattr(linux_identity_module.linux_pidfd.os, "pidfd_open", raising=False)
     monkeypatch.delattr(
         linux_identity_module.linux_pidfd.signal, "pidfd_send_signal", raising=False
     )
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
         manifest_path=manifest,
@@ -203,7 +203,9 @@ def test_real_launch_uses_libc_when_python_omits_pidfd_wrappers(
     asyncio.run(_run())
 
 
-def test_provider_configuration_uses_post_filter_spool_seam(tmp_path: Path, manifest: Path) -> None:
+def test_provider_configuration_uses_post_filter_spool_seam(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -213,7 +215,7 @@ def test_provider_configuration_uses_post_filter_spool_seam(tmp_path: Path, mani
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         configuration = LocalCaptureConfiguration(
             resource_id=request.resource_id,
             uri="qemu:///system",
@@ -229,7 +231,9 @@ def test_provider_configuration_uses_post_filter_spool_seam(tmp_path: Path, mani
     asyncio.run(_run())
 
 
-def test_gate_eof_exits_without_opening_request(tmp_path: Path, manifest: Path) -> None:
+def test_gate_eof_exits_without_opening_request(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -239,7 +243,7 @@ def test_gate_eof_exits_without_opening_request(tmp_path: Path, manifest: Path) 
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         os.chmod(child.attempt_dir / "request.json", 0)
         assert await child.cancel()
         assert child.returncode == 0
@@ -248,9 +252,11 @@ def test_gate_eof_exits_without_opening_request(tmp_path: Path, manifest: Path) 
     asyncio.run(_run())
 
 
-def test_request_digest_mismatch_fails_before_spawn(tmp_path: Path, manifest: Path) -> None:
+def test_request_digest_mismatch_fails_before_spawn(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     operation = replace(operation, request_digest="0" * 64)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -264,9 +270,11 @@ def test_request_digest_mismatch_fails_before_spawn(tmp_path: Path, manifest: Pa
     assert not (tmp_path / "runtime" / str(operation.id)).exists()
 
 
-def test_spool_refuses_symlink_attempt_directory(tmp_path: Path, manifest: Path) -> None:
+def test_spool_refuses_symlink_attempt_directory(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     runtime = tmp_path / "runtime"
     runtime.mkdir(mode=0o700)
     (runtime / str(operation.id)).symlink_to(tmp_path)
@@ -282,10 +290,10 @@ def test_spool_refuses_symlink_attempt_directory(tmp_path: Path, manifest: Path)
 
 
 def test_manifest_mode_and_fingerprint_drift_fail_before_spawn(
-    tmp_path: Path, manifest: Path
+    tmp_path: Path, manifest: Path, launch_token: str
 ) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
         manifest_path=manifest,
@@ -306,7 +314,9 @@ def test_manifest_mode_and_fingerprint_drift_fail_before_spawn(
     assert aborts == [_before_spawn_evidence(), _before_spawn_evidence()]
 
 
-def test_result_reader_rejects_symlink_and_oversize(tmp_path: Path, manifest: Path) -> None:
+def test_result_reader_rejects_symlink_and_oversize(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -316,7 +326,7 @@ def test_result_reader_rejects_symlink_and_oversize(tmp_path: Path, manifest: Pa
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         child.release()
         await child.wait_process()
         result = child.attempt_dir / "result.json"
@@ -330,7 +340,9 @@ def test_result_reader_rejects_symlink_and_oversize(tmp_path: Path, manifest: Pa
     asyncio.run(_run())
 
 
-def test_capture_reader_is_private_bounded_and_no_follow(tmp_path: Path, manifest: Path) -> None:
+def test_capture_reader_is_private_bounded_and_no_follow(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -340,7 +352,7 @@ def test_capture_reader_is_private_bounded_and_no_follow(tmp_path: Path, manifes
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         child.release()
         await child.wait_process()
         capture = child.attempt_dir / "capture.pcap"
@@ -361,7 +373,7 @@ def test_capture_reader_is_private_bounded_and_no_follow(tmp_path: Path, manifes
 
 @pytest.mark.parametrize("payload", [b"x" * 65_537, b"{not-json\n"])
 def test_result_reader_rejects_oversize_and_malformed_json(
-    tmp_path: Path, manifest: Path, payload: bytes
+    tmp_path: Path, manifest: Path, payload: bytes, launch_token: str
 ) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
@@ -372,7 +384,7 @@ def test_result_reader_rejects_oversize_and_malformed_json(
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         child.release()
         await child.wait_process()
         result = child.attempt_dir / "result.json"
@@ -384,7 +396,9 @@ def test_result_reader_rejects_oversize_and_malformed_json(
     asyncio.run(_run())
 
 
-def test_identity_write_failure_keeps_provider_gate_closed(tmp_path: Path, manifest: Path) -> None:
+def test_identity_write_failure_keeps_provider_gate_closed(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -394,7 +408,7 @@ def test_identity_write_failure_keeps_provider_gate_closed(tmp_path: Path, manif
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         try:
             raise RuntimeError("identity-write fault")
         except RuntimeError:
@@ -404,7 +418,9 @@ def test_identity_write_failure_keeps_provider_gate_closed(tmp_path: Path, manif
     asyncio.run(_run())
 
 
-def test_child_rejects_request_digest_drift_after_release(tmp_path: Path, manifest: Path) -> None:
+def test_child_rejects_request_digest_drift_after_release(
+    tmp_path: Path, manifest: Path, launch_token: str
+) -> None:
     request = _request()
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
@@ -414,7 +430,7 @@ def test_child_rejects_request_digest_drift_after_release(tmp_path: Path, manife
     )
 
     async def _run() -> None:
-        child = await launcher.launch(request, _operation(request))
+        child = await launcher.launch(request, _operation(request, launch_token))
         changed = request.model_copy(update={"domain_name": "changed-after-launch"})
         (child.attempt_dir / "request.json").write_bytes(changed.to_canonical_json())
         os.chmod(child.attempt_dir / "request.json", 0o600)
@@ -426,10 +442,10 @@ def test_child_rejects_request_digest_drift_after_release(tmp_path: Path, manife
 
 
 def test_spawn_failure_closes_gate_and_never_releases(
-    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
         manifest_path=manifest,
@@ -457,10 +473,10 @@ def test_spawn_failure_closes_gate_and_never_releases(
 
 @pytest.mark.parametrize("fault", ["stat", "pidfd", "process-group"])
 def test_post_spawn_attestation_faults_abort_before_release(
-    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, fault: str, launch_token: str
 ) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
         manifest_path=manifest,
@@ -538,10 +554,10 @@ def test_post_spawn_attestation_faults_abort_before_release(
 
 
 def test_stale_post_spawn_numeric_identity_never_signals_unrelated_group(
-    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
         manifest_path=manifest,
@@ -647,6 +663,7 @@ def test_exact_process_members_are_all_attested_before_any_signal(
 
 def test_extra_member_pid_reuse_never_signals_replacement(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     signaled: list[tuple[int, str]] = []
     group_scans: list[str] = []
@@ -707,7 +724,7 @@ def test_extra_member_pid_reuse_never_signals_replacement(
         asyncio.run(
             launcher_module._cleanup_failed_launch(
                 _Process(),  # ty: ignore[invalid-argument-type] - exact cleanup process fake
-                launch_token="a" * 64,
+                launch_token=launch_token,
                 interpreter=Path(sys.executable),
                 host_instance="host-a",
                 leader=(leader, _ready_pidfd()),  # ty: ignore[invalid-argument-type] - identity fake
@@ -720,7 +737,9 @@ def test_extra_member_pid_reuse_never_signals_replacement(
     assert token_scans == ["token"]
 
 
-def test_process_group_recovery_scan_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_group_recovery_scan_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
     class _Identity:
         def __init__(self, pid: int, generation: str) -> None:
             self.pid = pid
@@ -763,7 +782,7 @@ def test_process_group_recovery_scan_is_bounded(monkeypatch: pytest.MonkeyPatch)
         asyncio.run(
             launcher_module._cleanup_failed_launch(
                 _Process(),  # ty: ignore[invalid-argument-type] - exact cleanup process fake
-                launch_token="a" * 64,
+                launch_token=launch_token,
                 interpreter=Path(sys.executable),
                 host_instance="host-a",
                 leader=(leader, leader.open_pidfd(current_host_instance="host-a")),  # ty: ignore[invalid-argument-type]
@@ -774,6 +793,7 @@ def test_process_group_recovery_scan_is_bounded(monkeypatch: pytest.MonkeyPatch)
 
 def test_recovery_acquisition_failure_closes_each_owned_pidfd_once(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     closed: list[int] = []
 
@@ -825,7 +845,7 @@ def test_recovery_acquisition_failure_closes_each_owned_pidfd_once(
         asyncio.run(
             launcher_module._cleanup_failed_launch(
                 _Process(),  # ty: ignore[invalid-argument-type] - exact cleanup process fake
-                launch_token="a" * 64,
+                launch_token=launch_token,
                 interpreter=Path(sys.executable),
                 host_instance="host-a",
                 leader=(leader, 101),  # ty: ignore[invalid-argument-type] - identity fake
@@ -838,10 +858,10 @@ def test_recovery_acquisition_failure_closes_each_owned_pidfd_once(
 
 
 def test_unreadable_token_recovery_scan_fails_closed_without_numeric_signal(
-    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, manifest: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     request = _request()
-    operation = _operation(request)
+    operation = _operation(request, launch_token)
     launcher = GatedCaptureLauncher(
         runtime_root=tmp_path / "runtime",
         manifest_path=manifest,

@@ -159,22 +159,21 @@ def test_fallback_pidfd_is_closed_when_identity_recheck_fails(
 
 
 def test_launch_token_scan_finds_only_exact_executable_and_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     _proc_tree(tmp_path, 123)
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
-    token = "a" * 64
-    _register_bootstrap(tmp_path / "123", interpreter=interpreter, token=token)
+    _register_bootstrap(tmp_path / "123", interpreter=interpreter, token=launch_token)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
 
-    assert scan_launch_token(token, interpreter=interpreter, host_instance="host-a") == (
+    assert scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a") == (
         LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=123, start_ticks=4242),
     )
 
 
 def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     """A matched process vanishing between the cmdline read and the identity read is skipped,
     not turned into a scan-wide RuntimeError (regression test for #1974).
@@ -187,12 +186,11 @@ def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read
     (tmp_path / "sys/kernel/random/boot_id").write_text("boot-a\n")
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
-    token = "a" * 64
     for pid, start_ticks in ((111, 1111), (222, 2222)):
         proc = tmp_path / str(pid)
         proc.mkdir()
         proc.joinpath("stat").write_text(_stat_text(pid, start_ticks))
-        _register_bootstrap(proc, interpreter=interpreter, token=token)
+        _register_bootstrap(proc, interpreter=interpreter, token=launch_token)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
     real_read = LinuxIdentity.read
 
@@ -203,13 +201,13 @@ def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read
 
     monkeypatch.setattr(LinuxIdentity, "read", _flaky_read)
 
-    assert scan_launch_token(token, interpreter=interpreter, host_instance="host-a") == (
+    assert scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a") == (
         LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=222, start_ticks=2222),
     )
 
 
 def test_launch_token_scan_raises_for_genuine_identity_read_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     """A non-ESRCH OSError from the identity read is a genuine failure, not a vanished
     process, and must still abort the scan rather than being widened into a skip
@@ -217,8 +215,7 @@ def test_launch_token_scan_raises_for_genuine_identity_read_failure(
     _proc_tree(tmp_path, 123)
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
-    token = "a" * 64
-    _register_bootstrap(tmp_path / "123", interpreter=interpreter, token=token)
+    _register_bootstrap(tmp_path / "123", interpreter=interpreter, token=launch_token)
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
     monkeypatch.setattr(
         LinuxIdentity,
@@ -227,11 +224,11 @@ def test_launch_token_scan_raises_for_genuine_identity_read_failure(
     )
 
     with pytest.raises(RuntimeError, match="complete launch-token scan could not attest"):
-        scan_launch_token(token, interpreter=interpreter, host_instance="host-a")
+        scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a")
 
 
 def test_launch_token_scan_raises_when_boot_id_sentinel_is_unreadable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     """``LinuxIdentity.read`` reports a vanished pid and an unreadable shared boot_id sentinel
     as the same ``ProcessLookupError`` shape. Only the pid-specific case means "this matched
@@ -239,20 +236,19 @@ def test_launch_token_scan_raises_when_boot_id_sentinel_is_unreadable(
     still raise RuntimeError, not be silently absorbed by the vanished-process skip."""
     interpreter = tmp_path / "python"
     interpreter.write_bytes(b"python")
-    token = "a" * 64
     proc = tmp_path / "123"
     proc.mkdir()
     proc.joinpath("stat").write_text(_stat_text(123, 4242))
-    _register_bootstrap(proc, interpreter=interpreter, token=token)
+    _register_bootstrap(proc, interpreter=interpreter, token=launch_token)
     # deliberately no sys/kernel/random/boot_id under tmp_path
     monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
 
     with pytest.raises(RuntimeError, match="boot id sentinel"):
-        scan_launch_token(token, interpreter=interpreter, host_instance="host-a")
+        scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a")
 
 
 def test_launch_token_scan_refuses_incomplete_proc_enumeration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
     _proc_tree(tmp_path, 123)
     interpreter = tmp_path / "python"
@@ -265,4 +261,4 @@ def test_launch_token_scan_refuses_incomplete_proc_enumeration(
     )
 
     with pytest.raises(RuntimeError, match="complete launch-token scan"):
-        scan_launch_token("a" * 64, interpreter=interpreter, host_instance="host-a")
+        scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a")
