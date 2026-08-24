@@ -70,6 +70,19 @@ piped through `tail`/`head` or with output redirected — so exit codes stay tru
 Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you
 need (`just lint`, `just type`, `prek run`).
 
+**Before `git commit` (agent guidance):** let the mutating hooks rewrite the tree *before* the
+commit attempt rather than during it. Four hooks in `.pre-commit-config.yaml` rewrite files in
+place — `ruff-check` (which runs with `--fix`) and `ruff-format` (Python only),
+`end-of-file-fixer` and `trailing-whitespace` (any text file). When one of them changes
+something, `git commit` aborts with the tree modified and the same commit has to be re-staged
+and retried, so that round trip is guaranteed rather than occasional for any commit touching a
+file a hook rewrites.
+`just format` settles the ruff pair, which is all a Python-only change needs. For anything
+else (Markdown, YAML, shell), stage first and run `prek run`: it builds its file list from
+the staged paths, stashes everything unstaged while it works, rewrites the staged files in
+the working tree, and exits non-zero when it changed one — a rewrite, not a gate failure.
+Then `git add -A` and commit, which now has nothing left to rewrite.
+
 **Running the live tiers** — before re-deriving how to run a live test, read
 [`docs/operating/runbooks/live-testing.md`](docs/operating/runbooks/live-testing.md).
 It is the canonical map of the three live test tiers (`live_stack`, `live_vm`,
