@@ -90,13 +90,14 @@ type:
 _TEST_MARKERS := 'not live_vm and not live_stack and not agent_smoke'
 
 # xdist parallelism and the worker cap, both explained under `test:` below. `test-lf` does not
-# use it: `--dist worksteal` shortens the straggler tail of a full run, and `--lf` reruns a
-# handful of tests where there is no tail to shorten.
+# use it: on a warm cache `--lf` reruns a handful of tests, where there is no straggler tail
+# for `--dist worksteal` to shorten. A cold or stale cache makes it a full serial-scheduled
+# run, which is the cost of keeping the flag set matched to the recipe's normal case.
 #
-# This is also the authoritative copy of the "reproduce the gate's topology" command that
-# `test-verbose` below and AGENTS.md both point at — a scoped `test-verbose` is serial, so an
-# xdist-caused failure can vanish under it. Run that case as:
-#   uv run python -m pytest <paths> -n auto --maxprocesses=16 --dist worksteal -vv
+# These two variables are also how you reproduce the gate's topology by hand: a `test-verbose`
+# run with arguments is serial, so an xdist-caused failure can vanish under it. Run that case
+# as direct pytest carrying `-m "<_TEST_MARKERS>"` and the `_TEST_XDIST` flags below, plus
+# `-vv --tb=long` — no fourth copy of the flag list, which is what this split exists to end.
 _TEST_XDIST := '-n auto --maxprocesses=16 --dist worksteal'
 
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
@@ -123,8 +124,9 @@ _TEST_XDIST := '-n auto --maxprocesses=16 --dist worksteal'
 #
 # `-q` bounds nothing on the failure path: it drops the per-test progress line and the header
 # and nothing else, so every failure still prints a full traceback with complete assertion
-# introspection. `--tb=short` is what bounds it (ADR-0577), at one line per frame plus the
-# failing expression and the assertion message — roughly half the bytes of a real failing run,
+# introspection. `--tb=short` is what bounds it (ADR-0577): a `file:line: in func` entry and
+# its source line per frame instead of the full source context, plus the failing expression
+# and the assertion message — roughly half the bytes of a real failing run,
 # each failure still individually diagnosable. (Captured log/stdout sections read the same
 # under `short` as under `long`; only `--tb=no` drops them, along with everything else.)
 # `test-lf` and `test-changed` carry the same bound: both can fall back to the whole suite —
@@ -152,7 +154,7 @@ test:
 # Serial execution is a different topology from the gate's, so a failure caused by xdist
 # itself — worker-scoped container resources, cross-worker contention, worksteal ordering —
 # can vanish under escalation. For that case run pytest directly with the gate's parallelism
-# and verbose output — the command is spelled out beside `_TEST_XDIST` above.
+# and verbose output — described beside `_TEST_XDIST` above.
 #
 # The marker exclusion is `_TEST_MARKERS` either way, so selection stays identical to `test:`.
 test-verbose *PATHS:

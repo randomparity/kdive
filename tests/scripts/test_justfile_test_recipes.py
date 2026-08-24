@@ -136,6 +136,9 @@ def test_a_verbose_run_with_arguments_is_serial(argument: str) -> None:
     assert selected.group(1) == gate.group(1), (
         f"the serial branch selects a different tier: {expanded}"
     )
+    # The conditional sits between the flags and {{PATHS}}, so an edit there can swallow the
+    # arguments entirely — which reads as a green whole-suite run, not as an error.
+    assert expanded.rstrip().endswith(argument), f"the argument never reached pytest: {expanded}"
 
 
 def test_a_bare_verbose_run_keeps_the_parallelism() -> None:
