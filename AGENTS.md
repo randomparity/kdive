@@ -28,7 +28,7 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
 | `just test` | the suite, excluding the gated `live_vm` marker |
-| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run |
+| `just test-verbose` | same selection as `just test` with full error output (`-vv --tb=long`); optional path arguments scope the run, and passing any argument makes it serial |
 | `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
 | `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
 | `just ci` | the full PR gate: lint, type, lock-check, shell/workflow/Ansible lint, mermaid + doc-link guards, all generated-artifact checks, then the suite |
@@ -50,10 +50,21 @@ output on just that block).
 
 **Choosing how to run the suite (agent guidance):** iterate on changed code with
 `just test-changed`, rerun failures with `just test-lf`, and treat `just test` as the
-pre-push gate. Default recipes run quietly (`-q` plus `-ra` from `addopts`): pass/fail
-counts and the short failure summary — enough to see what broke without flooding the
-terminal. When a failure needs full detail, escalate only the affected paths
-(`just test-verbose tests/<dir>` or a single file) instead of re-running everything loud.
+pre-push gate. Default recipes run quietly (`-q` plus `-ra` from `addopts`), but that only
+drops the per-test progress line and the header — it bounds nothing on the failure path.
+What bounds it is `--tb=short`, carried by `just test`, `just test-lf`, and
+`just test-changed` alike (ADR-0577): a `file:line: in func` entry and its source line for
+every frame, in place of the full source context and argument values pytest's default
+`--tb=auto` prints for the first and last frame, plus the failing expression and the
+assertion message — so every failure stays individually diagnosable at roughly half the
+bytes. When a failure needs a full frame or an assertion diff, escalate only the affected
+paths (`just test-verbose tests/<dir>` or a single file) instead of re-running everything;
+passing `test-verbose` any argument drops xdist, so its output is serial and readable top to
+bottom. Name paths when you can: any argument drops xdist, so one that does not narrow the
+run (`-x`, `--pdb`, a broad `-k`) runs the whole suite single-process. Serial is also a
+different topology from the gate's, so a failure caused by xdist itself can vanish under
+escalation — reproduce those with direct pytest carrying the gate's marker exclusion and
+parallelism flags (`_TEST_MARKERS` / `_TEST_XDIST` in the justfile, where it is described).
 For one known test, direct pytest stays fine (see above). Run gate recipes bare — never
 piped through `tail`/`head` or with output redirected — so exit codes stay truthful.
 Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you

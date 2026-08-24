@@ -83,10 +83,27 @@ format:
 type:
     uv run ty check
 
-# Shared selection for `test` / `test-verbose`: the gated-tier exclusion, xdist parallelism,
-# and the worker cap described below, defined once so the quiet and verbose invocations
-# cannot drift apart.
-_TEST_SELECT := '-m "not live_vm and not live_stack and not agent_smoke" -n auto --maxprocesses=16 --dist worksteal'
+# The gated-tier exclusion, defined once so what `test`, `test-verbose`, `test-lf`, and
+# `test-changed` select cannot drift apart. The bare expression rather than `-m "…"`, because
+# `test-changed` is a bash recipe that needs it as a shell value. Split from the parallelism
+# below: the recipes deliberately differ on parallelism and must not differ on selection.
+_TEST_MARKERS := 'not live_vm and not live_stack and not agent_smoke'
+
+# Worker count and the cap, explained under `test:` below. Its own variable because `test-lf`
+# takes the cap without the scheduler flag: on a warm cache `--lf` reruns a handful of tests,
+# where there is no straggler tail for `--dist worksteal` to shorten. A cold or stale cache
+# makes it a full run under xdist's default `load` scheduler, which is the cost of matching
+# the flag set to the recipe's normal case rather than its fallback.
+_TEST_WORKERS := '-n auto --maxprocesses=16'
+
+# What every whole-suite recipe runs under.
+#
+# With `_TEST_MARKERS` above, this is also how you reproduce the gate's topology by hand: a
+# `test-verbose` run with arguments is serial, so an xdist-caused failure can vanish under it.
+# Run that case as direct pytest under `PYTHONHASHSEED=0` (xdist workers must agree on
+# collection order — see `test:` below) carrying `-m "<_TEST_MARKERS>"` and these flags, plus
+# `-vv --tb=long` — no fourth copy of the flag list, which is what this split exists to end.
+_TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
@@ -109,22 +126,52 @@ _TEST_SELECT := '-m "not live_vm and not live_stack and not agent_smoke" -n auto
 # collected". It defaults to 0 but is overridable: the weekly test-ordering workflow sets
 # PYTHONHASHSEED=random to surface any new ordering-dependent test the pinned seed would
 # otherwise mask.
+#
+# `-q` bounds nothing on the failure path: it drops the per-test progress line and the header
+# and nothing else. Every failure still prints a traceback under pytest's default `--tb=auto`,
+# which long-styles the first and last frame — full source context and argument values — and
+# short-styles only what is between them. `--tb=short` is what bounds it (ADR-0577): a
+# `file:line: in func` entry and its source line for *every* frame, plus the failing
+# expression and the assertion message — roughly half the bytes of a real failing run,
+# each failure still individually diagnosable. (Captured log/stdout sections read the same
+# under `short` as under `long`; only `--tb=no` drops them, along with everything else.)
+# `test-lf` and `test-changed` carry the same bound: both can fall back to the whole suite —
+# an empty `--lf` cache, an unmappable change — so both have the same mass-failure shape.
+# `just test-verbose <paths>` is the escalation when a full frame or an assertion diff is
+# actually needed.
 test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_SELECT}} -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short
 
 # Same selection as `test:` with full error output for inspection: `-vv` restores complete
-# assertion introspection and diffs, `--tb=long` keeps every frame, where `-q` trims both.
-# Optional path arguments scope the run to the failing files, so a failure can be escalated
-# to readable output without re-running the whole suite loudly or hand-assembling flags.
+# assertion introspection and diffs and `--tb=long` keeps every frame, where `test:` runs
+# `--tb=short`. Optional arguments scope the run to the failing files, so a failure can be
+# escalated to readable output without re-running the whole suite loudly or hand-assembling
+# flags. `{{PATHS}}` interpolates unquoted and the shell re-splits it, so an argument
+# containing a space does not survive: `-k retryable` works, `-k "a or b"` does not — use
+# direct pytest for that.
+#
+# Passing *any* argument drops xdist and runs serially — the test is "did you pass arguments",
+# not "did you pass paths", so `just test-verbose -x` runs the whole suite serially too.
+# Interleaving up to 16 workers' output defeats the point of the recipe you reach for in order
+# to *read* a failure, and every escalation flag (`-x`, `--pdb`) wants the same serial
+# ordering (ADR-0577). A bare `just test-verbose` keeps the parallelism, because the whole
+# suite serially is not a loop anyone waits on.
+#
+# Serial execution is a different topology from the gate's, so a failure caused by xdist
+# itself — worker-scoped container resources, cross-worker contention, worksteal ordering —
+# can vanish under escalation. For that case run pytest directly with the gate's parallelism
+# and verbose output — described beside `_TEST_XDIST` above.
+#
+# The marker exclusion is `_TEST_MARKERS` either way, so selection stays identical to `test:`.
 test-verbose *PATHS:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_SELECT}} -vv --tb=long {{PATHS}}
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{ if PATHS == '' { _TEST_XDIST } else { '' } }} -vv --tb=long {{PATHS}}
 
 # Rerun the tests that failed on the previous run, failures first — the fast inner loop
 # (#1334, ADR-0420). Additive: `just test` stays the full pre-push gate and this never runs
 # in CI. Same marker exclusion and pinned PYTHONHASHSEED as `test:`, so a stale/empty --lf
 # cache (pytest then runs everything) still skips the gated live tiers and collects stably.
 test-lf:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" --lf -n auto --maxprocesses=16 -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" --lf {{_TEST_WORKERS}} -q --tb=short
 
 # Run only the tests your working changes touch — the fast inner loop (#1334, ADR-0420).
 # scripts/select_changed_tests.py maps each changed src file to every tests/**/test_<stem>.py
@@ -135,9 +182,9 @@ test-lf:
 test-changed:
     #!/usr/bin/env bash
     set -euo pipefail
-    marks="not live_vm and not live_stack and not agent_smoke"
+    marks="{{_TEST_MARKERS}}"
     run_full() {
-      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "$marks" -n auto --maxprocesses=16 --dist worksteal -q
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "$marks" {{_TEST_XDIST}} -q --tb=short
     }
     # Command substitution (not `< <(...)`) so a selector crash is caught, not read as "no
     # changed tests" — a false green is the one failure this recipe must never produce.
@@ -159,7 +206,7 @@ test-changed:
       # (a changed live_vm/live_stack/agent_smoke test) — report it, don't abort as a
       # false-red under set -e. Other non-zero codes are real failures and propagate.
       rc=0
-      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" -n auto --maxprocesses=16 --dist worksteal -q || rc=$?
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" {{_TEST_XDIST}} -q --tb=short || rc=$?
       if [[ "$rc" -eq 5 ]]; then
         echo "all selected tests are gated (live_vm/live_stack/agent_smoke) — none ran; use 'just test' or a live recipe"
         exit 0
