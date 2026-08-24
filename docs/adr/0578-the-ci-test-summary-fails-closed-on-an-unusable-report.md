@@ -106,7 +106,13 @@ cause, and part 1 is the only thing covering exit 5.
   handler — inherits it. Nothing in this tree does either; the offending call spawns from
   inside a test, on a worker. Accepted as prose rather than machinery.
 - Reading bytes rather than text means a report in a non-UTF-8 encoding now parses instead of
-  raising. Strictly wider; nothing depended on the previous narrowing.
+  raising. Strictly wider; nothing depended on the previous narrowing. It also puts byte
+  sequences in front of expat that previously died in the decoder, so the parser's own
+  behaviour was checked rather than assumed. Verified on CPython 3.14.6: an external entity
+  reference raises `ParseError`, which the existing handler turns into prose at exit 0 — no
+  file disclosure. Internal entity expansion does run (a 4-level nest yielded 10,000 characters
+  from a few hundred bytes); accepted, because reaching it needs code execution in the test job
+  and `MAX_FAILURES`/`MAX_BYTES` bound what the amplification can produce.
 - **Residual: a zero-total report that still carries failing cases keeps its totals line**,
   so it prints `0 failed` above a real failure list. That shape does not take the floor —
   deliberately, since discarding the failures would be worse — but it means the "never renders

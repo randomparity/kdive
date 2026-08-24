@@ -227,6 +227,45 @@ Every case below is a test in this change, not a manual check.
   For the floor, that includes reverting the `and not _failing_cases(root)` clause and
   confirming the unparseable-attribute test reddens.
 
+## Threat model
+
+The change parses input the script does not produce, so the boundaries are worth stating.
+
+**Boundaries.** (1) The JUnit report file → `summarize()`. Widened by this change: reading
+bytes instead of UTF-8 text means a report in any encoding, and any byte sequence, now reaches
+expat where some previously died in the decoder. (2) `PYTEST_ADDOPTS` → every pytest process
+and everything it spawns. Narrowed by this change: the scrub removes the variable. (3) The
+rendered markdown → `$GITHUB_STEP_SUMMARY`. Unchanged.
+
+**Actor model.** For a `pull_request` run from a fork, the untrusted party is the PR author,
+who already executes arbitrary code inside the test job — the report is written by pytest
+running *their* tests. Anything they could do by crafting a report, they can do directly. The
+trust this design places is therefore in the job boundary, not in the report's contents; the
+report is untrusted data handled defensively, but it is not the weakest link and controls here
+are not sized as if it were.
+
+**Controls.**
+
+- Boundary 1 — the stdlib parser, deliberately. Verified on CPython 3.14.6: an external entity
+  reference (`<!ENTITY x SYSTEM "file://…">`) raises `ParseError`, which `summarize` already
+  converts to prose with exit 0 — no file disclosure. Internal entity expansion *does* run
+  (a 4-level nest produced 10,000 characters from a few hundred bytes), so amplification is
+  reachable in principle; it is bounded downstream by `MAX_FAILURES` and `MAX_BYTES`, costs
+  the attacker nothing they do not already have, and is accepted rather than defused.
+- Boundary 1 — the script decides nothing. `main()` returns 0 for every input and the step
+  carries `continue-on-error: true`, so no report content can move the gate's verdict.
+- Boundary 2 — the pop is unconditional and total. It cannot leak a value; the failure mode is
+  a child that wanted the options and does not get them, covered under Consequences in
+  ADR-0578.
+- Boundary 3 — `_span` neutralises the backtick and the code span neutralises the rest. **This
+  control is incomplete:** it does not hold across a newline, and `_node_id` does not collapse
+  whitespace the way `_reason` does, so a crafted `name` attribute escapes the span and renders
+  live markdown. Pre-existing, not touched by this diff, filed as #2069.
+
+**Out of scope.** Anything requiring the job boundary itself to hold against a malicious PR —
+secret exfiltration, cache poisoning, token misuse. Those are GitHub's fork-PR controls
+(restricted token, no secrets), not this script's.
+
 ## Residual, accepted
 
 The floor covers only *zero*. A nested pytest that runs N>0 tests and passes would write a
