@@ -52,9 +52,10 @@ output on just that block).
 `just test-changed`, rerun failures with `just test-lf`, and treat `just test` as the
 pre-push gate. Default recipes run quietly (`-q` plus `-ra` from `addopts`), but that only
 drops the per-test progress line and the header — it bounds nothing on the failure path.
-What bounds it is `--tb=short` on `just test` (ADR-0577): one line per frame, plus the
-failing expression and the assertion message, so every failure stays individually
-diagnosable at roughly half the bytes. When a failure needs a full frame or an assertion
+What bounds it is `--tb=short`, carried by `just test`, `just test-lf`, and
+`just test-changed` alike (ADR-0577): one line per frame, plus the failing expression and
+the assertion message, so every failure stays individually diagnosable at roughly half the
+bytes. When a failure needs a full frame or an assertion
 diff, escalate only the affected paths (`just test-verbose tests/<dir>` or a single file)
 instead of re-running everything loud; passing `test-verbose` any argument drops xdist, so
 its output is serial and readable top to bottom. That is a different topology from the

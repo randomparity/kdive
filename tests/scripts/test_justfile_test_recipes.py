@@ -4,9 +4,11 @@
 Three properties the recipes' prose asserts and nothing else enforced. Each has already
 drifted or was one edit from drifting:
 
-1. `just test` bounds its failure output with ``--tb=short``. Without it every failing test
-   prints a full traceback — ``-q`` trims neither tracebacks nor assertion introspection —
-   and a mass failure buries its own cause (#1913).
+1. Every suite recipe bounds its failure output with ``--tb=short``. Without it every failing
+   test prints a full traceback — ``-q`` trims neither tracebacks nor assertion introspection
+   — and a mass failure buries its own cause (#1913). `test-lf` and `test-changed` are
+   included because both fall back to the whole suite: an empty ``--lf`` cache, an unmappable
+   change.
 2. `just test-verbose` with *any* argument runs serially. It is the recipe you reach for in
    order to read a failure, so interleaving up to 16 xdist workers' output defeats it. Bare,
    it keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
@@ -65,12 +67,23 @@ def _expand(*args: str) -> str:
     return result.stderr.strip()
 
 
-def test_the_default_suite_bounds_its_failure_output() -> None:
-    assert _TB.findall(_expand("test")) == ["short"], (
-        "`just test` must pass exactly one --tb, and it must be short (ADR-0577): -q bounds "
-        "nothing on the failure path, so without it one broken fixture prints a full "
+@pytest.mark.parametrize("recipe", ["test", "test-lf"])
+def test_the_suite_recipes_bound_their_failure_output(recipe: str) -> None:
+    assert _TB.findall(_expand(recipe)) == ["short"], (
+        f"`just {recipe}` must pass exactly one --tb, and it must be short (ADR-0577): -q "
+        "bounds nothing on the failure path, so without it one broken fixture prints a full "
         "traceback per failing test"
     )
+
+
+def test_the_changed_test_recipe_bounds_every_invocation() -> None:
+    # A bash recipe with two pytest invocations — the changed-target one and the full-suite
+    # fallback. The fallback is the one that can run all 13,000 tests, so it needs the bound
+    # at least as much as the gate does.
+    lines = [line for line in _expand("test-changed").splitlines() if "python -m pytest" in line]
+    assert len(lines) == 2, f"expected two pytest invocations in test-changed, got {len(lines)}"
+    for line in lines:
+        assert _TB.findall(line) == ["short"], f"unbounded pytest invocation: {line.strip()}"
 
 
 def test_the_verbose_recipe_keeps_every_frame() -> None:
@@ -95,10 +108,19 @@ def test_a_verbose_run_with_arguments_is_serial(argument: str) -> None:
         "`just test-verbose <args>` must drop xdist (ADR-0577): it is the recipe for reading a "
         f"failure, and interleaved worker output defeats that; got: {expanded}"
     )
+    # Dropping xdist must drop only xdist: the serial branch is a separate expansion, so it is
+    # where the tier exclusion or the verbose output could silently go missing.
+    assert _TB.findall(expanded) == ["long"], f"the serial branch lost --tb=long: {expanded}"
+    selected = _DASH_M.search(expanded)
+    gate = _DASH_M.search(_expand("test"))
+    assert selected is not None and gate is not None
+    assert selected.group(1) == gate.group(1), (
+        f"the serial branch selects a different tier: {expanded}"
+    )
 
 
 def test_a_bare_verbose_run_keeps_the_parallelism() -> None:
-    assert " -n auto " in _expand("test-verbose"), (
+    assert _PARALLEL.search(_expand("test-verbose")) is not None, (
         "bare `just test-verbose` runs the whole suite, which is not a loop anyone waits on "
         "serially — it keeps xdist"
     )

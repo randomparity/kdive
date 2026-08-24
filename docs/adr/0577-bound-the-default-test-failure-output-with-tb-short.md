@@ -14,7 +14,7 @@ The belief that it was bounded came from `-q`. It is wrong: `-q` drops the per-t
 line and the run header, and nothing else. Tracebacks print in full, with complete assertion
 introspection, one per failing test. Over a suite that collects 13,382 tests, one broken
 conftest or shared fixture therefore emits a full traceback per failing test. This has
-already happened — `.github/workflows/ci.yml:241` records a run of `3 failed, 8938 passed,
+already happened — `.github/workflows/ci.yml:240` records a run of `3 failed, 8938 passed,
 3448 errors` with the real cause several screens down (#1913). The fix there was pre-pulling
 the testcontainer images, which treats one cause of a mass failure, not the class.
 
@@ -55,23 +55,28 @@ selection/parallelism seam.
 1. `just test` runs `-q --tb=short`. Every failure keeps its `file:line`, the failing
    expression, the assertion message with introspection, the call chain at one line per
    frame — individually diagnosable, at roughly half the bytes. Captured log and stdout
-   sections are not affected by `--tb` style and print either way.
-2. `just test-verbose` stays the escalation to `-vv --tb=long`: full frames and full
+   sections read the same under `short` as under `long`; only `--tb=no` drops them.
+2. `test-lf` and `test-changed` carry the same bound. Both fall back to the whole suite — an
+   empty or stale `--lf` cache, an unmappable change — so both have the gate's mass-failure
+   shape, and they are the recipes the guidance tells an agent to iterate with. Bounding only
+   the gate would leave the inner loop, which runs more often, unbounded.
+3. `just test-verbose` stays the single escalation to `-vv --tb=long`: full frames and full
    assertion diffs, on the paths you name.
-3. `just test-verbose` drops xdist and runs serially whenever it is given **any** argument,
-   not only a path. `-x`, `--pdb`, and `-k` narrow nothing or narrow differently, and every
-   one of them wants the same serial ordering; the recipe's condition therefore tests for
-   arguments, and the documentation says so rather than describing a paths-only rule the
-   recipe does not implement. A bare `just test-verbose` keeps the parallelism, because the
-   whole suite serially is not a loop anyone waits on.
-4. `_TEST_SELECT` splits into `_TEST_MARKERS` (the gated-tier marker expression) and
+4. `just test-verbose` drops xdist and runs serially whenever it is given **any** argument,
+   not only a path. `-x` and `--pdb` narrow nothing, and both want the same serial ordering;
+   the recipe's condition therefore tests for arguments, and the documentation says so rather
+   than describing a paths-only rule the recipe does not implement. A bare `just test-verbose`
+   keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
+   Arguments interpolate unquoted and the shell re-splits them, so one containing a space does
+   not survive: `-k retryable` works, `-k "a or b"` does not, and direct pytest covers that.
+5. `_TEST_SELECT` splits into `_TEST_MARKERS` (the gated-tier marker expression) and
    `_TEST_XDIST` (parallelism and the worker cap). `test`, `test-verbose`, `test-lf`, and
    `test-changed` all take the marker expression from `_TEST_MARKERS`, so selection cannot
    drift between them — three of those carried their own literal copy before. `test-lf`
    keeps its own parallelism flags, without `--dist worksteal`: worksteal shortens the
    straggler tail of a full run, and `--lf` reruns a handful of tests with no tail to
    shorten. Only parallelism and output flags differ per recipe.
-5. `AGENTS.md` and the `justfile` comments describe what `-q` actually does and what bounds
+6. `AGENTS.md` and the `justfile` comments describe what `-q` actually does and what bounds
    the failure path.
 
 ## Consequences
@@ -85,6 +90,14 @@ local, where pytest truncates a long assertion explanation to 8 lines; with `CI`
 environment it does not truncate at all
 (`_pytest/assertion/truncate.py`), and no `--tb` style bounds that explanation. What CI saves
 is the frame and source-context share only — real, but smaller than 55%.
+
+CI also pays a cost this ADR accepts rather than mitigates. A CI failure is the one an
+engineer most often cannot reproduce locally, and it is exactly there that the per-frame
+source context and argument values `--tb=long` printed are gone; re-running the job is the
+only recovery. That is the trade: a run whose cause is buried under thousands of tracebacks
+is unreadable at any level of per-frame detail, and the readable-but-thinner run is the
+better failure mode. A CI-only `--tb` override would be a second mechanism doing the job of
+the first, which is what the last rejected option below argues against.
 
 A failure whose diagnosis needs a full frame or an assertion diff now takes a second command.
 That is the trade accepted: it taxes the uncommon case rather than the common one, where
