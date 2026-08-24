@@ -413,9 +413,7 @@ def _run_nested(tmp_path: Path, module: str) -> subprocess.CompletedProcess[str]
 
 def test_a_process_spawned_from_a_test_does_not_inherit_addopts(tmp_path: Path) -> None:
     module = _GRANDCHILD + (
-        "def test_grandchild():\n"
-        "    observed = _seen()\n"
-        "    assert observed == 'None', observed\n"
+        "def test_grandchild():\n    observed = _seen()\n    assert observed == 'None', observed\n"
     )
     result = _run_nested(tmp_path, module)
     assert result.returncode == 0, result.stdout + result.stderr
