@@ -29,11 +29,21 @@ _NAMED_HOOKS = ("ruff-check", "ruff-format", "end-of-file-fixer", "trailing-whit
 #: `just format` and `prek run` appear elsewhere in AGENTS.md for unrelated reasons.
 _ANCHOR = "**Before `git commit` (agent guidance):**"
 
+#: The bold lead-in that follows the guidance. Slicing to it rather than to the first blank
+#: line means a routine reflow that splits the paragraph in two does not fail the guard on
+#: intact guidance (#2068).
+_END = "**Running the live tiers**"
+
 
 def _paragraph() -> str:
     text = _AGENTS.read_text(encoding="utf-8")
     assert _ANCHOR in text, "the pre-commit ordering guidance is gone from AGENTS.md (#2062)"
-    return text.split(_ANCHOR, 1)[1].split("\n\n", 1)[0]
+    after = text.split(_ANCHOR, 1)[1]
+    assert _END in after, (
+        f"the guidance's closing anchor {_END!r} is gone from AGENTS.md, so this guard can no "
+        "longer bound its slice and would silently check the rest of the file (#2068)"
+    )
+    return after.split(_END, 1)[0]
 
 
 def _hook_ids() -> set[str]:
