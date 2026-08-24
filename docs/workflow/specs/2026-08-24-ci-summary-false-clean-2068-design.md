@@ -84,8 +84,20 @@ nothing has spawned a subprocess. Measured (pytest 9.1.1, xdist 3.8.0), with
 | `pytest_collection` | `tb=line`, `xunit1` | **yes** — all 4 | covered |
 
 The three early hooks lose worker configuration because the xdist controller runs them before
-spawning workers. The fixture runs too late: only in a process assigned at least one test, and
-only after test modules are imported.
+spawning workers. The fixture runs too late: only in a process assigned at least one test
+(two of four workers in the measured run), and only after test modules are imported.
+
+Under xdist the hook **never runs on the controller** — `DSession.pytest_collection` returns
+`True` and the hookspec is `firstresult`, so the chain stops first. That is exactly why
+workers keep their configuration: the controller still holds the variable when it spawns them.
+Two consequences for the implementation: it must **not** be marked `tryfirst` (that would
+order it ahead of `DSession` and restore the regression), and the controller keeps
+`PYTEST_ADDOPTS` for the whole session, so a controller-side spawn is outside what this
+covers.
+
+The table was measured in a minimal synthetic repo. It transfers because this repo's
+`tests/conftest.py` defines no `pytest_*` hooks, no `pytest_collection` exists in the tree,
+and no plugins beyond `pytest-xdist` are installed — all three checked.
 
 **`scripts/pytest_summary.py`**
 
@@ -134,16 +146,20 @@ Every case below is a test in this change, not a manual check.
   actually set in the parent.
 - A subprocess spawned at test-module import time does not see it either — this is the case
   that distinguishes the chosen hook from a session fixture, so it is the one worth pinning.
+- The hook implementation is not marked `tryfirst`. Worth a guard assertion: marking it would
+  silently move the pop onto the controller and strip every worker's configuration, which no
+  behavioural test in this change would catch.
 - Each new assertion mutation-verified: break the behaviour, watch the test redden, restore.
 
 ## Residual, accepted
 
 The floor covers only *zero*. A nested pytest that runs N>0 tests and passes would write a
 plausible `N passed` report that nothing here detects. The scrub is what prevents that, so
-the residual is a pytest spawned before collection begins — from a conftest at import, or
-from a `pytest_configure` hook — or by a separate tool the workflow step invokes. None exists
-in this tree today, and catching them would require independently attesting the totals, which
-costs more than the exposure.
+the residual is a pytest spawned before the hook runs — from a conftest at import or a
+`pytest_configure` hook — from controller-side code under `-n` (the controller never runs the
+hook, so it holds the variable all session), or by a separate tool the workflow step invokes.
+None exists in this tree today, and catching them would require independently attesting the
+totals, which costs more than the exposure.
 
 ## Out of scope
 

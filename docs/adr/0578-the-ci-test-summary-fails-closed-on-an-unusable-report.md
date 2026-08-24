@@ -56,10 +56,18 @@ holds even against `env=os.environ.copy()`, because the variable is gone from th
 The hook is `pytest_collection` specifically, and the timing is the whole decision. It has to
 run **late enough** that the process has already configured itself from the variable, and
 **early enough** that nothing has spawned a subprocess yet. `pytest_collection` is the only
-one of the candidates that is both: on the xdist controller it runs after the workers are
-spawned, and in each worker it runs before any test module is imported. Because
-`testpaths = ["tests"]`, `tests/conftest.py` is an initial conftest, so the hook is registered
-before collection begins.
+candidate that is both, and under xdist it achieves that for a reason worth stating exactly:
+**on the controller it does not run at all.** `DSession.pytest_collection` returns `True` and
+the hookspec is `firstresult`, so the chain stops before this implementation — the controller
+therefore keeps the variable and hands it to every worker, and each worker runs the hook
+itself, before importing any test module. Serially there is no `DSession`, so the hook runs
+normally. Because `testpaths = ["tests"]`, `tests/conftest.py` is an initial conftest and the
+hook is registered before collection begins.
+
+**The implementation must not be marked `tryfirst`.** Under pluggy that would order it ahead
+of `DSession.pytest_collection`, the controller would pop before spawning workers, and the
+worker-configuration regression this decision rejects `pytest_configure` for would return
+silently.
 
 **3. The report is read as bytes and parsed from bytes.** `Path.read_bytes()` into
 `ET.fromstring` lets the parser honour the XML encoding declaration instead of assuming
@@ -84,14 +92,24 @@ cause, and part 1 is the only thing covering exit 5.
 - The scrub is action at a distance: a test that wanted the parent's `PYTEST_ADDOPTS`
   propagated to a child would silently not get one. No test does, and a test that needs
   specific addopts in a child can pass them explicitly.
-- **Residual: a subprocess spawned before collection begins** — from a conftest at import, or
-  from a `pytest_configure` hook — still inherits the variable. Nothing in this tree does
-  that; the offending call spawns from inside a test, and test modules are imported during
-  collection, after the hook has run.
+- **Residual: a subprocess spawned before the hook runs** — from a conftest at import, or from
+  a `pytest_configure` hook — still inherits the variable. Under `-n` there is a second,
+  wider case: because the hook never runs on the controller, the controller holds
+  `PYTEST_ADDOPTS` for the whole session, so anything spawning from controller-side code — a
+  `pytest_sessionfinish` or `pytest_terminal_summary` hook, a reporting plugin, an `atexit`
+  handler — inherits it. Nothing in this tree does either; the offending call spawns from
+  inside a test, on a worker. Accepted as prose rather than machinery.
 - Reading bytes rather than text means a report in a non-UTF-8 encoding now parses instead of
   raising. Strictly wider; nothing depended on the previous narrowing.
 
 ## Considered & rejected
+
+> The A/B measurements below were taken in a minimal synthetic repo with
+> `testpaths = ["tests"]`, not in this tree, so the commands are not re-runnable here as
+> written. Three transfer conditions were checked against this repo: `tests/conftest.py`
+> defines no `pytest_*` hooks, no `pytest_collection` implementation exists anywhere in the
+> tree, and no plugins beyond `pytest-xdist` are installed.
+
 
 - **Fix each nested-pytest call site with an explicit `env=`, enforced by an AST guard over
   the test tree.** verified: this was the original design; the conftest scrub replaces it
@@ -103,9 +121,10 @@ cause, and part 1 is the only thing covering exit 5.
   it — fixtures live in the test tree.)
 - **Scrub in a session-scoped autouse fixture.** verified: it fires only in a process that is
   assigned at least one test, and it fires after test modules are imported. Measured with
-  `MODE=fixture pytest tests -n 4 -q` over a two-test suite (pytest 9.1.1, xdist 3.8.0): the
-  pop ran in `gw0` and `gw1` only — `gw2` and `gw3` imported every test module and never
-  popped. Serially, a module-level `subprocess.run` in a test module saw the full
+  `pytest tests -n 4 --dist worksteal -q` over a two-test suite (pytest 9.1.1, xdist 3.8.0):
+  the pop ran in **two of the four** workers — the other two imported every test module and
+  never popped. Which two is scheduler-dependent and not part of the finding. Serially, a
+  module-level `subprocess.run` in a test module saw the full
   `--tb=line --junit-xml=…`, where the `pytest_collection` hook gave it `None`. Its ordering
   against sibling session-scoped autouse fixtures is also unspecified by pytest, and
   `tests/conftest.py` already defines one.
