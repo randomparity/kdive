@@ -83,10 +83,13 @@ format:
 type:
     uv run ty check
 
-# Shared selection for `test` / `test-verbose`: the gated-tier exclusion, xdist parallelism,
-# and the worker cap described below, defined once so the quiet and verbose invocations
-# cannot drift apart.
-_TEST_SELECT := '-m "not live_vm and not live_stack and not agent_smoke" -n auto --maxprocesses=16 --dist worksteal'
+# The gated-tier exclusion, defined once and shared by `test`, `test-verbose`, and `test-lf`
+# so what they select cannot drift apart. Split from the parallelism below because
+# `test-verbose` deliberately differs on parallelism and must not differ on selection.
+_TEST_MARKERS := '-m "not live_vm and not live_stack and not agent_smoke"'
+
+# xdist parallelism and the worker cap, both explained under `test:` below.
+_TEST_XDIST := '-n auto --maxprocesses=16 --dist worksteal'
 
 # Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
@@ -109,22 +112,35 @@ _TEST_SELECT := '-m "not live_vm and not live_stack and not agent_smoke" -n auto
 # collected". It defaults to 0 but is overridable: the weekly test-ordering workflow sets
 # PYTHONHASHSEED=random to surface any new ordering-dependent test the pinned seed would
 # otherwise mask.
+#
+# `-q` bounds nothing on the failure path: it drops the per-test progress line and the header
+# and nothing else, so every failure still prints a full traceback with complete assertion
+# introspection. `--tb=short` is what bounds it (ADR-0577), at one line per frame plus the
+# failing expression, the assertion message, and captured output — roughly half the bytes of
+# a real failing run, each failure still individually diagnosable. `just test-verbose <paths>`
+# is the escalation when a diff or a full frame is actually needed.
 test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_SELECT}} -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_MARKERS}} {{_TEST_XDIST}} -q --tb=short
 
 # Same selection as `test:` with full error output for inspection: `-vv` restores complete
-# assertion introspection and diffs, `--tb=long` keeps every frame, where `-q` trims both.
-# Optional path arguments scope the run to the failing files, so a failure can be escalated
-# to readable output without re-running the whole suite loudly or hand-assembling flags.
+# assertion introspection and diffs and `--tb=long` keeps every frame, where `test:` runs
+# `--tb=short`. Optional path arguments scope the run to the failing files, so a failure can
+# be escalated to readable output without re-running the whole suite loudly or
+# hand-assembling flags.
+#
+# A scoped run drops xdist and runs serially: interleaving up to 16 workers' output defeats
+# the point of the recipe you reach for in order to *read* a failure (ADR-0577). An unscoped
+# run keeps the parallelism, because the whole suite serially is not a loop anyone waits on.
+# The marker exclusion is `_TEST_MARKERS` either way, so selection stays identical to `test:`.
 test-verbose *PATHS:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_SELECT}} -vv --tb=long {{PATHS}}
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_MARKERS}} {{ if PATHS == '' { _TEST_XDIST } else { '' } }} -vv --tb=long {{PATHS}}
 
 # Rerun the tests that failed on the previous run, failures first — the fast inner loop
 # (#1334, ADR-0420). Additive: `just test` stays the full pre-push gate and this never runs
 # in CI. Same marker exclusion and pinned PYTHONHASHSEED as `test:`, so a stale/empty --lf
 # cache (pytest then runs everything) still skips the gated live tiers and collects stably.
 test-lf:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" --lf -n auto --maxprocesses=16 -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest {{_TEST_MARKERS}} --lf -n auto --maxprocesses=16 -q
 
 # Run only the tests your working changes touch — the fast inner loop (#1334, ADR-0420).
 # scripts/select_changed_tests.py maps each changed src file to every tests/**/test_<stem>.py
