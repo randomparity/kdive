@@ -249,9 +249,40 @@ jobs:
         # KDIVE_REQUIRE_DOCKER turns the db suite's skip-when-no-Docker into a hard
         # failure, so a broken daemon on the runner can't mask the schema tests
         # (ADR-0015). GitHub-hosted ubuntu runners provide Docker.
+        #
+        # PYTEST_ADDOPTS asks the same run for a JUnit report, which the summary step below
+        # renders into the job summary (#2062). It goes in the environment rather than as an
+        # argument to the recipe so that CI still invokes `just test` verbatim and the gate's
+        # command keeps its single definition in the justfile. The report is written under
+        # RUNNER_TEMP, outside the checkout, so no working-tree or generated-artifact gate
+        # sees it. `xunit1` is asked for because pytest's default `xunit2` family drops the
+        # `file` attribute, and without it a class-based or parametrized failure cannot be
+        # rendered as a node id you can paste back into pytest.
         env:
           KDIVE_REQUIRE_DOCKER: "1"
+          PYTEST_ADDOPTS: >-
+            --junit-xml=${{ runner.temp }}/pytest-junit.xml
+            -o junit_family=xunit1
         run: just test
+
+      - name: Test failure summary
+        # Additive reporting, never a gate. The step above owns the verdict; this only turns
+        # its JUnit report into a short list of which node ids failed and why, so a red PR is
+        # diagnosable from the run page instead of a `gh run view --log-failed` that was
+        # 74,735 bytes on the last failed run here (#2062).
+        #
+        # `if: always()` because the run worth summarising is the failing one. The script
+        # returns 0 for every input — a missing report (pytest killed before writing one), a
+        # truncated one — so it cannot redden a green gate on its own; `continue-on-error`
+        # covers the remaining case of `uv run` itself failing to start. It runs under
+        # `uv run python` rather than the ambient python3 for the reason scripts/audit_report.py
+        # records: ruff lints scripts/ at py314, so the file is not portable to an older
+        # interpreter.
+        if: always()
+        continue-on-error: true
+        env:
+          PYTEST_JUNIT_REPORT: ${{ runner.temp }}/pytest-junit.xml
+        run: uv run python scripts/pytest_summary.py "$PYTEST_JUNIT_REPORT"
 
       - name: Compose data-volume persistence proof
         # The structural guard in `just test` only reads `docker compose config`; this drives
