@@ -23,7 +23,7 @@ from kdive.jobs.capture_operations.repository import CaptureOperation
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _operation(**changes: object) -> CaptureOperation:
+def _operation(launch_token: str, **changes: object) -> CaptureOperation:
     operation = CaptureOperation(
         id=uuid4(),
         job_id=uuid4(),
@@ -34,7 +34,7 @@ def _operation(**changes: object) -> CaptureOperation:
         system_id=uuid4(),
         domain_name="guest",
         request_digest="a" * 64,
-        launch_token="b" * 64,
+        launch_token=launch_token,
         host_instance="host-a",
         boot_id="boot-a",
         pid=41,
@@ -141,8 +141,10 @@ class _Store:
         ),
     ],
 )
-def test_publication_identity_conflicts_are_stable_and_redacted(head: Any, reason: str) -> None:
-    operation = _operation()
+def test_publication_identity_conflicts_are_stable_and_redacted(
+    head: Any, reason: str, launch_token: str
+) -> None:
+    operation = _operation(launch_token)
 
     with pytest.raises(CapturePublicationIdentityConflict) as caught:
         publication.PublicationObjectIdentity.parse(operation, head(operation))
@@ -154,8 +156,10 @@ def test_publication_identity_conflicts_are_stable_and_redacted(head: Any, reaso
 
 
 @pytest.mark.anyio
-async def test_recovery_adopts_existing_tombstone(monkeypatch: pytest.MonkeyPatch) -> None:
-    operation = _operation()
+async def test_recovery_adopts_existing_tombstone(
+    monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
+    operation = _operation(launch_token)
     store = _Store(_head(operation, kind="tombstone", version_id="tombstone-version"))
     committed: list[str] = []
 
@@ -185,8 +189,10 @@ async def test_recovery_adopts_existing_tombstone(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.anyio
 async def test_recovery_deletes_only_journaled_capture_then_tombstones(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     operation = _operation(
+        launch_token,
         cleanup_capture_version_id="capture-version",
         publication_etag="capture-etag",
     )
@@ -222,8 +228,9 @@ async def test_recovery_deletes_only_journaled_capture_then_tombstones(
 @pytest.mark.anyio
 async def test_recovery_leaves_conflicting_object_untouched(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
-    operation = _operation()
+    operation = _operation(launch_token)
     store = _Store(_head(operation, kind="capture", operation_id=uuid4(), size_bytes=64))
 
     async def begin(*_args: object) -> CaptureOperation:

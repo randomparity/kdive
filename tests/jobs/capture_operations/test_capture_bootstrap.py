@@ -12,6 +12,7 @@ from kdive.jobs.capture_operations import sandbox
 
 def test_filter_failure_occurs_before_handshake_or_gate_read(
     monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
 ) -> None:
     writes: list[bytes] = []
     reads: list[int] = []
@@ -24,19 +25,21 @@ def test_filter_failure_occurs_before_handshake_or_gate_read(
     monkeypatch.setattr(capture_bootstrap.os, "read", lambda fd, _size: reads.append(fd) or b"R")
 
     with pytest.raises(RuntimeError, match="filter fault"):
-        capture_bootstrap.main(["--launch-token", "a" * 64, "--gate-fd", "9"])
+        capture_bootstrap.main(["--launch-token", launch_token, "--gate-fd", "9"])
     assert writes == []
     assert reads == []
 
 
-def test_internal_capture_operation_verb_has_only_fixed_boundary_arguments() -> None:
+def test_internal_capture_operation_verb_has_only_fixed_boundary_arguments(
+    launch_token: str,
+) -> None:
     args = build_parser().parse_args(
-        ["capture-operation", "--launch-token", "a" * 64, "--gate-fd", "9"]
+        ["capture-operation", "--launch-token", launch_token, "--gate-fd", "9"]
     )
     assert vars(args) == {
         "command": "capture-operation",
         "gate_fd": 9,
-        "launch_token": "a" * 64,
+        "launch_token": launch_token,
         "log_level": None,
         "version": None,
     }
