@@ -732,6 +732,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Describe session-daemon persistence and no-sudo recovery
 - Require --body-file for PR and issue bodies
 - Regenerate config reference for KDIVE_GITLEAKS
+- Record bounding just test failure output with --tb=short
+- Correct what the default test recipes actually print
+- Describe --tb=short output precisely and drop the duplicated command
+- State pytest's --tb=auto baseline and share the worker cap
 
 ### Fixed
 
@@ -1207,6 +1211,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Execute live spine scripts from materialized files, not shared stdin (#2054)
 - Default KDIVE_ACCEPTED_LANES to default,state-fenced
 - Document the KDIVE_GITLEAKS script override
+- Assert effective test flags and share markers with test-changed
+- Bound the inner-loop recipes and correct the -k claim
+- Guard parallelism drift and single-source the fallback command
+- Pin the tier literal and PYTHONHASHSEED in the guard
 
 ### Build
 
