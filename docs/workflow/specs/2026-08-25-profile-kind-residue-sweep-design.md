@@ -375,8 +375,19 @@ identities.
    rendering and the closed label vocabulary are what carry that second half.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
-   `redact_database_url`, which masks a URL password and blanket-redacts a keyword/value conninfo
-   mentioning `password`. What is printed is `(system id, project, state, section label, resource
+   `redact_database_url`, which masks a URL **userinfo** password and blanket-redacts a
+   keyword/value conninfo mentioning `password`. **It does not mask credentials carried as URI
+   query parameters**, which libpq accepts: for a conninfo holding *both* a userinfo password and
+   a query credential, the first branch fires, `urlunsplit` passes `parsed.query` through
+   verbatim, and the blanket-redaction fallback is never reached — so
+   `postgresql://kdive:<userinfo-pw>@db/kdive?password=<query-pw>` renders as
+   `postgresql://kdive:***@db/kdive?password=<query-pw>` — the second credential intact.
+   Measured against the shipped function. That
+   defect predates this command and is shared with `verify-project`, which prints through the
+   same helper; it is tracked separately rather than fixed here, because `redact_database_url`
+   sits outside this change's surface. Recorded because this design names the function as a
+   control, and a control's stated guarantee must match what it does.
+   What is printed is `(system id, project, state, section label, resource
    kind)` — never the profile body, which is where a caller-supplied value could live.
 
    **Four of the five fields are bounded by something other than this code.** `system_id` is a
@@ -402,12 +413,24 @@ identities.
      `isprintable()`. A `ord(c) < 0x20` bound would pass every one of those but the first, since
      they all sit above `0x20` — and a terminal honouring C1 reads a bare U+009B as the Control
      Sequence Introducer, which is the escape-sequence injection this control exists to stop.
-   - **Tokenization.** It delimits the value *and* escapes any quote inside it. Hand-written
-     quotes do not: a double quote is printable, so `project="…"` is closed by the next literal
-     `"` the formatter emits rather than by the end of the value, and a project named
-     `x" state=ready profile_section=fault-inject … junk="y` forges a full set of leading
-     `key=value` pairs with the true values trailing them. Measured against the specified format.
-     `repr` renders that same value as one token.
+   - **Tokenization — `repr` alone is not sufficient, and `_project_token` finishes it.**
+     Hand-written quotes fail outright: a double quote is printable, so `project="…"` is closed
+     by the next literal `"` the formatter emits rather than by the end of the value, and a
+     project named `x" state=ready … junk="y` forges a full set of leading `key=value` pairs.
+     `repr` defeats *that* attack, but it **selects** its quote character rather than escaping
+     quotes — a value holding `'` and no `"` comes back double-quoted with the `'` bare — and it
+     leaves ASCII space intact, because a space is printable. The report line is a
+     whitespace-delimited `key=value` sequence, so under a bare `!r` the project name
+     `x' state=torn_down … junk='y` still contributes extra tokens, and because `project` is the
+     *second* key on the line they land **ahead** of the real ones: `state=torn_down` becomes the
+     first `state=` token. The closing block tells the operator a `torn_down` row is inert, so
+     splitting or grepping the report drops a live `ready` System from the remediation list.
+     Measured. `_project_token` therefore escapes both `\x20` and `=` in `repr`'s output.
+     Escaping only the space is not enough: the line then splits into one `state=` token again,
+     but the substring `state=torn_down` remains, so a plain `grep 'state=torn_down'` still
+     matches. Escaping `=` as well leaves the token unable to hold any `key=value` lookalike,
+     which is the property the report needs. Both substitutions are reversible, and an ordinary
+     project name is unaffected.
    - **Losslessness.** It escapes where a substitution helper destroys. Replacing a hostile byte
      with `?` silently rewrites a project name in a report an operator reads to decide what to do
      about that row.
