@@ -41,9 +41,14 @@ Transcribed from the spec and ADR — values exactly as written there.
 - **`state`, `profile_section`, and `resource_kind` are `str`, not enums.** Parsing a stored
   value into an enum is how the sweep raises on exactly the data it exists to find.
 - **`redact_database_url` is imported from `kdive.admin.projects`, not reimplemented.**
-- **The read-only guard is `SET default_transaction_read_only = on`**, never
-  `SET TRANSACTION READ ONLY` — measured, the latter is a silent no-op on an `autocommit=True`
-  connection, which is what every helper in `tests/db/conftest.py` uses.
+- **Open the scan connection `autocommit=True`, then use
+  `SET default_transaction_read_only = on`.** Both halves are requirements and the second is
+  correct *because* of the first. `AsyncConnection.connect()` defaults to `autocommit=False`, and
+  measured, the two `SET` forms **swap correctness across the modes**: under autocommit the chosen
+  form raises `ReadOnlySqlTransaction` and `SET TRANSACTION READ ONLY` is a silent no-op; without
+  autocommit the chosen form is dead and the rejected one works. Do not ground this on
+  `tests/db/conftest.py`'s helpers — they are *synchronous*, and their default is the opposite of
+  the async one.
 - **Assert the property, not the implementation's range.** `assert line.isprintable()`, never
   `all(ord(c) >= 0x20 for c in line)`.
 - **No test guards the join dependency.** A row-count comparison against a fixture the test
@@ -92,7 +97,7 @@ class ProfileKindMismatch:
 
 
 def _section_label(provider: object) -> str
-def _entry(key: str, value: object) -> str
+def _entry(key: object, value: object) -> str
 def format_profile_kind_result(
     mismatches: Sequence[ProfileKindMismatch], *, redacted_url: str
 ) -> str
@@ -103,35 +108,16 @@ that one operator is the whole control: `repr` escapes exactly what `str.isprint
 delimits the value, and escapes any quote inside it. The label needs nothing — it is closed over
 printable ASCII by construction.
 
-Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec — the branch order is
-load-bearing and each branch has a test below — **with one correction the spec's block does not
-yet carry.** As written there it does not type-check:
+Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec **verbatim** — the branch order
+is load-bearing and each branch has a test below.
 
-```
-error[invalid-argument-type]: Argument to function `_entry` is incorrect
-  |     return ",".join(sorted({_entry(key, provider[key]) for key in provider}))
-  |                                    ^^^ Expected `str`, found `object`
-```
-
-`isinstance(provider, dict)` narrows to `dict[Unknown, Unknown]`, so the keys are `object` and
-`_entry(key: str, …)` rejects them; `provider[key]` fails for the same reason. Measured with
-`uv run ty check` — the exact command `just type` runs — two diagnostics, exit 1. The fix is two
-lines and `ty` then exits 0:
-
-```python
-def _entry(key: object, value: object) -> str:
-    name = key if isinstance(key, str) and key in _KNOWN_KINDS else "<unrecognized>"
-    return name if isinstance(value, dict) else f"{name}=<not-an-object>"
-
-
-# ... and iterate items(), not provider[key]:
-return ",".join(sorted({_entry(k, v) for k, v in provider.items()}))
-```
-
-Verified behaviour-preserving over all 15 shapes of the spec's measured table, including the
-500-unknown-key bound (still `<unrecognized>`, 14 chars): zero divergences from the spec's form.
-The added `isinstance(key, str)` is not dead defensiveness — it is what makes the narrowing sound,
-and a sweep whose job is surviving malformed data should not assume its own key type.
+Copy the signatures exactly as the spec gives them, `_entry(key: object, …)` included. The obvious
+`key: str` form does **not** type-check: `isinstance(provider, dict)` narrows to
+`dict[Unknown, Unknown]`, so the keys are `object` and both `_entry(key: str, …)` and
+`provider[key]` are rejected — measured with `uv run ty check`, the command `just type` runs, two
+diagnostics and exit 1. The spec's form takes `key: object`, narrows with `isinstance(key, str)`,
+and iterates `items()`; it exits 0 and is behaviour-identical over all 15 shapes of the measured
+table, the 500-key bound included.
 
 **Tests (spec items 7–10).**
 
@@ -261,38 +247,42 @@ directly; the only shared seeders in the tree are area-local).
    `profile_section == "fault-inject=<not-an-object>"`. The **only** test that reddens if the
    **first** disjunct is dropped — tests 1–4 all mismatch on the key, which the second disjunct
    catches by itself.
-6. **Order is deterministic**, in two halves. The variable that decides both is **UPDATE order**,
-   not insertion order.
+6. **Order is deterministic**, in two halves. **The fixture must disagree with the asserted
+   order in BOTH of its orderings** — see the spec's item 6, which this restates.
 
    `created_at` is in `_SERVER_GENERATED` (`db/repositories.py:53`) so `SYSTEMS.insert` cannot
    write it. Impose it out of band after inserting:
    `UPDATE systems SET created_at = %s WHERE id = %s`. This is the **only** carve-out from the
    repositories in the whole fixture; every other column comes from them.
 
-   **That carve-out is also what makes insertion order irrelevant, and getting this wrong makes
-   the whole test vacuous.** PostgreSQL writes a new tuple version on `UPDATE`, so a seq scan
-   returns rows in **last-write** order. Every row in this fixture is updated exactly once, so
-   heap order is the `UPDATE` order and **nothing else** — measured on the migrated schema
-   through the repositories, running the fixture under two different insertion orders changed no
-   result at all.
+   Two requirements, both load-bearing:
 
-   The invariant that follows is the whole of it: **both `ORDER BY` mutations are DEAD whenever
-   the `UPDATE` order equals the asserted order**, because the scan then returns the asserted
-   order for free and a query shipping no `ORDER BY` passes. That is the most readable way to
-   write the fixture, which is exactly why it is the trap.
+   - **insert** the tied pair with the larger-`id` row first, and
+   - **`UPDATE`** every row in the reverse of the asserted order — the row that must come back
+     last is updated first.
 
-   So: **issue the `UPDATE` statements in the reverse of the asserted order** — the row that must
-   come back last is updated first — for the tied pair as well as the `created_at` pair. That is
-   deterministic and does not depend on how the rows were inserted.
+   PostgreSQL writes a new tuple version on `UPDATE`, so a seq scan returns rows in last-write
+   order (measured: 24 of 24 `UPDATE` permutations came back in exactly that order). That makes
+   `UPDATE` order the variable to control, but controlling only it leaves the fixture depending
+   on an insertion order nothing states. Fixing both costs one clause and removes the dependency.
+
+   **The mutation this defends is silent.** If the fixture's order happens to match the asserted
+   order, the scan returns it for free and both `ORDER BY` mutations report green against a query
+   shipping no `ORDER BY` at all. A correct implementation still passes either way — what is lost
+   is the mutation sensitivity that is the only reason this test imposes `created_at` out of band.
 
    - *`created_at` half:* one row carries the earlier timestamp, one the later; assert the
      earlier comes back first.
-   - *`id` tiebreak half:* seed the tied pair with **fixed, explicit UUIDs** sharing one
-     timestamp, `UPDATE` the larger-id row first, and assert the smaller comes back first. The
-     fixed UUIDs stay load-bearing — every seed helper in this repo uses `uuid4()`, which would
-     make this assertion pass or fail at random, and a flake that passes on re-run is not
-     evidence.
+   - *`id` tiebreak half:* seed the tied pair with **fixed, explicit UUIDs**. Fixed UUIDs are
+     load-bearing — every seed helper in this repo uses `uuid4()`, which would make this
+     assertion pass or fail at random, and a flake that passes on re-run is not evidence.
 
+   **Impose the tie with one literal timestamp in the same `UPDATE`.** Do not rely on two rows
+   seeded together sharing `now()`: measured, that holds inside an explicit transaction and is
+   **false** on the `autocommit=True` connection this task requires — two `SELECT now()` calls
+   came back 464 µs apart. Without a real tie the pair does not tie, `ORDER BY s.created_at`
+   alone fully determines their order, and the tiebreak assertion passes against an
+   implementation carrying no `, s.id` at all.
 
 **Mutation check before moving on.** Drop the second `WHERE` disjunct and confirm test 4 alone
 reddens; drop the first and confirm test 5 alone reddens; drop `, s.id` from the `ORDER BY` and
@@ -338,7 +328,7 @@ _Command(
 No arguments: the sweep is whole-database by construction, and every filter that could be
 offered (by project, by state) is the triage call #1907 excludes.
 
-**Tests (spec items 11–12).**
+**Tests (spec items 11–13).**
 
 1. **The handler prints the report and raises no `SystemExit`.** Capture stdout and assert it
    contains the seeded System's id **and** the closing remediation text, *then* assert no
@@ -352,6 +342,18 @@ offered (by project, by state) is the triage call #1907 excludes.
    database.
 2. `build_parser().parse_args(["verify-profile-kinds"])` yields
    `command == "verify-profile-kinds"`, and the command is absent from `_RUNNABLE`.
+3. **`verify_profile_kinds()` itself runs against a real database** (spec item 13). Without it the
+   one function in the module with a **resource lifecycle** is executed by nothing: tests 1-6 of
+   Task 2 drive `scan_profile_kinds(conn)`, Task 1 is pure, test 1 above patches
+   `verify_profile_kinds` out, and test 2 is the parser. Its `finally: await pool.close()` and its
+   pre-query `CONFIGURATION_ERROR` would both ship unguarded, and the first row of the spec's
+   failure-mode table would have no bite anywhere in the suite.
+
+   `monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)`, then assert `verify_profile_kinds()`
+   returns the same list `scan_profile_kinds` returns for Task 2 test 1's seed. This mirrors
+   `verify_project` — the function this module is modelled on — which has four database-backed
+   tests calling the pool-opening wrapper itself (`tests/admin/test_bootstrap.py:239`, `:258`,
+   `:272`, `:286`) rather than patching it out.
 
 **Mutation check before moving on.** Replace the handler body with `pass` and confirm test 1
 reddens on the stdout assertion, not merely on the `SystemExit` half. Add `runnable=True` to the

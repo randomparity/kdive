@@ -223,12 +223,17 @@ Two rows in that table are load-bearing:
   resource_kind=fault-inject` — two identical strings under a header saying these rows are
   mismatched, which reads as a broken sweep. `=<not-an-object>` is what makes the report legible
   for the case the first disjunct was written for.
-- **The unrecognized-key row is what makes the vocabulary claim true.** A hand-edited row's
-  `provider` keys are arbitrary JSON strings — arbitrary length, arbitrary bytes, ANSI escapes
-  included — and this spec puts hand-edited rows in scope by name. Rendering a key verbatim would
-  print those bytes straight to an operator's terminal through `print`. Mapping any key outside
-  `_KNOWN_KINDS` to a marker keeps the output closed over the three kind names and three markers,
-  which is what the threat model's control 3 asserts.
+- **The unrecognized-key row is what makes the vocabulary claim true.** Mapping any key outside
+  `_KNOWN_KINDS` to a marker keeps the printed label closed over the three kind names and three
+  markers whatever the stored object holds, which is what the threat model's control 3 asserts,
+  and it is what bounds the label's *length* — 500 unknown keys render 14 characters.
+
+  It is deliberately **not** justified as a defence against hostile keys. `dump_profile` is on
+  both write paths and each section's alias *is* a `ResourceKind` value, so a key outside that
+  vocabulary can only arrive by direct database write — and the threat model's item 4 already
+  places that actor out of reach, since they can equally rewrite the report's inputs. Claiming
+  the marker bounds a threat there would contradict it. The `project` control is different and
+  its chain does hold: that value comes from an IdP claim validated only for non-empty-string.
 
 JSON `null` and an absent `provider` are **indistinguishable** at the Python layer — both arrive
 as `None` — so mapping both to `<none>` is forced, not merely convenient.
