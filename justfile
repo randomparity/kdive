@@ -124,8 +124,9 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # parametrized tests in the same order — a parametrize source backed by a set is ordered by
 # the hash seed, which differs per worker, and xdist then aborts with "Different tests were
 # collected". It defaults to 0 but is overridable: the weekly test-ordering workflow sets
-# PYTHONHASHSEED=random to surface any new ordering-dependent test the pinned seed would
-# otherwise mask.
+# the run number as the seed — a concrete value, recorded in that run's log and job summary,
+# so a red run is reproducible with `PYTHONHASHSEED=<seed> just test` (#2065) — to surface
+# any new ordering-dependent test the pinned seed would otherwise mask.
 #
 # `-q` bounds nothing on the failure path: it drops the per-test progress line and the header
 # and nothing else. Every failure still prints a traceback under pytest's default `--tb=auto`,
