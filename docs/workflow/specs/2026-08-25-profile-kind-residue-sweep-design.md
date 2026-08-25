@@ -20,11 +20,19 @@ before it keeps its mismatched profile, and the check never runs on a stored-pro
 
 A **fault-inject** Resource holding a libvirt-section profile was accepted outright before
 ADR-0549 and reaches `ready`, because the fault-inject provisioner discards the profile. It then
-raises a bare `AttributeError` from `ProviderSection.fault_inject` at first use, on
-`src/kdive/mcp/tools/control/registrar.py`, `src/kdive/services/runs/steps.py`,
-`src/kdive/mcp/tools/lifecycle/vmcore/handlers.py`, and
-`src/kdive/mcp/tools/debug/sessions/lifecycle.py`. The two libvirt kinds could not reach `ready`,
-so the expected residue is fault-inject Systems.
+raises a bare `AttributeError` from `ProviderSection.fault_inject` at first use, on the four lanes
+ADR-0549 names: `src/kdive/mcp/tools/lifecycle/control/registrar.py:207` (`destructive_opt_in`),
+`src/kdive/services/runs/steps.py:445` (the Run install step's `install_method_for`),
+`src/kdive/jobs/handlers/runs/boot_evidence.py:243` (`capture_method`), and
+`src/kdive/mcp/tools/lifecycle/vmcore/handlers.py:181` (`capture_method`).
+
+#1907's body lists `src/kdive/mcp/tools/debug/sessions/lifecycle.py` in place of the boot-evidence
+step. That is wrong and this spec does not follow it: the only profile-policy call in that module
+is `drgn_live_seeds_bootstrap_key` at line 445, and `FaultInjectProfilePolicy` returns `False`
+from it without dereferencing a section. The correction changes nothing about the sweep — it
+changes which lane the report tells an operator to look at.
+
+The two libvirt kinds could not reach `ready`, so the expected residue is fault-inject Systems.
 
 ## What "mismatched" means here
 
@@ -91,9 +99,13 @@ System row can fall out of the scan unreported, which is the property that makes
 mean something.
 
 The section **key** is not extracted in SQL. `jsonb_object_keys` is a set-returning function that
-fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument, and a `CASE`
-guard is not a documented guarantee against evaluating the other arm. The row carries the whole
-`provider` value back and Python renders the label.
+fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument. A `jsonb_typeof`
+`CASE` guard around a scalar sub-`SELECT` does hold in practice — measured clean over object,
+JSON-`null`, scalar and missing-key rows — so the rejection is on the guarantee, not on an
+observed failure: PostgreSQL documents that a `CASE` arm is not a promise that the other arms'
+subexpressions go unevaluated, and this sweep's whole job is to not raise on the malformed data it
+exists to find. The row carries the whole `provider` value back and Python renders the label,
+which also gets the rendering a test per shape.
 
 `ORDER BY s.created_at, s.id` makes the report stable across runs; `id` breaks ties on rows sharing
 a timestamp.
@@ -195,7 +207,12 @@ identities.
    On failure, the `CategorizedError` path in `main()` renders through `Redactor`.
 4. **Explicitly out of scope.** Access control on the command itself: the DB URL is the
    credential, matching every other `python -m kdive` operator subcommand, and adding an RBAC gate
-   would require the MCP surface ADR-0579 rejects. Denial of service from a large `systems` table:
+   would require the MCP surface ADR-0579 rejects. **Audit trail:** the same cross-project read
+   served over MCP would owe a `platform_auditor` gate and one `platform_audit_log` row
+   (`src/kdive/mcp/tools/ops/_reads.py`); this command owes neither and records nothing. Accepted
+   as a stated residual in ADR-0579 — there is no authenticated actor to attribute a row to, and
+   the holder of the URL can already read the rows directly. Denial of service from a large
+   `systems` table:
    the query is a single indexed-join scan an operator runs by hand, not on a loop. Tampering with
    `systems.provisioning_profile` by someone with direct database write access: that actor can
    equally rewrite the report's inputs, and no read-side check bounds them.
