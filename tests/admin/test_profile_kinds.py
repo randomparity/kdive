@@ -14,9 +14,11 @@ a direct ``UPDATE`` after inserting.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -24,6 +26,7 @@ import psycopg
 import pytest
 
 from kdive.admin.profile_kinds import (
+    _RAISING_LANES,
     _SCAN_QUERY,
     ProfileKindMismatch,
     _section_label,
@@ -34,6 +37,7 @@ from kdive.admin.profile_kinds import (
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 
 _REDACTED_URL = "postgresql://demo:***@db.example/kdive"
@@ -93,8 +97,11 @@ def _mismatch_line(report: str) -> str:
         ),
         pytest.param({"\x1b[31mBOOM": {}}, "<unrecognized>", id="unrecognized-key"),
         pytest.param({}, "<none>", id="empty-object"),
-        pytest.param(None, "<none>", id="none-json-null"),
-        pytest.param(None, "<none>", id="none-absent-provider"),
+        # One case, not two. JSON `null` and an absent `provider` key both arrive here as
+        # `None`, so a second `None` row would exercise no path the first does not and could
+        # only fail once the first already had. The distinction is real one layer down, at the
+        # SQL boundary, and it is pinned there — see the `provider-json-null` scan case.
+        pytest.param(None, "<none>", id="none-json-null-or-absent"),
         pytest.param("nope", "<not-an-object>", id="string-scalar"),
         pytest.param([1, 2], "<not-an-object>", id="array"),
         pytest.param(7, "<not-an-object>", id="number"),
@@ -167,8 +174,8 @@ def test_format_empty_names_redacted_url() -> None:
     report = format_profile_kind_result([], redacted_url=_REDACTED_URL)
 
     assert report == (
-        "verified no System's provisioning-profile provider section mismatches its "
-        f"Resource kind in {_REDACTED_URL}"
+        "verified no System bound to a Resource has a provisioning-profile provider "
+        f"section that mismatches its Resource kind in {_REDACTED_URL}"
     )
 
 
@@ -205,10 +212,33 @@ def test_format_mismatches_header_body_and_closing_block() -> None:
     )
     assert "ADR-0549" in report
     assert "remediation is not automated" in report.lower()
-    assert "src/kdive/mcp/tools/lifecycle/control/registrar.py (destructive_opt_in)" in report
-    assert "src/kdive/services/runs/steps.py (install_method_for)" in report
-    assert "src/kdive/jobs/handlers/runs/boot_evidence.py (capture_method)" in report
-    assert "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py (capture_method)" in report
+    for lane in _RAISING_LANES:
+        assert lane in report
+
+
+def test_raising_lanes_resolve_to_real_paths_and_symbols() -> None:
+    """The lane list is operator-facing: it is printed at the foot of every non-empty report so
+    a reader can go look at the code. Asserting the four literal strings appear in the report
+    only pins `_RAISING_LANES` against itself — it restates the constant and stays green through
+    any rename, move, or deletion of the four modules, which is the rot the list's own comment
+    claims to have removed. Resolve each entry instead: the path must exist and the symbol must
+    be defined in it. This reddens on exactly the drift the string assert cannot see.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+
+    for lane in _RAISING_LANES:
+        path_part, _, symbol_part = lane.partition(" (")
+        symbol = symbol_part.rstrip(")")
+        assert symbol, f"{lane!r} carries no (symbol) parenthetical"
+
+        target = repo_root / path_part
+        assert target.is_file(), f"{lane!r} names a path that does not exist"
+
+        source = target.read_text(encoding="utf-8")
+        assert re.search(rf"^\s*(async\s+)?def\s+{re.escape(symbol)}\b", source, re.MULTILINE), (
+            f"{lane!r} names {symbol!r}, which is not defined in {path_part} — a policy method "
+            "called there is not a symbol an operator can grep for in that file"
+        )
 
 
 # --- scan_profile_kinds: the database-backed sweep (spec Testing items 1-6) -----------------
@@ -391,6 +421,10 @@ def test_scan_of_a_clean_database_returns_no_mismatches(migrated_url: str) -> No
     ("profile", "expected_section"),
     [
         pytest.param(_base_profile(), "<none>", id="no-provider-key"),
+        # Distinct from the row above at *this* layer: `{"provider": null}` and an absent
+        # `provider` key are different stored rows, even though psycopg hands both to
+        # `_section_label` as `None`. Pinned here, where the difference exists.
+        pytest.param(_profile(None), "<none>", id="provider-json-null"),
         pytest.param(
             _profile({"fault-inject": _FAULT_INJECT_SECTION, "local-libvirt": _LIBVIRT_SECTION}),
             "fault-inject,local-libvirt",
@@ -553,11 +587,15 @@ def test_scan_breaks_created_at_ties_on_id(migrated_url: str) -> None:
 def test_verify_profile_kinds_opens_its_own_pool_against_a_real_database(
     monkeypatch: pytest.MonkeyPatch, migrated_url: str
 ) -> None:
-    """Spec item 13: without this, `verify_profile_kinds`'s resource lifecycle — pool open,
-    `finally: await pool.close()`, and the pre-query `CONFIGURATION_ERROR` from `create_pool()`
-    — is exercised by nothing else in the suite. Same seed as item 1, but driven through the
-    wrapper itself rather than `scan_profile_kinds(conn)` directly, and through the environment
-    variable rather than an explicit connection.
+    """Spec item 13: drives `verify_profile_kinds` end to end — it opens its own pool from
+    `KDIVE_DATABASE_URL` and returns the same rows `scan_profile_kinds(conn)` does. Same seed as
+    item 1, but through the wrapper and the environment variable rather than an explicit
+    connection.
+
+    What this does **not** cover, stated so the gap is not read as coverage: nothing here
+    asserts `finally: await pool.close()` ran. A leaked pool raises no error the suite escalates
+    (`addopts` sets no `filterwarnings`), so deleting that `finally` would stay green. Pool
+    closure rests on inspection. The unset-URL path is covered separately, below.
     """
 
     async def _seed() -> UUID:
@@ -590,3 +628,21 @@ def test_verify_profile_kinds_opens_its_own_pool_against_a_real_database(
             resource_kind="fault-inject",
         )
     ]
+
+
+def test_verify_profile_kinds_raises_configuration_error_without_a_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first row of the spec's failure-mode table, asserted rather than argued.
+
+    `create_pool()` resolves `KDIVE_DATABASE_URL` *before* opening anything, so an unset
+    variable must fail as a `CategorizedError(CONFIGURATION_ERROR)` — which `main()` renders and
+    maps to ADR-0089's exit code — not as a connection error from a pool that was opened first.
+    Needs no database: it must raise before any query.
+    """
+    monkeypatch.delenv("KDIVE_DATABASE_URL", raising=False)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(verify_profile_kinds())
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
