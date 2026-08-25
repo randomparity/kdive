@@ -103,8 +103,35 @@ that one operator is the whole control: `repr` escapes exactly what `str.isprint
 delimits the value, and escapes any quote inside it. The label needs nothing — it is closed over
 printable ASCII by construction.
 
-Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec verbatim — the branch order is
-load-bearing and each branch has a test below.
+Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec — the branch order is
+load-bearing and each branch has a test below — **with one correction the spec's block does not
+yet carry.** As written there it does not type-check:
+
+```
+error[invalid-argument-type]: Argument to function `_entry` is incorrect
+  |     return ",".join(sorted({_entry(key, provider[key]) for key in provider}))
+  |                                    ^^^ Expected `str`, found `object`
+```
+
+`isinstance(provider, dict)` narrows to `dict[Unknown, Unknown]`, so the keys are `object` and
+`_entry(key: str, …)` rejects them; `provider[key]` fails for the same reason. Measured with
+`uv run ty check` — the exact command `just type` runs — two diagnostics, exit 1. The fix is two
+lines and `ty` then exits 0:
+
+```python
+def _entry(key: object, value: object) -> str:
+    name = key if isinstance(key, str) and key in _KNOWN_KINDS else "<unrecognized>"
+    return name if isinstance(value, dict) else f"{name}=<not-an-object>"
+
+
+# ... and iterate items(), not provider[key]:
+return ",".join(sorted({_entry(k, v) for k, v in provider.items()}))
+```
+
+Verified behaviour-preserving over all 15 shapes of the spec's measured table, including the
+500-unknown-key bound (still `<unrecognized>`, 14 chars): zero divergences from the spec's form.
+The added `isinstance(key, str)` is not dead defensiveness — it is what makes the narrowing sound,
+and a sweep whose job is surviving malformed data should not assume its own key type.
 
 **Tests (spec items 7–10).**
 
