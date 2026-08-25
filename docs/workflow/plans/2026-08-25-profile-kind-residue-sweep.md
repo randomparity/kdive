@@ -138,9 +138,10 @@ load-bearing and each branch has a test below.
    `state=`, one `profile_section=` and one `resource_kind=`. That is quote-agnostic and holds
    for every hostile input in the parametrize set.
 4. `format_profile_kind_result([])` returns one line naming the redacted URL.
-5. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
-   five fields; the closing block names ADR-0549, says remediation is not automated, and names
-   the four raising lanes.
+5. `format_profile_kind_result([one, two])` returns the fixed header carrying the count and the
+   redacted URL, then one line per mismatch each carrying all five fields; the closing block
+   names ADR-0549, says remediation is not automated, and names the four raising lanes. Assert
+   the header explicitly — it is the only report line an implementer would otherwise invent.
 
 **Mutation check before moving on.** Break `_entry`'s `isinstance(value, dict)` branch and
 confirm the section-not-an-object case reddens; break the `key in _KNOWN_KINDS` branch and

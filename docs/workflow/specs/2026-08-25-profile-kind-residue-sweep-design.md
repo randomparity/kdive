@@ -63,15 +63,8 @@ That covers the residue #1907 targets, the degenerate shapes a hand-edited row c
 `provider` object, a scalar, a JSON-`null` section), and a `provider` carrying a second section
 beside the matching one.
 
-This is the rule the query implements and the one ADR-0579 records; the `Design` section below
-derives both halves of the predicate from it. An earlier draft defined mismatch as "does not carry
-an object under the bound kind" and added that no second rule was needed — that is the first
-disjunct alone, and it is false. Measured: `{"fault-inject": {}, "local-libvirt": {}}` on a
-fault-inject Resource *does* carry an object under the bound kind, so the narrow rule calls it
-clean, while the query reports it and `ProvisioningProfile.parse` rejects it outright. An
-implementer building to the narrow rule would write exactly the bug the `Design` section spends a
-paragraph refuting, which matters because ADR-0579 anticipates a follow-up reusing
-`scan_profile_kinds` unchanged.
+This is the rule the query implements and the one ADR-0579 records; the `Design` section
+below derives both halves of the predicate from it.
 
 ## Design
 
@@ -223,7 +216,7 @@ Measured against `postgres:17` through the project venv:
 | array `[1, 2]` | `list` | `<not-an-object>` |
 | number `7` / bool `true` | `int` / `bool` | `<not-an-object>` |
 
-Two rows in that table are load-bearing and were nearly missed:
+Two rows in that table are load-bearing:
 
 - **The section-not-an-object row is what the predicate's first disjunct exists to catch**, and a
   label rendering only the *key* would print `profile_section=fault-inject
@@ -270,7 +263,10 @@ the printed report is the answer.
 
 - **clean** → one line naming the credential-redacted target:
   `verified no System's provisioning-profile provider section mismatches its Resource kind in <url>`
-- **mismatches** → a header naming the count and the target, then one line per mismatch:
+- **mismatches** → a header, then one line per mismatch, then a closing block. The header is
+  fixed text like every other line, so no later edit can drift it while the suite stays green:
+  `found <n> System(s) whose provisioning-profile provider section does not match their Resource kind in <url>`
+  then one line per mismatch:
   `system=<uuid> project=<project!r> state=<state> profile_section=<section> resource_kind=<kind>`
   — `project` rendered with `repr`, because it is the one field nothing else bounds (threat
   model, control 3); the other four are printed as they stand,
@@ -282,12 +278,8 @@ the printed report is the answer.
   ADR-0549 is named as background for the kind-mismatch case, not as a claim about when each row
   was written.
 
-The single-cause version of that line was wrong for two of the four reported classes. "These
-predate ADR-0549's admission cross-check" is false for a hand-edited row, which this spec puts
-in scope by name, and "they raise on the four lanes" understates a two-section row, which the
-spec's own second-disjunct argument calls *worse* than the residue being swept. A fixed message
-has no wording that is true of all four classes, so it describes the class and distinguishes the
-two blast radii rather than picking one and being wrong about the rest.
+That closing block describes the class and distinguishes the two blast radii rather than
+asserting one cause, because no fixed wording is true of all four reported classes.
 
 There is no non-zero exit because there could not be a working one. #1907's criteria ask for a
 query, a report, no mutation, and a test — none asks for an exit code — and the sweep reports
@@ -340,8 +332,7 @@ identities.
 1. **Boundary inventory.** Two boundaries are *added*. The `verify-profile-kinds` argv path into
    a database read — inert, since the command takes no arguments. And **stdout into the
    operator's terminal**, which is the one that matters: stored row content crosses it through
-   `print`, and a terminal interprets what it is handed. Naming only the argv path is what left
-   four of the five printed fields without a control in an earlier draft of this model. Nothing
+   `print`, and a terminal interprets what it is handed. Nothing
    is widened — the query is a `SELECT` over three tables the same process already reads through
    `migrate`, `seed-project`, and `verify-project`. No network listener, no new file, no new
    environment variable.
@@ -420,7 +411,10 @@ identities.
 
    **`project`'s bound is charset and tokenization, not length.** `repr` is a per-character
    escape and a delimiter; neither caps length, and `systems.project` is unbounded `text`.
-   Measured: a 5000-character project renders a 5093-character line. Accepted rather than fixed —
+   Measured against a realistic row (`state=ready`, `profile_section=local-libvirt`,
+   `resource_kind=fault-inject`): a 5000-character project renders a 5123-character line. An
+   earlier figure of 5093 was taken from the format skeleton with the other fields empty, which
+   the `CHECK` constraints forbid. Accepted rather than fixed —
    this is a report an operator runs by hand and reads, not a fixed-width surface, and a width
    policy plus its tests costs more than the over-long line it prevents. Stated because the
    adjacent field *is* length-bounded and the asymmetry would otherwise read as an oversight.
@@ -503,22 +497,39 @@ Database-backed:
    repositories as everywhere else, and this one column is then imposed out of band: after
    inserting, issue `UPDATE systems SET created_at = %s WHERE id = %s` per row.
 
-   With that in place: give the row inserted **first** the *later* `created_at`, so heap order and
-   `created_at` order disagree, and assert the returned order is by `created_at`. Rows come back
-   from a small unindexed scan in insertion order, so a fixture whose insertion order already
-   matches `created_at` passes with no `ORDER BY` at all — the test would assert what the storage
-   layer supplies for free.
+   **The variable that decides both halves is `UPDATE` order, not insertion order.** PostgreSQL
+   writes a new tuple version on `UPDATE`, so a seq scan returns rows in **last-write** order;
+   every row in this fixture is updated exactly once, so heap order is the `UPDATE` order and
+   nothing else. Measured over three sequencings of the same fixture:
 
-   The tiebreak half needs **the same disagreement construction**, and stating only "seed a third
-   row sharing a timestamp and assert the `id` tiebreak" does not get it. Measured: with the tied
-   pair inserted in ascending `id` order, `ORDER BY created_at` alone and
-   `ORDER BY created_at, id` return the identical sequence — an implementation shipping no
-   `, s.id` passes. So the fixture must make heap order and `id` order disagree: seed the tied
-   pair with **fixed, explicit UUIDs**, insert the **larger** one first, and assert the smaller
-   comes back first. Fixed UUIDs are load-bearing — every seed helper in this repo uses `uuid4()`,
-   which would make this assertion pass or fail at random, and a flake that passes on re-run is
-   not evidence. Sharing a timestamp is not hypothetical: two Systems seeded in one transaction
-   get identical `now()`.
+   | `UPDATE` sequence | no `ORDER BY` | `ORDER BY created_at` |
+   |---|---|---|
+   | insertion order | fires | fires |
+   | **ascending asserted order** | **DEAD** | **DEAD** |
+   | reverse of asserted order | fires | fires |
+
+   The middle row is the trap: it is the most readable way to write the fixture, it makes the
+   scan return the asserted order for free, and both `ORDER BY` mutations then report green
+   against a query shipping no `ORDER BY` at all. So **issue the `UPDATE` statements in the
+   reverse of the asserted order** — the row that must come back last is updated first.
+
+   - *`created_at` half:* one row carries the earlier timestamp, one the later; assert the
+     earlier comes back first.
+   - *`id` tiebreak half:* seed the tied pair with **fixed, explicit UUIDs** sharing one
+     timestamp, `UPDATE` the larger-`id` row first, and assert the smaller comes back first.
+     Fixed UUIDs are load-bearing — every seed helper in this repo uses `uuid4()`, which would
+     make this assertion pass or fail at random, and a flake that passes on re-run is not
+     evidence. Measured: with the tied pair in ascending `id` order, `ORDER BY created_at` alone
+     and `ORDER BY created_at, id` return the identical sequence, so an implementation shipping
+     no `, s.id` passes.
+
+   **The tie must be imposed by that same `UPDATE`, with one identical literal timestamp for both
+   rows.** Do not rely on two rows seeded together sharing `now()`: measured, that holds inside an
+   explicit transaction and is **false** on an `autocommit=True` connection — two `SELECT now()`
+   calls returned timestamps 464 µs apart — and `autocommit=True` is the connection pattern item 1
+   specifies, because it is what every helper in `tests/db/conftest.py` uses. Without a real tie
+   the pair no longer ties, `ORDER BY s.created_at` alone fully determines their order, and the
+   tiebreak assertion passes against an implementation carrying no `, s.id` at all.
 
 There is deliberately **no** test guarding the join dependency. A comparison of the join's row
 count against the fixture's `systems` count would look protective and detect nothing: a migration
@@ -554,16 +565,34 @@ Pure:
      `line.isprintable()` still passes. This is the case that reddens.
 
    Assert the real `state=` / `profile_section=` / `resource_kind=` pairs are the **only** ones
-   outside the rendered `project` field — **slice the line at the closing quote and assert on the
-   tail**. Do *not* assert `line.count("state=") == 1`: `repr` escapes and keeps the hostile text
-   rather than deleting it, so measured, `state=` appears **twice** on the fixed line and twice on
-   the broken one. A count assertion is green against both and tests nothing. This is the bite
-   behind the threat model's control 3; without the quote case the control ships untested on its
-   one gap, and without the slice the test restates the count trap instead of the property.
+   outside the rendered `project` field, and **anchor that assertion on the rendered token**:
+
+   ```python
+   tail = line.split(f"project={mismatch.project!r}", 1)[1]
+   ```
+
+   then assert `tail` carries exactly one `state=`, one `profile_section=` and one
+   `resource_kind=`. Two other wordings are wrong, in opposite directions:
+
+   - `line.count("state=") == 1` is **vacuous** — `repr` escapes and keeps the hostile text
+     rather than deleting it, so measured, `state=` appears **twice** on the fixed line and twice
+     on the broken one. Green against both, testing nothing.
+   - "slice at the closing quote" **reddens the correct implementation** — measured, `repr` picks
+     `'` for this value (it contains `"` and no `'`) and leaves the embedded `"` unescaped, so the
+     first `"` sits two characters into the project value. The delimiter `repr` chooses is
+     data-dependent, so "the closing quote" names no fixed character across a parametrized set. A
+     test that reddens on a good tree is worse than one that cannot fire: it gets repaired by
+     weakening the assertion.
+
+   Splitting on the rendered token is quote-agnostic and holds for every hostile input in the
+   set. This is the bite behind the threat model's control 3; without the quote case the control
+   ships untested on its one gap.
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
     five fields; the message names ADR-0549, says remediation is not automated, and names the
-    four raising lanes.
+    four raising lanes. **Assert the header too** — that it carries the count `2` and the
+    redacted URL. Without it the header is the only line of the report no test constrains, and
+    it is also the only one an implementer would otherwise invent.
 Handler (not pure — see the prerequisites):
 
 11. **The handler prints the report and raises no `SystemExit`.** Capture stdout and assert it
@@ -584,7 +613,7 @@ Parser:
     `command == "verify-profile-kinds"`, and the command is absent from `_RUNNABLE`.
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
-`kdive.db.repositories`, the pattern `tests/services/test_allocation_enqueue.py` uses, so the
+`kdive.db.repositories`, the pattern `tests/mcp/lifecycle/test_systems_list.py:104-155` uses, so the
 fixture rows are built by the same code production uses and cannot drift from the schema. **One
 carve-out, and only one:** `created_at` is server-generated and the repositories exclude it from
 their insert columns, so item 6 sets it with a direct `UPDATE` after inserting. Every other
