@@ -116,7 +116,8 @@ Copy the signatures exactly as the spec gives them, `_entry(key: object, …)` i
 `dict[Unknown, Unknown]`, so the keys are `object` and both `_entry(key: str, …)` and
 `provider[key]` are rejected — measured with `uv run ty check`, the command `just type` runs, two
 diagnostics and exit 1. The spec's form takes `key: object`, narrows with `isinstance(key, str)`,
-and iterates `items()`; it exits 0 and is behaviour-identical over all 15 shapes of the measured
+and iterates `items()`; it exits 0 and is behaviour-identical over 15 measured stored shapes
+covering every row of the
 table, the 500-key bound included.
 
 **Tests (spec items 7–10).**

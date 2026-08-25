@@ -189,7 +189,8 @@ iterates `items()` rather than indexing, because **the obvious form does not typ
 `isinstance(provider, dict)` narrows to `dict[Unknown, Unknown]`, so the keys are `object` and
 both `_entry(key: str, …)` and `provider[key]` are rejected. Measured with `uv run ty check`, the
 command `just type` runs: two diagnostics, exit 1 — Task 1 would go red on its first guardrail
-run. The form above exits 0 and is behaviour-identical over all 15 shapes of the table below,
+run. The form above exits 0 and is behaviour-identical over 15 measured stored shapes covering
+every row of the table below,
 the 500-key bound included. The `isinstance(key, str)` is not dead defensiveness: it is what
 makes the narrowing sound, and a sweep whose job is surviving malformed data should not assume
 its own key type.
