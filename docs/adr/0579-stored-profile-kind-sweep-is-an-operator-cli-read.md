@@ -19,10 +19,10 @@ admission completely before ADR-0549 — `FaultInjectProfilePolicy.rootfs_source
 and its `validate_profile` was a no-op — and the fault-inject provisioner discards the profile
 entirely, so such a System reached `ready`. It then raises a bare `AttributeError` from
 `ProviderSection.fault_inject` at first use, on four lanes — the same four ADR-0549 names:
-`control._op_opt_in` (`mcp/tools/lifecycle/control/registrar.py:207`), the Run install step
-(`services/runs/steps.py:445`), the Run boot-evidence step
-(`jobs/handlers/runs/boot_evidence.py:243`), and the vmcore `capture_method` lookup
-(`mcp/tools/lifecycle/vmcore/handlers.py:181`). #1907's own body lists the debug-session
+`control._op_opt_in` (`mcp/tools/lifecycle/control/registrar.py`), the Run install step
+(`services/runs/steps.py`), the Run boot-evidence step
+(`jobs/handlers/runs/boot_evidence.py`), and the vmcore `capture_method` lookup
+(`mcp/tools/lifecycle/vmcore/handlers.py`). #1907's own body lists the debug-session
 lifecycle in place of boot-evidence; that is wrong — the only profile-policy call there is
 `drgn_live_seeds_bootstrap_key` (`mcp/tools/debug/sessions/lifecycle.py:445`), and the
 fault-inject adapter returns `False` from it without dereferencing anything. The two libvirt

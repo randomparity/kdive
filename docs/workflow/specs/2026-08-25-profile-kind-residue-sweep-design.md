@@ -21,10 +21,11 @@ before it keeps its mismatched profile, and the check never runs on a stored-pro
 A **fault-inject** Resource holding a libvirt-section profile was accepted outright before
 ADR-0549 and reaches `ready`, because the fault-inject provisioner discards the profile. It then
 raises a bare `AttributeError` from `ProviderSection.fault_inject` at first use, on the four lanes
-ADR-0549 names: `src/kdive/mcp/tools/lifecycle/control/registrar.py:207` (`destructive_opt_in`),
-`src/kdive/services/runs/steps.py:445` (the Run install step's `install_method_for`),
-`src/kdive/jobs/handlers/runs/boot_evidence.py:243` (`capture_method`), and
-`src/kdive/mcp/tools/lifecycle/vmcore/handlers.py:181` (`capture_method`).
+ADR-0549 names: `src/kdive/mcp/tools/lifecycle/control/registrar.py` (`destructive_opt_in`),
+`src/kdive/services/runs/steps.py` (the Run install step's `install_method_for`),
+`src/kdive/jobs/handlers/runs/boot_evidence.py` (`capture_method`), and
+`src/kdive/mcp/tools/lifecycle/vmcore/handlers.py` (`capture_method`). Path and function only:
+a line number rots and nothing keeps it accurate, so the report never carries one.
 
 #1907's body lists `src/kdive/mcp/tools/debug/sessions/lifecycle.py` in place of the boot-evidence
 step. That is wrong and this spec does not follow it: the only profile-policy call in that module

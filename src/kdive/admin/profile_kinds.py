@@ -29,12 +29,14 @@ from kdive.domain.catalog.resources import ResourceKind
 _KNOWN_KINDS = {kind.value for kind in ResourceKind}
 
 # The four lanes ADR-0549 names as raising a bare `AttributeError` from `ProviderSection` at
-# first use on a kind-mismatched, `ready` System.
+# first use on a kind-mismatched, `ready` System. Path and function only, never a line number:
+# nothing keeps a line number accurate, and the test can only pin the string it was written
+# with, so a drifted reference would point an operator at unrelated code on a green suite.
 _RAISING_LANES = (
-    "src/kdive/mcp/tools/lifecycle/control/registrar.py:207 (destructive_opt_in)",
-    "src/kdive/services/runs/steps.py:445 (install_method_for)",
-    "src/kdive/jobs/handlers/runs/boot_evidence.py:243 (capture_method)",
-    "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py:181 (capture_method)",
+    "src/kdive/mcp/tools/lifecycle/control/registrar.py (destructive_opt_in)",
+    "src/kdive/services/runs/steps.py (install_method_for)",
+    "src/kdive/jobs/handlers/runs/boot_evidence.py (capture_method)",
+    "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py (capture_method)",
 )
 
 

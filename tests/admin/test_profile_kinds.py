@@ -192,10 +192,10 @@ def test_format_mismatches_header_body_and_closing_block() -> None:
     )
     assert "ADR-0549" in report
     assert "remediation is not automated" in report.lower()
-    assert "src/kdive/mcp/tools/lifecycle/control/registrar.py:207" in report
-    assert "src/kdive/services/runs/steps.py:445" in report
-    assert "src/kdive/jobs/handlers/runs/boot_evidence.py:243" in report
-    assert "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py:181" in report
+    assert "src/kdive/mcp/tools/lifecycle/control/registrar.py (destructive_opt_in)" in report
+    assert "src/kdive/services/runs/steps.py (install_method_for)" in report
+    assert "src/kdive/jobs/handlers/runs/boot_evidence.py (capture_method)" in report
+    assert "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py (capture_method)" in report
 
 
 # --- scan_profile_kinds: the database-backed sweep (spec Testing items 1-6) -----------------
