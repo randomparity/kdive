@@ -235,11 +235,13 @@ def format_profile_kind_result(
     if not mismatches:
         return (
             "verified every System bound to a Resource has a stored provisioning-profile "
-            f"provider of exactly one section keyed by its Resource kind in {redacted_url}"
+            "provider of exactly one object-valued section keyed by its Resource kind "
+            f"in {redacted_url}"
         )
     lines = [
         f"found {len(mismatches)} System(s) whose stored provisioning-profile provider is not "
-        f"exactly one section keyed by their bound Resource's kind in {redacted_url}"
+        f"exactly one object-valued section keyed by their bound Resource's kind "
+        f"in {redacted_url}"
     ]
     for mismatch in mismatches:
         lines.append(
@@ -248,14 +250,14 @@ def format_profile_kind_result(
             f"resource_kind={mismatch.resource_kind}"
         )
     lines.append(
-        "each listed System's stored provisioning-profile provider is not exactly one section "
-        "keyed by its bound Resource's kind. Where the section is simply under the wrong kind, "
-        "the System raises at first use on the four lanes below (ADR-0549) if it is still live "
-        "enough to reach them. Every other listed shape — a provider carrying any key besides "
-        "the bound kind, or none, or a section under the bound kind that is not an object — "
-        "fails ProvisioningProfile.parse outright and so breaks every parse site instead. "
-        "state is reported per row so you can judge which rows are worth acting on. "
-        "Remediation is not automated."
+        "each listed System's stored provisioning-profile provider is not exactly one "
+        "object-valued section keyed by its bound Resource's kind. A row holding exactly one "
+        "section under the wrong kind still parses: it raises only at first use, on the four "
+        "lanes below (ADR-0549), and only for a System live enough to reach them. Every other "
+        "listed shape — a provider holding two or more sections, or none, or a section under "
+        "the bound kind whose value is not an object — fails ProvisioningProfile.parse "
+        "outright and so breaks every parse site instead. state is reported per row so you can "
+        "judge which rows are worth acting on. Remediation is not automated."
     )
     lines.extend(_RAISING_LANES)
     return "\n".join(lines)
