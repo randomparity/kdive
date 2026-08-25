@@ -34,6 +34,15 @@ changes which lane the report tells an operator to look at.
 
 The two libvirt kinds could not reach `ready`, so the expected residue is fault-inject Systems.
 
+That bounds the candidate population hard: the fault-inject runtime "is opt-in and absent from
+the default production composition (ADR-0071)"
+(`src/kdive/providers/fault_inject/__init__.py:5-6`, gated by `_fault_inject_enabled` in
+`providers/assembly/composition.py:189`). A deployment that never composed it holds no
+`fault-inject` Resource and so no candidate row — the sweep is clean there by construction. The
+sweep is worth building anyway (#1907 asks for detection, and "clean by construction" is a claim
+worth being able to check rather than assert), but it sets the scale: this is a targeted check
+for opted-in deployments, not a fleet-wide integrity problem.
+
 ## What "mismatched" means here
 
 `ProvisioningProfile.provider` is required, and `_require_exactly_one_provider` admits exactly one
@@ -109,14 +118,28 @@ join it returns the eight wrong ones — mismatched key, both two-key shapes, JS
 empty object, scalar, array, absent `provider` — and neither correct one. No System row can fall
 out of the scan unreported, which is the property that makes a clean result mean something.
 
+Totality rests on the **join** too, and that half is a dependency rather than a proof.
+`allocations.resource_id` is nullable — `0016_pending_queue.sql` dropped the `NOT NULL` and
+`0017_queue_terminal_null_resource.sql` guards it with
+`CHECK (resource_id IS NOT NULL OR state IN ('requested', 'released', 'failed'))` — so an inner
+join would silently drop a System whose Allocation carried none. It holds today because
+`systems.allocation_id` is `NOT NULL`, a System is minted only against a placed Allocation, and
+no path NULLs `resource_id` afterwards (`rg -n "SET resource_id|resource_id = NULL" src/` finds
+nothing). The query is deliberately **not** widened to a `LEFT JOIN` for a case nothing can
+reach — that would add a NULL branch to `resource_kind`, a reported field, to cover a row no
+code can construct. Naming the dependency is the fix; a migration relaxing any of those three
+has nothing else to warn it.
+
 The section **key** is not extracted in SQL. `jsonb_object_keys` is a set-returning function that
 fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument. A `jsonb_typeof`
 `CASE` guard around a scalar sub-`SELECT` does hold in practice — measured clean over object,
-JSON-`null`, scalar and missing-key rows — so the rejection is on the guarantee, not on an
-observed failure: PostgreSQL documents that a `CASE` arm is not a promise that the other arms'
-subexpressions go unevaluated, and this sweep's whole job is to not raise on the malformed data it
-exists to find. The row carries the whole `provider` value back and Python renders the label,
-which also gets the rendering a test per shape.
+JSON-`null`, scalar and missing-key rows — so the guard is not rejected for failing. PostgreSQL 17
+§9.18.1 notes that "CASE evaluates only necessary subexpressions" is not ironclad, but its
+documented instance is constant folding, which cannot reach a column-correlated subexpression; the
+note declines to promise evaluation order rather than predicting a failure here. The deciding
+ground is testability: the row carries the whole `provider` value back and Python renders the
+label, which gets a case per stored shape where the SQL form gets none — on the one part of the
+sweep whose job is to survive malformed data.
 
 `ORDER BY s.created_at, s.id` makes the report stable across runs; `id` breaks ties on rows sharing
 a timestamp.

@@ -28,6 +28,14 @@ lifecycle in place of boot-evidence; that is wrong — the only profile-policy c
 fault-inject adapter returns `False` from it without dereferencing anything. The two libvirt
 kinds could not reach `ready`, so the expected residue is fault-inject Systems specifically.
 
+**That bounds the candidate population, and it bounds it hard.** The fault-inject runtime "is
+opt-in and absent from the default production composition (ADR-0071)" — its own words,
+`src/kdive/providers/fault_inject/__init__.py:5-6`, gated by `_fault_inject_enabled` in
+`providers/assembly/composition.py:189`. A deployment that never composed it holds no
+`fault-inject` Resource, hence no candidate row, hence a sweep that is clean by construction.
+The residue is real only where an operator opted the mock provider in. That is the fact that
+sets the scale of everything below, so it belongs here rather than in a reader's head.
+
 Issue #1907 asks for **detection, not repair**: a query over `systems` joined through
 `allocations` to `resources`, a report naming each mismatch, and a test seeding one mismatched
 `ready` System. It leaves the exposure open — "whether the sweep ships as a `just` recipe, a
@@ -51,7 +59,9 @@ It is built the way `verify-project` ([ADR-0256](0256-onboard-target.md)) is bui
   does.
 - `format_profile_kind_result(...)` is pure and returns `(message, exit_code)` — `0` for a clean
   sweep, `1` when any mismatch is found. The target database is named in the message through the
-  existing `redact_database_url`.
+  existing `redact_database_url`. A non-empty message also names the four raising lanes and
+  states that remediation is manual, so the report needs no companion document; those two are
+  part of the contract, not presentation left to the implementer.
 
 **A System is clean only when its stored `provider` is exactly `{<the bound kind>: {…}}`.** The
 `WHERE` clause is
@@ -71,11 +81,20 @@ fault-inject Resource as clean, and that row is *worse* than the residue this sw
 above.
 
 The predicate is **total** — no System row can fall out of the scan unreported, which is what
-makes a clean result mean anything. Measured on PostgreSQL 17.10, `jsonb -> text` returns SQL
+makes a clean result mean anything. Measured on `postgres:17` (17.10 at the time of measurement;
+the tag floats and now resolves to 17.11, with identical results), `jsonb -> text` returns SQL
 `NULL` for a missing key and for every non-object left operand (array, string scalar, JSON
 `null`), and `jsonb_typeof(NULL::jsonb)` is `NULL`. Run over ten seeded profile shapes on a real
 join, the clause returns the eight wrong ones — mismatched key, both two-key shapes, JSON-`null`
 section, empty object, scalar, array, absent `provider` — and neither correct one.
+
+Totality rests on the **join** as well as the predicate, and that half is a dependency rather
+than a proof: `allocations.resource_id` is nullable (`0016_pending_queue.sql`,
+`0017_queue_terminal_null_resource.sql` permit `NULL` only for `requested`/`released`/`failed`),
+so an inner join would silently drop a System whose Allocation had none. It holds today because
+`systems.allocation_id` is `NOT NULL`, a System is only minted against a placed Allocation, and
+no path NULLs `resource_id` afterwards. The query is not widened for a case nothing can reach —
+but a migration that relaxes any of those three has no other way to learn it broke this claim.
 
 The **key** under `provider` is not extracted in SQL; the row carries
 `provisioning_profile -> 'provider'` back and a pure Python helper renders the label: the single
@@ -90,7 +109,8 @@ a statement other than that `SELECT`.
 ## Consequences
 
 - An operator upgrading past ADR-0549 has a one-command answer to "did this deployment mint any
-  such System before the check landed".
+  such System before the check landed" — an answer that is `0` by construction wherever the
+  fault-inject provider was never composed, which is the default.
 - **The non-zero exit is a one-shot post-upgrade check, not a standing gate.** The
   `verify-project` analogy stops at the exit code: verify-project's `1` clears by running
   `seed-project`, and this one clears only when someone hand-repairs the rows. Every state is
@@ -166,15 +186,27 @@ a statement other than that `SELECT`.
   judgment: #1907 asks for a report and excludes the
   repair decision, so a pass would have nothing to do but log on an interval, and a log line on an
   interval is not a surface an operator can query.
-- **Ship it as a `just` recipe.** verified: a recipe is a wrapper, not an entry point —
-  `justfile`'s `onboard` is exactly a recipe wrapping `migrate`, `seed-project`, and
-  `verify-project` against a live `KDIVE_DATABASE_URL` (`justfile:49-50`,
-  `scripts/live-stack/onboard.sh`). judgment: so this is not a rival to the decision but a
-  question one level up from it — where the Python entry point lives is still what has to be
-  settled, and a `just verify-profile-kinds` wrapper stays available afterwards on exactly the
-  `onboard` precedent. Note the recipe could **not** join the `ci` chain, since every `*-check`
-  in it reads the tree and none opens a database connection (`justfile:656`) — but that is a fact
-  about the gate, not a reason against the recipe.
+- **Ship it as a checked-in `.sql` file plus a `just` recipe running `psql -f`.** This is the
+  cheapest form that satisfies #1907 at all, and it needs no Python entry point — so it is a
+  genuine rival, not a wrapper question. verified: the form works. The `WHERE` clause above, run
+  under `psql` over a seeded three-table join, prints System id, resource kind and the raw
+  `provider` value for all eight wrong shapes and neither correct one. The `onboard` precedent
+  supports it rather than the alternative: that recipe wraps a **shell** script
+  (`justfile:49-50` → `scripts/live-stack/onboard.sh`), not Python. judgment: rejected on two
+  grounds it cannot meet. It cannot render the observed section — `<none>`, `<not-an-object>`,
+  and the sorted-key join are exactly what SQL should not be computing here, per the last bullet
+  — so its report prints raw JSON and the operator does the reading. And it puts the sweep
+  outside the test suite: #1907's fourth criterion is a test that seeds one mismatched `ready`
+  System and asserts the sweep finds exactly it, which against a `psql -f` recipe means shelling
+  out and parsing stdout instead of calling a function. The exit code follows from the
+  `verify-project` precedent the charter points at rather than being the reason for this
+  rejection; it would not, on its own, have been worth a Python module.
+- **Ship it as a plain `just` recipe wrapping the Python entry point.** judgment: not a rival —
+  it is one level up from the decision, since a recipe still has to wrap something, and it stays
+  available afterwards on exactly the `onboard` precedent. Noted so the alternative above is not
+  read as ruling it out. (Either form could **not** join the `ci` chain, since every `*-check` in
+  it reads the tree and none opens a database connection, `justfile:656` — a fact about the gate,
+  not a reason against a recipe.)
 - **Repair the rows as well as report them.** judgment: #1907 states the exclusion in its own
   words ("this is a report, not a migration"; "deciding between cordon, teardown, and operator
   notification is a separate call"), and there is no accepted decision that says which of the
@@ -184,13 +216,15 @@ a statement other than that `SELECT`.
   of a `ready` System rather than at upgrade time, which is the whole difference the sweep buys.
 - **Report only the live states.** judgment: which states matter is the triage call #1907
   excludes, and `state` is in the report so the operator can make it.
-- **Extract the section key in SQL with `jsonb_object_keys`.** verified: on PostgreSQL 17.10
-  (`docker run --rm postgres:17`), `SELECT jsonb_object_keys('"s"'::jsonb)` fails with
+- **Extract the section key in SQL with `jsonb_object_keys`.** verified: on `postgres:17`,
+  `SELECT jsonb_object_keys('"s"'::jsonb)` fails with
   `ERROR: cannot call jsonb_object_keys on a scalar`, so the bare form is out. A `jsonb_typeof`
   `CASE` guard around a scalar sub-`SELECT` **does** work in practice — it ran clean over object,
-  JSON-`null`, scalar and missing-key rows — so this is rejected on the guarantee, not on a
-  failure: PostgreSQL documents that a `CASE` arm is not a promise that the other arms'
-  subexpressions go unevaluated. judgment: the sweep's one job is to not raise on the malformed
-  stored data it exists to find, which is a poor thing to rest on an evaluation-order property the
-  engine declines to guarantee — and a pure Python renderer gets a test per shape, which the SQL
-  form does not.
+  JSON-`null`, scalar and missing-key rows. So the guard is not rejected for failing. verified:
+  PostgreSQL 17 §9.18.1 (referring to §4.2.14) notes that "CASE evaluates only necessary
+  subexpressions" is not ironclad; its documented instance is constant folding, which cannot
+  reach a subexpression correlated to a column, so that note does **not** predict a failure here
+  — it only declines to promise evaluation order. judgment: that is thin ground to rest on, but
+  it is not what decides this. What decides it is testability: a pure Python renderer gets a case
+  per stored shape — one key, several keys, empty object, JSON `null`, scalar, array — and the
+  SQL form gets none, on the one part of the sweep whose job is to survive malformed data.
