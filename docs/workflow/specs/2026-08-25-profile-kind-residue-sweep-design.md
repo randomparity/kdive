@@ -673,9 +673,16 @@ Pure:
    `x" state=ready … junk="y` (double-quote forgery);
    `x' state=torn_down … junk='y` (single-quote forgery); and `x\tstate=torn_down` (tab).
 
-   **All four cases are required.** The `'`-only case is the one that reddens when either of
-   `_project_token`'s substitutions is dropped, so it is the guard on a live security control:
-   keep it. Two forms that do **not** work: anchoring on `f"project={project!r}"` restates the
+   **`_project_token` makes two substitutions, they fail differently, and each needs its own
+   assertion.** Dropping the `=` escape leaves `key=value` lookalikes in the token, which the
+   per-key counts catch. Dropping the `\x20` escape leaves the token spanning several fields —
+   the key counts still pass, because a shifted field is still one key — so the positional
+   assertion catches that: exactly five whitespace-delimited fields, each with its expected
+   prefix. **Verify them one at a time.** Removing both substitutions reddens on either
+   assertion and therefore proves neither; that compound mutation is what let an unguarded
+   `\x20` escape ship past a review round.
+
+   Two forms that do **not** work: anchoring on `f"project={project!r}"` restates the
    implementation and cannot fail on forgery, and `line.count("state=") == 1` over the whole line
    is vacuous against a bare `!r`, since `repr` keeps the hostile text and `state=` then appears
    twice on both trees. The token split above avoids both.

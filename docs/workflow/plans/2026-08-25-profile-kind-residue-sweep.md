@@ -157,8 +157,11 @@ table, the 500-key bound included.
    `x" state=ready … junk="y` (double-quote forgery);
    `x' state=torn_down … junk='y` (single-quote forgery); and `x\tstate=torn_down` (tab).
 
-   **All four are required**, and the `'`-only case especially: it is the one that reddens when
-   either of `_project_token`'s substitutions is dropped, so it guards a live security control.
+   **`_project_token` makes two substitutions and each needs its own assertion.** The per-key
+   counts catch a dropped `=` escape; only a positional assertion — five whitespace-delimited
+   fields, each with its expected prefix — catches a dropped `\x20` escape, since a shifted
+   field is still one key. Mutate them **one at a time**: removing both reddens on either
+   assertion and proves neither.
 
    Three forms that do not work: anchoring on `f"project={project!r}"` restates the
    implementation and cannot fail on forgery; `line.count("state=") == 1` is vacuous against a

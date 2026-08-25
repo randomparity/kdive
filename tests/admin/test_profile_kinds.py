@@ -155,16 +155,30 @@ def test_format_tokenization_project_cannot_forge_a_field(project: str) -> None:
     report = format_profile_kind_result([mismatch], redacted_url=_REDACTED_URL)
     line = _mismatch_line(report)
 
-    # The bite: split the way an operator's grep/awk does and demand one token per key.
+    # `_project_token` makes two substitutions and they fail differently, so each needs its own
+    # assertion. Removing only one and running this test is how you check that; removing both at
+    # once reddens on either and proves neither.
+    #
+    # The `=` escape: without it the hostile text still contributes `key=value` lookalikes, so
+    # count the keys and demand one apiece.
     keys = [token.split("=", 1)[0] for token in line.split() if "=" in token]
     assert keys.count("state") == 1
     assert keys.count("profile_section") == 1
     assert keys.count("resource_kind") == 1
     assert keys.count("project") == 1
-
-    # The real state must be the only one present, whatever the project name claims.
     assert "state=ready" in line
     assert "state=torn_down" not in line
+
+    # The `\x20` escape: without it the project spans several whitespace-delimited fields and
+    # every column after it shifts, so `awk '{print $4}'` over the report reads the wrong field
+    # for that row. The key counts above cannot see this — a shifted field is still one key.
+    fields = line.split()
+    assert len(fields) == 5, f"project must occupy exactly one field, got {len(fields)}: {fields}"
+    assert fields[0].startswith("system=")
+    assert fields[1].startswith("project=")
+    assert fields[2].startswith("state=")
+    assert fields[3].startswith("profile_section=")
+    assert fields[4].startswith("resource_kind=")
 
 
 # --- format_profile_kind_result: empty / populated report shape ----------------------------
@@ -175,7 +189,8 @@ def test_format_empty_names_redacted_url() -> None:
 
     assert report == (
         "verified every System bound to a Resource has a stored provisioning-profile "
-        f"provider of exactly one section keyed by its Resource kind in {_REDACTED_URL}"
+        "provider of exactly one object-valued section keyed by its Resource kind "
+        f"in {_REDACTED_URL}"
     )
 
 
@@ -200,7 +215,7 @@ def test_format_mismatches_header_body_and_closing_block() -> None:
 
     assert lines[0] == (
         "found 2 System(s) whose stored provisioning-profile provider is not exactly one "
-        f"section keyed by their bound Resource's kind in {_REDACTED_URL}"
+        f"object-valued section keyed by their bound Resource's kind in {_REDACTED_URL}"
     )
     assert (
         "system=00000000-0000-0000-0000-000000000001 project='proj-a' state=ready "
@@ -214,6 +229,19 @@ def test_format_mismatches_header_body_and_closing_block() -> None:
     assert "remediation is not automated" in report.lower()
     for lane in _RAISING_LANES:
         assert lane in report
+
+    # The closing block sorts listed rows into two classes and they must stay disjoint. The
+    # residue #1907 exists to find is a lone section under the wrong kind: it parses, and raises
+    # only on the four lanes. An enumeration of the parse-outright class phrased as "any key
+    # besides the bound kind" silently re-includes it, so the operator reads both branches as
+    # true of the same row. Nothing else pins these sentences — they are the whole of the
+    # operator's guidance on what a listed row means.
+    closing = report.splitlines()[-5]
+    assert "two or more sections" in closing, (
+        "the parse-outright class must be enumerated so it excludes the single-wrong-kind row"
+    )
+    assert "any key besides" not in closing
+    assert "still parses" in closing
 
 
 def test_raising_lanes_resolve_to_real_paths_and_symbols() -> None:
