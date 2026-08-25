@@ -199,6 +199,21 @@ def _handle_verify_project(
     raise SystemExit(code)
 
 
+def _handle_verify_profile_kinds(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del args, secret_registry, telemetry
+    from kdive.admin.profile_kinds import format_profile_kind_result, verify_profile_kinds
+    from kdive.admin.projects import redact_database_url
+    from kdive.db.pool import database_url
+
+    mismatches = asyncio.run(verify_profile_kinds())
+    message = format_profile_kind_result(
+        mismatches, redacted_url=redact_database_url(database_url())
+    )
+    print(message)
+
+
 def _handle_build_fs(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
@@ -321,6 +336,11 @@ _COMMANDS: tuple[_Command, ...] = (
         "read back a project's budget/quota rows; exit non-zero if either is absent",
         _handle_verify_project,
         add_arguments=_add_verify_project_arguments,
+    ),
+    _Command(
+        "verify-profile-kinds",
+        "report Systems whose stored profile section does not match their Resource kind",
+        _handle_verify_profile_kinds,
     ),
     _Command(
         "build-fs",

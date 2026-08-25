@@ -152,6 +152,35 @@ expires. This is the dev/demo path; production onboards via the audited admin to
 ([project onboarding](../project-onboarding.md)). It can run any time after the backends and
 migrations are up (it does not need the host processes).
 
+A second read-only check reports every stored System whose provisioning-profile provider section
+is not exactly one section keyed by its bound Resource's kind (ADR-0579) — pre-ADR-0549 residue
+that ADR-0549 stopped admitting but never repaired. Worth running after upgrading past ADR-0549.
+
+It resolves its target from `KDIVE_DATABASE_URL`, which the two environments supply differently.
+
+**Source tree.** `env.sh` deliberately exports no shared `KDIVE_DATABASE_URL` — one DSN per
+database authority (#1929) — so source it, alias the server DSN, and scrub the other roles from
+the child, exactly as `onboard.sh` does for its `verify-project` step (#2046):
+
+```bash
+source scripts/live-stack/env.sh
+KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
+  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+      -u KDIVE_RECONCILER_DATABASE_URL \
+  uv run python -m kdive verify-profile-kinds
+```
+
+**Installed-package deployment**, where `KDIVE_DATABASE_URL` is already set by the unit
+environment or the chart:
+
+```bash
+python -m kdive verify-profile-kinds
+```
+
+It writes nothing and the report is the whole answer: remediation is manual. Once it can reach
+the database it exits `0` whether or not it finds residue, so a non-zero exit means it could not
+run — not that the database is clean.
+
 ## 2. Review the host-process env
 
 The source-tree wrappers source `scripts/live-stack/env.sh`, which exports the local
