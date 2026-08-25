@@ -108,10 +108,16 @@ def format_profile_kind_result(
 ) -> str
 ```
 
-There is **no sanitizing helper**. `project` is rendered `f"project={mismatch.project!r}"` and
-that one operator is the whole control: `repr` escapes exactly what `str.isprintable()` rejects,
-delimits the value, and escapes any quote inside it. The label needs nothing — it is closed over
-printable ASCII by construction.
+`project` is rendered through **`_project_token`**, which is the control. `repr` alone is not:
+it carries the charset half (escaping exactly what `str.isprintable()` rejects), but it *selects*
+a quote character rather than escaping quotes, and leaves ASCII space intact — so under a bare
+`!r` a stored name contributes forged `key=value` tokens to this whitespace-delimited line, ahead
+of the real fields. `_project_token` escapes `\x20` and `=` in `repr`'s output. The label needs
+nothing — it is closed over printable ASCII by construction.
+
+> This corrects an earlier version of this plan, which specified a bare `!r` and stated that
+> `repr` "escapes any quote inside it". It does not. A security pass on the branch demonstrated
+> the forgery; see the spec's threat model and `_project_token`'s docstring.
 
 Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec **verbatim** — the branch order
 is load-bearing and each branch has a test below.
@@ -149,30 +155,29 @@ table, the 500-key bound included.
    and the natural way to "repair" a test that errors is to guard the split — which makes it
    vacuous.
 
-   **An input discriminates only if it does not contain `'` without also containing `"`.**
-   Measured against the hand-quoted formatter this control replaces:
+   **Assert the property, not the expression.** Anchoring on `f"project={project!r}"` restates
+   the implementation: it pins that `repr` was called and cannot fail on forgery. Instead split
+   the line the way an operator's `grep`/`awk` does and demand exactly one token per key
+   (`state`, `profile_section`, `resource_kind`, `project`), plus `state=ready` present and
+   `state=torn_down` absent.
 
-   | `project` contains | broken formatter | fixed | discriminates |
-   |---|---|---|---|
-   | neither quote | red — anchor absent | green | yes |
-   | `"` only | red — anchor absent | green | yes |
-   | **`'` only** | **green** | green | **NO** |
-   | both | red — anchor absent | green | yes |
+   Parametrize over four inputs, all of which discriminate against a bare `!r`:
+   `x state=ready profile_section=fault-inject` (no quote);
+   `x" state=ready … junk="y` (double-quote forgery);
+   `x' state=torn_down … junk='y` (single-quote forgery); and `x\tstate=torn_down` (tab).
 
-   The `'`-only row is the trap: `repr` then picks `"` as its own delimiter, so the broken line is
-   byte-identical to the anchor, the split succeeds, the tail counts come back `(1, 1, 1)`, and
-   `line.isprintable()` passes too — green against a formatter that forges. **Do not add the
-   single-quote sibling of case 2 to this set as if it were a guard.**
+   > **This supersedes an earlier version of this plan**, which measured the same set against a
+   > hand-quoted formatter, concluded the `'`-only input "does NOT discriminate", and instructed
+   > the reader not to add it. That was true of the `!r`-only formatter this plan originally
+   > specified and is **false** of the shipped `_project_token`: the `'`-only case is now the one
+   > that reddens if either substitution is dropped. Do not reinstate that instruction — it would
+   > delete the guard on a live security control.
 
-   Parametrize over `x state=ready profile_section=fault-inject` (no quote) and
-   `x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y`. Both
-   discriminate; the second is the one that reproduces the actual forgery, closing the field on
-   its own `"` and emitting a full set of leading `key=value` pairs while `line.isprintable()`
-   still passes. Two earlier wordings were wrong and are recorded so they are not reintroduced:
-   `line.count("state=") == 1` is vacuous (`repr` escapes and keeps the hostile text, so `state=`
-   appears twice on the fixed line *and* twice on the broken one), and "slice at the closing
-   quote" reddens the *correct* implementation (the delimiter `repr` picks is data-dependent, so
-   no fixed character anchors the set).
+   Two earlier wordings really were wrong and stay recorded so they are not reintroduced:
+   `line.count("state=") == 1` is vacuous against a bare `!r` (`repr` escapes and keeps the
+   hostile text, so `state=` appears twice on both trees), and "slice at the closing quote"
+   reddens the *correct* implementation (the delimiter `repr` picks is data-dependent, so no
+   fixed character anchors the set).
 
 4. `format_profile_kind_result([])` returns one line naming the redacted URL.
 5. `format_profile_kind_result([one, two])` returns the fixed header carrying the count and the

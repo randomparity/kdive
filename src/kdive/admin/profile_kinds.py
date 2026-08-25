@@ -213,9 +213,12 @@ def format_profile_kind_result(
     and that remediation is not automated.
 
     ``project`` is the one field nothing else bounds (no ``CHECK``, no charset validation on its
-    live path), so it is rendered with ``repr`` — ``f"project={mismatch.project!r}"`` — which
-    escapes exactly what ``str.isprintable()`` rejects, delimits the value, and escapes any
-    quote inside it. The other four fields are printed as they stand.
+    live path), so it is rendered through :func:`_project_token`, which is the control — not a
+    bare ``!r``. ``repr`` carries the charset half only: it escapes exactly what
+    ``str.isprintable()`` rejects. It does **not** escape quotes, it *selects* a quote character,
+    and it leaves ASCII space intact; both gaps let a stored name contribute forged ``key=value``
+    tokens to this whitespace-delimited line. :func:`_project_token` closes that, and its
+    docstring carries the reasoning. The other four fields are printed as they stand.
 
     Args:
         mismatches: The rows :func:`scan_profile_kinds` returned, in report order.
