@@ -277,11 +277,20 @@ exactly as `verify_project` does. The pool is closed in a `finally`.
 `format_profile_kind_result` is pure and returns the message. **The command always exits `0`;**
 the printed report is the answer.
 
-- **clean** → one line naming the credential-redacted target:
-  `verified no System's provisioning-profile provider section mismatches its Resource kind in <url>`
-- **mismatches** → a header, then one line per mismatch, then a closing block. The header is
-  fixed text like every other line, so no later edit can drift it while the suite stays green:
-  `found <n> System(s) whose provisioning-profile provider section does not match their Resource kind in <url>`
+**The literal strings live in `format_profile_kind_result` and are pinned by its tests; this
+section specifies what each must say, not the bytes.** Quoting them here put a fourth copy of
+every sentence in a file no gate checks, and the copies drifted.
+
+- **clean** → one line naming the credential-redacted target. It must be scoped to the
+  population the join actually reads — no System **bound to a Resource** mismatches, never the
+  unqualified universal over `systems` — because the inner join drops an Allocation carrying a
+  NULL `resource_id`, and that residual is accepted rather than signalled by a count (ADR-0579).
+  Pinned by `test_format_empty_names_redacted_url`.
+- **mismatches** → a header, then one line per mismatch, then a closing block. The header states
+  the predicate the query implements — the stored `provider` is not **exactly one section keyed
+  by the bound Resource's kind** — rather than a bare kind mismatch, which is false of the
+  two-section rows the second disjunct exists to catch. Fixed text, so no later edit drifts it
+  while the suite stays green.
   then one line per mismatch:
   `system=<uuid> project=<_project_token(project)> state=<state> profile_section=<section> resource_kind=<kind>`
   — `project` rendered through `_project_token` (`repr`, then `\x20` and `=` escaped), because it
@@ -440,8 +449,8 @@ identities.
      whitespace-delimited `key=value` sequence, so under a bare `!r` the project name
      `x' state=torn_down … junk='y` still contributes extra tokens, and because `project` is the
      *second* key on the line they land **ahead** of the real ones: `state=torn_down` becomes the
-     first `state=` token. The closing block tells the operator a `torn_down` row is inert, so
-     splitting or grepping the report drops a live `ready` System from the remediation list.
+     first `state=` token for that row — so any grep- or awk-driven triage of a multi-row report
+     reads the forged value as the row's `state`, whichever state the operator is selecting on.
      Measured. `_project_token` therefore escapes both `\x20` and `=` in `repr`'s output.
      Escaping only the space is not enough: the line then splits into one `state=` token again,
      but the substring `state=torn_down` remains, so a plain `grep 'state=torn_down'` still
