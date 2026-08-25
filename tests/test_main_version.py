@@ -324,6 +324,12 @@ def test_verify_profile_kinds_handler_prints_report_and_raises_no_systemexit(
     nothing. `verify_profile_kinds` is patched out, so this needs no live database — only a
     resolvable `KDIVE_DATABASE_URL`, since the handler calls `database_url()` for the redacted
     target before printing, exactly as `_handle_verify_project` does.
+
+    The URL carries a password on purpose. With a passwordless one `redact_database_url`
+    returns its input unchanged, so the report reads identically whether or not the handler
+    calls it — and deleting that call would print the database password to an operator's
+    terminal on every run with this suite still green. The two credential assertions below
+    are what hold the control in place.
     """
     from uuid import uuid4
 
@@ -343,7 +349,10 @@ def test_verify_profile_kinds_handler_prints_report_and_raises_no_systemexit(
     async def _fake_verify_profile_kinds() -> list[ProfileKindMismatch]:
         return [mismatch]
 
-    monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://kdive@localhost/kdive")
+    monkeypatch.setenv(
+        "KDIVE_DATABASE_URL",
+        "postgresql://kdive:not-a-real-password@localhost/kdive",  # pragma: allowlist secret
+    )
     monkeypatch.setattr(
         "kdive.admin.profile_kinds.verify_profile_kinds", _fake_verify_profile_kinds
     )
@@ -357,3 +366,5 @@ def test_verify_profile_kinds_handler_prints_report_and_raises_no_systemexit(
     out = capsys.readouterr().out
     assert str(system_id) in out
     assert "Remediation is not automated." in out
+    assert "not-a-real-password" not in out
+    assert "postgresql://kdive:***@localhost/kdive" in out
