@@ -149,6 +149,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the session libvirtd boot-persistent via a user unit (#2032)
 - Carry state timeline and terminated-worker journals on red proofs
 - Gate PR and issue body text on leaked credentials
+- Add profile-kind residue sweep pure surface
+- Scan stored Systems for profile-kind mismatches
+- Add verify-profile-kinds CLI command (#1907)
 
 ### Changed
 
@@ -749,6 +752,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stage the paths you staged, not the whole tree
 - Reconcile the spec, ADR, and plan with what was built
 - Record the threat model for the report-parsing boundary
+- Record the stored-profile kind sweep as an operator CLI read
+- Correct the residue lanes, MCP cost, and SQL-guard grounds
+- Require the provider object to hold exactly the bound kind
+- Bound the candidate population and name the join dependency
+- Guard the join dependency and cut implementation detail
+- Always exit 0 and drop the join guard that cannot fire
+- Make the section label legible and its vocabulary closed
+- Make the criterion-3 and ordering guards actually bite
+- Harden the sweep's controls and bound its clean report
+- Implementation plan for the profile-kind residue sweep
+- Render project with repr, and fix the definition that contradicted the query
+- Key the ordering fixture on UPDATE order, not insertion order
+- Impose the ordering tie explicitly, and fix the anchor and header
+- Drop the misleading ordering table and name the vacuous quote class
+- Correct the label renderer so it type-checks
+- Pin the connection mode, cover the pool wrapper, fix the label types
+- Carry the reviewed spec's final state into the plan
+- Drop the second stale autocommit ground
+- Say what the label measurement actually covered
+- Correct the ordering fixture's mechanism claim
+- State the label bound as len(ResourceKind) + 2, not 5
+- Name verify-profile-kinds in the live-stack runbook
+- Correct the error-path claim for the redaction control
+- Correct two control claims the security pass refuted
+- Describe the shipped project control, not the one it replaced
+- Sweep the remaining stale project-control claims from the spec
+- Drop the superseded two-input parametrize instruction
+- Point at the project-token control instead of restating it
+- Align the records with the shipped report, and strip review transcript
+- Specify what the report must say, not the bytes it prints
 
 ### Fixed
 
@@ -1230,6 +1263,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the tier literal and PYTHONHASHSEED in the guard
 - Detach the summary tests from the live job summary
 - Fail closed when the pytest report totals zero tests
+- Drop rotting line numbers from raising-lane references
+- Make the report's closing block true of every row it lists
+- Stop a stored project name forging fields in the report
+- Correct three report claims the branch review refuted
+- Make the runbook command runnable as written
+- State the predicate the query implements, not a kind mismatch
+- Stop the closing block's two classes overlapping
+- Make the runbook block self-contained and match its precedent
+- Classify listed rows by the label vocabulary, not by prose
 
 ### Build
 
