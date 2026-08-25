@@ -152,6 +152,12 @@ expires. This is the dev/demo path; production onboards via the audited admin to
 ([project onboarding](../project-onboarding.md)). It can run any time after the backends and
 migrations are up (it does not need the host processes).
 
+A second read-only check against the same database, `python -m kdive verify-profile-kinds`,
+reports every stored System whose provisioning-profile provider section does not match its
+bound Resource's kind (ADR-0579) — pre-ADR-0549 residue that ADR-0549 stopped admitting but
+never repaired. It writes nothing, always exits `0`, and the report is the whole answer:
+remediation is manual. Worth running after upgrading past ADR-0549.
+
 ## 2. Review the host-process env
 
 The source-tree wrappers source `scripts/live-stack/env.sh`, which exports the local

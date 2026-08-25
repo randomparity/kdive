@@ -14,8 +14,10 @@ chosen.
 
 **Architecture.** One new module `src/kdive/admin/profile_kinds.py` mirroring
 `src/kdive/admin/projects.py`'s split — an impure reader, a pure formatter, and a frozen
-dataclass between them — plus one `_Command` entry in `src/kdive/__main__.py`. Nothing else in
-the tree changes: no schema change, no migration, no write path, no new dependency.
+dataclass between them — plus one `_Command` entry in `src/kdive/__main__.py` and one paragraph
+naming the command in the live-stack runbook, since no generator covers a `python -m kdive`
+subcommand. Nothing else in the tree changes: no schema change, no migration, no write path, no
+new dependency.
 
 **Stack.** Python 3.14, psycopg 3.3.4 / psycopg-pool, PostgreSQL 17, pytest, `uv`, `just`.
 
@@ -67,6 +69,7 @@ Transcribed from the spec and ADR — values exactly as written there.
 | `tests/admin/test_profile_kinds.py` | create | every behaviour below — pure, DB, and handler |
 | `src/kdive/__main__.py` | modify | `_handle_verify_profile_kinds` and the `_Command` entry |
 | `tests/test_main_version.py` | modify | the parser assertion (test 12) |
+| `docs/operating/runbooks/live-stack.md` | modify | the one operator-facing mention of the command |
 
 `tests/admin/test_profile_kinds.py` importing `kdive.admin.profile_kinds` by dotted path is what
 satisfies `tests/guards/test_module_has_direct_test.py`; the module would otherwise fail that
