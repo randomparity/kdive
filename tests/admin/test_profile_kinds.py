@@ -435,6 +435,13 @@ _ASSERTED_ORDER = (_ID_EARLY, _ID_TIE_LOW, _ID_TIE_HIGH)
 # issue under the "drop the whole ORDER BY" mutation. The join's chosen plan — not just the
 # `systems` heap's own layout — decides the order an un-ordered read of these rows comes back in,
 # so a hand-rolled query over `systems` alone measures a different, irrelevant scan shape.
+# `rsplit` is correct by construction, not by luck: a top-level `ORDER BY` can only be followed
+# by `LIMIT`/`OFFSET`/`FETCH`/`FOR UPDATE`, while a window's `OVER (ORDER BY ...)` or a subquery's
+# own clause must appear earlier in the statement — so the LAST occurrence is the top-level one.
+# The assertion below turns the two shapes that would break the derivation (the keyword gone, or
+# a second occurrence) into a named failure at import instead of a cryptic `ProgrammingError` or
+# a pinned-value mismatch.
+assert _SCAN_QUERY.count("ORDER BY") == 1, "_UNORDERED_SCAN_QUERY derivation assumes exactly one"
 _UNORDERED_SCAN_QUERY = _SCAN_QUERY.rsplit("ORDER BY", 1)[0]
 
 
@@ -475,16 +482,21 @@ async def _seed_ordering_fixture(conn: psycopg.AsyncConnection) -> None:
         )
 
     # Precondition guard for THIS FIXTURE, not for `scan_profile_kinds`: the disagreement the
-    # two docstring bullets above describe rests on undocumented PostgreSQL behaviour (the
-    # planner's chosen join strategy and small-N sort stability) that a version bump, a schema
-    # change adding a preferred index, or a fixture grown past the insertion-sort threshold could
-    # silently stop holding. If that happens, an un-ordered read of these rows returns the
-    # asserted order for free, and both `ORDER BY` mutations pass against a query with no
-    # `ORDER BY` at all with nothing here to say why. Issue `_UNORDERED_SCAN_QUERY` — the real
-    # scan minus its `ORDER BY`, so the read is driven by the same planner decisions the mutation
-    # would be — and pin the result to the reverse-of-asserted order this fixture is built to
-    # produce. If this assertion fails, the fixture went stale — the shipped query has not been
-    # touched.
+    # two docstring bullets above describe rests on the planner's chosen join strategy, which a
+    # version bump or a schema change adding a preferred index could silently stop holding. If
+    # that happens, an un-ordered read of these rows returns the asserted order for free, and the
+    # drop-whole-`ORDER BY` mutation passes against a query with no `ORDER BY` at all with
+    # nothing here to say why. Issue `_UNORDERED_SCAN_QUERY` — the real scan minus its
+    # `ORDER BY`, so the read is driven by the same planner decisions the mutation would be — and
+    # pin the result to the reverse-of-asserted order this fixture is built to produce. If this
+    # assertion fails, the fixture went stale — the shipped query has not been touched.
+    #
+    # What this does NOT measure: the `drop , s.id` mutation additionally needs the
+    # `created_at`-only sort to leave the tied pair in scan order, and an UN-ordered read cannot
+    # observe sort stability at all. If small-N stability stopped holding, the tiebreak test
+    # would go green under that mutation while this assertion still passed. That assumption is
+    # stated rather than guarded: pinning it would mean a second string-surgery derivation to
+    # test a PostgreSQL implementation detail rather than this code.
     async with conn.cursor() as cur:
         await cur.execute(_UNORDERED_SCAN_QUERY)
         physical_order = [row[0] for row in await cur.fetchall()]
