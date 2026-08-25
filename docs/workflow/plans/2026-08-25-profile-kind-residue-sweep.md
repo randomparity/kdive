@@ -141,19 +141,14 @@ table, the 500-key bound included.
    line**, not the label alone: `assert line.isprintable()`. Parametrize the `project` input over
    `\x1b`, `\x7f` (DEL), `\x9b` (CSI), `\xa0` (NBSP), `\u202e` (RLO). A `< 0x20` assertion would
    pass on four of those five, which is why the property is asserted instead of the range.
-3. **Tokenization — `project` cannot forge a field.** The assertion is anchored on the rendered
-   token, never on a quote character:
+3. **Tokenization — `project` cannot forge a field.** The assertion splits the line the way an
+   operator's `grep`/`awk` does and demands one token per key:
 
    ```python
-   assert f"project={project!r}" in line  # fail here, not on an IndexError below
-   tail = line.split(f"project={project!r}", 1)[1]
+   keys = [token.split("=", 1)[0] for token in line.split() if "=" in token]
+   assert keys.count("state") == 1  # and profile_section, resource_kind, project
+   assert "state=ready" in line and "state=torn_down" not in line
    ```
-
-   then assert `tail` carries exactly one `state=`, one `profile_section=` and one
-   `resource_kind=`. The explicit `in line` assertion is load-bearing: without it a broken
-   formatter fails with an incidental `IndexError` from the split rather than on an assertion,
-   and the natural way to "repair" a test that errors is to guard the split — which makes it
-   vacuous.
 
    **Assert the property, not the expression.** Anchoring on `f"project={project!r}"` restates
    the implementation: it pins that `repr` was called and cannot fail on forgery. Instead split

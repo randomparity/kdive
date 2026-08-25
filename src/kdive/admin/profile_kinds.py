@@ -6,8 +6,9 @@ nothing already stored. ADR-0579 records this module's shape — an impure reade
 wrapper, and a pure formatter — mirroring ``kdive.admin.projects``'s split.
 
 This module holds the :class:`ProfileKindMismatch` dataclass, the section-label renderer,
-:func:`scan_profile_kinds`, :func:`format_profile_kind_result`, and the pool-opening wrapper
-:func:`verify_profile_kinds`. The CLI wiring lives in ``kdive.__main__``.
+:func:`_project_token` — the control that keeps a stored project name from forging a field in
+the report — :func:`scan_profile_kinds`, :func:`format_profile_kind_result`, and the
+pool-opening wrapper :func:`verify_profile_kinds`. The CLI wiring lives in ``kdive.__main__``.
 """
 
 from __future__ import annotations

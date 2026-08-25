@@ -276,8 +276,9 @@ the printed report is the answer.
   fixed text like every other line, so no later edit can drift it while the suite stays green:
   `found <n> System(s) whose provisioning-profile provider section does not match their Resource kind in <url>`
   then one line per mismatch:
-  `system=<uuid> project=<project!r> state=<state> profile_section=<section> resource_kind=<kind>`
-  — `project` rendered with `repr`, because it is the one field nothing else bounds (threat
+  `system=<uuid> project=<_project_token(project)> state=<state> profile_section=<section> resource_kind=<kind>`
+  — `project` rendered through `_project_token` (`repr`, then `\x20` and `=` escaped), because it
+  is the one field nothing else bounds and a bare `repr` does not stop it forging a field (threat
   model, control 3); the other four are printed as they stand,
   then a closing block that **describes the class without asserting one cause**: each listed
   System's stored provider section does not match its bound Resource kind; a plain kind mismatch
@@ -371,8 +372,8 @@ identities.
    still needing no database access, still unvalidated as a string, but a materially narrower
    actor than "anyone holding a token with an arbitrary claim".
 
-   This design trusts the command's caller and does **not** trust the row contents; the `repr`
-   rendering and the closed label vocabulary are what carry that second half.
+   This design trusts the command's caller and does **not** trust the row contents;
+   `_project_token` and the closed label vocabulary are what carry that second half.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
    `redact_database_url`, which masks a URL **userinfo** password and blanket-redacts a
@@ -404,8 +405,10 @@ identities.
    claim (`security/authz/context.py:44-50`) — no charset bound anywhere. So the exact escape the
    label machinery exists to stop walks through the adjacent field on the same line.
 
-   **`project` is rendered with `repr`** — `f"project={mismatch.project!r}"` — and that single
-   operator is the whole control. It does three things a hand-rolled pair of them does not:
+   **`project` is rendered through `_project_token`** — `repr(project)`, then `\x20` and `=`
+   escaped — and the helper, not `repr` alone, is the control. `repr` is the right *base*: it
+   does two things a hand-rolled pair of quotes does not, below. It does not do the third, which
+   is why the helper exists:
 
    - **Charset.** `repr` escapes exactly the characters `str.isprintable()` rejects. Measured:
      `\x1b`, `DEL` (U+007F), the C1 controls including `CSI` (U+009B), `NBSP` (U+00A0) and
@@ -439,7 +442,10 @@ identities.
    `project {project!r}`. `str.isprintable()` itself is the repo's guard idiom at
    `security/artifacts/bpf_filter.py:27`, `profiles/provisioning.py:66`, `jobs/payloads.py:211`,
    `domain/labels.py:57` and three more — but every one of those *rejects* where this must
-   *render*, which is why the control is `repr` rather than a validator.
+   *render*, which is why the control is `_project_token` rather than a validator. (The
+   `format_verify_result` precedent uses a bare `!r`; it prints one operator-supplied project
+   into a prose line rather than into a whitespace-delimited `key=value` row, so the forgery
+   this control stops does not arise there.)
 
    The label needs no such treatment: it is closed over printable ASCII by construction, so
    putting it through the same operator would add a mechanism with no input that reaches it.
@@ -631,42 +637,34 @@ Pure:
    **whole line**, not the label alone: `project` is the unbounded field, and a test covering
    only the label is how a sanitized-label/unsanitized-project pairing survives.
 
-   *Tokenization.* The detector is the **anchor's presence**, and it must be asserted:
+   *Tokenization.* **Assert the property, not the expression.** Anchoring on
+   `f"project={mismatch.project!r}"` restates the implementation: it pins that `repr` was called
+   and cannot fail on forgery, which is the property the test is named for. Split the line the
+   way an operator's `grep`/`awk` does and demand one token per key:
 
    ```python
-   anchor = f"project={mismatch.project!r}"
-   assert anchor in line  # this is the bite
-   tail = line.split(anchor, 1)[1]
+   keys = [token.split("=", 1)[0] for token in line.split() if "=" in token]
+   assert keys.count("state") == 1  # and profile_section, resource_kind, project
+   assert "state=ready" in line and "state=torn_down" not in line
    ```
 
-   A formatter that does not render `project` through `repr` — the hand-quoted form this control
-   replaces, or a bare `project={project}` — puts no such token on the line, and the assertion
-   fails with a legible message. Without it the split raises a bare `IndexError` instead, and the
-   natural way to "repair" a test that errors is to guard the split, which makes it vacuous.
+   Parametrize over four inputs, all of which redden against a bare `!r`:
+   `x state=ready profile_section=fault-inject` (no quote);
+   `x" state=ready … junk="y` (double-quote forgery);
+   `x' state=torn_down … junk='y` (single-quote forgery); and `x\tstate=torn_down` (tab).
 
-   **The count assertion that follows is documentation, not the bite.** Asserting `tail` carries
-   exactly one `state=`, one `profile_section=` and one `resource_kind=` is a *constant*: once the
-   anchor matches, the remainder of the line is the fixed suffix, so the counts are `(1, 1, 1)`
-   for every possible input. Measured over 16 hostile values it failed zero times against a
-   correct implementation. Keep it if it reads well; do not describe it as what catches the
-   defect. (An earlier draft asserted `line.count("state=") == 1` over the *whole* line, which is
-   vacuous for the opposite reason — `repr` escapes and keeps the hostile text, so `state=`
-   appears twice on the fixed line and twice on the broken one.)
+   > **This supersedes an earlier version of this section**, which prescribed the anchor above as
+   > "the bite", called the token counts "documentation, not the bite" — they were a constant
+   > once the anchor matched — and concluded from a measured table that the `'`-only input "does
+   > NOT discriminate", instructing the reader not to add it. All of that was measured against a
+   > **hand-quoted** formatter and is false of the shipped `_project_token`: the `'`-only case is
+   > now precisely the one that reddens when either substitution is dropped. Do not reinstate
+   > that instruction — it would delete the guard on a live security control.
 
-   **An input discriminates only if it does not contain `'` without also containing `"`.**
-   Measured against the hand-quoted formatter:
-
-   | `project` contains | broken formatter | correct | discriminates |
-   |---|---|---|---|
-   | neither quote | red — anchor absent | green | yes |
-   | `"` only | red — anchor absent | green | yes |
-   | **`'` only** | **green** | green | **NO** |
-   | both | red — anchor absent | green | yes |
-
-   The `'`-only row is the trap: `repr` then picks `"` as its own delimiter, so the broken line is
-   byte-identical to the anchor and `line.isprintable()` passes too — green against a formatter
-   that forges. **Do not add the single-quote sibling of the forgery case to this set as if it
-   were a guard.**
+   One earlier wording really was wrong and stays recorded: `line.count("state=") == 1` over the
+   whole line is vacuous against a bare `!r`, because `repr` escapes and keeps the hostile text,
+   so `state=` appears twice on both trees. The token-split form above does not have that defect,
+   because the escaped `=` means the hostile text contributes no `key=value` token at all.
 
    Parametrize over `'x state=ready profile_section=fault-inject'` and
    `'x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y'`. Both
