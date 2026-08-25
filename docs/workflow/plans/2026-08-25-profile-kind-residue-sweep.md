@@ -121,10 +121,22 @@ load-bearing and each branch has a test below.
    a broken formatter and a correct one alike), and
    `x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y`, which against
    hand-written quotes closes the field on its own `"` and emits a full set of leading
-   `key=value` pairs while `line.isprintable()` still passes. **Slice the line at the closing
-   quote and assert on the tail** — never `line.count("state=") == 1`. Measured: `repr` escapes
-   and keeps the hostile text rather than deleting it, so `state=` appears twice on the fixed
-   line *and* twice on the broken one, and a count assertion is green against both.
+   `key=value` pairs while `line.isprintable()` still passes.
+
+   **Anchor the assertion on the rendered token, not on a quote character.** Two wordings are
+   wrong here and both were in an earlier draft:
+
+   - `line.count("state=") == 1` is **vacuous** — measured, `repr` escapes and keeps the hostile
+     text rather than deleting it, so `state=` appears twice on the fixed line *and* twice on the
+     broken one.
+   - "slice at the closing quote" **reddens the correct implementation** — measured, `repr` picks
+     `'` for this value (it contains `"` and no `'`) and leaves the embedded `"` unescaped, so the
+     first `"` sits two characters into the project value. The delimiter `repr` chooses is
+     data-dependent, so "the closing quote" names no fixed character across a parametrized set.
+
+   Use `tail = line.split(f"project={project!r}", 1)[1]` and assert `tail` carries exactly one
+   `state=`, one `profile_section=` and one `resource_kind=`. That is quote-agnostic and holds
+   for every hostile input in the parametrize set.
 4. `format_profile_kind_result([])` returns one line naming the redacted URL.
 5. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
    five fields; the closing block names ADR-0549, says remediation is not automated, and names
@@ -157,8 +169,10 @@ database with no pool lifecycle. It executes the single static statement, maps e
 **Fixtures.** `tests/admin/conftest.py` already re-exports `migrated_url` (function-scoped, from
 `tests/db/conftest.py:319`) and `pg_conn`. Seeds go through `RESOURCES.insert` /
 `ALLOCATIONS.insert` / `SYSTEMS.insert` from `kdive.db.repositories` — the pattern
-`tests/services/test_allocation_enqueue.py` uses — so fixture rows are built by the code
-production uses and cannot drift from the schema. Helpers are **module-local**, taking an
+`tests/mcp/lifecycle/test_systems_list.py:104-155` uses, which seeds all three in that order —
+so fixture rows are built by the code production uses and cannot drift from the schema.
+(`tests/services/test_allocation_enqueue.py` is *not* the model to copy: it seeds `RESOURCES`
+and `ALLOCATIONS` only and never reaches `SYSTEMS.insert`.) Helpers are **module-local**, taking an
 `AsyncConnection`; `tests/integration/_seed.py` is not reused (hardwired to local-libvirt through
 `LocalLibvirtDiscovery`, takes a pool, and can seed neither a `fault-inject` Resource nor a
 malformed profile), and no shared helper is introduced (48 test modules call `SYSTEMS.insert`
@@ -187,23 +201,43 @@ directly; the only shared seeders in the tree are area-local).
    `profile_section == "fault-inject=<not-an-object>"`. The **only** test that reddens if the
    **first** disjunct is dropped — tests 1–4 all mismatch on the key, which the second disjunct
    catches by itself.
-6. **Order is deterministic**, in two halves, both needing a fixture whose natural order
-   *disagrees* with the asserted order.
+6. **Order is deterministic**, in two halves. The variable that decides both is **UPDATE order**,
+   not insertion order.
 
    `created_at` is in `_SERVER_GENERATED` (`db/repositories.py:53`) so `SYSTEMS.insert` cannot
    write it. Impose it out of band after inserting:
    `UPDATE systems SET created_at = %s WHERE id = %s`. This is the **only** carve-out from the
    repositories in the whole fixture; every other column comes from them.
 
-   - *`created_at` half:* give the row inserted **first** the **later** `created_at`. Rows come
-     back from a small unindexed scan in insertion order, so a fixture whose insertion order
-     already matches `created_at` passes with no `ORDER BY` at all.
-   - *`id` tiebreak half:* seed the tied pair with **fixed, explicit UUIDs** and insert the
-     **larger** one first; assert the smaller comes back first. Measured: with the pair inserted
-     in ascending `id` order both `ORDER BY created_at` and `ORDER BY created_at, id` return the
-     identical sequence, so that fixture cannot redden. The fixed UUIDs are load-bearing —
-     every seed helper in this repo uses `uuid4()`, which would make this assertion pass or fail
-     at random, and a flake that passes on re-run is not evidence.
+   **That carve-out is also what makes insertion order irrelevant, and getting this wrong makes
+   the whole test vacuous.** PostgreSQL writes a new tuple version on `UPDATE`, so a seq scan
+   returns rows in **last-write** order. Every row in this fixture is updated exactly once, so
+   heap order is the UPDATE order and nothing else. Measured over the three sequencings, with the
+   fixture otherwise identical and rows inserted exactly as an earlier draft of this plan
+   prescribed:
+
+   | `UPDATE` sequence | no `ORDER BY` | `ORDER BY created_at` |
+   |---|---|---|
+   | insertion order | fires | fires |
+   | **ascending asserted order** | **DEAD** | **DEAD** |
+   | reverse of asserted order | fires | fires |
+
+   The middle row is the trap: it is the most readable way to write the fixture, it makes the
+   scan return the asserted order for free, and *both* `ORDER BY` mutations then report green
+   against a query that ships no `ORDER BY` at all.
+
+   So: **issue the `UPDATE` statements in the reverse of the asserted order** — the row that must
+   come back last is updated first — for the tied pair as well as the `created_at` pair. That is
+   deterministic and does not depend on how the rows were inserted.
+
+   - *`created_at` half:* one row carries the earlier timestamp, one the later; assert the
+     earlier comes back first.
+   - *`id` tiebreak half:* seed the tied pair with **fixed, explicit UUIDs** sharing one
+     timestamp, `UPDATE` the larger-id row first, and assert the smaller comes back first. The
+     fixed UUIDs stay load-bearing — every seed helper in this repo uses `uuid4()`, which would
+     make this assertion pass or fail at random, and a flake that passes on re-run is not
+     evidence.
+
 
 **Mutation check before moving on.** Drop the second `WHERE` disjunct and confirm test 4 alone
 reddens; drop the first and confirm test 5 alone reddens; drop `, s.id` from the `ORDER BY` and
