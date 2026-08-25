@@ -53,24 +53,35 @@ It is built the way `verify-project` ([ADR-0256](0256-onboard-target.md)) is bui
   sweep, `1` when any mismatch is found. The target database is named in the message through the
   existing `redact_database_url`.
 
-**The predicate is total, and the observed section is rendered in Python.** The `WHERE` clause is
+**A System is clean only when its stored `provider` is exactly `{<the bound kind>: {…}}`.** The
+`WHERE` clause is
 
 ```sql
 jsonb_typeof(s.provisioning_profile -> 'provider' -> r.kind) IS DISTINCT FROM 'object'
+   OR s.provisioning_profile -> 'provider'
+        IS DISTINCT FROM jsonb_build_object(r.kind, s.provisioning_profile -> 'provider' -> r.kind)
 ```
 
-Measured on PostgreSQL 17.10: `'[1,2]'::jsonb -> 'a'`, `'"s"'::jsonb -> 'a'`, `'null'::jsonb ->
-'a'` and `'{"b":1}'::jsonb -> 'a'` all return SQL `NULL`, `jsonb_typeof(NULL::jsonb)` is `NULL`,
-and `jsonb_typeof('null'::jsonb)` is the string `null`. So every System row reaches the predicate,
-and a profile with no usable `provider` object — or one whose section is JSON `null` — is reported
-rather than silently dropped. The **key** under `provider` is
-not extracted in SQL: `jsonb_object_keys` errors on a non-object argument, and while a
-`jsonb_typeof` `CASE` guard does hold in practice, PostgreSQL declines to guarantee that a `CASE`
-arm's subexpressions go unevaluated — and a sweep whose job is to survive malformed stored data
-should not rest on an evaluation-order property the engine will not promise. The row carries
-`provisioning_profile -> 'provider'` back instead, and a pure Python helper renders the label: the
-single key for a one-key object, the sorted keys comma-joined for a multi-key one, and an
-angle-bracketed marker (`<none>`, `<not-an-object>`) for a shape that carries no section at all.
+Read it as two halves: the section under the bound kind is not an object, **or** the `provider`
+object holds anything besides that one section. The second half is load-bearing rather than
+belt-and-braces — the first half alone passes `{"fault-inject": {}, "local-libvirt": {}}` on a
+fault-inject Resource as clean, and that row is *worse* than the residue this sweep targets:
+`_require_exactly_one_provider` (`profiles/provisioning.py:306-315`) makes it fail
+`ProvisioningProfile.parse` outright, so it breaks every parse site rather than the four lanes
+above.
+
+The predicate is **total** — no System row can fall out of the scan unreported, which is what
+makes a clean result mean anything. Measured on PostgreSQL 17.10, `jsonb -> text` returns SQL
+`NULL` for a missing key and for every non-object left operand (array, string scalar, JSON
+`null`), and `jsonb_typeof(NULL::jsonb)` is `NULL`. Run over ten seeded profile shapes on a real
+join, the clause returns the eight wrong ones — mismatched key, both two-key shapes, JSON-`null`
+section, empty object, scalar, array, absent `provider` — and neither correct one.
+
+The **key** under `provider` is not extracted in SQL; the row carries
+`provisioning_profile -> 'provider'` back and a pure Python helper renders the label: the single
+key for a one-key object, the sorted keys comma-joined for a multi-key one, and an
+angle-bracketed marker (`<none>`, `<not-an-object>`) for a shape carrying no section at all. See
+the rejected alternative for why the extraction is not done in SQL.
 
 **It reports every state, and it never writes.** `state` is in the report because #1907 asks for
 it; filtering to live states would be the triage call #1907 excludes. Nothing in the module issues
@@ -79,8 +90,14 @@ a statement other than that `SELECT`.
 ## Consequences
 
 - An operator upgrading past ADR-0549 has a one-command answer to "did this deployment mint any
-  such System before the check landed", and a non-zero exit makes it usable from a deploy script
-  the same way `verify-project` is.
+  such System before the check landed".
+- **The non-zero exit is a one-shot post-upgrade check, not a standing gate.** The
+  `verify-project` analogy stops at the exit code: verify-project's `1` clears by running
+  `seed-project`, and this one clears only when someone hand-repairs the rows. Every state is
+  reported, so a torn-down mismatched System keeps the sweep red forever, and #1907 authorizes no
+  action that turns it green. A deploy pipeline that wired this in as a permanent step would go
+  permanently red, and the usual answer to a permanently-red step is deleting it. Run it once
+  after the upgrade; the follow-up record that settles remediation is what could make it a gate.
 - The report names the affected lanes and states that remediation is not automated, so the output
   is actionable without a second document. When #1907's follow-up decides between cordon,
   teardown, and notification, that decision gets its own record and may reuse

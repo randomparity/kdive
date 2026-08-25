@@ -89,14 +89,25 @@ FROM systems AS s
 JOIN allocations AS a ON a.id = s.allocation_id
 JOIN resources AS r ON r.id = a.resource_id
 WHERE jsonb_typeof(s.provisioning_profile -> 'provider' -> r.kind) IS DISTINCT FROM 'object'
+   OR s.provisioning_profile -> 'provider'
+        IS DISTINCT FROM jsonb_build_object(r.kind, s.provisioning_profile -> 'provider' -> r.kind)
 ORDER BY s.created_at, s.id
 ```
 
+A System is clean only when its stored `provider` is **exactly** `{<the bound kind>: {…}}`. The
+first disjunct says the section under the bound kind is not an object; the second says the
+`provider` object holds anything besides that one section. The second is not belt-and-braces:
+without it, `{"fault-inject": {}, "local-libvirt": {}}` on a fault-inject Resource passes as
+clean, and that row is worse than the residue this sweep targets — `_require_exactly_one_provider`
+(`src/kdive/profiles/provisioning.py:306-315`) makes it fail `ProvisioningProfile.parse` outright,
+so it breaks every parse site rather than the four lanes above.
+
 The predicate is **total**: measured on PostgreSQL 17.10, `jsonb -> text` returns SQL `NULL` for a
 missing key and for every non-object left operand (array, string scalar, JSON `null`), and
-`jsonb_typeof(NULL::jsonb)` is `NULL`, so `IS DISTINCT FROM 'object'` is true for all of them. No
-System row can fall out of the scan unreported, which is the property that makes a clean result
-mean something.
+`jsonb_typeof(NULL::jsonb)` is `NULL`. Run over ten seeded profile shapes on a real three-table
+join it returns the eight wrong ones — mismatched key, both two-key shapes, JSON-`null` section,
+empty object, scalar, array, absent `provider` — and neither correct one. No System row can fall
+out of the scan unreported, which is the property that makes a clean result mean something.
 
 The section **key** is not extracted in SQL. `jsonb_object_keys` is a set-returning function that
 fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument. A `jsonb_typeof`
@@ -150,8 +161,13 @@ exactly as `verify_project` does. The pool is closed in a `finally`.
 - **mismatches** → exit `1`, a header naming the count and the target, then one line per mismatch:
   `system=<uuid> project=<project> state=<state> profile_section=<section> resource_kind=<kind>`,
   then a closing line stating that these Systems predate ADR-0549's admission cross-check, that
-  they raise on the control, install, vmcore, and debug-session lanes, and that remediation is not
+  they raise on the control, install, boot-evidence, and vmcore lanes, and that remediation is not
   automated.
+
+Exit `1` is a **one-shot post-upgrade check, not a standing gate**: every state is reported and
+#1907 authorizes no repair, so a torn-down mismatched System keeps the sweep red until someone
+hand-repairs the rows. ADR-0579's Consequences carries the same warning — a permanently-red deploy
+step is a step someone deletes.
 
 The target URL passes through the existing `redact_database_url` from `kdive.admin.projects`; it
 is not reimplemented.
@@ -183,6 +199,7 @@ The handler mirrors `_handle_verify_project` exactly: run the coroutine, format,
 | database reachable, no mismatch | exit `0`, one clean line |
 | database reachable, N mismatches | exit `1`, header + N lines + remediation line |
 | a System whose `provider` is absent, scalar, or JSON-`null` | reported, with the label from the table above |
+| a System whose `provider` carries a second section beside the matching one | reported; the label is both keys, sorted and comma-joined |
 | an Allocation with no Resource row | impossible — `allocations.resource_id` is `NOT NULL REFERENCES resources (id)` |
 
 ## Threat model
@@ -230,21 +247,26 @@ Database-backed:
    and its five fields are the seeded values.
 2. **A clean database returns an empty list**, so criterion 1's assertion is not vacuously true —
    the same seed minus the mismatched System.
-3. **Totality.** A System whose stored `provisioning_profile` carries no `provider` key at all is
-   reported, with `profile_section == "<none>"`. This is the property that makes an empty result
-   trustworthy.
-4. **Order is deterministic** across two mismatched Systems with distinct `created_at`.
+3. **Totality — no `provider` key.** A System whose stored `provisioning_profile` carries no
+   `provider` key at all is reported, with `profile_section == "<none>"`. This is the property
+   that makes an empty result trustworthy.
+4. **Totality — a second section beside the matching one.** A System on a `fault-inject` Resource
+   whose `provider` is `{"fault-inject": {...}, "local-libvirt": {...}}` is reported, with
+   `profile_section == "fault-inject,local-libvirt"`. This is the regression guard for the
+   predicate's second disjunct: with only the first, this row reads as clean, and it is a row
+   `ProvisioningProfile.parse` rejects outright.
+5. **Order is deterministic** across two mismatched Systems with distinct `created_at`.
 
 Pure:
 
-5. `_section_label` over each row of the table above.
-6. `format_profile_kind_result([])` → exit `0`, and the message names the redacted URL.
-7. `format_profile_kind_result([one, two])` → exit `1`, one line per mismatch, each carrying all
+6. `_section_label` over each row of the table above.
+7. `format_profile_kind_result([])` → exit `0`, and the message names the redacted URL.
+8. `format_profile_kind_result([one, two])` → exit `1`, one line per mismatch, each carrying all
    five fields, and the message names ADR-0549 and says remediation is not automated.
 
 Parser:
 
-8. `build_parser().parse_args(["verify-profile-kinds"])` yields `command == "verify-profile-kinds"`,
+9. `build_parser().parse_args(["verify-profile-kinds"])` yields `command == "verify-profile-kinds"`,
    and the command is absent from `_RUNNABLE`.
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
