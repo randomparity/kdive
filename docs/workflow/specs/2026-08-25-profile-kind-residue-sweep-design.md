@@ -57,10 +57,21 @@ is a kebab-case kind string (`local-libvirt`, `fault-inject`, `remote-libvirt`).
 `0018_resources_kind_fault_inject.sql` and `0020_resources_kind_remote_libvirt.sql`). The
 comparison is therefore direct string equality between the stored JSON key and the column.
 
-A System is **mismatched** when `provisioning_profile -> 'provider'` does not carry an object under
-the bound Resource's `kind`. That covers the residue #1907 targets and, without a second rule, the
-degenerate shapes a hand-edited row could hold (no `provider` object, a scalar, a JSON-`null`
-section).
+A System is **mismatched** unless its stored `provisioning_profile -> 'provider'` is **exactly**
+`{<the bound Resource's kind>: {…}}` — one section, keyed by that kind, whose value is an object.
+That covers the residue #1907 targets, the degenerate shapes a hand-edited row could hold (no
+`provider` object, a scalar, a JSON-`null` section), and a `provider` carrying a second section
+beside the matching one.
+
+This is the rule the query implements and the one ADR-0579 records; the `Design` section below
+derives both halves of the predicate from it. An earlier draft defined mismatch as "does not carry
+an object under the bound kind" and added that no second rule was needed — that is the first
+disjunct alone, and it is false. Measured: `{"fault-inject": {}, "local-libvirt": {}}` on a
+fault-inject Resource *does* carry an object under the bound kind, so the narrow rule calls it
+clean, while the query reports it and `ProvisioningProfile.parse` rejects it outright. An
+implementer building to the narrow rule would write exactly the bug the `Design` section spends a
+paragraph refuting, which matters because ADR-0579 anticipates a follow-up reusing
+`scan_profile_kinds` unchanged.
 
 ## Design
 
@@ -260,8 +271,9 @@ the printed report is the answer.
 - **clean** → one line naming the credential-redacted target:
   `verified no System's provisioning-profile provider section mismatches its Resource kind in <url>`
 - **mismatches** → a header naming the count and the target, then one line per mismatch:
-  `system=<uuid> project="<project>" state=<state> profile_section=<section> resource_kind=<kind>`
-  — `project` quoted because it is the one unbounded field (threat model, control 3),
+  `system=<uuid> project=<project!r> state=<state> profile_section=<section> resource_kind=<kind>`
+  — `project` rendered with `repr`, because it is the one field nothing else bounds (threat
+  model, control 3); the other four are printed as they stand,
   then a closing block that **describes the class without asserting one cause**: each listed
   System's stored provider section does not match its bound Resource kind; a plain kind mismatch
   reaches `ready` and raises at first use on the control, install, boot-evidence, and vmcore
@@ -342,49 +354,76 @@ identities.
    The rows carry values two other sets of principals populate: `systems.project` comes from an
    IdP-issued `projects` claim whose only live-path validation rejects non-strings and empty
    strings (`security/authz/context.py:44-50` — no charset bound), and
-   `LibvirtProfile.domain_xml_params` is agent-supplied. So a principal holding a token with an
-   attacker-chosen claim can plant printed bytes with no database access at all — remotely, not
-   self-inflicted. This design trusts the command's caller and does **not** trust the row
-   contents; `_printable` and the closed label vocabulary are what carry that second half.
+   `LibvirtProfile.domain_xml_params` is agent-supplied. So printed bytes can be planted with no
+   database access at all — remotely, not self-inflicted.
+
+   That path has **one more hop than the claim above suggests**, and naming it keeps this
+   inventory honest. `systems.project` is `alloc.project` (`services/systems/admission.py:651`),
+   so a System exists only behind a placed Allocation, and Allocation admission is fail-closed on
+   funding — `has_quota` records that "a project with **no quota row** is over quota (ADR-0007
+   §4 — no silent default)" (`services/allocation/admission/core.py:605-611`). The hostile
+   project string must therefore already own `budgets`/`quotas` rows, which come either from the
+   operator running `seed-project` or from `accounting.set_budget` / `set_quota`, both gated by
+   `require_role(ctx, project, Role.ADMIN)` (`mcp/tools/accounting/admin.py:53-54`). The planter
+   is an ADMIN-role principal on a project whose *name* carries the hostile bytes — still remote,
+   still needing no database access, still unvalidated as a string, but a materially narrower
+   actor than "anyone holding a token with an arbitrary claim".
+
+   This design trusts the command's caller and does **not** trust the row contents; the `repr`
+   rendering and the closed label vocabulary are what carry that second half.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
    `redact_database_url`, which masks a URL password and blanket-redacts a keyword/value conninfo
    mentioning `password`. What is printed is `(system id, project, state, section label, resource
    kind)` — never the profile body, which is where a caller-supplied value could live.
 
-   **Every one of those five fields is bounded, and three of them are bounded by something other
-   than this code.** `system_id` is a `uuid`; `state` and `resource_kind` carry `CHECK`
-   constraints (`systems_state_check`, `resources_kind_check`). The section **label** is bounded
-   here: `_section_label` maps any key outside `_KNOWN_KINDS` to `<unrecognized>`, so the printed
-   vocabulary is closed over the `ResourceKind` values and three markers even for a hand-edited
-   row whose keys carry arbitrary bytes.
+   **Four of the five fields are bounded by something other than this code.** `system_id` is a
+   `uuid`; `state` and `resource_kind` carry `CHECK` constraints (`systems_state_check`,
+   `resources_kind_check`). The section **label** is bounded here: `_section_label` maps any key
+   outside `_KNOWN_KINDS` to `<unrecognized>`, so the printed vocabulary is closed over the
+   `ResourceKind` values and three markers even for a hand-edited row whose keys carry arbitrary
+   bytes — in charset *and* in length, at most five entries however large the stored object is.
 
    `project` is the exception and needs its own control. `systems.project` is `text NOT NULL`
    with **no** `CHECK` (`0001_init.sql:57`), `System.project` is a bare `str` on `Attribution`,
    and the only live-path validation is a non-empty `isinstance(..., str)` test over the IdP
    claim (`security/authz/context.py:44-50`) — no charset bound anywhere. So the exact escape the
-   label machinery exists to stop walks through the adjacent field on the same line, for the same
-   in-scope actor. **Both free-text fields go through one `_printable` helper** before the line is
-   built, replacing every character for which `str.isprintable()` is false with `?`. Sanitizing
-   the label while printing `project` as stored would be a control that reads as protective and
-   is not.
+   label machinery exists to stop walks through the adjacent field on the same line.
 
-   The predicate is `str.isprintable()`, not `ord(c) < 0x20`, and the difference is the control.
-   Measured: `DEL` (U+007F), the C1 controls including `CSI` (U+009B) and `ST` (U+009C), `NBSP`
-   (U+00A0) and `RIGHT-TO-LEFT OVERRIDE` (U+202E) all have `ord >= 0x20`, so a `< 0x20` bound
-   passes every one of them through — and a terminal honouring C1 reads a bare U+009B as the
-   Control Sequence Introducer, which is exactly the escape-sequence injection this control
-   exists to stop. `str.isprintable()` is false for all of them and true for `SPACE`, so it is a
-   strict superset of the `< 0x20` filter with nothing lost. It is also the idiom already in this
-   codebase — `security/artifacts/bpf_filter.py:27`, `profiles/provisioning.py:66`,
-   `jobs/payloads.py:211`, `domain/labels.py:57`, and three more — though every one of those
-   *rejects* where this one must *render*, which is why this is a substitution and not a guard.
+   **`project` is rendered with `repr`** — `f"project={mismatch.project!r}"` — and that single
+   operator is the whole control. It does three things a hand-rolled pair of them does not:
 
-   `project` is additionally **quoted** in the line format, because `_printable` cannot help
-   there: `SPACE` and `=` are printable, so an unquoted project named
-   `x state=ready profile_section=fault-inject` forges adjacent `key=value` pairs on the report's
-   own line. Quoting bounds the field to one token for a reader and for anything parsing the
-   output.
+   - **Charset.** `repr` escapes exactly the characters `str.isprintable()` rejects. Measured:
+     `\x1b`, `DEL` (U+007F), the C1 controls including `CSI` (U+009B), `NBSP` (U+00A0) and
+     `RIGHT-TO-LEFT OVERRIDE` (U+202E) all come back escaped, and the rendered line is
+     `isprintable()`. A `ord(c) < 0x20` bound would pass every one of those but the first, since
+     they all sit above `0x20` — and a terminal honouring C1 reads a bare U+009B as the Control
+     Sequence Introducer, which is the escape-sequence injection this control exists to stop.
+   - **Tokenization.** It delimits the value *and* escapes any quote inside it. Hand-written
+     quotes do not: a double quote is printable, so `project="…"` is closed by the next literal
+     `"` the formatter emits rather than by the end of the value, and a project named
+     `x" state=ready profile_section=fault-inject … junk="y` forges a full set of leading
+     `key=value` pairs with the true values trailing them. Measured against the specified format.
+     `repr` renders that same value as one token.
+   - **Losslessness.** It escapes where a substitution helper destroys. Replacing a hostile byte
+     with `?` silently rewrites a project name in a report an operator reads to decide what to do
+     about that row.
+
+   It is also already the idiom for this exact field: `format_verify_result` prints
+   `project {project!r}`. `str.isprintable()` itself is the repo's guard idiom at
+   `security/artifacts/bpf_filter.py:27`, `profiles/provisioning.py:66`, `jobs/payloads.py:211`,
+   `domain/labels.py:57` and three more — but every one of those *rejects* where this must
+   *render*, which is why the control is `repr` rather than a validator.
+
+   The label needs no such treatment: it is closed over printable ASCII by construction, so
+   putting it through the same operator would add a mechanism with no input that reaches it.
+
+   **`project`'s bound is charset and tokenization, not length.** `repr` is a per-character
+   escape and a delimiter; neither caps length, and `systems.project` is unbounded `text`.
+   Measured: a 5000-character project renders a 5093-character line. Accepted rather than fixed —
+   this is a report an operator runs by hand and reads, not a fixed-width surface, and a width
+   policy plus its tests costs more than the over-long line it prevents. Stated because the
+   adjacent field *is* length-bounded and the asymmetry would otherwise read as an oversight.
 
    On failure, the `CategorizedError` path in `main()` renders through `Redactor`.
 4. **Explicitly out of scope.** Access control on the command itself: the DB URL is the
@@ -396,13 +435,16 @@ identities.
    the holder of the URL can already read the rows directly. Denial of service from a large
    `systems` table: the query is a **full scan** of `systems` — the predicate correlates
    `provisioning_profile` to `r.kind`, so it is not sargable and no index can serve it, and the
-   plan demotes it to a per-row join filter. Measured at **~120-135 ms over 200k rows** — 200k
+   plan demotes it to a per-row join filter. Measured at **~120-155 ms over 200k rows** — 200k
    each of `systems`, `allocations` and `resources`, all-clean one-key profiles, PostgreSQL 17.11
-   in a stock `postgres:17` container on a Fedora developer host, warm, 2 parallel workers; three
-   warm runs at 121.8 / 125.4 / 121.5 ms wall-clock and `EXPLAIN (ANALYZE, BUFFERS)` Execution
-   Time 133.6 ms. The figure is host- and row-width-dependent and is quoted with its host for
-   that reason; the plan shape above is not, and reproduces exactly. Run by hand and not on a
-   loop, which is why that scan shape is acceptable rather than irrelevant. Tampering with
+   in a stock `postgres:17` container on a Fedora developer host, warm, 2 parallel workers. That
+   band is the spread of **three independent runs** on this host: 121.8 / 125.4 / 121.5 ms,
+   129–138 ms, and 143.3 / 144.8 / 132.6 / 148.9 ms wall-clock, with `EXPLAIN (ANALYZE, BUFFERS)`
+   Execution Time between 133.6 and 156.4 ms. A range rather than a figure is the honest form:
+   three runs of the same query on the same host varied by 25%, so a single number would invite
+   reliance it cannot carry. The **plan shape** is not host-dependent and reproduced exactly in
+   every run. Run by hand and not on a loop, which is why that scan shape is acceptable rather
+   than irrelevant. Tampering with
    `systems.provisioning_profile` by someone with direct database write access: that actor can
    equally rewrite the report's inputs, and no read-side check bounds them.
 
@@ -488,20 +530,36 @@ Pure:
 
 7. `_section_label` over every row of the measured table above, including the
    section-not-an-object and unrecognized-key rows.
-8. **Nothing unprintable reaches the printed line — either field.** `_section_label({"\x1b[31mBOOM":
-   {}})` returns `<unrecognized>`; and a mismatch whose `project` is `"a\x1b[31mb"` renders
-   through `_printable`. Assert on the whole line, not on the label alone: `project` is the
-   unbounded field, and a test covering only the label is how a sanitized-label/unsanitized-project
-   pairing survives.
+8. **Nothing unprintable reaches the printed line, and `project` cannot forge a field.** Two
+   properties, one per half of control 3, and each needs its own assertion.
 
-   **Assert the property, not the range:** `assert line.isprintable()`, never
-   `all(ord(c) >= 0x20 for c in line)`. The second is the implementation restated as a test, and
-   it cannot redden on the gap that matters — a `project` of `"a\x9b31mb"` satisfies it while
-   `line.isprintable()` is `False`. Parametrize the inputs over `\x1b`, `\x7f` (DEL), `"\x9b"`
-   (CSI), `"\xa0"` (NBSP) and `"\u202e"` (RLO), so the C1 and BiDi cases the `< 0x20` bound would
-   have let through each have their own row. Add one case for a `project` of
-   `'x state=ready profile_section=fault-inject'` asserting the forged pairs land inside the
-   quotes. This is the bite behind the threat model's control 3.
+   *Charset.* `_section_label({"\x1b[31mBOOM": {}})` returns `<unrecognized>`; and a mismatch
+   whose `project` carries a hostile byte renders through `repr`. **Assert the property, not the
+   range:** `assert line.isprintable()`, never `all(ord(c) >= 0x20 for c in line)`. The second is
+   the implementation restated as a test, and it cannot redden on the gap that matters — a
+   `project` of `"a\x9b31mb"` satisfies it while `line.isprintable()` is `False`. Parametrize
+   over `\x1b`, `\x7f` (DEL), `"\x9b"` (CSI), `"\xa0"` (NBSP) and `"\u202e"` (RLO), so the C1 and
+   BiDi cases a `< 0x20` bound would have let through each get their own row. Assert on the
+   **whole line**, not the label alone: `project` is the unbounded field, and a test covering
+   only the label is how a sanitized-label/unsanitized-project pairing survives.
+
+   *Tokenization.* Two forgery cases, and the second is the one that decides the control:
+
+   - `project` = `'x state=ready profile_section=fault-inject'` — no quote, so it forges nothing
+     against either a quoted or a `repr`-rendered field. **This case alone is vacuous:** it
+     passes against the defective formatter and the fixed one alike.
+   - `project` = `'x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y'`
+     — measured against hand-written quotes, this closes the field on its own `"` and emits a
+     full set of leading `key=value` pairs with the true values trailing them, while
+     `line.isprintable()` still passes. This is the case that reddens.
+
+   Assert the real `state=` / `profile_section=` / `resource_kind=` pairs are the **only** ones
+   outside the rendered `project` field — **slice the line at the closing quote and assert on the
+   tail**. Do *not* assert `line.count("state=") == 1`: `repr` escapes and keeps the hostile text
+   rather than deleting it, so measured, `state=` appears **twice** on the fixed line and twice on
+   the broken one. A count assertion is green against both and tests nothing. This is the bite
+   behind the threat model's control 3; without the quote case the control ships untested on its
+   one gap, and without the slice the test restates the count trap instead of the property.
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
     five fields; the message names ADR-0549, says remediation is not automated, and names the

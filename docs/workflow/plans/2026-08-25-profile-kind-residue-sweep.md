@@ -93,11 +93,15 @@ class ProfileKindMismatch:
 
 def _section_label(provider: object) -> str
 def _entry(key: str, value: object) -> str
-def _printable(value: str) -> str
 def format_profile_kind_result(
     mismatches: Sequence[ProfileKindMismatch], *, redacted_url: str
 ) -> str
 ```
+
+There is **no sanitizing helper**. `project` is rendered `f"project={mismatch.project!r}"` and
+that one operator is the whole control: `repr` escapes exactly what `str.isprintable()` rejects,
+delimits the value, and escapes any quote inside it. The label needs nothing — it is closed over
+printable ASCII by construction.
 
 Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec verbatim — the branch order is
 load-bearing and each branch has a test below.
@@ -108,13 +112,19 @@ load-bearing and each branch has a test below.
    sections, 500 unknown keys, section-not-an-object (`null`, `[]`, `"x"`), unrecognized key,
    empty object, `None` (both JSON `null` and absent `provider`), string scalar, array, number,
    bool. Parametrize; each row is a case.
-2. **Nothing unprintable reaches the printed line — either field.** Assert on the **whole
-   formatted line**, not the label alone: `assert line.isprintable()`. Parametrize the `project`
-   input over `\x1b`, `\x7f` (DEL), `\x9b` (CSI), `\xa0` (NBSP), `\u202e` (RLO). A
-   `< 0x20` assertion would pass on four of those five, which is why the property is asserted
-   instead of the range.
-3. A `project` of `x state=ready profile_section=fault-inject` does not forge adjacent
-   `key=value` pairs on the line.
+2. **Charset — nothing unprintable reaches the printed line.** Assert on the **whole formatted
+   line**, not the label alone: `assert line.isprintable()`. Parametrize the `project` input over
+   `\x1b`, `\x7f` (DEL), `\x9b` (CSI), `\xa0` (NBSP), `\u202e` (RLO). A `< 0x20` assertion would
+   pass on four of those five, which is why the property is asserted instead of the range.
+3. **Tokenization — `project` cannot forge a field.** Two cases, and only the second decides it:
+   `x state=ready profile_section=fault-inject` (no quote — **vacuous alone**, it passes against
+   a broken formatter and a correct one alike), and
+   `x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y`, which against
+   hand-written quotes closes the field on its own `"` and emits a full set of leading
+   `key=value` pairs while `line.isprintable()` still passes. **Slice the line at the closing
+   quote and assert on the tail** — never `line.count("state=") == 1`. Measured: `repr` escapes
+   and keeps the hostile text rather than deleting it, so `state=` appears twice on the fixed
+   line *and* twice on the broken one, and a count assertion is green against both.
 4. `format_profile_kind_result([])` returns one line naming the redacted URL.
 5. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
    five fields; the closing block names ADR-0549, says remediation is not automated, and names
