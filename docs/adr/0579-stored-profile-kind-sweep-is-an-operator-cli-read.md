@@ -154,7 +154,11 @@ a statement other than that `SELECT`.
   anyway.
 - The sweep is not reachable over MCP, so an agent cannot run it and `kdivectl` does not grow a
   verb. That is deliberate — see the rejected alternative — and it means the sweep runs only where
-  `KDIVE_DATABASE_URL` resolves, which is the server/deploy host.
+  `KDIVE_DATABASE_URL` resolves. Deployment sets it (`deploy/systemd/kdive.env.example`, the Helm
+  chart); the source-tree live stack deliberately does **not** (`scripts/live-stack/env.sh`: one
+  DSN per database authority, #1929), so there the operator supplies it per invocation exactly as
+  `onboard.sh` does for `verify-project`. An unset variable is a configuration error, not a clean
+  result.
 - **The residual of that choice: this is a cross-project read with no `platform_auditor` gate and
   no `platform_audit_log` row.** The same read served over MCP would owe both
   (`src/kdive/mcp/tools/ops/_reads.py`); the subcommand reports every project's Systems and

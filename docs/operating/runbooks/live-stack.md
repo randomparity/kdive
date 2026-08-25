@@ -152,11 +152,22 @@ expires. This is the dev/demo path; production onboards via the audited admin to
 ([project onboarding](../project-onboarding.md)). It can run any time after the backends and
 migrations are up (it does not need the host processes).
 
-A second read-only check against the same database, `python -m kdive verify-profile-kinds`,
-reports every stored System whose provisioning-profile provider section does not match its
-bound Resource's kind (ADR-0579) — pre-ADR-0549 residue that ADR-0549 stopped admitting but
-never repaired. It writes nothing, always exits `0`, and the report is the whole answer:
-remediation is manual. Worth running after upgrading past ADR-0549.
+A second read-only check reports every stored System whose provisioning-profile provider section
+is not exactly one section keyed by its bound Resource's kind (ADR-0579) — pre-ADR-0549 residue
+that ADR-0549 stopped admitting but never repaired. Worth running after upgrading past ADR-0549.
+
+```bash
+KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" python -m kdive verify-profile-kinds
+```
+
+The `KDIVE_DATABASE_URL` prefix is required, not decoration: `env.sh` deliberately exports no
+shared value (one DSN per database authority, #1929), so a bare invocation fails with a
+configuration error before it reads anything. Every sibling here is invoked the same way — see
+`onboard.sh`'s `verify-project` step.
+
+It writes nothing and the report is the whole answer: remediation is manual. Once it can reach
+the database it exits `0` whether or not it finds residue, so a non-zero exit means it could not
+run, not that the database is clean.
 
 ## 2. Review the host-process env
 
