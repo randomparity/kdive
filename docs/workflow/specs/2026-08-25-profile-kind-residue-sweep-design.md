@@ -185,7 +185,7 @@ async def scan_profile_kinds(conn: AsyncConnection) -> list[ProfileKindMismatch]
 async def verify_profile_kinds() -> list[ProfileKindMismatch]
 def format_profile_kind_result(
     mismatches: Sequence[ProfileKindMismatch], *, redacted_url: str
-) -> tuple[str, int]
+) -> str
 ```
 
 `scan_profile_kinds` takes an open connection, so a test drives it against the migrated fixture
@@ -193,21 +193,22 @@ database with no pool lifecycle. `verify_profile_kinds` opens a pool with `creat
 delegates — an unset `KDIVE_DATABASE_URL` raises `CONFIGURATION_ERROR` there, before any query,
 exactly as `verify_project` does. The pool is closed in a `finally`.
 
-`format_profile_kind_result` is pure and returns `(message, exit_code)`:
+`format_profile_kind_result` is pure and returns the message. **The command always exits `0`;**
+the printed report is the answer.
 
-- **clean** → exit `0`, one line naming the credential-redacted target:
+- **clean** → one line naming the credential-redacted target:
   `verified no System's provisioning-profile provider section mismatches its Resource kind in <url>`
-- **mismatches** → exit `1`, a header naming the count and the target, then one line per mismatch:
+- **mismatches** → a header naming the count and the target, then one line per mismatch:
   `system=<uuid> project=<project> state=<state> profile_section=<section> resource_kind=<kind>`,
   then a closing line stating that these Systems predate ADR-0549's admission cross-check, that
-  they raise on the control, install, boot-evidence, and vmcore lanes, that remediation is not
-  automated, and that **this is a one-shot post-upgrade check rather than a standing gate**.
+  they raise on the control, install, boot-evidence, and vmcore lanes, and that remediation is
+  not automated.
 
-That last clause is in the message, not only in the ADR, on purpose. Exit `1` never clears on its
-own: every state is reported and #1907 authorizes no repair, so a torn-down mismatched System
-keeps the sweep red until someone hand-repairs the rows. Someone wiring a pipeline step reads the
-command's output, not ADR-0579, and a permanently-red step is a step that gets deleted — taking
-the only detection the deployment has with it.
+There is no non-zero exit because there could not be a working one. #1907's criteria ask for a
+query, a report, no mutation, and a test — none asks for an exit code — and the sweep reports
+every state, so a torn-down mismatched System would hold a non-zero exit red permanently with
+nothing left to repair. A signal that cannot return to green is not a signal. (Operator
+decision, 2026-08-25; see ADR-0579.)
 
 The target URL passes through the existing `redact_database_url` from `kdive.admin.projects`; it
 is not reimplemented.
@@ -228,8 +229,10 @@ No arguments — the sweep is whole-database by construction, and every filter t
 (by project, by state) is the triage call #1907 excludes. The command is **not** `runnable`, so it
 takes the same non-telemetry path as `verify-project`.
 
-The handler mirrors `_handle_verify_project` exactly: run the coroutine, format, `print`,
-`raise SystemExit(code)`.
+The handler follows `_handle_verify_project`'s shape — run the coroutine, format, `print` — and
+stops there. It raises no `SystemExit`, so the command returns `0`; a `CategorizedError` from
+`create_pool()` still routes through `main()`'s handler to the category's exit code (ADR-0089),
+which is a configuration failure rather than a finding.
 
 ## Failure modes
 
@@ -237,10 +240,10 @@ The handler mirrors `_handle_verify_project` exactly: run the coroutine, format,
 |---|---|
 | `KDIVE_DATABASE_URL` unset or unusable | `create_pool()` raises `CategorizedError(CONFIGURATION_ERROR)`; `main()`'s handler prints it and exits with the category's code (ADR-0089) |
 | database reachable, no mismatch | exit `0`, one clean line |
-| database reachable, N mismatches | exit `1`, header + N lines + remediation line |
+| database reachable, N mismatches | exit `0`, header + N lines + remediation line |
 | a System whose `provider` is absent, scalar, or JSON-`null` | reported, with the label from the table above |
 | a System whose `provider` carries a second section beside the matching one | reported; the label is both keys, sorted and comma-joined |
-| an Allocation with no Resource row | impossible — `allocations.resource_id` is `NOT NULL REFERENCES resources (id)` |
+| a System bound to an Allocation with a NULL `resource_id` | **not reported** — the inner join drops it. Accepted residual, stated in ADR-0579 and unreachable today (see the join dependency above) |
 
 ## Threat model
 
@@ -296,19 +299,22 @@ Database-backed:
    predicate's second disjunct: with only the first, this row reads as clean, and it is a row
    `ProvisioningProfile.parse` rejects outright.
 5. **Order is deterministic** across two mismatched Systems with distinct `created_at`.
-6. **The join does not shrink the scan.** With the fixture seeded, the number of rows the scan
-   examines equals `SELECT count(*) FROM systems`. This is the guard for the join dependency
-   above: `allocations.resource_id` is nullable, so a future migration that makes it NULL for a
-   live state would drop Systems out of the inner join and the sweep would report a clean zero.
-   Nothing else would notice. The assertion reddens the day that becomes reachable.
+
+There is deliberately **no** test guarding the join dependency. A comparison of the join's row
+count against the fixture's `systems` count would look protective and detect nothing: a migration
+relaxing the `allocations.resource_id` CHECK adds no such row to a fixture the test seeds, so both
+counts stay equal and the suite stays green through exactly the change worth catching. The
+dependency is an accepted residual, stated in ADR-0579 and in the failure-mode table above.
 
 Pure:
 
-7. `_section_label` over each of the nine measured shapes in the table above.
-8. `format_profile_kind_result([])` → exit `0`, and the message names the redacted URL.
-9. `format_profile_kind_result([one, two])` → exit `1`, one line per mismatch, each carrying all
-   five fields; the message names ADR-0549, says remediation is not automated, names the four
-   raising lanes, and says the check is one-shot rather than a standing gate.
+6. `_section_label` over each of the nine measured shapes in the table above.
+7. `format_profile_kind_result([])` returns one line naming the redacted URL.
+8. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
+   five fields; the message names ADR-0549, says remediation is not automated, and names the
+   four raising lanes.
+9. The CLI handler raises no `SystemExit` — `verify-profile-kinds` exits `0` with mismatches
+   present. Assert on the handler, not on a subprocess.
 
 Parser:
 
