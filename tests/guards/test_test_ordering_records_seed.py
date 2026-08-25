@@ -3,7 +3,7 @@
 ADR-0577's `--tb=short` trade is "escalate or re-run to get full detail" — except in the
 weekly ordering job, where `PYTHONHASHSEED: random` drew a per-process seed CPython never
 records, so re-running the job was a different run, not a reproduction (#2065). The job now
-seeds with the run's id and records that value in the step log and the job summary before
+seeds with the run's number and records that value in the step log and the job summary before
 the suite runs, so a red run names the concrete seed: `PYTHONHASHSEED=<seed> just test`
 locally reproduces the collection and assertion order. This guard keeps that contract from
 regressing to an unrecordable seed.
@@ -102,11 +102,16 @@ def test_the_ordering_job_runs_with_a_recordable_seed() -> None:
 
 
 def test_the_seed_changes_with_the_run() -> None:
-    """A constant seed exercises one order forever; the seed must derive from the run."""
+    """The seed must derive from the run, or one order is exercised forever.
+
+    `github.run_number` (a per-workflow counter), not `github.run_id`: run ids already
+    exceed CPython's PYTHONHASHSEED range [0, 4294967295], and an out-of-range value is a
+    fatal error at interpreter startup.
+    """
     job = _ordering_job()
     seed = _effective_seed(job, _test_step(job))
     assert seed is not None, "the `just test` step sets no PYTHONHASHSEED at all"
-    assert "github.run_id" in str(seed), (
+    assert "github.run_number" in str(seed), (
         f"the seed {seed!r} does not derive from the run, so consecutive weekly runs "
         "share one order and mask every order-dependent test that order happens to pass"
     )
