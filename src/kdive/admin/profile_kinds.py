@@ -189,10 +189,10 @@ def _project_token(project: str) -> str:
     delimited ``key=value`` sequence, so a stored project name carrying spaces contributes
     extra ``key=value`` tokens — positioned ahead of the real fields, since ``project`` is the
     second key on the line. A name of the form ``x' state=torn_down ... junk='y`` makes
-    ``state=torn_down`` the first ``state=`` token on the line, and the closing block below
-    tells the operator a ``torn_down`` row is inert. Whitespace-splitting or grepping the
-    report — the ordinary way to work one listing many rows — then drops a live ``ready``
-    System from the remediation list.
+    ``state=torn_down`` the first ``state=`` token on that row. Whitespace-splitting or grepping
+    the report — the ordinary way to work one listing many rows — then reads the forged value as
+    the row's ``state``, whichever state the operator is selecting on, and the row is triaged as
+    something it is not.
 
     ``systems.project`` is remotely plantable (an IdP ``projects`` claim, validated only as a
     non-empty ``str``), so this is reachable without database access.
@@ -234,12 +234,12 @@ def format_profile_kind_result(
     """
     if not mismatches:
         return (
-            "verified no System bound to a Resource has a provisioning-profile provider "
-            f"section that mismatches its Resource kind in {redacted_url}"
+            "verified every System bound to a Resource has a stored provisioning-profile "
+            f"provider of exactly one section keyed by its Resource kind in {redacted_url}"
         )
     lines = [
-        f"found {len(mismatches)} System(s) whose provisioning-profile provider section "
-        f"does not match their Resource kind in {redacted_url}"
+        f"found {len(mismatches)} System(s) whose stored provisioning-profile provider is not "
+        f"exactly one section keyed by their bound Resource's kind in {redacted_url}"
     ]
     for mismatch in mismatches:
         lines.append(
@@ -248,12 +248,13 @@ def format_profile_kind_result(
             f"resource_kind={mismatch.resource_kind}"
         )
     lines.append(
-        "each listed System's stored provisioning-profile provider section does not match "
-        "its bound Resource's kind: a plain kind mismatch raises at first use on the four "
-        "lanes below (ADR-0549) for a System still live enough to reach them, while a section "
-        "that fails ProvisioningProfile.parse outright (a provider holding two sections, none, "
-        "or a section under the bound kind that is not an object) breaks every parse site "
-        "instead. state is reported per row so you can judge which rows are worth acting on. "
+        "each listed System's stored provisioning-profile provider is not exactly one section "
+        "keyed by its bound Resource's kind. Where the section is simply under the wrong kind, "
+        "the System raises at first use on the four lanes below (ADR-0549) if it is still live "
+        "enough to reach them. Every other listed shape — a provider carrying any key besides "
+        "the bound kind, or none, or a section under the bound kind that is not an object — "
+        "fails ProvisioningProfile.parse outright and so breaks every parse site instead. "
+        "state is reported per row so you can judge which rows are worth acting on. "
         "Remediation is not automated."
     )
     lines.extend(_RAISING_LANES)

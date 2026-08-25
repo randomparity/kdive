@@ -148,8 +148,8 @@ def test_format_tokenization_project_cannot_forge_a_field(project: str) -> None:
     and cannot fail on forgery: `repr` selects its quote character rather than escaping, and
     leaves ASCII space intact because a space is printable. The `forged-single-quote` case
     below is the one that proves it — against a bare `!r` it renders `state=torn_down` as the
-    *first* `state=` token on the line, and the closing block tells the operator a `torn_down`
-    row is inert, so grepping the report drops a live `ready` System.
+    *first* `state=` token on the row, so any grep- or awk-driven triage of a multi-row report
+    reads the wrong state for that System.
     """
     mismatch = _make_mismatch(project=project)
     report = format_profile_kind_result([mismatch], redacted_url=_REDACTED_URL)
@@ -174,8 +174,8 @@ def test_format_empty_names_redacted_url() -> None:
     report = format_profile_kind_result([], redacted_url=_REDACTED_URL)
 
     assert report == (
-        "verified no System bound to a Resource has a provisioning-profile provider "
-        f"section that mismatches its Resource kind in {_REDACTED_URL}"
+        "verified every System bound to a Resource has a stored provisioning-profile "
+        f"provider of exactly one section keyed by its Resource kind in {_REDACTED_URL}"
     )
 
 
@@ -199,8 +199,8 @@ def test_format_mismatches_header_body_and_closing_block() -> None:
     lines = report.splitlines()
 
     assert lines[0] == (
-        "found 2 System(s) whose provisioning-profile provider section does not match "
-        f"their Resource kind in {_REDACTED_URL}"
+        "found 2 System(s) whose stored provisioning-profile provider is not exactly one "
+        f"section keyed by their bound Resource's kind in {_REDACTED_URL}"
     )
     assert (
         "system=00000000-0000-0000-0000-000000000001 project='proj-a' state=ready "
@@ -545,6 +545,10 @@ async def _seed_ordering_fixture(conn: psycopg.AsyncConnection) -> None:
     # would go green under that mutation while this assertion still passed. That assumption is
     # stated rather than guarded: pinning it would mean a second string-surgery derivation to
     # test a PostgreSQL implementation detail rather than this code.
+    #
+    # Both couplings — the join plan below and the sort stability above — are recorded in
+    # issue #2079, which carries the triage path. If this assertion reddens, start there:
+    # a new PostgreSQL plan is the likely cause, not a regression in `_SCAN_QUERY`.
     async with conn.cursor() as cur:
         await cur.execute(_UNORDERED_SCAN_QUERY)
         physical_order = [row[0] for row in await cur.fetchall()]
