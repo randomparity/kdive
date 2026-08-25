@@ -116,27 +116,45 @@ load-bearing and each branch has a test below.
    line**, not the label alone: `assert line.isprintable()`. Parametrize the `project` input over
    `\x1b`, `\x7f` (DEL), `\x9b` (CSI), `\xa0` (NBSP), `\u202e` (RLO). A `< 0x20` assertion would
    pass on four of those five, which is why the property is asserted instead of the range.
-3. **Tokenization — `project` cannot forge a field.** Two cases, and only the second decides it:
-   `x state=ready profile_section=fault-inject` (no quote — **vacuous alone**, it passes against
-   a broken formatter and a correct one alike), and
-   `x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y`, which against
-   hand-written quotes closes the field on its own `"` and emits a full set of leading
-   `key=value` pairs while `line.isprintable()` still passes.
+3. **Tokenization — `project` cannot forge a field.** The assertion is anchored on the rendered
+   token, never on a quote character:
 
-   **Anchor the assertion on the rendered token, not on a quote character.** Two wordings are
-   wrong here and both were in an earlier draft:
+   ```python
+   assert f"project={project!r}" in line  # fail here, not on an IndexError below
+   tail = line.split(f"project={project!r}", 1)[1]
+   ```
 
-   - `line.count("state=") == 1` is **vacuous** — measured, `repr` escapes and keeps the hostile
-     text rather than deleting it, so `state=` appears twice on the fixed line *and* twice on the
-     broken one.
-   - "slice at the closing quote" **reddens the correct implementation** — measured, `repr` picks
-     `'` for this value (it contains `"` and no `'`) and leaves the embedded `"` unescaped, so the
-     first `"` sits two characters into the project value. The delimiter `repr` chooses is
-     data-dependent, so "the closing quote" names no fixed character across a parametrized set.
+   then assert `tail` carries exactly one `state=`, one `profile_section=` and one
+   `resource_kind=`. The explicit `in line` assertion is load-bearing: without it a broken
+   formatter fails with an incidental `IndexError` from the split rather than on an assertion,
+   and the natural way to "repair" a test that errors is to guard the split — which makes it
+   vacuous.
 
-   Use `tail = line.split(f"project={project!r}", 1)[1]` and assert `tail` carries exactly one
-   `state=`, one `profile_section=` and one `resource_kind=`. That is quote-agnostic and holds
-   for every hostile input in the parametrize set.
+   **An input discriminates only if it does not contain `'` without also containing `"`.**
+   Measured against the hand-quoted formatter this control replaces:
+
+   | `project` contains | broken formatter | fixed | discriminates |
+   |---|---|---|---|
+   | neither quote | red — anchor absent | green | yes |
+   | `"` only | red — anchor absent | green | yes |
+   | **`'` only** | **green** | green | **NO** |
+   | both | red — anchor absent | green | yes |
+
+   The `'`-only row is the trap: `repr` then picks `"` as its own delimiter, so the broken line is
+   byte-identical to the anchor, the split succeeds, the tail counts come back `(1, 1, 1)`, and
+   `line.isprintable()` passes too — green against a formatter that forges. **Do not add the
+   single-quote sibling of case 2 to this set as if it were a guard.**
+
+   Parametrize over `x state=ready profile_section=fault-inject` (no quote) and
+   `x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y`. Both
+   discriminate; the second is the one that reproduces the actual forgery, closing the field on
+   its own `"` and emitting a full set of leading `key=value` pairs while `line.isprintable()`
+   still passes. Two earlier wordings were wrong and are recorded so they are not reintroduced:
+   `line.count("state=") == 1` is vacuous (`repr` escapes and keeps the hostile text, so `state=`
+   appears twice on the fixed line *and* twice on the broken one), and "slice at the closing
+   quote" reddens the *correct* implementation (the delimiter `repr` picks is data-dependent, so
+   no fixed character anchors the set).
+
 4. `format_profile_kind_result([])` returns one line naming the redacted URL.
 5. `format_profile_kind_result([one, two])` returns the fixed header carrying the count and the
    redacted URL, then one line per mismatch each carrying all five fields; the closing block
@@ -167,11 +185,23 @@ Takes an **open connection**, not a pool, so a test drives it against the migrat
 database with no pool lifecycle. It executes the single static statement, maps each row through
 `_section_label`, and returns the list in the order the query produced.
 
-**Fixtures.** `tests/admin/conftest.py` already re-exports `migrated_url` (function-scoped, from
-`tests/db/conftest.py:319`) and `pg_conn`. Seeds go through `RESOURCES.insert` /
-`ALLOCATIONS.insert` / `SYSTEMS.insert` from `kdive.db.repositories` — the pattern
-`tests/mcp/lifecycle/test_systems_list.py:104-155` uses, which seeds all three in that order —
-so fixture rows are built by the code production uses and cannot drift from the schema.
+**Fixtures.** Use the `migrated_url` fixture (function-scoped, from `tests/db/conftest.py:319`,
+already re-exported by `tests/admin/conftest.py`) and open an `AsyncConnection` on it with
+`autocommit=True` — that is both the mode the read-only measurement in test 1 depends on and the
+mode `tests/db/conftest.py`'s own helpers use.
+
+**Do not reach for `pg_conn`.** It is re-exported alongside `migrated_url`, but it is a
+*synchronous* `psycopg.Connection` and its first act is
+`DROP SCHEMA public CASCADE; CREATE SCHEMA public;` (`tests/db/conftest.py:209-216`) — so it
+yields an unmigrated database with no `systems` table, and the repositories this task mandates
+take an `AsyncConnection`. Both sub-steps that invite a raw connection — the out-of-band
+`UPDATE systems SET created_at`, and the read-only proof's trivial `INSERT` — must use the same
+`AsyncConnection` as the scan.
+
+Seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
+`kdive.db.repositories` — the pattern `tests/mcp/lifecycle/test_systems_list.py` uses (its
+helpers span 102-170 and seed all three in that order) — so fixture rows are built by the code
+production uses and cannot drift from the schema.
 (`tests/services/test_allocation_enqueue.py` is *not* the model to copy: it seeds `RESOURCES`
 and `ALLOCATIONS` only and never reaches `SYSTEMS.insert`.) Helpers are **module-local**, taking an
 `AsyncConnection`; `tests/integration/_seed.py` is not reused (hardwired to local-libvirt through
@@ -185,7 +215,9 @@ directly; the only shared seeders in the tree are area-local).
    `fault-inject` Resource whose stored `provider` is a `local-libvirt` section — plus clean
    rows, and assert the scan returns exactly the mismatched System with all five fields.
 
-   Run it under `SET default_transaction_read_only = on`, then **assert the guard is live**:
+   Seed first, **then** issue `SET default_transaction_read_only = on` — the seeding writes and
+   the `created_at` UPDATEs share this connection, so setting it earlier fails the fixture rather
+   than the assertion. Run the scan under it, then **assert the guard is live**:
    after the scan, a trivial `INSERT` on that same connection must raise
    `psycopg.errors.ReadOnlySqlTransaction`. Without that assertion the test passes whether the
    guard is live or dead — `scan_profile_kinds` only `SELECT`s either way — and criterion 3
@@ -213,19 +245,14 @@ directly; the only shared seeders in the tree are area-local).
    **That carve-out is also what makes insertion order irrelevant, and getting this wrong makes
    the whole test vacuous.** PostgreSQL writes a new tuple version on `UPDATE`, so a seq scan
    returns rows in **last-write** order. Every row in this fixture is updated exactly once, so
-   heap order is the UPDATE order and nothing else. Measured over the three sequencings, with the
-   fixture otherwise identical and rows inserted exactly as an earlier draft of this plan
-   prescribed:
+   heap order is the `UPDATE` order and **nothing else** — measured on the migrated schema
+   through the repositories, running the fixture under two different insertion orders changed no
+   result at all.
 
-   | `UPDATE` sequence | no `ORDER BY` | `ORDER BY created_at` |
-   |---|---|---|
-   | insertion order | fires | fires |
-   | **ascending asserted order** | **DEAD** | **DEAD** |
-   | reverse of asserted order | fires | fires |
-
-   The middle row is the trap: it is the most readable way to write the fixture, it makes the
-   scan return the asserted order for free, and *both* `ORDER BY` mutations then report green
-   against a query that ships no `ORDER BY` at all.
+   The invariant that follows is the whole of it: **both `ORDER BY` mutations are DEAD whenever
+   the `UPDATE` order equals the asserted order**, because the scan then returns the asserted
+   order for free and a query shipping no `ORDER BY` passes. That is the most readable way to
+   write the fixture, which is exactly why it is the trap.
 
    So: **issue the `UPDATE` statements in the reverse of the asserted order** — the row that must
    come back last is updated first — for the tied pair as well as the `created_at` pair. That is
