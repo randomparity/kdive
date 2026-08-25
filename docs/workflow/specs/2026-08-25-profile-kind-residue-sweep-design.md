@@ -8,8 +8,8 @@ Builds on: [ADR-0549](../../adr/0549-profile-policy-declares-its-resource-kind.m
 ## Goal
 
 Give an operator one command that reports every stored System whose provisioning-profile provider
-section is not the kind of the Resource its Allocation is bound to, and exits non-zero when it
-finds any. Report only — no row is written, and no remediation is chosen.
+section is not the kind of the Resource its Allocation is bound to. It always exits `0`; the
+printed report is the answer. Report only — no row is written, and no remediation is chosen.
 
 ## Background
 
@@ -150,33 +150,69 @@ a timestamp.
 def _section_label(provider: object) -> str
 ```
 
-Pure, and total over what psycopg can hand back for a `jsonb` column. Measured against
-`postgres:17` through the project venv, all nine shapes:
+Pure, and total over what psycopg can hand back for a `jsonb` column. Two rules, applied in
+order:
+
+```python
+_KNOWN_KINDS = {"local-libvirt", "fault-inject", "remote-libvirt"}
+
+
+def _section_label(provider: object) -> str:
+    if provider is None:
+        return "<none>"
+    if not isinstance(provider, dict):
+        return "<not-an-object>"
+    if not provider:
+        return "<none>"
+    return ",".join(_entry(key, provider[key]) for key in sorted(provider))
+
+
+def _entry(key: str, value: object) -> str:
+    name = key if key in _KNOWN_KINDS else "<unrecognized>"
+    return name if isinstance(value, dict) else f"{name}=<not-an-object>"
+```
+
+Measured against `postgres:17` through the project venv:
 
 | stored `provider` value | psycopg gives | label |
 |---|---|---|
 | one-key object `{"local-libvirt": {"a": 1}}` | `dict` | `local-libvirt` |
-| multi-key object `{"a": {}, "b": {}}` | `dict` | `a,b` — keys sorted, comma-joined |
+| two sections `{"fault-inject": {}, "local-libvirt": {}}` | `dict` | `fault-inject,local-libvirt` |
+| **section not an object** `{"fault-inject": null}` (also `[]`, `"x"`) | `dict` | `fault-inject=<not-an-object>` |
+| **unrecognized key** `{"\x1b[31mBOOM": {}}` | `dict` | `<unrecognized>` |
 | empty object `{}` | `dict` | `<none>` |
 | JSON `null` | `None` | `<none>` |
 | `provider` key absent | `None` | `<none>` |
 | string scalar `"nope"` | `str` | `<not-an-object>` |
 | array `[1, 2]` | `list` | `<not-an-object>` |
-| number `7` | `int` | `<not-an-object>` |
-| bool `true` | `bool` | `<not-an-object>` |
+| number `7` / bool `true` | `int` / `bool` | `<not-an-object>` |
 
-So the helper is three branches: `dict` → sorted keys comma-joined, or `<none>` when empty;
-`None` → `<none>`; anything else → `<not-an-object>`. JSON `null` and an absent `provider` are
-**indistinguishable** at the Python layer — both arrive as `None` — so mapping both to `<none>`
-is forced, not merely convenient.
+Two rows in that table are load-bearing and were nearly missed:
 
-The markers are angle-bracketed so they cannot collide with a real `ResourceKind` value.
+- **The section-not-an-object row is what the predicate's first disjunct exists to catch**, and a
+  label rendering only the *key* would print `profile_section=fault-inject
+  resource_kind=fault-inject` — two identical strings under a header saying these rows are
+  mismatched, which reads as a broken sweep. `=<not-an-object>` is what makes the report legible
+  for the case the first disjunct was written for.
+- **The unrecognized-key row is what makes the vocabulary claim true.** A hand-edited row's
+  `provider` keys are arbitrary JSON strings — arbitrary length, arbitrary bytes, ANSI escapes
+  included — and this spec puts hand-edited rows in scope by name. Rendering a key verbatim would
+  print those bytes straight to an operator's terminal through `print`. Mapping any key outside
+  `_KNOWN_KINDS` to a marker keeps the output closed over the three kind names and three markers,
+  which is what the threat model's control 3 asserts.
+
+JSON `null` and an absent `provider` are **indistinguishable** at the Python layer — both arrive
+as `None` — so mapping both to `<none>` is forced, not merely convenient.
+
+The markers are angle-bracketed so they cannot collide with a real `ResourceKind` value. A stored
+key could itself be the literal string `<none>`, but it is not in `_KNOWN_KINDS`, so it renders
+`<unrecognized>` and the ambiguity does not arise.
 
 The rendered label is a **refinement beyond criterion 2**, which the raw section value would
-already satisfy. It is worth the refinement because `LibvirtProfile.domain_xml_params` is an
-agent-supplied `dict[NonEmptyStr, NonEmptyStr]`: printing the raw `provider` value would put
-caller-controlled text into an operator report, where the label prints a fixed vocabulary of
-three kind names and two markers. This is the same bound the threat model's control 3 states.
+already satisfy. It earns the refinement twice over: `LibvirtProfile.domain_xml_params` is an
+agent-supplied `dict[NonEmptyStr, NonEmptyStr]`, so printing the raw `provider` value would put
+caller-controlled text into an operator report; and the raw value cannot distinguish the two
+rows called out above.
 
 ### Entry points
 
@@ -243,6 +279,8 @@ which is a configuration failure rather than a finding.
 | database reachable, N mismatches | exit `0`, header + N lines + remediation line |
 | a System whose `provider` is absent, scalar, or JSON-`null` | reported, with the label from the table above |
 | a System whose `provider` carries a second section beside the matching one | reported; the label is both keys, sorted and comma-joined |
+| a System whose section under the bound kind is not an object (`null`, array, scalar) | reported; the label is `<kind>=<not-an-object>`, never the bare kind name |
+| a System whose `provider` carries a key outside the three `ResourceKind` values | reported; that key renders `<unrecognized>`, so its bytes never reach the terminal |
 | a System bound to an Allocation with a NULL `resource_id` | **not reported** — the inner join drops it. Accepted residual, stated in ADR-0579 and unreachable today (see the join dependency above) |
 
 ## Threat model
@@ -262,9 +300,13 @@ identities.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
    `redact_database_url`, which masks a URL password and blanket-redacts a keyword/value conninfo
-   mentioning `password`. What is printed is bounded to `(system id, project, state, section key,
-   resource kind)` — never the profile body, which is where a caller-supplied value could live.
-   On failure, the `CategorizedError` path in `main()` renders through `Redactor`.
+   mentioning `password`. What is printed is bounded to `(system id, project, state, section
+   label, resource kind)` — never the profile body, which is where a caller-supplied value could
+   live. The section **label** is the enforcement point, not a description of well-formed data:
+   `_section_label` maps any key outside `_KNOWN_KINDS` to `<unrecognized>`, so the printed
+   vocabulary is closed over three kind names and three markers even for a hand-edited row whose
+   keys carry arbitrary bytes. On failure, the `CategorizedError` path in `main()` renders through
+   `Redactor`.
 4. **Explicitly out of scope.** Access control on the command itself: the DB URL is the
    credential, matching every other `python -m kdive` operator subcommand, and adding an RBAC gate
    would require the MCP surface ADR-0579 rejects. **Audit trail:** the same cross-project read
@@ -272,8 +314,11 @@ identities.
    (`src/kdive/mcp/tools/ops/_reads.py`); this command owes neither and records nothing. Accepted
    as a stated residual in ADR-0579 — there is no authenticated actor to attribute a row to, and
    the holder of the URL can already read the rows directly. Denial of service from a large
-   `systems` table:
-   the query is a single indexed-join scan an operator runs by hand, not on a loop. Tampering with
+   `systems` table: the query is a **full scan** of `systems` — the predicate correlates
+   `provisioning_profile` to `r.kind`, so it is not sargable and no index can serve it, and the
+   plan demotes it to a per-row join filter. Measured at ~80 ms over 200k rows on PostgreSQL 17,
+   run by hand and not on a loop, which is why the scan shape is acceptable rather than
+   irrelevant. Tampering with
    `systems.provisioning_profile` by someone with direct database write access: that actor can
    equally rewrite the report's inputs, and no read-side check bounds them.
 
@@ -288,6 +333,13 @@ Database-backed:
    it, and a `ready` System whose stored profile carries a `local-libvirt` section. Seed a second,
    matching System on a `local-libvirt` Resource. `scan_profile_kinds` returns exactly one row,
    and its five fields are the seeded values.
+
+   **Run it inside a read-only transaction.** Issue `SET TRANSACTION READ ONLY` on the fixture
+   connection before calling `scan_profile_kinds`. This is the only bite behind criterion 3 —
+   "the sweep reports rather than mutates" — which otherwise rests on inspection alone. A `SELECT`
+   is unaffected; any write added inside the reader later raises `cannot execute … in a read-only
+   transaction`. ADR-0579 anticipates a follow-up reusing `scan_profile_kinds` unchanged, so the
+   contract needs a guard that outlives this change.
 2. **A clean database returns an empty list**, so criterion 1's assertion is not vacuously true —
    the same seed minus the mismatched System.
 3. **Totality — no `provider` key.** A System whose stored `provisioning_profile` carries no
@@ -298,7 +350,19 @@ Database-backed:
    `profile_section == "fault-inject,local-libvirt"`. This is the regression guard for the
    predicate's second disjunct: with only the first, this row reads as clean, and it is a row
    `ProvisioningProfile.parse` rejects outright.
-5. **Order is deterministic** across two mismatched Systems with distinct `created_at`.
+5. **Totality — the section under the bound kind is not an object.** A System on a `fault-inject`
+   Resource whose `provider` is `{"fault-inject": null}` is reported, with
+   `profile_section == "fault-inject=<not-an-object>"`. This is the **only** test in the suite
+   that reddens if the predicate's *first* disjunct is dropped: tests 1–4 all mismatch on the key,
+   which the second disjunct catches by itself. Without this case the first disjunct is untested
+   despite being the half whose totality the spec argues at length.
+6. **Order is deterministic.** Seed the row with the *later* `created_at` **first**, so heap order
+   and `created_at` order disagree, then assert the returned order is by `created_at`. Seed a
+   third row sharing a timestamp with one of them and assert the `id` tiebreak. Both halves
+   matter: rows returned from a small unindexed scan come back in insertion order, so a fixture
+   seeded in `created_at` order passes with no `ORDER BY` at all — the test would be asserting
+   what the storage layer supplies for free. `created_at` defaults to transaction-start `now()`,
+   so two Systems seeded in one transaction share it exactly and the tiebreak is not hypothetical.
 
 There is deliberately **no** test guarding the join dependency. A comparison of the join's row
 count against the fixture's `systems` count would look protective and detect nothing: a migration
@@ -308,17 +372,22 @@ dependency is an accepted residual, stated in ADR-0579 and in the failure-mode t
 
 Pure:
 
-6. `_section_label` over each of the nine measured shapes in the table above.
-7. `format_profile_kind_result([])` returns one line naming the redacted URL.
-8. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
-   five fields; the message names ADR-0549, says remediation is not automated, and names the
-   four raising lanes.
-9. The CLI handler raises no `SystemExit` — `verify-profile-kinds` exits `0` with mismatches
-   present. Assert on the handler, not on a subprocess.
+7. `_section_label` over every row of the measured table above, including the
+   section-not-an-object and unrecognized-key rows.
+8. **No control byte reaches the label.** `_section_label({"\x1b[31mBOOM": {}})` returns
+   `<unrecognized>`, and the result contains no character below `0x20`. This is the bite behind
+   the threat model's control 3; without it, "bounded to a fixed vocabulary" is an assertion
+   rather than a property.
+9. `format_profile_kind_result([])` returns one line naming the redacted URL.
+10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
+    five fields; the message names ADR-0549, says remediation is not automated, and names the
+    four raising lanes.
+11. The CLI handler raises no `SystemExit` — `verify-profile-kinds` exits `0` with mismatches
+    present. Assert on the handler, not on a subprocess.
 
 Parser:
 
-10. `build_parser().parse_args(["verify-profile-kinds"])` yields
+12. `build_parser().parse_args(["verify-profile-kinds"])` yields
     `command == "verify-profile-kinds"`, and the command is absent from `_RUNNABLE`.
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from

@@ -46,7 +46,7 @@ The remediation policy (cordon, teardown, operator notification) is explicitly n
 ## Decision
 
 **The sweep is `python -m kdive verify-profile-kinds`, a read-only operator subcommand that
-prints one line per mismatch and exits non-zero when it finds any.**
+prints one line per mismatch and always exits `0`.**
 
 It is built the way `verify-project` ([ADR-0256](0256-onboard-target.md)) is built: an impure
 reader taking an open connection, a pool-opening wrapper so an unset `KDIVE_DATABASE_URL` raises
@@ -110,11 +110,15 @@ narrows the sweep silently.
 The **key** under `provider` is not extracted in SQL; the row carries
 `provisioning_profile -> 'provider'` back and a pure Python helper renders the label. That label
 is a **refinement beyond #1907's criterion 2**, which the raw section value would already
-satisfy, and it is chosen for a reason worth stating: `LibvirtProfile.domain_xml_params` is an
-agent-supplied `dict[NonEmptyStr, NonEmptyStr]`, so printing the raw `provider` value puts
-caller-controlled text in an operator report. The label bounds the output to a fixed vocabulary —
-the three kind names and two markers — and nothing else. See the rejected alternative for why
-the extraction is not done in SQL.
+satisfy, and it earns that twice over. It keeps caller-controlled text out of an operator report:
+`LibvirtProfile.domain_xml_params` is an agent-supplied `dict[NonEmptyStr, NonEmptyStr]`, and a
+hand-edited row's `provider` keys are arbitrary JSON strings, so the renderer maps any key
+outside the three `ResourceKind` values to `<unrecognized>` rather than printing its bytes. And
+it keeps the report legible where the raw value cannot: a section that is present but not an
+object renders `<kind>=<not-an-object>`, because rendering the bare key would print
+`profile_section=fault-inject resource_kind=fault-inject` — two identical strings under a header
+saying the row is mismatched. The spec holds the full mapping and its measured cases. See the
+rejected alternative for why the extraction is not done in SQL.
 
 **It reports every state, and it never writes.** `state` is in the report because #1907 asks for
 it; filtering to live states would be the triage call #1907 excludes. Nothing in the module issues
