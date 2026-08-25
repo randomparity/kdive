@@ -198,7 +198,9 @@ its own key type.
 
 The `set` is load-bearing, not tidying. Entries are drawn from a closed pool — each known kind
 in one of two forms, plus `<unrecognized>` in one of two forms — so deduplicating bounds the
-label to at most five entries whatever the stored object holds. Measured: a `provider` carrying
+label to at most `len(ResourceKind) + 2` entries whatever the stored object holds. The bound is
+stated as the expression, not as today's 5: `resources.kind` has been widened twice already
+(0018, 0020), and a fourth kind would falsify a literal. Measured: a `provider` carrying
 500 unknown keys renders `<unrecognized>`, 14 characters. Without the `set` the label is linear
 in key count, and one hand-edited row can emit an arbitrarily long line into a terminal.
 
@@ -382,7 +384,8 @@ identities.
    `resources_kind_check`). The section **label** is bounded here: `_section_label` maps any key
    outside `_KNOWN_KINDS` to `<unrecognized>`, so the printed vocabulary is closed over the
    `ResourceKind` values and three markers even for a hand-edited row whose keys carry arbitrary
-   bytes — in charset *and* in length, at most five entries however large the stored object is.
+   bytes — in charset *and* in length, at most `len(ResourceKind) + 2` entries however large the
+   stored object is.
 
    `project` is the exception and needs its own control. `systems.project` is `text NOT NULL`
    with **no** `CHECK` (`0001_init.sql:57`), `System.project` is a bare `str` on `Attribution`,

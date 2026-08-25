@@ -66,7 +66,9 @@ def _section_label(provider: object) -> str:
     ``provider`` key are indistinguishable at this layer — both arrive as ``None`` — so both map
     to ``"<none>"``. Any other non-``dict`` value (scalar, array) maps to ``"<not-an-object>"``.
     A ``dict`` renders one entry per key via :func:`_entry`, deduplicated and sorted so the
-    label is bounded to at most five entries however large the stored object is.
+    label is bounded to at most ``len(ResourceKind) + 2`` entries however large the stored
+    object is — one per known kind, plus ``<unrecognized>`` in each of its two forms. Stated as
+    the expression rather than today's 5, because ``resources.kind`` has been widened twice.
     """
     if provider is None:
         return "<none>"

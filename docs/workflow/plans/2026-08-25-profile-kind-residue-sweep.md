@@ -35,9 +35,11 @@ Transcribed from the spec and ADR — values exactly as written there.
 - **`_KNOWN_KINDS` is derived from the `ResourceKind` enum, never a literal.** `resources.kind`
   has been widened twice already (`0018`, `0020`); a literal would render a fourth kind
   `<unrecognized>` in exactly the window a residue sweep exists for.
-- **The `set` in `_section_label` is load-bearing.** It bounds the label to at most five entries
-  whatever the stored object holds — 500 unknown keys render 14 characters. Without it one
-  hand-edited row emits an arbitrarily long line into a terminal.
+- **The `set` in `_section_label` is load-bearing.** It bounds the label to at most
+  `len(ResourceKind) + 2` entries whatever the stored object holds — one per known kind, plus
+  `<unrecognized>` in each of its two forms — and 500 unknown keys render 14 characters. State
+  the bound as the expression, not today's 5: `resources.kind` has been widened twice. Without
+  it one hand-edited row emits an arbitrarily long line into a terminal.
 - **`state`, `profile_section`, and `resource_kind` are `str`, not enums.** Parsing a stored
   value into an enum is how the sweep raises on exactly the data it exists to find.
 - **`redact_database_url` is imported from `kdive.admin.projects`, not reimplemented.**
