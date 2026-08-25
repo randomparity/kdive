@@ -118,6 +118,14 @@ join it returns the eight wrong ones — mismatched key, both two-key shapes, JS
 empty object, scalar, array, absent `provider` — and neither correct one. No System row can fall
 out of the scan unreported, which is the property that makes a clean result mean something.
 
+Totality is about **rows**, and the bound is worth stating because a reader will otherwise take it
+as a statement about stored profiles being sound. The sweep compares the section **key** against
+the bound kind and checks that the section is a JSON object. It does not validate the section
+**body**, so a clean report does not imply every stored profile parses:
+`{"provider": {"fault-inject": {}}}` on a fault-inject Resource is clean here — measured — and
+`ProvisioningProfile.parse` rejects it with a `CategorizedError`. Detecting invalid section bodies
+is outside #1907, whose criterion is the section key not equalling the kind.
+
 Totality rests on the **join** too, and that half is a dependency rather than a proof.
 `allocations.resource_id` is nullable — `0016_pending_queue.sql` dropped the `NOT NULL` and
 `0017_queue_terminal_null_resource.sql` guards it with
@@ -127,8 +135,14 @@ join would silently drop a System whose Allocation carried none. It holds today 
 no path NULLs `resource_id` afterwards (`rg -n "SET resource_id|resource_id = NULL" src/` finds
 nothing). The query is deliberately **not** widened to a `LEFT JOIN` for a case nothing can
 reach — that would add a NULL branch to `resource_kind`, a reported field, to cover a row no
-code can construct. Naming the dependency is the fix; a migration relaxing any of those three
-has nothing else to warn it.
+code can construct. Naming the dependency is the fix.
+
+Nothing in this design signals a relaxation at run time. A printed count would — carrying
+`count(*) FROM systems` beside the scanned count makes a narrowed join visible in the same run,
+at the cost of one scalar subquery over a table already being scanned. It is deliberately not
+built: #1907 asks for a report of mismatches, the divergence it would surface needs a migration
+that does not exist, and a field added for a hypothetical is surface nobody asked for. The
+honest statement is that the residual is accepted and unsignalled, not that it is unsignallable.
 
 The section **key** is not extracted in SQL. `jsonb_object_keys` is a set-returning function that
 fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument. A `jsonb_typeof`
@@ -246,7 +260,8 @@ the printed report is the answer.
 - **clean** → one line naming the credential-redacted target:
   `verified no System's provisioning-profile provider section mismatches its Resource kind in <url>`
 - **mismatches** → a header naming the count and the target, then one line per mismatch:
-  `system=<uuid> project=<project> state=<state> profile_section=<section> resource_kind=<kind>`,
+  `system=<uuid> project="<project>" state=<state> profile_section=<section> resource_kind=<kind>`
+  — `project` quoted because it is the one unbounded field (threat model, control 3),
   then a closing block that **describes the class without asserting one cause**: each listed
   System's stored provider section does not match its bound Resource kind; a plain kind mismatch
   reaches `ready` and raises at first use on the control, install, boot-evidence, and vmcore
@@ -320,9 +335,17 @@ identities.
    environment variable.
 2. **Actor model.** The actor is a local operator on the host where `KDIVE_DATABASE_URL` resolves
    — the same actor who can already run `python -m kdive migrate` and `psql`. There is no
-   untrusted caller: the command has no input to influence and no remote surface. Anyone who can
-   invoke it can already read the same rows directly. This design places its trust exactly there
-   and nowhere else.
+   untrusted caller **of the command**: it has no argument to influence and no remote surface, and
+   anyone who can invoke it can already read the same rows directly.
+
+   That says nothing about the **data** it prints, and the distinction is what control 3 turns on.
+   The rows carry values two other sets of principals populate: `systems.project` comes from an
+   IdP-issued `projects` claim whose only live-path validation rejects non-strings and empty
+   strings (`security/authz/context.py:44-50` — no charset bound), and
+   `LibvirtProfile.domain_xml_params` is agent-supplied. So a principal holding a token with an
+   attacker-chosen claim can plant printed bytes with no database access at all — remotely, not
+   self-inflicted. This design trusts the command's caller and does **not** trust the row
+   contents; `_printable` and the closed label vocabulary are what carry that second half.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
    `redact_database_url`, which masks a URL password and blanket-redacts a keyword/value conninfo
@@ -341,9 +364,27 @@ identities.
    and the only live-path validation is a non-empty `isinstance(..., str)` test over the IdP
    claim (`security/authz/context.py:44-50`) — no charset bound anywhere. So the exact escape the
    label machinery exists to stop walks through the adjacent field on the same line, for the same
-   in-scope actor. **Both free-text fields go through one `_printable` helper** that replaces any
-   character below `0x20` before the line is built. Sanitizing the label while printing `project`
-   as stored would be a control that reads as protective and is not.
+   in-scope actor. **Both free-text fields go through one `_printable` helper** before the line is
+   built, replacing every character for which `str.isprintable()` is false with `?`. Sanitizing
+   the label while printing `project` as stored would be a control that reads as protective and
+   is not.
+
+   The predicate is `str.isprintable()`, not `ord(c) < 0x20`, and the difference is the control.
+   Measured: `DEL` (U+007F), the C1 controls including `CSI` (U+009B) and `ST` (U+009C), `NBSP`
+   (U+00A0) and `RIGHT-TO-LEFT OVERRIDE` (U+202E) all have `ord >= 0x20`, so a `< 0x20` bound
+   passes every one of them through — and a terminal honouring C1 reads a bare U+009B as the
+   Control Sequence Introducer, which is exactly the escape-sequence injection this control
+   exists to stop. `str.isprintable()` is false for all of them and true for `SPACE`, so it is a
+   strict superset of the `< 0x20` filter with nothing lost. It is also the idiom already in this
+   codebase — `security/artifacts/bpf_filter.py:27`, `profiles/provisioning.py:66`,
+   `jobs/payloads.py:211`, `domain/labels.py:57`, and three more — though every one of those
+   *rejects* where this one must *render*, which is why this is a substitution and not a guard.
+
+   `project` is additionally **quoted** in the line format, because `_printable` cannot help
+   there: `SPACE` and `=` are printable, so an unquoted project named
+   `x state=ready profile_section=fault-inject` forges adjacent `key=value` pairs on the report's
+   own line. Quoting bounds the field to one token for a reader and for anything parsing the
+   output.
 
    On failure, the `CategorizedError` path in `main()` renders through `Redactor`.
 4. **Explicitly out of scope.** Access control on the command itself: the DB URL is the
@@ -355,9 +396,13 @@ identities.
    the holder of the URL can already read the rows directly. Denial of service from a large
    `systems` table: the query is a **full scan** of `systems` — the predicate correlates
    `provisioning_profile` to `r.kind`, so it is not sargable and no index can serve it, and the
-   plan demotes it to a per-row join filter. Measured at ~80 ms over 200k rows on PostgreSQL 17,
-   run by hand and not on a loop, which is why the scan shape is acceptable rather than
-   irrelevant. Tampering with
+   plan demotes it to a per-row join filter. Measured at **~120-135 ms over 200k rows** — 200k
+   each of `systems`, `allocations` and `resources`, all-clean one-key profiles, PostgreSQL 17.11
+   in a stock `postgres:17` container on a Fedora developer host, warm, 2 parallel workers; three
+   warm runs at 121.8 / 125.4 / 121.5 ms wall-clock and `EXPLAIN (ANALYZE, BUFFERS)` Execution
+   Time 133.6 ms. The figure is host- and row-width-dependent and is quoted with its host for
+   that reason; the plan shape above is not, and reproduces exactly. Run by hand and not on a
+   loop, which is why that scan shape is acceptable rather than irrelevant. Tampering with
    `systems.provisioning_profile` by someone with direct database write access: that actor can
    equally rewrite the report's inputs, and no read-side check bounds them.
 
@@ -420,9 +465,18 @@ Database-backed:
    `created_at` order disagree, and assert the returned order is by `created_at`. Rows come back
    from a small unindexed scan in insertion order, so a fixture whose insertion order already
    matches `created_at` passes with no `ORDER BY` at all — the test would assert what the storage
-   layer supplies for free. Then seed a third row sharing a timestamp with one of them and assert
-   the `id` tiebreak; sharing is not hypothetical, since two Systems seeded in one transaction get
-   identical `now()`.
+   layer supplies for free.
+
+   The tiebreak half needs **the same disagreement construction**, and stating only "seed a third
+   row sharing a timestamp and assert the `id` tiebreak" does not get it. Measured: with the tied
+   pair inserted in ascending `id` order, `ORDER BY created_at` alone and
+   `ORDER BY created_at, id` return the identical sequence — an implementation shipping no
+   `, s.id` passes. So the fixture must make heap order and `id` order disagree: seed the tied
+   pair with **fixed, explicit UUIDs**, insert the **larger** one first, and assert the smaller
+   comes back first. Fixed UUIDs are load-bearing — every seed helper in this repo uses `uuid4()`,
+   which would make this assertion pass or fail at random, and a flake that passes on re-run is
+   not evidence. Sharing a timestamp is not hypothetical: two Systems seeded in one transaction
+   get identical `now()`.
 
 There is deliberately **no** test guarding the join dependency. A comparison of the join's row
 count against the fixture's `systems` count would look protective and detect nothing: a migration
@@ -434,12 +488,20 @@ Pure:
 
 7. `_section_label` over every row of the measured table above, including the
    section-not-an-object and unrecognized-key rows.
-8. **No control byte reaches the printed line — either field.** `_section_label({"\x1b[31mBOOM":
+8. **Nothing unprintable reaches the printed line — either field.** `_section_label({"\x1b[31mBOOM":
    {}})` returns `<unrecognized>`; and a mismatch whose `project` is `"a\x1b[31mb"` renders
-   through `_printable`, so the formatted line contains no character below `0x20`. Assert on the
-   whole line, not on the label alone: `project` is the unbounded field, and a test covering only
-   the label is how a sanitized-label/unsanitized-project pairing survives. This is the bite
-   behind the threat model's control 3.
+   through `_printable`. Assert on the whole line, not on the label alone: `project` is the
+   unbounded field, and a test covering only the label is how a sanitized-label/unsanitized-project
+   pairing survives.
+
+   **Assert the property, not the range:** `assert line.isprintable()`, never
+   `all(ord(c) >= 0x20 for c in line)`. The second is the implementation restated as a test, and
+   it cannot redden on the gap that matters — a `project` of `"a\x9b31mb"` satisfies it while
+   `line.isprintable()` is `False`. Parametrize the inputs over `\x1b`, `\x7f` (DEL), `"\x9b"`
+   (CSI), `"\xa0"` (NBSP) and `"\u202e"` (RLO), so the C1 and BiDi cases the `< 0x20` bound would
+   have let through each have their own row. Add one case for a `project` of
+   `'x state=ready profile_section=fault-inject'` asserting the forged pairs land inside the
+   quotes. This is the bite behind the threat model's control 3.
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
     five fields; the message names ADR-0549, says remediation is not automated, and names the
