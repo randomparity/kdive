@@ -24,6 +24,7 @@ import psycopg
 import pytest
 
 from kdive.admin.profile_kinds import (
+    _SCAN_QUERY,
     ProfileKindMismatch,
     _section_label,
     format_profile_kind_result,
@@ -354,12 +355,18 @@ def test_scan_of_a_clean_database_returns_no_mismatches(migrated_url: str) -> No
 
     async def _run() -> None:
         async with _conn(migrated_url) as conn:
-            await _seed_bound_system(
+            system_id = await _seed_bound_system(
                 conn,
                 kind=ResourceKind.LOCAL_LIBVIRT,
                 profile=_profile({"local-libvirt": _LIBVIRT_SECTION}),
                 project="clean",
             )
+
+            # Positive control: without this, a seed that landed outside the scan's joins would
+            # also pass the `== []` below, since emptiness proves nothing happened.
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id FROM systems WHERE id = %s", (system_id,))
+                assert await cur.fetchone() is not None
 
             assert await scan_profile_kinds(conn) == []
 
@@ -424,6 +431,12 @@ _ORDER_LATE_AT = datetime(2026, 6, 1, tzinfo=UTC)
 
 _ASSERTED_ORDER = (_ID_EARLY, _ID_TIE_LOW, _ID_TIE_HIGH)
 
+# `_SCAN_QUERY` with its trailing `ORDER BY` stripped: the exact shape `scan_profile_kinds` would
+# issue under the "drop the whole ORDER BY" mutation. The join's chosen plan — not just the
+# `systems` heap's own layout — decides the order an un-ordered read of these rows comes back in,
+# so a hand-rolled query over `systems` alone measures a different, irrelevant scan shape.
+_UNORDERED_SCAN_QUERY = _SCAN_QUERY.rsplit("ORDER BY", 1)[0]
+
 
 async def _seed_ordering_fixture(conn: psycopg.AsyncConnection) -> None:
     """Seed three mismatched Systems whose stored order disagrees with the asserted order.
@@ -455,6 +468,22 @@ async def _seed_ordering_fixture(conn: psycopg.AsyncConnection) -> None:
         await conn.execute(
             "UPDATE systems SET created_at = %s WHERE id = %s", (created_at, system_id)
         )
+
+    # Precondition guard for THIS FIXTURE, not for `scan_profile_kinds`: the disagreement the
+    # two docstring bullets above describe rests on undocumented PostgreSQL behaviour (the
+    # planner's chosen join strategy and small-N sort stability) that a version bump, a schema
+    # change adding a preferred index, or a fixture grown past the insertion-sort threshold could
+    # silently stop holding. If that happens, an un-ordered read of these rows returns the
+    # asserted order for free, and both `ORDER BY` mutations pass against a query with no
+    # `ORDER BY` at all with nothing here to say why. Issue `_UNORDERED_SCAN_QUERY` — the real
+    # scan minus its `ORDER BY`, so the read is driven by the same planner decisions the mutation
+    # would be — and pin the result to the reverse-of-asserted order this fixture is built to
+    # produce. If this assertion fails, the fixture went stale — the shipped query has not been
+    # touched.
+    async with conn.cursor() as cur:
+        await cur.execute(_UNORDERED_SCAN_QUERY)
+        physical_order = [row[0] for row in await cur.fetchall()]
+    assert physical_order == [_ID_TIE_HIGH, _ID_TIE_LOW, _ID_EARLY]
 
 
 def test_scan_orders_by_created_at(migrated_url: str) -> None:
