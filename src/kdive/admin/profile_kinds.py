@@ -5,16 +5,20 @@ profile on the write path (``systems.provision`` / ``systems.reprovision``), but
 nothing already stored. ADR-0579 records this module's shape — an impure reader, a pool-opening
 wrapper, and a pure formatter — mirroring ``kdive.admin.projects``'s split.
 
-This module holds only the pure surface: the :class:`ProfileKindMismatch` dataclass, the
-section-label renderer, and :func:`format_profile_kind_result`. The database reader
-(``scan_profile_kinds`` / ``verify_profile_kinds``) and the CLI wiring are built separately.
+This module holds the :class:`ProfileKindMismatch` dataclass, the section-label renderer,
+:func:`scan_profile_kinds`, and :func:`format_profile_kind_result`. The pool-opening wrapper
+(``verify_profile_kinds``) and the CLI wiring are built separately.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import LiteralString
 from uuid import UUID
+
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 
 from kdive.domain.catalog.resources import ResourceKind
 
@@ -83,6 +87,64 @@ def _entry(key: object, value: object) -> str:
     """
     name = key if isinstance(key, str) and key in _KNOWN_KINDS else "<unrecognized>"
     return name if isinstance(value, dict) else f"{name}=<not-an-object>"
+
+
+# A System is clean only when its stored `provider` is exactly `{<the bound kind>: {…}}`. The
+# first disjunct says the section under the bound kind is not an object; the second says the
+# `provider` object holds anything besides that one section. The second is not belt-and-braces:
+# without it, `{"fault-inject": {}, "local-libvirt": {}}` on a fault-inject Resource passes as
+# clean, and that row fails `ProvisioningProfile.parse` outright rather than only on the four
+# lanes ADR-0549 names. The section key is deliberately not extracted in SQL — the row carries
+# the whole `provider` value back and `_section_label` renders it (ADR-0579).
+_SCAN_QUERY: LiteralString = """
+SELECT s.id            AS system_id,
+       s.project       AS project,
+       s.state         AS state,
+       r.kind          AS resource_kind,
+       s.provisioning_profile -> 'provider' AS provider_section
+FROM systems AS s
+JOIN allocations AS a ON a.id = s.allocation_id
+JOIN resources AS r ON r.id = a.resource_id
+WHERE jsonb_typeof(s.provisioning_profile -> 'provider' -> r.kind) IS DISTINCT FROM 'object'
+   OR s.provisioning_profile -> 'provider'
+        IS DISTINCT FROM jsonb_build_object(r.kind, s.provisioning_profile -> 'provider' -> r.kind)
+ORDER BY s.created_at, s.id
+"""
+
+
+async def scan_profile_kinds(conn: AsyncConnection) -> list[ProfileKindMismatch]:
+    """Return every stored System whose provider section mismatches its Resource kind (ADR-0579).
+
+    One static statement, no parameters and no interpolation, issued on ``conn`` as given — the
+    caller owns the connection's lifecycle, so a test can drive this against a migrated fixture
+    database with no pool. Nothing here writes.
+
+    The predicate is total over the shapes a stored row can hold, so a System can only fall out
+    of the scan through the inner join to ``resources``: an Allocation carrying a NULL
+    ``resource_id`` would drop its System. That is unreachable today and an accepted residual
+    (ADR-0579) — a ``LEFT JOIN`` would add a NULL branch to ``resource_kind``, a reported field,
+    for a row no code path can construct.
+
+    Args:
+        conn: An open connection to the kdive database.
+
+    Returns:
+        The mismatches in report order — ``created_at``, then ``id`` to break ties — each
+        carrying the rendered :func:`_section_label` rather than the raw stored value.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_SCAN_QUERY)
+        rows = await cur.fetchall()
+    return [
+        ProfileKindMismatch(
+            system_id=row["system_id"],
+            project=row["project"],
+            state=row["state"],
+            profile_section=_section_label(row["provider_section"]),
+            resource_kind=row["resource_kind"],
+        )
+        for row in rows
+    ]
 
 
 def format_profile_kind_result(
