@@ -115,10 +115,6 @@ a quote character rather than escaping quotes, and leaves ASCII space intact —
 of the real fields. `_project_token` escapes `\x20` and `=` in `repr`'s output. The label needs
 nothing — it is closed over printable ASCII by construction.
 
-> This corrects an earlier version of this plan, which specified a bare `!r` and stated that
-> `repr` "escapes any quote inside it". It does not. A security pass on the branch demonstrated
-> the forgery; see the spec's threat model and `_project_token`'s docstring.
-
 Take `_section_label`, `_entry`, and `_KNOWN_KINDS` from the spec **verbatim** — the branch order
 is load-bearing and each branch has a test below.
 
@@ -161,18 +157,14 @@ table, the 500-key bound included.
    `x" state=ready … junk="y` (double-quote forgery);
    `x' state=torn_down … junk='y` (single-quote forgery); and `x\tstate=torn_down` (tab).
 
-   > **This supersedes an earlier version of this plan**, which measured the same set against a
-   > hand-quoted formatter, concluded the `'`-only input "does NOT discriminate", and instructed
-   > the reader not to add it. That was true of the `!r`-only formatter this plan originally
-   > specified and is **false** of the shipped `_project_token`: the `'`-only case is now the one
-   > that reddens if either substitution is dropped. Do not reinstate that instruction — it would
-   > delete the guard on a live security control.
+   **All four are required**, and the `'`-only case especially: it is the one that reddens when
+   either of `_project_token`'s substitutions is dropped, so it guards a live security control.
 
-   Two earlier wordings really were wrong and stay recorded so they are not reintroduced:
-   `line.count("state=") == 1` is vacuous against a bare `!r` (`repr` escapes and keeps the
-   hostile text, so `state=` appears twice on both trees), and "slice at the closing quote"
-   reddens the *correct* implementation (the delimiter `repr` picks is data-dependent, so no
-   fixed character anchors the set).
+   Three forms that do not work: anchoring on `f"project={project!r}"` restates the
+   implementation and cannot fail on forgery; `line.count("state=") == 1` is vacuous against a
+   bare `!r`, since `repr` keeps the hostile text and `state=` then appears twice on both trees;
+   and "slice at the closing quote" reddens the *correct* implementation, because the delimiter
+   `repr` picks is data-dependent.
 
 4. `format_profile_kind_result([])` returns one line naming the redacted URL.
 5. `format_profile_kind_result([one, two])` returns the fixed header carrying the count and the
@@ -357,9 +349,12 @@ offered (by project, by state) is the triage call #1907 excludes.
 3. **`verify_profile_kinds()` itself runs against a real database** (spec item 13). Without it the
    one function in the module with a **resource lifecycle** is executed by nothing: tests 1-6 of
    Task 2 drive `scan_profile_kinds(conn)`, Task 1 is pure, test 1 above patches
-   `verify_profile_kinds` out, and test 2 is the parser. Its `finally: await pool.close()` and its
-   pre-query `CONFIGURATION_ERROR` would both ship unguarded, and the first row of the spec's
-   failure-mode table would have no bite anywhere in the suite.
+   `verify_profile_kinds` out, and test 2 is the parser.
+
+   Only one of the wrapper's two properties is asserted. The pre-query `CONFIGURATION_ERROR` is
+   test 4 below. `finally: await pool.close()` is **not** asserted — an unclosed pool raises
+   nothing this suite escalates and no assertion inspects pool state, so deleting that `finally`
+   stays green. Record that plainly; do not describe it as covered.
 
    `monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)`, then assert `verify_profile_kinds()`
    returns the same list `scan_profile_kinds` returns for Task 2 test 1's seed. This mirrors
@@ -367,9 +362,15 @@ offered (by project, by state) is the triage call #1907 excludes.
    tests calling the pool-opening wrapper itself (`tests/admin/test_bootstrap.py:239`, `:258`,
    `:272`, `:286`) rather than patching it out.
 
+4. **An unset `KDIVE_DATABASE_URL` raises `CategorizedError(CONFIGURATION_ERROR)` before any
+   query** (spec item 14). `monkeypatch.delenv("KDIVE_DATABASE_URL", raising=False)`, then
+   `pytest.raises(CategorizedError)` asserting `category is ErrorCategory.CONFIGURATION_ERROR`.
+   Needs no database. This is what gives the failure-mode table's first row bite.
+
 **Mutation check before moving on.** Replace the handler body with `pass` and confirm test 1
 reddens on the stdout assertion, not merely on the `SystemExit` half. Add `runnable=True` to the
-`_Command` and confirm test 2 reddens.
+`_Command` and confirm test 2 reddens. For test 4, open the pool before resolving the URL and
+confirm it reddens on the exception type rather than passing on a connection error.
 
 **Verify:** `uv run pytest tests/admin/test_profile_kinds.py tests/test_main_version.py`,
 then the full gate: `env -u FORCE_COLOR just ci`.

@@ -19,10 +19,11 @@ admission completely before ADR-0549 — `FaultInjectProfilePolicy.rootfs_source
 and its `validate_profile` was a no-op — and the fault-inject provisioner discards the profile
 entirely, so such a System reached `ready`. It then raises a bare `AttributeError` from
 `ProviderSection.fault_inject` at first use, on four lanes — the same four ADR-0549 names:
-`control._op_opt_in` (`mcp/tools/lifecycle/control/registrar.py`), the Run install step
-(`services/runs/steps.py`), the Run boot-evidence step
-(`jobs/handlers/runs/boot_evidence.py`), and the vmcore `capture_method` lookup
-(`mcp/tools/lifecycle/vmcore/handlers.py`). #1907's own body lists the debug-session
+`_op_opt_in` (`mcp/tools/lifecycle/control/registrar.py`), `install_method_for`
+(`services/runs/steps.py`), `inert_capture` (`jobs/handlers/runs/boot_evidence.py`), and
+`_resolve_capture_method` (`mcp/tools/lifecycle/vmcore/handlers.py`) — each named by the
+function defined in the file cited, not by the `ProfilePolicy` method it calls, so an operator
+handed the printed list can grep for it and find it. #1907's own body lists the debug-session
 lifecycle in place of boot-evidence; that is wrong — the only profile-policy call there is
 `drgn_live_seeds_bootstrap_key` (`mcp/tools/debug/sessions/lifecycle.py:445`), and the
 fault-inject adapter returns `False` from it without dereferencing anything. The two libvirt
@@ -57,10 +58,18 @@ Two things about the report **are** decided here, because each is a contract a r
 rather than presentation:
 
 - **it always exits `0`.** The printed report is the answer. #1907's criteria ask for a query, a
-  report, no mutation, and a test; none asks for an exit code. And a non-zero exit could not have
-  worked here: the sweep reports every state, so a mismatched System that was torn down long ago
-  would keep the check red permanently with nothing left to repair. A signal that cannot return
-  to green is not a signal.
+  report, no mutation, and a test; none asks for an exit code. An exit contract is not merely
+  unasked-for, it is unbuildable *within this scope*: any usable one would have to distinguish
+  rows that can still clear from rows that never will, and which states matter is exactly the
+  triage call #1907 defers to "a separate call" — the same call this record declines below when
+  it rejects reporting only the live states. Deciding the exit code would decide the triage rule
+  by another route.
+
+  The obstacle is authority, not mechanism, and the distinction matters to whoever picks up the
+  follow-up below. A gate keyed on live states *would* return to green once those rows were
+  repaired; it is buildable. What this change lacks is the sanction to define "live", so the
+  follow-up that settles remediation is where an exit contract becomes available — not a later
+  rediscovery that one is possible.
 - **a non-empty message names the four raising lanes and states that remediation is manual**, so
   the report needs no companion document. The target database is named through the existing
   `redact_database_url`.
@@ -251,8 +260,10 @@ a statement other than that `SELECT`.
   the same connection, on a table the sweep already seq-scans. judgment: rejected anyway, because
   the divergence it would surface requires a migration that does not exist, #1907 asks for a
   report of mismatches rather than a coverage statistic, and a field added for a hypothetical is
-  surface nobody asked for. The residual is therefore accepted **unsignalled**, which is a weaker
-  and more honest claim than unsignallable.
+  surface nobody asked for. The residual is therefore accepted **unsignalled** by a count —
+  weaker and more honest than unsignallable. The clean line carries the bound instead, in
+  wording rather than a field: it reports that no System **bound to a Resource** mismatches, not
+  that no System does, so it never quantifies over rows the join did not read.
 - **Extract the section key in SQL with `jsonb_object_keys`.** verified: on `postgres:17`,
   `SELECT jsonb_object_keys('"s"'::jsonb)` fails with
   `ERROR: cannot call jsonb_object_keys on a scalar`, so the bare form is out. A `jsonb_typeof`

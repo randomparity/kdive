@@ -21,11 +21,18 @@ before it keeps its mismatched profile, and the check never runs on a stored-pro
 A **fault-inject** Resource holding a libvirt-section profile was accepted outright before
 ADR-0549 and reaches `ready`, because the fault-inject provisioner discards the profile. It then
 raises a bare `AttributeError` from `ProviderSection.fault_inject` at first use, on the four lanes
-ADR-0549 names: `src/kdive/mcp/tools/lifecycle/control/registrar.py` (`destructive_opt_in`),
-`src/kdive/services/runs/steps.py` (the Run install step's `install_method_for`),
-`src/kdive/jobs/handlers/runs/boot_evidence.py` (`capture_method`), and
-`src/kdive/mcp/tools/lifecycle/vmcore/handlers.py` (`capture_method`). Path and function only:
-a line number rots and nothing keeps it accurate, so the report never carries one.
+ADR-0549 names: `src/kdive/mcp/tools/lifecycle/control/registrar.py` (`_op_opt_in`),
+`src/kdive/services/runs/steps.py` (`install_method_for`),
+`src/kdive/jobs/handlers/runs/boot_evidence.py` (`inert_capture`), and
+`src/kdive/mcp/tools/lifecycle/vmcore/handlers.py` (`_resolve_capture_method`).
+
+Path and function only, and the function is the one **defined in the file cited** — the enclosing
+call site, not the policy method it calls. `destructive_opt_in` and `capture_method` are
+`ProfilePolicy` members declared in `profiles/provider_policy.py`; naming them here would send an
+operator to grep a file that does not define them, and `capture_method` is a module-level
+function in that policy module besides, so the bare name is ambiguous. No line numbers: nothing
+keeps one accurate. `test_raising_lanes_resolve_to_real_paths_and_symbols` resolves each entry —
+path exists, symbol is defined in it — so a rename or move reddens rather than rotting.
 
 #1907's body lists `src/kdive/mcp/tools/debug/sessions/lifecycle.py` in place of the boot-evidence
 step. That is wrong and this spec does not follow it: the only profile-policy call in that module
@@ -282,22 +289,28 @@ the printed report is the answer.
   model, control 3); the other four are printed as they stand,
   then a closing block that **describes the class without asserting one cause**: each listed
   System's stored provider section does not match its bound Resource kind; a plain kind mismatch
-  reaches `ready` and raises at first use on the control, install, boot-evidence, and vmcore
-  lanes, while a section that fails `ProvisioningProfile.parse` outright — a `provider` holding
-  two sections, none, or a section under the bound kind that is not an object — breaks *every*
-  parse site instead; a row whose `state` is `torn_down` or `failed` is inert, since nothing
-  runs against it, so it needs no action; and remediation is not automated.
+  raises at first use on the control, install, boot-evidence, and vmcore lanes for a System still
+  live enough to reach them, while a section that fails `ProvisioningProfile.parse` outright — a
+  `provider` holding two sections, none, or a section under the bound kind that is not an object
+  — breaks *every* parse site instead; `state` is reported per row so the operator can judge
+  which rows are worth acting on; and remediation is not automated.
+
+  **The block must not tell the operator which states to ignore.** That is the triage call
+  #1907 defers to "a separate call", and the one ADR-0579 declines when it rejects reporting
+  only the live states. No state is safely ignorable in any case: `rootfs_reclaim.py`'s
+  `_ROOTFS_REFERENCERS_SQL` excludes only `torn_down`, so a `failed` System's stored profile is
+  read, and a mismatched section key silently changes which rootfs base is reclaimable.
   ADR-0549 is named as background for the kind-mismatch case, not as a claim about when each row
   was written.
 
 That closing block describes the class and distinguishes the two blast radii rather than
 asserting one cause, because no fixed wording is true of all four reported classes.
 
-There is no non-zero exit because there could not be a working one. #1907's criteria ask for a
-query, a report, no mutation, and a test — none asks for an exit code — and the sweep reports
-every state, so a torn-down mismatched System would hold a non-zero exit red permanently with
-nothing left to repair. A signal that cannot return to green is not a signal. (Operator
-decision, 2026-08-25; see ADR-0579.)
+There is no non-zero exit. #1907's criteria ask for a query, a report, no mutation, and a test —
+none asks for an exit code — and any usable exit contract would have to separate rows that can
+still clear from rows that never will, which is the triage call #1907 defers to "a separate
+call". The mechanism is not the obstacle; the authority to define "live" is. (Operator decision,
+2026-08-25; see ADR-0579.)
 
 The target URL passes through the existing `redact_database_url` from `kdive.admin.projects`; it
 is not reimplemented.
@@ -327,7 +340,8 @@ which is a configuration failure rather than a finding.
 
 | Condition | Behavior |
 |---|---|
-| `KDIVE_DATABASE_URL` unset or unusable | `create_pool()` raises `CategorizedError(CONFIGURATION_ERROR)`; `main()`'s handler prints it and exits with the category's code (ADR-0089) |
+| `KDIVE_DATABASE_URL` unset | `create_pool()` raises `CategorizedError(CONFIGURATION_ERROR)` before opening anything; `main()`'s handler prints it and exits with the category's code (ADR-0089). Asserted by `test_verify_profile_kinds_raises_configuration_error_without_a_database_url` |
+| `KDIVE_DATABASE_URL` set but unusable (dead host, wrong database, bad credentials) | **not** a `CategorizedError`. `create_pool` builds the pool with `open=False` and connects to nothing, so the failure surfaces as `PoolTimeout`/`OperationalError` from `pool.connection()`, which `main()` does not catch — an uncaught traceback, exit 1. Leaks no credential; see the threat model's error-path paragraph |
 | database reachable, no mismatch | exit `0`, one clean line |
 | database reachable, N mismatches | exit `0`, header + N lines + remediation line |
 | a System whose `provider` is absent, scalar, or JSON-`null` | reported, with the label from the table above |
@@ -529,10 +543,9 @@ Database-backed:
    then the form: `autocommit=True` plus `SET default_transaction_read_only = on`, which is
    session-level and applies to the implicit transaction of every later statement.
 
-   An earlier draft justified the choice by pointing at `tests/db/conftest.py`'s helpers using
-   autocommit. That ground is unsound — those helpers are **synchronous** `psycopg.connect(...)`,
-   and this test opens an `AsyncConnection`, whose default is the opposite. The requirement is
-   stated here instead of inferred from a neighbouring pattern.
+   Do not infer the mode from `tests/db/conftest.py`'s helpers: those are **synchronous**
+   `psycopg.connect(...)` and this test opens an `AsyncConnection`, whose default is the
+   opposite.
 
    Seed first, **then** issue the `SET`: the seeding writes and the `created_at` UPDATEs share
    this connection, so setting it earlier fails the fixture rather than the assertion.
@@ -592,12 +605,10 @@ Database-backed:
    `ORDER BY s.created_at, s.id` fully determines the result; what is lost is the mutation
    sensitivity that is the only reason this test imposes `created_at` out of band.
 
-   One claim deliberately **not** made here: that a page prune returns the scan to insertion
-   order. It was raised in review and did not reproduce — `VACUUM` and `ANALYZE` after the
-   reverse-order `UPDATE`s left the scan in `UPDATE` order in all eight fixtures tried, including
-   the two the claim named (PostgreSQL 17.11, psycopg 3.3.4, autocommit). The both-orders fixture
-   above is adopted because it removes a dependency on an unstated variable, not because pruning
-   was shown to reorder.
+   The both-orders fixture is adopted because it removes a dependency on an unstated variable —
+   not because a page prune was shown to reorder the scan. Measured, it does not: `VACUUM` and
+   `ANALYZE` after the reverse-order `UPDATE`s left the scan in `UPDATE` order in all eight
+   fixtures tried (PostgreSQL 17.11, psycopg 3.3.4, autocommit).
 
    - *`created_at` half:* one row carries the earlier timestamp, one the later; assert the
      earlier comes back first.
@@ -653,18 +664,12 @@ Pure:
    `x" state=ready … junk="y` (double-quote forgery);
    `x' state=torn_down … junk='y` (single-quote forgery); and `x\tstate=torn_down` (tab).
 
-   > **This supersedes an earlier version of this section**, which prescribed the anchor above as
-   > "the bite", called the token counts "documentation, not the bite" — they were a constant
-   > once the anchor matched — and concluded from a measured table that the `'`-only input "does
-   > NOT discriminate", instructing the reader not to add it. All of that was measured against a
-   > **hand-quoted** formatter and is false of the shipped `_project_token`: the `'`-only case is
-   > now precisely the one that reddens when either substitution is dropped. Do not reinstate
-   > that instruction — it would delete the guard on a live security control.
-
-   One earlier wording really was wrong and stays recorded: `line.count("state=") == 1` over the
-   whole line is vacuous against a bare `!r`, because `repr` escapes and keeps the hostile text,
-   so `state=` appears twice on both trees. The token-split form above does not have that defect,
-   because the escaped `=` means the hostile text contributes no `key=value` token at all.
+   **All four cases are required.** The `'`-only case is the one that reddens when either of
+   `_project_token`'s substitutions is dropped, so it is the guard on a live security control:
+   keep it. Two forms that do **not** work: anchoring on `f"project={project!r}"` restates the
+   implementation and cannot fail on forgery, and `line.count("state=") == 1` over the whole line
+   is vacuous against a bare `!r`, since `repr` keeps the hostile text and `state=` then appears
+   twice on both trees. The token split above avoids both.
 
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
@@ -696,16 +701,29 @@ Pool wrapper:
 13. **`verify_profile_kinds()` itself runs against a real database.** Items 1–6 drive
     `scan_profile_kinds(conn)`, 7–10 are pure, item 11 patches `verify_profile_kinds` out, and
     item 12 is the parser — so without this item the one function in the module with a **resource
-    lifecycle** is never executed. Its `finally: await pool.close()` and its pre-query
-    `CONFIGURATION_ERROR` would both ship unguarded, and the first row of the failure-mode table
-    would have no bite anywhere in the suite. A leaked pool on an exception path, or a wrapper
-    that opens the pool before resolving the URL, would go green.
+    lifecycle** is never executed at all.
+
+    **Two properties, and only one of them is asserted.** The pre-query `CONFIGURATION_ERROR` is
+    covered by item 14 below, which is what gives the failure-mode table's first row its bite.
+    `finally: await pool.close()` is **not** asserted by anything: an unclosed pool raises no
+    error this suite escalates (`addopts` sets no `filterwarnings`) and nothing inspects pool
+    state, so deleting that `finally` stays green. Pool closure rests on inspection, and buying a
+    real assertion for it costs more than the risk. Say so rather than implying coverage.
 
     `monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)`, then assert `verify_profile_kinds()`
     returns the same list `scan_profile_kinds` returns for item 1's seed. This mirrors
     `verify_project`, the function this module is modelled on, which has four database-backed
     tests calling the pool-opening wrapper itself (`tests/admin/test_bootstrap.py:239`, `:258`,
     `:272`, `:286`) rather than patching it out.
+
+14. **An unset `KDIVE_DATABASE_URL` raises `CategorizedError(CONFIGURATION_ERROR)` before any
+    query.** `monkeypatch.delenv("KDIVE_DATABASE_URL", raising=False)`, then
+    `pytest.raises(CategorizedError)` around `verify_profile_kinds()`, asserting
+    `category is ErrorCategory.CONFIGURATION_ERROR`. Needs no database — it must raise before one
+    is opened, which is the property: `create_pool()` resolves the URL first, so a wrapper that
+    opened the pool before resolving would surface a connection error instead and redden here.
+    This is the assertion that gives the failure-mode table's first row bite; without it that row
+    is argued rather than tested.
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
 `kdive.db.repositories`, the pattern `tests/mcp/lifecycle/test_systems_list.py:104-155` uses, so the
