@@ -666,11 +666,6 @@ Pure:
    so `state=` appears twice on both trees. The token-split form above does not have that defect,
    because the escaped `=` means the hostile text contributes no `key=value` token at all.
 
-   Parametrize over `'x state=ready profile_section=fault-inject'` and
-   `'x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y'`. Both
-   discriminate; the second reproduces the actual forgery, closing the field on its own `"` and
-   emitting a full set of leading `key=value` pairs while `line.isprintable()` still passes.
-
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
     five fields; the message names ADR-0549, says remediation is not automated, and names the
