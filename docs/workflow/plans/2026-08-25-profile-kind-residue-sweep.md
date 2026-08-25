@@ -264,8 +264,11 @@ directly; the only shared seeders in the tree are area-local).
    - **`UPDATE`** every row in the reverse of the asserted order — the row that must come back
      last is updated first.
 
-   PostgreSQL writes a new tuple version on `UPDATE`, so a seq scan returns rows in last-write
-   order (measured: 24 of 24 `UPDATE` permutations came back in exactly that order). That makes
+   PostgreSQL writes a new tuple version on `UPDATE`, so a seq scan over a **single table**
+   returns rows in last-write order (measured: 24 of 24 `UPDATE` permutations). That measurement
+   does not govern this sweep — the shipped query is a three-table join whose un-ordered emission
+   order is planner-dependent, and a bare single-table read returns a different sequence. Assert
+   the fixture's precondition through the real query minus its `ORDER BY`. It still makes
    `UPDATE` order the variable to control, but controlling only it leaves the fixture depending
    on an insertion order nothing states. Fixing both costs one clause and removes the dependency.
 

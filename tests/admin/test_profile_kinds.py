@@ -446,8 +446,13 @@ async def _seed_ordering_fixture(conn: psycopg.AsyncConnection) -> None:
     ``ORDER BY`` mutations report green against a query shipping no ``ORDER BY`` at all:
 
     - the tied pair is **inserted** larger-``id`` first, and
-    - every row's ``created_at`` is **UPDATE**d in the reverse of the asserted order. PostgreSQL
-      writes a new tuple version on ``UPDATE``, so a seq scan returns rows in last-write order.
+    - every row's ``created_at`` is **UPDATE**d in the reverse of the asserted order.
+
+    Deliberately no claim here about *why* an un-ordered read emits rows in that order. For this
+    three-table join it is planner-dependent, not simply ``systems``' own heap layout: a bare
+    ``SELECT id FROM systems`` returns a different sequence and fails against the unmutated tree.
+    That is exactly why the precondition below reads through :data:`_UNORDERED_SCAN_QUERY` rather
+    than a single-table probe — it measures the shape the mutation would actually expose.
 
     ``created_at`` is server-generated (``_SERVER_GENERATED`` in ``db/repositories.py``), so
     ``SYSTEMS.insert`` cannot write it; the direct ``UPDATE`` is the one carve-out from the

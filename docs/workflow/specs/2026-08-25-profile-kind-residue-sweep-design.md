@@ -526,8 +526,12 @@ Database-backed:
 
    Why both. `created_at` is server-generated, so the fixture imposes it with an out-of-band
    `UPDATE` after inserting (below), and PostgreSQL writes a new tuple version on `UPDATE`, so a
-   seq scan returns rows in **last-write** order. Measured: 24 of 24 `UPDATE` permutations came
-   back in exactly the `UPDATE` order. That makes `UPDATE` order the variable to control — but
+   seq scan over **that table** returns rows in last-write order — measured, 24 of 24 `UPDATE`
+   permutations. That measurement is single-table and does **not** govern this sweep: the shipped
+   query is a three-table join, whose un-ordered emission order is planner-dependent. Measured
+   again during the build: a bare `SELECT id FROM systems` returns a different sequence from the
+   join and fails against a correct implementation. So the fixture's precondition is asserted
+   through the real query minus its `ORDER BY`, never through a single-table read. That makes `UPDATE` order the variable to control — but
    controlling only it leaves the fixture depending on an insertion order this document would
    then have to state and keep true. Fixing both costs one clause and removes the dependency.
 
