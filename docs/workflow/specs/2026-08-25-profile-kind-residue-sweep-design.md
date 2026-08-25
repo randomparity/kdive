@@ -429,7 +429,22 @@ identities.
    policy plus its tests costs more than the over-long line it prevents. Stated because the
    adjacent field *is* length-bounded and the asymmetry would otherwise read as an oversight.
 
-   On failure, the `CategorizedError` path in `main()` renders through `Redactor`.
+   **On failure, only the `CategorizedError` path is redacted, and it is not the path most
+   failures take.** `main()` catches `CategorizedError` alone (`__main__.py:415-419`) and renders
+   it through `Redactor`; the only such failure this command raises is an unset
+   `KDIVE_DATABASE_URL`, whose message carries no URL. Every other realistic failure is a psycopg
+   exception that `main()` does not catch: `UndefinedTable` from the scan on an unmigrated
+   database — reachable exactly when the runbook says to run this, after upgrading past ADR-0549 —
+   and `PoolTimeout`/`OperationalError` from `pool.connection()` on one that is down or refusing
+   authentication. Those propagate as an uncaught traceback with no redaction pass. That leaks no
+   credential today for two reasons outside this module: a CPython traceback prints source lines,
+   not frame locals, so the conninfo never reaches stderr through it; and `psycopg_pool` logs
+   connection failures as the generated pool name rather than the conninfo, onto a root logger
+   `bootstrap_stdout_floor` has already fitted with the redacting JSON handler. Recorded rather
+   than fixed: converting psycopg errors into `CategorizedError` is a larger change than the risk
+   it removes, and it would disturb the recorded always-exit-0 decision. What must not be assumed
+   is a redaction pass that does not run — a future `CategorizedError` reraise that folds the
+   conninfo into `details` would be the change that turns this from a documented gap into a leak.
 4. **Explicitly out of scope.** Access control on the command itself: the DB URL is the
    credential, matching every other `python -m kdive` operator subcommand, and adding an RBAC gate
    would require the MCP surface ADR-0579 rejects. **Audit trail:** the same cross-project read
