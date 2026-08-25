@@ -281,7 +281,9 @@ the printed report is the answer.
   System's stored provider section does not match its bound Resource kind; a plain kind mismatch
   reaches `ready` and raises at first use on the control, install, boot-evidence, and vmcore
   lanes, while a section that fails `ProvisioningProfile.parse` outright — a `provider` holding
-  two sections, or none — breaks *every* parse site instead; and remediation is not automated.
+  two sections, none, or a section under the bound kind that is not an object — breaks *every*
+  parse site instead; a row whose `state` is `torn_down` or `failed` is inert, since nothing
+  runs against it, so it needs no action; and remediation is not automated.
   ADR-0549 is named as background for the kind-mismatch case, not as a claim about when each row
   was written.
 

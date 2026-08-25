@@ -213,8 +213,10 @@ def format_profile_kind_result(
         "each listed System's stored provisioning-profile provider section does not match "
         "its bound Resource's kind: a plain kind mismatch reaches ready and raises at first "
         "use on the four lanes below (ADR-0549), while a section that fails "
-        "ProvisioningProfile.parse outright (a provider holding two sections, or none) breaks "
-        "every parse site instead. Remediation is not automated."
+        "ProvisioningProfile.parse outright (a provider holding two sections, none, or a "
+        "section under the bound kind that is not an object) breaks every parse site instead. "
+        "A row whose state is torn_down or failed is inert — nothing runs against it, so it "
+        "needs no action. Remediation is not automated."
     )
     lines.extend(_RAISING_LANES)
     return "\n".join(lines)
