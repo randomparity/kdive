@@ -6,8 +6,8 @@ nothing already stored. ADR-0579 records this module's shape — an impure reade
 wrapper, and a pure formatter — mirroring ``kdive.admin.projects``'s split.
 
 This module holds the :class:`ProfileKindMismatch` dataclass, the section-label renderer,
-:func:`scan_profile_kinds`, and :func:`format_profile_kind_result`. The pool-opening wrapper
-(``verify_profile_kinds``) and the CLI wiring are built separately.
+:func:`scan_profile_kinds`, :func:`format_profile_kind_result`, and the pool-opening wrapper
+:func:`verify_profile_kinds`. The CLI wiring lives in ``kdive.__main__``.
 """
 
 from __future__ import annotations
@@ -145,6 +145,28 @@ async def scan_profile_kinds(conn: AsyncConnection) -> list[ProfileKindMismatch]
         )
         for row in rows
     ]
+
+
+async def verify_profile_kinds() -> list[ProfileKindMismatch]:
+    """Open a pool and delegate to :func:`scan_profile_kinds` (ADR-0579).
+
+    Connects with :func:`kdive.db.pool.create_pool`, which raises
+    ``CategorizedError(CONFIGURATION_ERROR)`` if ``KDIVE_DATABASE_URL`` is unset, before any
+    query — mirroring :func:`kdive.admin.projects.verify_project`, the function this module is
+    modelled on. The pool is closed in a ``finally`` regardless of how the scan finishes.
+
+    Returns:
+        The mismatches :func:`scan_profile_kinds` found, in report order.
+    """
+    from kdive.db.pool import create_pool
+
+    pool = create_pool()
+    await pool.open()
+    try:
+        async with pool.connection() as conn:
+            return await scan_profile_kinds(conn)
+    finally:
+        await pool.close()
 
 
 def format_profile_kind_result(

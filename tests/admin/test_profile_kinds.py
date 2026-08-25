@@ -29,6 +29,7 @@ from kdive.admin.profile_kinds import (
     _section_label,
     format_profile_kind_result,
     scan_profile_kinds,
+    verify_profile_kinds,
 )
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
@@ -531,3 +532,48 @@ def test_scan_breaks_created_at_ties_on_id(migrated_url: str) -> None:
             assert ids[1:] == [_ID_TIE_LOW, _ID_TIE_HIGH]
 
     asyncio.run(_run())
+
+
+# --- verify_profile_kinds: the pool-opening wrapper (spec Testing item 13) -------------------
+
+
+def test_verify_profile_kinds_opens_its_own_pool_against_a_real_database(
+    monkeypatch: pytest.MonkeyPatch, migrated_url: str
+) -> None:
+    """Spec item 13: without this, `verify_profile_kinds`'s resource lifecycle — pool open,
+    `finally: await pool.close()`, and the pre-query `CONFIGURATION_ERROR` from `create_pool()`
+    — is exercised by nothing else in the suite. Same seed as item 1, but driven through the
+    wrapper itself rather than `scan_profile_kinds(conn)` directly, and through the environment
+    variable rather than an explicit connection.
+    """
+
+    async def _seed() -> UUID:
+        async with _conn(migrated_url) as conn:
+            mismatched = await _seed_bound_system(
+                conn,
+                kind=ResourceKind.FAULT_INJECT,
+                profile=_profile({"local-libvirt": _LIBVIRT_SECTION}),
+                project="residue",
+            )
+            await _seed_bound_system(
+                conn,
+                kind=ResourceKind.LOCAL_LIBVIRT,
+                profile=_profile({"local-libvirt": _LIBVIRT_SECTION}),
+                project="clean",
+            )
+            return mismatched
+
+    mismatched_id = asyncio.run(_seed())
+    monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
+
+    result = asyncio.run(verify_profile_kinds())
+
+    assert result == [
+        ProfileKindMismatch(
+            system_id=mismatched_id,
+            project="residue",
+            state="ready",
+            profile_section="local-libvirt",
+            resource_kind="fault-inject",
+        )
+    ]

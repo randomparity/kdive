@@ -303,3 +303,57 @@ def test_lifecycle_witness_is_a_dedicated_runnable_command() -> None:
 
     args = build_parser().parse_args(["lifecycle-witness"])
     assert args.command == "lifecycle-witness"
+
+
+def test_verify_profile_kinds_command_registered_and_not_runnable() -> None:
+    """Spec Testing item 12: registered with no arguments, and absent from `_RUNNABLE` — the
+    sweep takes the same non-telemetry path as `verify-project`."""
+    from kdive.__main__ import _RUNNABLE, build_parser
+
+    args = build_parser().parse_args(["verify-profile-kinds"])
+
+    assert args.command == "verify-profile-kinds"
+    assert "verify-profile-kinds" not in _RUNNABLE
+
+
+def test_verify_profile_kinds_handler_prints_report_and_raises_no_systemexit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec Testing item 11. The positive half is what makes this bite: "raises no SystemExit"
+    alone is satisfied by a handler whose body is `pass`, which opens no pool and prints
+    nothing. `verify_profile_kinds` is patched out, so this needs no live database — only a
+    resolvable `KDIVE_DATABASE_URL`, since the handler calls `database_url()` for the redacted
+    target before printing, exactly as `_handle_verify_project` does.
+    """
+    from uuid import uuid4
+
+    from kdive import __main__ as main_mod
+    from kdive.admin.profile_kinds import ProfileKindMismatch
+    from kdive.security.secrets.secret_registry import SecretRegistry
+
+    system_id = uuid4()
+    mismatch = ProfileKindMismatch(
+        system_id=system_id,
+        project="demo",
+        state="ready",
+        profile_section="local-libvirt",
+        resource_kind="fault-inject",
+    )
+
+    async def _fake_verify_profile_kinds() -> list[ProfileKindMismatch]:
+        return [mismatch]
+
+    monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://kdive@localhost/kdive")
+    monkeypatch.setattr(
+        "kdive.admin.profile_kinds.verify_profile_kinds", _fake_verify_profile_kinds
+    )
+    args = main_mod.build_parser().parse_args(["verify-profile-kinds"])
+
+    try:
+        main_mod._COMMAND_BY_NAME["verify-profile-kinds"].handler(args, SecretRegistry(), None)
+    except SystemExit as exc:
+        pytest.fail(f"handler raised SystemExit({exc.code}); verify-profile-kinds must not exit")
+
+    out = capsys.readouterr().out
+    assert str(system_id) in out
+    assert "Remediation is not automated." in out
