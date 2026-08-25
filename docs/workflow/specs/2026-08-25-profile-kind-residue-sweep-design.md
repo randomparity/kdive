@@ -141,23 +141,13 @@ nothing). The query is deliberately **not** widened to a `LEFT JOIN` for a case 
 reach — that would add a NULL branch to `resource_kind`, a reported field, to cover a row no
 code can construct. Naming the dependency is the fix.
 
-Nothing in this design signals a relaxation at run time. A printed count would — carrying
-`count(*) FROM systems` beside the scanned count makes a narrowed join visible in the same run,
-at the cost of one scalar subquery over a table already being scanned. It is deliberately not
-built: #1907 asks for a report of mismatches, the divergence it would surface needs a migration
-that does not exist, and a field added for a hypothetical is surface nobody asked for. The
-honest statement is that the residual is accepted and unsignalled, not that it is unsignallable.
+Nothing in this design signals a relaxation at run time, and the residual is accepted unsignalled rather than unsignallable — ADR-0579 records the printed-count alternative and why it is not built.
 
-The section **key** is not extracted in SQL. `jsonb_object_keys` is a set-returning function that
-fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument. A `jsonb_typeof`
-`CASE` guard around a scalar sub-`SELECT` does hold in practice — measured clean over object,
-JSON-`null`, scalar and missing-key rows — so the guard is not rejected for failing. PostgreSQL 17
-§9.18.1 notes that "CASE evaluates only necessary subexpressions" is not ironclad, but its
-documented instance is constant folding, which cannot reach a column-correlated subexpression; the
-note declines to promise evaluation order rather than predicting a failure here. The deciding
-ground is testability: the row carries the whole `provider` value back and Python renders the
-label, which gets a case per stored shape where the SQL form gets none — on the one part of the
-sweep whose job is to survive malformed data.
+The section **key** is not extracted in SQL. `jsonb_object_keys` fails with `cannot call jsonb_object_keys on a scalar` for a non-object argument, and a `jsonb_typeof`
+`CASE` guard around a scalar sub-`SELECT` does hold in practice — but the deciding ground is
+testability: the row carries the whole `provider` value back and Python renders the label,
+which gets a case per stored shape where the SQL form gets none, on the one part of the sweep
+whose job is to survive malformed data.
 
 `ORDER BY s.created_at, s.id` makes the report stable across runs; `id` breaks ties on rows sharing
 a timestamp.
@@ -186,13 +176,23 @@ def _section_label(provider: object) -> str:
         return "<not-an-object>"
     if not provider:
         return "<none>"
-    return ",".join(sorted({_entry(key, provider[key]) for key in provider}))
+    return ",".join(sorted({_entry(k, v) for k, v in provider.items()}))
 
 
-def _entry(key: str, value: object) -> str:
-    name = key if key in _KNOWN_KINDS else "<unrecognized>"
+def _entry(key: object, value: object) -> str:
+    name = key if isinstance(key, str) and key in _KNOWN_KINDS else "<unrecognized>"
     return name if isinstance(value, dict) else f"{name}=<not-an-object>"
 ```
+
+`_entry` takes `key: object` and narrows with `isinstance(key, str)`, and `_section_label`
+iterates `items()` rather than indexing, because **the obvious form does not type-check**:
+`isinstance(provider, dict)` narrows to `dict[Unknown, Unknown]`, so the keys are `object` and
+both `_entry(key: str, …)` and `provider[key]` are rejected. Measured with `uv run ty check`, the
+command `just type` runs: two diagnostics, exit 1 — Task 1 would go red on its first guardrail
+run. The form above exits 0 and is behaviour-identical over all 15 shapes of the table below,
+the 500-key bound included. The `isinstance(key, str)` is not dead defensiveness: it is what
+makes the narrowing sound, and a sweep whose job is surviving malformed data should not assume
+its own key type.
 
 The `set` is load-bearing, not tidying. Entries are drawn from a closed pool — each known kind
 in one of two forms, plus `<unrecognized>` in one of two forms — so deduplicating bounds the
@@ -412,9 +412,7 @@ identities.
    **`project`'s bound is charset and tokenization, not length.** `repr` is a per-character
    escape and a delimiter; neither caps length, and `systems.project` is unbounded `text`.
    Measured against a realistic row (`state=ready`, `profile_section=local-libvirt`,
-   `resource_kind=fault-inject`): a 5000-character project renders a 5123-character line. An
-   earlier figure of 5093 was taken from the format skeleton with the other fields empty, which
-   the `CHECK` constraints forbid. Accepted rather than fixed —
+   `resource_kind=fault-inject`): a 5000-character project renders a 5123-character line. Accepted rather than fixed —
    this is a report an operator runs by hand and reads, not a fixed-width surface, and a width
    policy plus its tests costs more than the over-long line it prevents. Stated because the
    adjacent field *is* length-bounded and the asymmetry would otherwise read as an oversight.
@@ -459,13 +457,29 @@ Database-backed:
    anticipates a follow-up reusing `scan_profile_kinds` unchanged, so the contract needs a guard
    that outlives this change.
 
-   Use **`SET default_transaction_read_only = on`**, not `SET TRANSACTION READ ONLY`. Measured on
-   `postgres:17` through the project venv: on an `autocommit=True` connection — which is what
-   every helper in `tests/db/conftest.py` uses, so it is what following the nearest local pattern
-   produces — `SET TRANSACTION READ ONLY` is a **silent no-op**. No exception, no surfaced
-   warning, and a subsequent `INSERT` succeeds. `SET default_transaction_read_only = on` is
-   session-level, applies to the implicit transaction of every later statement, and raises
-   `psycopg.errors.ReadOnlySqlTransaction` on a write.
+   **Open the connection as `await psycopg.AsyncConnection.connect(migrated_url, autocommit=True)`
+   — the `autocommit=True` is a requirement, not a style choice**, and the guard below is correct
+   *because* of it. `AsyncConnection.connect()` defaults to `autocommit=False`, so an implementer
+   who opens it the psycopg-default way walks into a dead guard. Measured on `postgres:17` (17.11)
+   through the project venv, on the async connection this test actually opens:
+
+   | connection | `SET default_transaction_read_only = on` | `SET TRANSACTION READ ONLY` |
+   |---|---|---|
+   | `autocommit=True` | `transaction_read_only=on`, write raises `ReadOnlySqlTransaction` | silent no-op, **write succeeds** |
+   | `autocommit=False` | `transaction_read_only=off`, **write succeeds** | `transaction_read_only=on` |
+
+   The two forms **swap correctness across the two modes**, because a `SET` issued inside an
+   already-open transaction does not affect that transaction's read-only mode. So pin the mode and
+   then the form: `autocommit=True` plus `SET default_transaction_read_only = on`, which is
+   session-level and applies to the implicit transaction of every later statement.
+
+   An earlier draft justified the choice by pointing at `tests/db/conftest.py`'s helpers using
+   autocommit. That ground is unsound — those helpers are **synchronous** `psycopg.connect(...)`,
+   and this test opens an `AsyncConnection`, whose default is the opposite. The requirement is
+   stated here instead of inferred from a neighbouring pattern.
+
+   Seed first, **then** issue the `SET`: the seeding writes and the `created_at` UPDATEs share
+   this connection, so setting it earlier fails the fixture rather than the assertion.
 
    Then assert the guard itself: after the scan, a trivial `INSERT` on that same connection must
    raise `ReadOnlySqlTransaction`. Without that assertion the test passes whether the guard is
@@ -497,31 +511,40 @@ Database-backed:
    repositories as everywhere else, and this one column is then imposed out of band: after
    inserting, issue `UPDATE systems SET created_at = %s WHERE id = %s` per row.
 
-   **The variable that decides both halves is `UPDATE` order, not insertion order.** PostgreSQL
-   writes a new tuple version on `UPDATE`, so a seq scan returns rows in **last-write** order;
-   every row in this fixture is updated exactly once, so heap order is the `UPDATE` order and
-   nothing else. Measured over three sequencings of the same fixture:
+   **The fixture must disagree with the asserted order in BOTH of its orderings**, and that is
+   one clause rather than an argument about which one the scan follows:
 
-   | `UPDATE` sequence | no `ORDER BY` | `ORDER BY created_at` |
-   |---|---|---|
-   | insertion order | fires | fires |
-   | **ascending asserted order** | **DEAD** | **DEAD** |
-   | reverse of asserted order | fires | fires |
+   - **insert** the tied pair with the larger-`id` row first, and
+   - **`UPDATE`** every row in the reverse of the asserted order — the row that must come back
+     last is updated first.
 
-   The middle row is the trap: it is the most readable way to write the fixture, it makes the
-   scan return the asserted order for free, and both `ORDER BY` mutations then report green
-   against a query shipping no `ORDER BY` at all. So **issue the `UPDATE` statements in the
-   reverse of the asserted order** — the row that must come back last is updated first.
+   Why both. `created_at` is server-generated, so the fixture imposes it with an out-of-band
+   `UPDATE` after inserting (below), and PostgreSQL writes a new tuple version on `UPDATE`, so a
+   seq scan returns rows in **last-write** order. Measured: 24 of 24 `UPDATE` permutations came
+   back in exactly the `UPDATE` order. That makes `UPDATE` order the variable to control — but
+   controlling only it leaves the fixture depending on an insertion order this document would
+   then have to state and keep true. Fixing both costs one clause and removes the dependency.
+
+   **The mutation this defends is silent.** If the fixture's order happens to match the asserted
+   order, the scan returns it for free, and both `ORDER BY` mutations — dropping `, s.id`, and
+   dropping the clause entirely — report green against a query that ships no `ORDER BY` at all.
+   A correct implementation still passes either way, because the shipped
+   `ORDER BY s.created_at, s.id` fully determines the result; what is lost is the mutation
+   sensitivity that is the only reason this test imposes `created_at` out of band.
+
+   One claim deliberately **not** made here: that a page prune returns the scan to insertion
+   order. It was raised in review and did not reproduce — `VACUUM` and `ANALYZE` after the
+   reverse-order `UPDATE`s left the scan in `UPDATE` order in all eight fixtures tried, including
+   the two the claim named (PostgreSQL 17.11, psycopg 3.3.4, autocommit). The both-orders fixture
+   above is adopted because it removes a dependency on an unstated variable, not because pruning
+   was shown to reorder.
 
    - *`created_at` half:* one row carries the earlier timestamp, one the later; assert the
      earlier comes back first.
    - *`id` tiebreak half:* seed the tied pair with **fixed, explicit UUIDs** sharing one
-     timestamp, `UPDATE` the larger-`id` row first, and assert the smaller comes back first.
-     Fixed UUIDs are load-bearing — every seed helper in this repo uses `uuid4()`, which would
-     make this assertion pass or fail at random, and a flake that passes on re-run is not
-     evidence. Measured: with the tied pair in ascending `id` order, `ORDER BY created_at` alone
-     and `ORDER BY created_at, id` return the identical sequence, so an implementation shipping
-     no `, s.id` passes.
+     timestamp. Fixed UUIDs are load-bearing — every seed helper in this repo uses `uuid4()`,
+     which would make this assertion pass or fail at random, and a flake that passes on re-run is
+     not evidence.
 
    **The tie must be imposed by that same `UPDATE`, with one identical literal timestamp for both
    rows.** Do not rely on two rows seeded together sharing `now()`: measured, that holds inside an
@@ -554,39 +577,48 @@ Pure:
    **whole line**, not the label alone: `project` is the unbounded field, and a test covering
    only the label is how a sanitized-label/unsanitized-project pairing survives.
 
-   *Tokenization.* Two forgery cases, and the second is the one that decides the control:
-
-   - `project` = `'x state=ready profile_section=fault-inject'` — no quote, so it forges nothing
-     against either a quoted or a `repr`-rendered field. **This case alone is vacuous:** it
-     passes against the defective formatter and the fixed one alike.
-   - `project` = `'x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y'`
-     — measured against hand-written quotes, this closes the field on its own `"` and emits a
-     full set of leading `key=value` pairs with the true values trailing them, while
-     `line.isprintable()` still passes. This is the case that reddens.
-
-   Assert the real `state=` / `profile_section=` / `resource_kind=` pairs are the **only** ones
-   outside the rendered `project` field, and **anchor that assertion on the rendered token**:
+   *Tokenization.* The detector is the **anchor's presence**, and it must be asserted:
 
    ```python
-   tail = line.split(f"project={mismatch.project!r}", 1)[1]
+   anchor = f"project={mismatch.project!r}"
+   assert anchor in line  # this is the bite
+   tail = line.split(anchor, 1)[1]
    ```
 
-   then assert `tail` carries exactly one `state=`, one `profile_section=` and one
-   `resource_kind=`. Two other wordings are wrong, in opposite directions:
+   A formatter that does not render `project` through `repr` — the hand-quoted form this control
+   replaces, or a bare `project={project}` — puts no such token on the line, and the assertion
+   fails with a legible message. Without it the split raises a bare `IndexError` instead, and the
+   natural way to "repair" a test that errors is to guard the split, which makes it vacuous.
 
-   - `line.count("state=") == 1` is **vacuous** — `repr` escapes and keeps the hostile text
-     rather than deleting it, so measured, `state=` appears **twice** on the fixed line and twice
-     on the broken one. Green against both, testing nothing.
-   - "slice at the closing quote" **reddens the correct implementation** — measured, `repr` picks
-     `'` for this value (it contains `"` and no `'`) and leaves the embedded `"` unescaped, so the
-     first `"` sits two characters into the project value. The delimiter `repr` chooses is
-     data-dependent, so "the closing quote" names no fixed character across a parametrized set. A
-     test that reddens on a good tree is worse than one that cannot fire: it gets repaired by
-     weakening the assertion.
+   **The count assertion that follows is documentation, not the bite.** Asserting `tail` carries
+   exactly one `state=`, one `profile_section=` and one `resource_kind=` is a *constant*: once the
+   anchor matches, the remainder of the line is the fixed suffix, so the counts are `(1, 1, 1)`
+   for every possible input. Measured over 16 hostile values it failed zero times against a
+   correct implementation. Keep it if it reads well; do not describe it as what catches the
+   defect. (An earlier draft asserted `line.count("state=") == 1` over the *whole* line, which is
+   vacuous for the opposite reason — `repr` escapes and keeps the hostile text, so `state=`
+   appears twice on the fixed line and twice on the broken one.)
 
-   Splitting on the rendered token is quote-agnostic and holds for every hostile input in the
-   set. This is the bite behind the threat model's control 3; without the quote case the control
-   ships untested on its one gap.
+   **An input discriminates only if it does not contain `'` without also containing `"`.**
+   Measured against the hand-quoted formatter:
+
+   | `project` contains | broken formatter | correct | discriminates |
+   |---|---|---|---|
+   | neither quote | red — anchor absent | green | yes |
+   | `"` only | red — anchor absent | green | yes |
+   | **`'` only** | **green** | green | **NO** |
+   | both | red — anchor absent | green | yes |
+
+   The `'`-only row is the trap: `repr` then picks `"` as its own delimiter, so the broken line is
+   byte-identical to the anchor and `line.isprintable()` passes too — green against a formatter
+   that forges. **Do not add the single-quote sibling of the forgery case to this set as if it
+   were a guard.**
+
+   Parametrize over `'x state=ready profile_section=fault-inject'` and
+   `'x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y'`. Both
+   discriminate; the second reproduces the actual forgery, closing the field on its own `"` and
+   emitting a full set of leading `key=value` pairs while `line.isprintable()` still passes.
+
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
     five fields; the message names ADR-0549, says remediation is not automated, and names the
@@ -611,6 +643,22 @@ Parser:
 
 12. `build_parser().parse_args(["verify-profile-kinds"])` yields
     `command == "verify-profile-kinds"`, and the command is absent from `_RUNNABLE`.
+
+Pool wrapper:
+
+13. **`verify_profile_kinds()` itself runs against a real database.** Items 1–6 drive
+    `scan_profile_kinds(conn)`, 7–10 are pure, item 11 patches `verify_profile_kinds` out, and
+    item 12 is the parser — so without this item the one function in the module with a **resource
+    lifecycle** is never executed. Its `finally: await pool.close()` and its pre-query
+    `CONFIGURATION_ERROR` would both ship unguarded, and the first row of the failure-mode table
+    would have no bite anywhere in the suite. A leaked pool on an exception path, or a wrapper
+    that opens the pool before resolving the URL, would go green.
+
+    `monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)`, then assert `verify_profile_kinds()`
+    returns the same list `scan_profile_kinds` returns for item 1's seed. This mirrors
+    `verify_project`, the function this module is modelled on, which has four database-backed
+    tests calling the pool-opening wrapper itself (`tests/admin/test_bootstrap.py:239`, `:258`,
+    `:272`, `:286`) rather than patching it out.
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
 `kdive.db.repositories`, the pattern `tests/mcp/lifecycle/test_systems_list.py:104-155` uses, so the

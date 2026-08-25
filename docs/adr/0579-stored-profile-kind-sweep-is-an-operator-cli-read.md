@@ -244,6 +244,15 @@ a statement other than that `SELECT`.
   not with this record.
 - **Report only the live states.** judgment: which states matter is the triage call #1907
   excludes, and `state` is in the report so the operator can make it.
+- **Print a scanned-vs-total System count, so a narrowed join is visible in the run.** The inner
+  join to `resources` drops a System whose Allocation carries a NULL `resource_id`, and this
+  record accepts that as a residual; a count beside the clean line would surface it at run time
+  where the suite cannot. verified: the count is cheap — `SELECT count(*) FROM systems` against
+  the same connection, on a table the sweep already seq-scans. judgment: rejected anyway, because
+  the divergence it would surface requires a migration that does not exist, #1907 asks for a
+  report of mismatches rather than a coverage statistic, and a field added for a hypothetical is
+  surface nobody asked for. The residual is therefore accepted **unsignalled**, which is a weaker
+  and more honest claim than unsignallable.
 - **Extract the section key in SQL with `jsonb_object_keys`.** verified: on `postgres:17`,
   `SELECT jsonb_object_keys('"s"'::jsonb)` fails with
   `ERROR: cannot call jsonb_object_keys on a scalar`, so the bare form is out. A `jsonb_typeof`
