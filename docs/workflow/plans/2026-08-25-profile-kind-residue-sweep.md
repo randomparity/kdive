@@ -199,9 +199,11 @@ database with no pool lifecycle. It executes the single static statement, maps e
 `_section_label`, and returns the list in the order the query produced.
 
 **Fixtures.** Use the `migrated_url` fixture (function-scoped, from `tests/db/conftest.py:319`,
-already re-exported by `tests/admin/conftest.py`) and open an `AsyncConnection` on it with
-`autocommit=True` — that is both the mode the read-only measurement in test 1 depends on and the
-mode `tests/db/conftest.py`'s own helpers use.
+already re-exported by `tests/admin/conftest.py`) and open the connection as
+`await psycopg.AsyncConnection.connect(migrated_url, autocommit=True)`. The `autocommit=True` is a
+**requirement**: `AsyncConnection.connect()` defaults to `autocommit=False`, and test 1's
+read-only guard is dead in that mode (see the Global Constraints entry). Do not ground it on
+`tests/db/conftest.py`'s helpers — those are *synchronous*, and their default is the opposite.
 
 **Do not reach for `pg_conn`.** It is re-exported alongside `migrated_url`, but it is a
 *synchronous* `psycopg.Connection` and its first act is
