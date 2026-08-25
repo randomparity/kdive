@@ -127,24 +127,37 @@ def test_format_charset_whole_line_is_printable(hostile: str) -> None:
     [
         "x state=ready profile_section=fault-inject",
         'x" state=ready profile_section=fault-inject resource_kind=fault-inject junk="y',
+        "x' state=torn_down profile_section=fault-inject resource_kind=fault-inject junk='y",
+        "x\tstate=torn_down",
     ],
-    ids=["no-quote", "forged-double-quote"],
+    ids=["no-quote", "forged-double-quote", "forged-single-quote", "forged-tab"],
 )
 def test_format_tokenization_project_cannot_forge_a_field(project: str) -> None:
+    """The report line is a whitespace-delimited `key=value` sequence, so the property that
+    matters is that a hostile `project` contributes exactly one token — not that `repr` was
+    called on it.
+
+    Asserting the latter (anchoring on `f"project={project!r}"`) restates the implementation
+    and cannot fail on forgery: `repr` selects its quote character rather than escaping, and
+    leaves ASCII space intact because a space is printable. The `forged-single-quote` case
+    below is the one that proves it — against a bare `!r` it renders `state=torn_down` as the
+    *first* `state=` token on the line, and the closing block tells the operator a `torn_down`
+    row is inert, so grepping the report drops a live `ready` System.
+    """
     mismatch = _make_mismatch(project=project)
     report = format_profile_kind_result([mismatch], redacted_url=_REDACTED_URL)
     line = _mismatch_line(report)
 
-    anchor = f"project={project!r}"
-    assert anchor in line  # fail here, not on an IndexError below
-    tail = line.split(anchor, 1)[1]
+    # The bite: split the way an operator's grep/awk does and demand one token per key.
+    keys = [token.split("=", 1)[0] for token in line.split() if "=" in token]
+    assert keys.count("state") == 1
+    assert keys.count("profile_section") == 1
+    assert keys.count("resource_kind") == 1
+    assert keys.count("project") == 1
 
-    # Documentation, not the bite: once the anchor matches, the remainder of the line is the
-    # fixed suffix, so these counts are a constant for every input — keep them as an
-    # executable description of the tail's shape, not as the property that catches forgery.
-    assert tail.count("state=") == 1
-    assert tail.count("profile_section=") == 1
-    assert tail.count("resource_kind=") == 1
+    # The real state must be the only one present, whatever the project name claims.
+    assert "state=ready" in line
+    assert "state=torn_down" not in line
 
 
 # --- format_profile_kind_result: empty / populated report shape ----------------------------

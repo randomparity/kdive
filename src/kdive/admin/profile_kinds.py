@@ -173,6 +173,35 @@ async def verify_profile_kinds() -> list[ProfileKindMismatch]:
         await pool.close()
 
 
+def _project_token(project: str) -> str:
+    """Render ``project`` as a single whitespace-free token for the report line.
+
+    ``repr`` alone is not enough. It escapes every non-printable character and delimits the
+    value, but it *selects* its quote character rather than escaping quotes, and it leaves
+    ASCII space untouched because a space is printable. The report line is a whitespace-
+    delimited ``key=value`` sequence, so a stored project name carrying spaces contributes
+    extra ``key=value`` tokens — positioned ahead of the real fields, since ``project`` is the
+    second key on the line. A name of the form ``x' state=torn_down ... junk='y`` makes
+    ``state=torn_down`` the first ``state=`` token on the line, and the closing block below
+    tells the operator a ``torn_down`` row is inert. Whitespace-splitting or grepping the
+    report — the ordinary way to work one listing many rows — then drops a live ``ready``
+    System from the remediation list.
+
+    ``systems.project`` is remotely plantable (an IdP ``projects`` claim, validated only as a
+    non-empty ``str``), so this is reachable without database access.
+
+    Both ``\\x20`` and ``=`` are escaped, and escaping only the space is not enough. That alone
+    fixes whitespace tokenization — the line splits into one ``state=`` token again — but leaves
+    the *substring* ``state=torn_down`` sitting in the line, so a plain
+    ``grep 'state=torn_down'`` still matches and still drops the live System. Escaping ``=`` as
+    well means the rendered token can hold no ``key=value`` lookalike at all, which is the
+    property the report actually needs. U+0020 is the only whitespace ``repr`` leaves intact —
+    every other separator is non-printable to ``str.isprintable`` and is already escaped — so
+    these two substitutions are complete, reversible, and keep ``repr``'s charset bound.
+    """
+    return repr(project).replace(" ", "\\x20").replace("=", "\\x3d")
+
+
 def format_profile_kind_result(
     mismatches: Sequence[ProfileKindMismatch], *, redacted_url: str
 ) -> str:
@@ -207,7 +236,7 @@ def format_profile_kind_result(
     ]
     for mismatch in mismatches:
         lines.append(
-            f"system={mismatch.system_id} project={mismatch.project!r} "
+            f"system={mismatch.system_id} project={_project_token(mismatch.project)} "
             f"state={mismatch.state} profile_section={mismatch.profile_section} "
             f"resource_kind={mismatch.resource_kind}"
         )
