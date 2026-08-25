@@ -154,7 +154,11 @@ Pure, and total over what psycopg can hand back for a `jsonb` column. Two rules,
 order:
 
 ```python
-_KNOWN_KINDS = {"local-libvirt", "fault-inject", "remote-libvirt"}
+# Derived from the enum, never a literal: `resources.kind` has been widened twice already
+# (0018, 0020), and both migrations say they mirror ResourceKind. A literal would not move
+# with a fourth kind, so the report would render that kind `<unrecognized>` — hiding the one
+# field criterion 2 asks for, in exactly the window a residue sweep exists for.
+_KNOWN_KINDS = {kind.value for kind in ResourceKind}
 
 
 def _section_label(provider: object) -> str:
@@ -164,7 +168,7 @@ def _section_label(provider: object) -> str:
         return "<not-an-object>"
     if not provider:
         return "<none>"
-    return ",".join(_entry(key, provider[key]) for key in sorted(provider))
+    return ",".join(sorted({_entry(key, provider[key]) for key in provider}))
 
 
 def _entry(key: str, value: object) -> str:
@@ -172,12 +176,19 @@ def _entry(key: str, value: object) -> str:
     return name if isinstance(value, dict) else f"{name}=<not-an-object>"
 ```
 
+The `set` is load-bearing, not tidying. Entries are drawn from a closed pool — each known kind
+in one of two forms, plus `<unrecognized>` in one of two forms — so deduplicating bounds the
+label to at most five entries whatever the stored object holds. Measured: a `provider` carrying
+500 unknown keys renders `<unrecognized>`, 14 characters. Without the `set` the label is linear
+in key count, and one hand-edited row can emit an arbitrarily long line into a terminal.
+
 Measured against `postgres:17` through the project venv:
 
 | stored `provider` value | psycopg gives | label |
 |---|---|---|
 | one-key object `{"local-libvirt": {"a": 1}}` | `dict` | `local-libvirt` |
 | two sections `{"fault-inject": {}, "local-libvirt": {}}` | `dict` | `fault-inject,local-libvirt` |
+| 500 unknown keys | `dict` | `<unrecognized>` — deduplicated, 14 chars |
 | **section not an object** `{"fault-inject": null}` (also `[]`, `"x"`) | `dict` | `fault-inject=<not-an-object>` |
 | **unrecognized key** `{"\x1b[31mBOOM": {}}` | `dict` | `<unrecognized>` |
 | empty object `{}` | `dict` | `<none>` |
@@ -236,9 +247,20 @@ the printed report is the answer.
   `verified no System's provisioning-profile provider section mismatches its Resource kind in <url>`
 - **mismatches** → a header naming the count and the target, then one line per mismatch:
   `system=<uuid> project=<project> state=<state> profile_section=<section> resource_kind=<kind>`,
-  then a closing line stating that these Systems predate ADR-0549's admission cross-check, that
-  they raise on the control, install, boot-evidence, and vmcore lanes, and that remediation is
-  not automated.
+  then a closing block that **describes the class without asserting one cause**: each listed
+  System's stored provider section does not match its bound Resource kind; a plain kind mismatch
+  reaches `ready` and raises at first use on the control, install, boot-evidence, and vmcore
+  lanes, while a section that fails `ProvisioningProfile.parse` outright — a `provider` holding
+  two sections, or none — breaks *every* parse site instead; and remediation is not automated.
+  ADR-0549 is named as background for the kind-mismatch case, not as a claim about when each row
+  was written.
+
+The single-cause version of that line was wrong for two of the four reported classes. "These
+predate ADR-0549's admission cross-check" is false for a hand-edited row, which this spec puts
+in scope by name, and "they raise on the four lanes" understates a two-section row, which the
+spec's own second-disjunct argument calls *worse* than the residue being swept. A fixed message
+has no wording that is true of all four classes, so it describes the class and distinguishes the
+two blast radii rather than picking one and being wrong about the rest.
 
 There is no non-zero exit because there could not be a working one. #1907's criteria ask for a
 query, a report, no mutation, and a test — none asks for an exit code — and the sweep reports
@@ -288,10 +310,14 @@ which is a configuration failure rather than a finding.
 The change is security-relevant only in that it adds a CLI entry point that prints stored row
 identities.
 
-1. **Boundary inventory.** One boundary is *added*: the `verify-profile-kinds` argv path into a
-   database read. None is widened — the query is a `SELECT` over three tables the same process
-   already reads through `migrate`, `seed-project`, and `verify-project`. No network listener, no
-   new file, no new environment variable.
+1. **Boundary inventory.** Two boundaries are *added*. The `verify-profile-kinds` argv path into
+   a database read — inert, since the command takes no arguments. And **stdout into the
+   operator's terminal**, which is the one that matters: stored row content crosses it through
+   `print`, and a terminal interprets what it is handed. Naming only the argv path is what left
+   four of the five printed fields without a control in an earlier draft of this model. Nothing
+   is widened — the query is a `SELECT` over three tables the same process already reads through
+   `migrate`, `seed-project`, and `verify-project`. No network listener, no new file, no new
+   environment variable.
 2. **Actor model.** The actor is a local operator on the host where `KDIVE_DATABASE_URL` resolves
    — the same actor who can already run `python -m kdive migrate` and `psql`. There is no
    untrusted caller: the command has no input to influence and no remote surface. Anyone who can
@@ -300,13 +326,26 @@ identities.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
    `redact_database_url`, which masks a URL password and blanket-redacts a keyword/value conninfo
-   mentioning `password`. What is printed is bounded to `(system id, project, state, section
-   label, resource kind)` — never the profile body, which is where a caller-supplied value could
-   live. The section **label** is the enforcement point, not a description of well-formed data:
-   `_section_label` maps any key outside `_KNOWN_KINDS` to `<unrecognized>`, so the printed
-   vocabulary is closed over three kind names and three markers even for a hand-edited row whose
-   keys carry arbitrary bytes. On failure, the `CategorizedError` path in `main()` renders through
-   `Redactor`.
+   mentioning `password`. What is printed is `(system id, project, state, section label, resource
+   kind)` — never the profile body, which is where a caller-supplied value could live.
+
+   **Every one of those five fields is bounded, and three of them are bounded by something other
+   than this code.** `system_id` is a `uuid`; `state` and `resource_kind` carry `CHECK`
+   constraints (`systems_state_check`, `resources_kind_check`). The section **label** is bounded
+   here: `_section_label` maps any key outside `_KNOWN_KINDS` to `<unrecognized>`, so the printed
+   vocabulary is closed over the `ResourceKind` values and three markers even for a hand-edited
+   row whose keys carry arbitrary bytes.
+
+   `project` is the exception and needs its own control. `systems.project` is `text NOT NULL`
+   with **no** `CHECK` (`0001_init.sql:57`), `System.project` is a bare `str` on `Attribution`,
+   and the only live-path validation is a non-empty `isinstance(..., str)` test over the IdP
+   claim (`security/authz/context.py:44-50`) — no charset bound anywhere. So the exact escape the
+   label machinery exists to stop walks through the adjacent field on the same line, for the same
+   in-scope actor. **Both free-text fields go through one `_printable` helper** that replaces any
+   character below `0x20` before the line is built. Sanitizing the label while printing `project`
+   as stored would be a control that reads as protective and is not.
+
+   On failure, the `CategorizedError` path in `main()` renders through `Redactor`.
 4. **Explicitly out of scope.** Access control on the command itself: the DB URL is the
    credential, matching every other `python -m kdive` operator subcommand, and adding an RBAC gate
    would require the MCP surface ADR-0579 rejects. **Audit trail:** the same cross-project read
@@ -334,12 +373,23 @@ Database-backed:
    matching System on a `local-libvirt` Resource. `scan_profile_kinds` returns exactly one row,
    and its five fields are the seeded values.
 
-   **Run it inside a read-only transaction.** Issue `SET TRANSACTION READ ONLY` on the fixture
-   connection before calling `scan_profile_kinds`. This is the only bite behind criterion 3 —
-   "the sweep reports rather than mutates" — which otherwise rests on inspection alone. A `SELECT`
-   is unaffected; any write added inside the reader later raises `cannot execute … in a read-only
-   transaction`. ADR-0579 anticipates a follow-up reusing `scan_profile_kinds` unchanged, so the
-   contract needs a guard that outlives this change.
+   **Run it read-only, and prove the guard is live.** This is the only bite behind criterion 3 —
+   "the sweep reports rather than mutates" — which otherwise rests on inspection alone. ADR-0579
+   anticipates a follow-up reusing `scan_profile_kinds` unchanged, so the contract needs a guard
+   that outlives this change.
+
+   Use **`SET default_transaction_read_only = on`**, not `SET TRANSACTION READ ONLY`. Measured on
+   `postgres:17` through the project venv: on an `autocommit=True` connection — which is what
+   every helper in `tests/db/conftest.py` uses, so it is what following the nearest local pattern
+   produces — `SET TRANSACTION READ ONLY` is a **silent no-op**. No exception, no surfaced
+   warning, and a subsequent `INSERT` succeeds. `SET default_transaction_read_only = on` is
+   session-level, applies to the implicit transaction of every later statement, and raises
+   `psycopg.errors.ReadOnlySqlTransaction` on a write.
+
+   Then assert the guard itself: after the scan, a trivial `INSERT` on that same connection must
+   raise `ReadOnlySqlTransaction`. Without that assertion the test passes whether the guard is
+   live or dead — `scan_profile_kinds` only `SELECT`s either way — and criterion 3 reverts to the
+   inspection-only state this item exists to escape.
 2. **A clean database returns an empty list**, so criterion 1's assertion is not vacuously true —
    the same seed minus the mismatched System.
 3. **Totality — no `provider` key.** A System whose stored `provisioning_profile` carries no
@@ -356,13 +406,23 @@ Database-backed:
    that reddens if the predicate's *first* disjunct is dropped: tests 1–4 all mismatch on the key,
    which the second disjunct catches by itself. Without this case the first disjunct is untested
    despite being the half whose totality the spec argues at length.
-6. **Order is deterministic.** Seed the row with the *later* `created_at` **first**, so heap order
-   and `created_at` order disagree, then assert the returned order is by `created_at`. Seed a
-   third row sharing a timestamp with one of them and assert the `id` tiebreak. Both halves
-   matter: rows returned from a small unindexed scan come back in insertion order, so a fixture
-   seeded in `created_at` order passes with no `ORDER BY` at all — the test would be asserting
-   what the storage layer supplies for free. `created_at` defaults to transaction-start `now()`,
-   so two Systems seeded in one transaction share it exactly and the tiebreak is not hypothetical.
+6. **Order is deterministic.** Two halves, and the first one needs a mechanism the repositories
+   deliberately withhold.
+
+   `created_at` is in `_SERVER_GENERATED` (`db/repositories.py:53`), so it is excluded from
+   `SYSTEMS._insert_columns` and `SYSTEMS.insert` **cannot** write it — the column falls to its
+   schema default, transaction-start `now()`. Verified:
+   `'created_at' in SYSTEMS._insert_columns` is `False`. So the row *content* comes from the
+   repositories as everywhere else, and this one column is then imposed out of band: after
+   inserting, issue `UPDATE systems SET created_at = %s WHERE id = %s` per row.
+
+   With that in place: give the row inserted **first** the *later* `created_at`, so heap order and
+   `created_at` order disagree, and assert the returned order is by `created_at`. Rows come back
+   from a small unindexed scan in insertion order, so a fixture whose insertion order already
+   matches `created_at` passes with no `ORDER BY` at all — the test would assert what the storage
+   layer supplies for free. Then seed a third row sharing a timestamp with one of them and assert
+   the `id` tiebreak; sharing is not hypothetical, since two Systems seeded in one transaction get
+   identical `now()`.
 
 There is deliberately **no** test guarding the join dependency. A comparison of the join's row
 count against the fixture's `systems` count would look protective and detect nothing: a migration
@@ -374,16 +434,29 @@ Pure:
 
 7. `_section_label` over every row of the measured table above, including the
    section-not-an-object and unrecognized-key rows.
-8. **No control byte reaches the label.** `_section_label({"\x1b[31mBOOM": {}})` returns
-   `<unrecognized>`, and the result contains no character below `0x20`. This is the bite behind
-   the threat model's control 3; without it, "bounded to a fixed vocabulary" is an assertion
-   rather than a property.
+8. **No control byte reaches the printed line — either field.** `_section_label({"\x1b[31mBOOM":
+   {}})` returns `<unrecognized>`; and a mismatch whose `project` is `"a\x1b[31mb"` renders
+   through `_printable`, so the formatted line contains no character below `0x20`. Assert on the
+   whole line, not on the label alone: `project` is the unbounded field, and a test covering only
+   the label is how a sanitized-label/unsanitized-project pairing survives. This is the bite
+   behind the threat model's control 3.
 9. `format_profile_kind_result([])` returns one line naming the redacted URL.
 10. `format_profile_kind_result([one, two])` returns one line per mismatch, each carrying all
     five fields; the message names ADR-0549, says remediation is not automated, and names the
     four raising lanes.
-11. The CLI handler raises no `SystemExit` — `verify-profile-kinds` exits `0` with mismatches
-    present. Assert on the handler, not on a subprocess.
+Handler (not pure — see the prerequisites):
+
+11. **The handler prints the report and raises no `SystemExit`.** Capture stdout and assert it
+    contains the seeded System's id *and* the closing remediation text, then assert no
+    `SystemExit` escaped. The positive half is what makes this bite: "raises no exception" alone
+    is satisfied by a handler whose body is `pass`, which opens no pool, prints nothing, and goes
+    green — the vacuous shape items 2 and 6 exist to avoid.
+
+    Two prerequisites, because the handler follows `_handle_verify_project`, which calls
+    `database_url()` for the redacted target before printing: `KDIVE_DATABASE_URL` must be set to
+    any resolvable value (else `CategorizedError(CONFIGURATION_ERROR)` from `db/pool.py`), and
+    `verify_profile_kinds` is patched to return the mismatch list, so the test does not need a
+    live database.
 
 Parser:
 
@@ -392,7 +465,16 @@ Parser:
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
 `kdive.db.repositories`, the pattern `tests/services/test_allocation_enqueue.py` uses, so the
-fixture rows are built by the same code production uses and cannot drift from the schema.
+fixture rows are built by the same code production uses and cannot drift from the schema. **One
+carve-out, and only one:** `created_at` is server-generated and the repositories exclude it from
+their insert columns, so item 6 sets it with a direct `UPDATE` after inserting. Every other
+column comes from the repositories.
+
+The helpers are module-local, taking an `AsyncConnection`. `tests/integration/_seed.py` is not
+reused: it is hardwired to local-libvirt through `LocalLibvirtDiscovery` and a fake libvirt
+connection, and takes a pool, so it can seed neither a `fault-inject` Resource nor a deliberately
+malformed profile. No shared helper is introduced either — 48 test modules call `SYSTEMS.insert`
+directly and the only shared seeders in the tree are area-local.
 
 ## Out of scope
 
