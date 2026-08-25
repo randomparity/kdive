@@ -6,7 +6,8 @@ records, so re-running the job was a different run, not a reproduction (#2065). 
 seeds with the run's number and records that value in the step log and the job summary before
 the suite runs, so a red run names the concrete seed: `PYTHONHASHSEED=<seed> just test`
 locally reproduces the collection and assertion order. This guard keeps that contract from
-regressing to an unrecordable seed.
+regressing to an unrecordable seed, or to a record that names a seed the suite did not run
+under.
 """
 
 from __future__ import annotations
@@ -25,6 +26,15 @@ _UNRECORDABLE_SEED = "random"
 
 #: The `just test` invocation, however it is spelled inside a longer `run:` line.
 _JUST_TEST = re.compile(r"(?:^|[^\w-])just test(?:\s|$)")
+
+#: The seed as the *expanded* shell variable — `$PYTHONHASHSEED` or `${PYTHONHASHSEED}`.
+#: A record step must write this, not a literal: a hard-coded value satisfies a plain
+#: substring check while naming a seed the suite did not run under.
+_SEED_EXPANSION = re.compile(r"\$\{?PYTHONHASHSEED\b")
+
+#: The shell verbs that write a value out. A step that only mentions the variable records
+#: nothing.
+_RECORDING_VERB = re.compile(r"\b(?:echo|printf|tee)\b")
 
 
 def _jobs() -> dict[str, object]:
@@ -48,7 +58,7 @@ def _job_steps(job: object) -> list[object]:
     steps = job.get("steps")
     if not isinstance(steps, list):
         return []
-    return [step for step in steps]
+    return list(steps)
 
 
 def _ordering_job() -> dict[str, object]:
@@ -132,15 +142,16 @@ def test_the_seed_is_recorded_before_the_suite_runs() -> None:
             test_index = index
         if (
             record_index is None
-            and "PYTHONHASHSEED" in run
+            and _SEED_EXPANSION.search(run)
             and "GITHUB_STEP_SUMMARY" in run
-            and re.search(r"\b(?:echo|tee)\b", run)
+            and _RECORDING_VERB.search(run)
         ):
             record_index = index
     assert test_index is not None, "no step in the ordering job runs `just test`"
     assert record_index is not None, (
-        "no step records PYTHONHASHSEED to the step log and the job summary, so a red "
-        "run cannot tell the reader which seed to reproduce (#2065)"
+        "no step writes the expanded PYTHONHASHSEED to the step log and the job summary, "
+        "so a red run cannot tell the reader which seed to reproduce (#2065). A literal "
+        "value does not count: it names a seed the suite may not have run under"
     )
     assert record_index < test_index, (
         "the seed is recorded after the test step, so a red test run never records the "
