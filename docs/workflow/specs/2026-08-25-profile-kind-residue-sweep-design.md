@@ -150,17 +150,33 @@ a timestamp.
 def _section_label(provider: object) -> str
 ```
 
-Pure, and total over what psycopg can hand back for a `jsonb` column:
+Pure, and total over what psycopg can hand back for a `jsonb` column. Measured against
+`postgres:17` through the project venv, all nine shapes:
 
-| stored `provider` value | label |
-|---|---|
-| one-key object, e.g. `{"local-libvirt": {...}}` | `local-libvirt` |
-| multi-key object | the keys sorted and comma-joined |
-| empty object `{}` | `<none>` |
-| SQL `NULL` or JSON `null` | `<none>` |
-| any other JSON type (array, string, number, bool) | `<not-an-object>` |
+| stored `provider` value | psycopg gives | label |
+|---|---|---|
+| one-key object `{"local-libvirt": {"a": 1}}` | `dict` | `local-libvirt` |
+| multi-key object `{"a": {}, "b": {}}` | `dict` | `a,b` — keys sorted, comma-joined |
+| empty object `{}` | `dict` | `<none>` |
+| JSON `null` | `None` | `<none>` |
+| `provider` key absent | `None` | `<none>` |
+| string scalar `"nope"` | `str` | `<not-an-object>` |
+| array `[1, 2]` | `list` | `<not-an-object>` |
+| number `7` | `int` | `<not-an-object>` |
+| bool `true` | `bool` | `<not-an-object>` |
+
+So the helper is three branches: `dict` → sorted keys comma-joined, or `<none>` when empty;
+`None` → `<none>`; anything else → `<not-an-object>`. JSON `null` and an absent `provider` are
+**indistinguishable** at the Python layer — both arrive as `None` — so mapping both to `<none>`
+is forced, not merely convenient.
 
 The markers are angle-bracketed so they cannot collide with a real `ResourceKind` value.
+
+The rendered label is a **refinement beyond criterion 2**, which the raw section value would
+already satisfy. It is worth the refinement because `LibvirtProfile.domain_xml_params` is an
+agent-supplied `dict[NonEmptyStr, NonEmptyStr]`: printing the raw `provider` value would put
+caller-controlled text into an operator report, where the label prints a fixed vocabulary of
+three kind names and two markers. This is the same bound the threat model's control 3 states.
 
 ### Entry points
 
@@ -184,13 +200,14 @@ exactly as `verify_project` does. The pool is closed in a `finally`.
 - **mismatches** → exit `1`, a header naming the count and the target, then one line per mismatch:
   `system=<uuid> project=<project> state=<state> profile_section=<section> resource_kind=<kind>`,
   then a closing line stating that these Systems predate ADR-0549's admission cross-check, that
-  they raise on the control, install, boot-evidence, and vmcore lanes, and that remediation is not
-  automated.
+  they raise on the control, install, boot-evidence, and vmcore lanes, that remediation is not
+  automated, and that **this is a one-shot post-upgrade check rather than a standing gate**.
 
-Exit `1` is a **one-shot post-upgrade check, not a standing gate**: every state is reported and
-#1907 authorizes no repair, so a torn-down mismatched System keeps the sweep red until someone
-hand-repairs the rows. ADR-0579's Consequences carries the same warning — a permanently-red deploy
-step is a step someone deletes.
+That last clause is in the message, not only in the ADR, on purpose. Exit `1` never clears on its
+own: every state is reported and #1907 authorizes no repair, so a torn-down mismatched System
+keeps the sweep red until someone hand-repairs the rows. Someone wiring a pipeline step reads the
+command's output, not ADR-0579, and a permanently-red step is a step that gets deleted — taking
+the only detection the deployment has with it.
 
 The target URL passes through the existing `redact_database_url` from `kdive.admin.projects`; it
 is not reimplemented.
@@ -279,18 +296,24 @@ Database-backed:
    predicate's second disjunct: with only the first, this row reads as clean, and it is a row
    `ProvisioningProfile.parse` rejects outright.
 5. **Order is deterministic** across two mismatched Systems with distinct `created_at`.
+6. **The join does not shrink the scan.** With the fixture seeded, the number of rows the scan
+   examines equals `SELECT count(*) FROM systems`. This is the guard for the join dependency
+   above: `allocations.resource_id` is nullable, so a future migration that makes it NULL for a
+   live state would drop Systems out of the inner join and the sweep would report a clean zero.
+   Nothing else would notice. The assertion reddens the day that becomes reachable.
 
 Pure:
 
-6. `_section_label` over each row of the table above.
-7. `format_profile_kind_result([])` → exit `0`, and the message names the redacted URL.
-8. `format_profile_kind_result([one, two])` → exit `1`, one line per mismatch, each carrying all
-   five fields, and the message names ADR-0549 and says remediation is not automated.
+7. `_section_label` over each of the nine measured shapes in the table above.
+8. `format_profile_kind_result([])` → exit `0`, and the message names the redacted URL.
+9. `format_profile_kind_result([one, two])` → exit `1`, one line per mismatch, each carrying all
+   five fields; the message names ADR-0549, says remediation is not automated, names the four
+   raising lanes, and says the check is one-shot rather than a standing gate.
 
 Parser:
 
-9. `build_parser().parse_args(["verify-profile-kinds"])` yields `command == "verify-profile-kinds"`,
-   and the command is absent from `_RUNNABLE`.
+10. `build_parser().parse_args(["verify-profile-kinds"])` yields
+    `command == "verify-profile-kinds"`, and the command is absent from `_RUNNABLE`.
 
 The seeds go through `RESOURCES.insert` / `ALLOCATIONS.insert` / `SYSTEMS.insert` from
 `kdive.db.repositories`, the pattern `tests/services/test_allocation_enqueue.py` uses, so the

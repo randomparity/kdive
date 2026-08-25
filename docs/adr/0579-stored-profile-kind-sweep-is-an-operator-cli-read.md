@@ -48,20 +48,21 @@ The remediation policy (cordon, teardown, operator notification) is explicitly n
 **The sweep is `python -m kdive verify-profile-kinds`, a read-only operator subcommand that
 prints one line per mismatch and exits non-zero when it finds any.**
 
-It is built the way `verify-project` ([ADR-0256](0256-onboard-target.md)) is built, in
-`src/kdive/admin/profile_kinds.py`:
+It is built the way `verify-project` ([ADR-0256](0256-onboard-target.md)) is built: an impure
+reader taking an open connection, a pool-opening wrapper so an unset `KDIVE_DATABASE_URL` raises
+`CONFIGURATION_ERROR` before any query, and a pure formatter returning `(message, exit_code)`.
+Module path, function names, field list and ordering are the spec's to fix, not this record's.
 
-- `scan_profile_kinds(conn)` runs one SQL statement and returns `list[ProfileKindMismatch]`
-  (`system_id`, `project`, `state`, `profile_section`, `resource_kind`), ordered
-  `s.created_at, s.id`.
-- `verify_profile_kinds()` opens a pool with `create_pool()` and delegates, so an unset
-  `KDIVE_DATABASE_URL` raises `CONFIGURATION_ERROR` before any query, exactly as verify-project
-  does.
-- `format_profile_kind_result(...)` is pure and returns `(message, exit_code)` — `0` for a clean
-  sweep, `1` when any mismatch is found. The target database is named in the message through the
-  existing `redact_database_url`. A non-empty message also names the four raising lanes and
-  states that remediation is manual, so the report needs no companion document; those two are
-  part of the contract, not presentation left to the implementer.
+Three things about the report **are** decided here, because each is a contract a reader depends
+on rather than presentation:
+
+- **exit `0` clean, `1` on any mismatch**, following the `verify-project` precedent that
+  criterion 5 points at;
+- **a non-empty message names the four raising lanes, states that remediation is manual, and
+  says the check is a one-shot post-upgrade read rather than a standing gate.** The last clause
+  is there because the hazard below is real and an ADR is not read at the moment someone wires a
+  pipeline step;
+- **the target database is named through the existing `redact_database_url`.**
 
 **A System is clean only when its stored `provider` is exactly `{<the bound kind>: {…}}`.** The
 `WHERE` clause is
@@ -93,14 +94,21 @@ than a proof: `allocations.resource_id` is nullable (`0016_pending_queue.sql`,
 `0017_queue_terminal_null_resource.sql` permit `NULL` only for `requested`/`released`/`failed`),
 so an inner join would silently drop a System whose Allocation had none. It holds today because
 `systems.allocation_id` is `NOT NULL`, a System is only minted against a placed Allocation, and
-no path NULLs `resource_id` afterwards. The query is not widened for a case nothing can reach —
-but a migration that relaxes any of those three has no other way to learn it broke this claim.
+no path NULLs `resource_id` afterwards. The query is **not** widened for a case nothing can
+reach — a `LEFT JOIN` would add a NULL branch to `resource_kind`, a reported field, to cover a
+row no code can construct. Instead the dependency gets a guard: **the seeded test asserts the
+scan examines as many rows as the fixture's `systems` table holds.** A migration that makes
+`resource_id` NULL-able for a live state then reddens the suite, rather than silently shrinking
+the sweep to a clean-looking zero — the worst failure available to an integrity check.
 
 The **key** under `provider` is not extracted in SQL; the row carries
-`provisioning_profile -> 'provider'` back and a pure Python helper renders the label: the single
-key for a one-key object, the sorted keys comma-joined for a multi-key one, and an
-angle-bracketed marker (`<none>`, `<not-an-object>`) for a shape carrying no section at all. See
-the rejected alternative for why the extraction is not done in SQL.
+`provisioning_profile -> 'provider'` back and a pure Python helper renders the label. That label
+is a **refinement beyond #1907's criterion 2**, which the raw section value would already
+satisfy, and it is chosen for a reason worth stating: `LibvirtProfile.domain_xml_params` is an
+agent-supplied `dict[NonEmptyStr, NonEmptyStr]`, so printing the raw `provider` value puts
+caller-controlled text in an operator report. The label bounds the output to a fixed vocabulary —
+the three kind names and two markers — and nothing else. See the rejected alternative for why
+the extraction is not done in SQL.
 
 **It reports every state, and it never writes.** `state` is in the report because #1907 asks for
 it; filtering to live states would be the triage call #1907 excludes. Nothing in the module issues
@@ -192,15 +200,18 @@ a statement other than that `SELECT`.
   under `psql` over a seeded three-table join, prints System id, resource kind and the raw
   `provider` value for all eight wrong shapes and neither correct one. The `onboard` precedent
   supports it rather than the alternative: that recipe wraps a **shell** script
-  (`justfile:49-50` → `scripts/live-stack/onboard.sh`), not Python. judgment: rejected on two
-  grounds it cannot meet. It cannot render the observed section — `<none>`, `<not-an-object>`,
-  and the sorted-key join are exactly what SQL should not be computing here, per the last bullet
-  — so its report prints raw JSON and the operator does the reading. And it puts the sweep
-  outside the test suite: #1907's fourth criterion is a test that seeds one mismatched `ready`
-  System and asserts the sweep finds exactly it, which against a `psql -f` recipe means shelling
-  out and parsing stdout instead of calling a function. The exit code follows from the
-  `verify-project` precedent the charter points at rather than being the reason for this
-  rejection; it would not, on its own, have been worth a Python module.
+  (`justfile:49-50` → `scripts/live-stack/onboard.sh`), not Python. And it is **not** expensive
+  to test — `db/migrate.py:139` already executes checked-in `.sql` text with
+  `conn.execute(migration.sql.encode())`, so a criterion-4 test would run the file against a
+  seeded connection with no subprocess and no stdout parsing. verified: what actually rejects it
+  is criterion 5 — this repo has **no** psql-based exposure to match. `rg -n psql justfile
+  scripts/` returns nothing, and the only non-migration `.sql` in the tree
+  (`deploy/compose/bootstrap-migration-owner.sql`) is a container init-db mount, not an operator
+  query. `verify-project` is the pattern criterion 5 points at, and it is a Python entry point.
+  judgment: a second, unprecedented exposure mechanism for one report is the "two mechanisms for
+  one job" surface this repo avoids. Secondarily, a raw `psql` dump prints
+  `LibvirtProfile.domain_xml_params` — an agent-supplied `dict[NonEmptyStr, NonEmptyStr]` — into
+  an operator report, where the rendered label prints a fixed vocabulary.
 - **Ship it as a plain `just` recipe wrapping the Python entry point.** judgment: not a rival —
   it is one level up from the decision, since a recipe still has to wrap something, and it stays
   available afterwards on exactly the `onboard` precedent. Noted so the alternative above is not
@@ -212,8 +223,16 @@ a statement other than that `SELECT`.
   notification is a separate call"), and there is no accepted decision that says which of the
   three is right.
 - **Do nothing and let the residue surface as the `AttributeError` it already raises.** judgment:
-  that is the status quo ADR-0549 called out as unfinished, and it puts the discovery at first use
-  of a `ready` System rather than at upgrade time, which is the whole difference the sweep buys.
+  foreclosed rather than merely weak — #1907 is an accepted issue asking for detection, so this
+  option is outside the charter whatever its merits. Recorded anyway because the Context's own
+  bound makes it the sharpest question in this record: if the affected population is only
+  deployments that opted a mock provider in, is any of this worth building? Two answers. The
+  discovery cost is what ADR-0549 set out to remove — a bare `AttributeError` at first use of a
+  `ready` System is the confusing failure, and it is no less confusing in a dev stack. And the
+  scale argument does not reach the decision, it reaches the *form*: it is why the cheapest
+  adequate exposure was contested above rather than assumed, and criterion 5 is what settled
+  that. A reader who thinks the scale should have decided differently is disagreeing with #1907,
+  not with this record.
 - **Report only the live states.** judgment: which states matter is the triage call #1907
   excludes, and `state` is in the report so the operator can make it.
 - **Extract the section key in SQL with `jsonb_object_keys`.** verified: on `postgres:17`,
