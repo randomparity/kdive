@@ -251,13 +251,15 @@ def format_profile_kind_result(
         )
     lines.append(
         "each listed System's stored provisioning-profile provider is not exactly one "
-        "object-valued section keyed by its bound Resource's kind. A row holding exactly one "
-        "section under the wrong kind still parses: it raises only at first use, on the four "
-        "lanes below (ADR-0549), and only for a System live enough to reach them. Every other "
-        "listed shape — a provider holding two or more sections, or none, or a section under "
-        "the bound kind whose value is not an object — fails ProvisioningProfile.parse "
-        "outright and so breaks every parse site instead. state is reported per row so you can "
-        "judge which rows are worth acting on. Remediation is not automated."
+        "object-valued section keyed by its bound Resource's kind. Read profile_section to tell "
+        "the two cases apart. Where it is a bare kind name (one of "
+        f"{', '.join(sorted(_KNOWN_KINDS))}) other than the row's resource_kind, the profile "
+        "still parses: that System raises only at first use, on the four lanes below "
+        "(ADR-0549), and only if it is live enough to reach them. Every other profile_section "
+        "this report can print — <none>, <not-an-object>, <unrecognized>, anything carrying "
+        "=<not-an-object>, and any comma-joined pair — fails ProvisioningProfile.parse "
+        "outright, so no parse site can read that System at all. state is reported per row so "
+        "you can judge which rows are worth acting on. Remediation is not automated."
     )
     lines.extend(_RAISING_LANES)
     return "\n".join(lines)

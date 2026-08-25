@@ -230,18 +230,59 @@ def test_format_mismatches_header_body_and_closing_block() -> None:
     for lane in _RAISING_LANES:
         assert lane in report
 
-    # The closing block sorts listed rows into two classes and they must stay disjoint. The
-    # residue #1907 exists to find is a lone section under the wrong kind: it parses, and raises
-    # only on the four lanes. An enumeration of the parse-outright class phrased as "any key
-    # besides the bound kind" silently re-includes it, so the operator reads both branches as
-    # true of the same row. Nothing else pins these sentences — they are the whole of the
-    # operator's guidance on what a listed row means.
     closing = report.splitlines()[-5]
-    assert "two or more sections" in closing, (
-        "the parse-outright class must be enumerated so it excludes the single-wrong-kind row"
+    assert "ADR-0549" in closing
+
+
+@pytest.mark.parametrize(
+    ("profile_section", "parses"),
+    [
+        pytest.param("local-libvirt", True, id="bare-known-kind-not-the-bound-one"),
+        pytest.param("<none>", False, id="none"),
+        pytest.param("<not-an-object>", False, id="not-an-object"),
+        pytest.param("<unrecognized>", False, id="unrecognized"),
+        pytest.param("local-libvirt=<not-an-object>", False, id="known-kind-not-an-object"),
+        pytest.param("<unrecognized>=<not-an-object>", False, id="unrecognized-not-an-object"),
+        pytest.param("fault-inject,local-libvirt", False, id="comma-joined"),
+    ],
+)
+def test_closing_block_classifies_every_label_it_can_print(
+    profile_section: str, parses: bool
+) -> None:
+    """The closing block is the operator's whole guidance on what a listed row means, and it
+    sorts rows into two classes: the profile still parses (raises only on the four lanes, and
+    only for a live System), or it fails `ProvisioningProfile.parse` outright.
+
+    Measured against the real parser, exactly one label shape lands in the first class — a bare
+    known-kind name other than the row's `resource_kind`. `<unrecognized>` and
+    `local-libvirt=<not-an-object>` both **fail** parse, so any wording that reads as "one
+    section under the wrong kind still parses" claims them wrongly and inverts the operator's
+    triage: they are rows no parse site can read at all.
+
+    Asserting substrings of the block cannot see that — the previous guard checked three
+    literals that were all present while the text was wrong. This pins the classification per
+    label instead, over the closed vocabulary `_section_label` emits.
+    """
+    mismatch = _make_mismatch(profile_section=profile_section, resource_kind="fault-inject")
+    closing = format_profile_kind_result([mismatch], redacted_url=_REDACTED_URL).splitlines()[-5]
+
+    bare_kind_clause = "where it is a bare kind name"
+    assert bare_kind_clause in closing.lower(), (
+        "the block must key the parses/does-not-parse split on profile_section's vocabulary"
     )
-    assert "any key besides" not in closing
-    assert "still parses" in closing
+
+    if parses:
+        # The shape that parses must not be swept into the parse-outright enumeration.
+        assert profile_section not in closing.split("Every other")[1]
+    else:
+        # Everything else must be named by the parse-outright enumeration, not the first class.
+        tail = closing.split("Every other")[1]
+        needle = (
+            "=<not-an-object>"
+            if profile_section.endswith("=<not-an-object>")
+            else ("comma-joined" if "," in profile_section else profile_section)
+        )
+        assert needle in tail, f"{profile_section!r} is not covered by the parse-outright class"
 
 
 def test_raising_lanes_resolve_to_real_paths_and_symbols() -> None:
