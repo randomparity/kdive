@@ -1,13 +1,17 @@
 name: Test ordering
 
-# Weekly run of the test suite with a randomized PYTHONHASHSEED. The PR gate (ci.yml)
-# pins PYTHONHASHSEED=0 so pytest-xdist workers collect parametrized tests in the same
-# order; that pin also masks tests whose collection or assertions depend on set/dict
-# iteration order. This job removes the pin (PYTHONHASHSEED=random) so each xdist worker
-# randomizes independently: a parametrize source backed by an unsorted set makes the
-# workers disagree and xdist aborts with "Different tests were collected", and an
-# order-dependent assertion fails outright. Either way the ordering bug surfaces here
-# instead of becoming a flaky failure when someone runs the suite locally.
+# Weekly run of the test suite under a concrete per-run PYTHONHASHSEED. The PR gate
+# (ci.yml) pins PYTHONHASHSEED=0 so pytest-xdist workers collect parametrized tests in the
+# same order; that pin also masks tests whose collection or assertions depend on set/dict
+# iteration order. This job sets the seed to the run's id instead: a concrete value that
+# changes every run, so the iteration order — and any order-dependent test — exercises a
+# different order weekly. The seed is recorded in the step log and the job summary before
+# the suite runs, so a red run names the concrete seed: `PYTHONHASHSEED=<seed> just test`
+# locally reproduces the collection and assertion order (ADR-0577, #2065).
+#
+# The shared seed also means every xdist worker collects identically, so the prior
+# per-worker collection-mismatch abort no longer fires; the surface is order-dependent
+# assertions under a per-run changing order.
 
 on:
   schedule:
@@ -23,17 +27,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-random-seed:
-    name: test (PYTHONHASHSEED=random)
+  test-run-seed:
+    name: test (PYTHONHASHSEED=<run-id>)
     runs-on: ubuntu-latest
     # The GitHub default is 360 minutes, and a wedged apt step burns all of it (#1978).
     # Observed ~7 min plus the apt script's ~11 min worst case, plus margin (ADR-0566).
     timeout-minutes: 25
+    env:
+      # A concrete per-run seed (the run's id) rather than CPython's unrecoverable draw:
+      # a red run is reproducible with `PYTHONHASHSEED=<seed> just test` (ADR-0577, #2065).
+      PYTHONHASHSEED: ${{ github.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Record the hash seed
+        # The run's id is the seed (job env above). Record it before the suite runs so a
+        # red run names the concrete seed to reproduce locally.
+        run: |
+          echo "PYTHONHASHSEED=${PYTHONHASHSEED}"
+          echo "PYTHONHASHSEED=${PYTHONHASHSEED}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install libvirt build headers
         # libvirt-python has no wheels; it compiles against the system libvirt
@@ -68,11 +83,10 @@ jobs:
         # thousands-of-errors shape that issue is about.
         run: just pull-test-images
 
-      - name: Test (randomized hash seed)
-        # PYTHONHASHSEED=random overrides the recipe default of 0; KDIVE_REQUIRE_DOCKER=1
-        # turns the db suite's skip-when-no-Docker into a hard failure (ADR-0015), matching
-        # the PR gate so the schema tests are part of the ordering surface.
+      - name: Test (per-run hash seed)
+        # KDIVE_REQUIRE_DOCKER=1 turns the db suite's skip-when-no-Docker into a hard
+        # failure (ADR-0015), matching the PR gate so the schema tests are part of the
+        # ordering surface. PYTHONHASHSEED is inherited from the job env.
         env:
-          PYTHONHASHSEED: random
           KDIVE_REQUIRE_DOCKER: "1"
         run: just test
