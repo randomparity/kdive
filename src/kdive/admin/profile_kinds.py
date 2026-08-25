@@ -30,14 +30,20 @@ from kdive.domain.catalog.resources import ResourceKind
 _KNOWN_KINDS = {kind.value for kind in ResourceKind}
 
 # The four lanes ADR-0549 names as raising a bare `AttributeError` from `ProviderSection` at
-# first use on a kind-mismatched, `ready` System. Path and function only, never a line number:
-# nothing keeps a line number accurate, and the test can only pin the string it was written
-# with, so a drifted reference would point an operator at unrelated code on a green suite.
+# first use on a kind-mismatched, `ready` System.
+#
+# Each parenthetical names the function **defined in the file cited**, which is the enclosing
+# call site — not the policy method it calls. `destructive_opt_in` and `capture_method` are
+# `ProfilePolicy` members declared in `profiles/provider_policy.py`, so naming them here would
+# send an operator to grep a file that does not define them; `capture_method` is also a
+# module-level function in that same policy module, so the bare name is ambiguous besides. No
+# line numbers: nothing keeps one accurate. `test_raising_lanes_resolve` checks each path exists
+# and each symbol is defined in it, so a rename or move reddens instead of rotting silently.
 _RAISING_LANES = (
-    "src/kdive/mcp/tools/lifecycle/control/registrar.py (destructive_opt_in)",
+    "src/kdive/mcp/tools/lifecycle/control/registrar.py (_op_opt_in)",
     "src/kdive/services/runs/steps.py (install_method_for)",
-    "src/kdive/jobs/handlers/runs/boot_evidence.py (capture_method)",
-    "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py (capture_method)",
+    "src/kdive/jobs/handlers/runs/boot_evidence.py (inert_capture)",
+    "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py (_resolve_capture_method)",
 )
 
 
@@ -228,8 +234,8 @@ def format_profile_kind_result(
     """
     if not mismatches:
         return (
-            "verified no System's provisioning-profile provider section mismatches its "
-            f"Resource kind in {redacted_url}"
+            "verified no System bound to a Resource has a provisioning-profile provider "
+            f"section that mismatches its Resource kind in {redacted_url}"
         )
     lines = [
         f"found {len(mismatches)} System(s) whose provisioning-profile provider section "
@@ -243,12 +249,12 @@ def format_profile_kind_result(
         )
     lines.append(
         "each listed System's stored provisioning-profile provider section does not match "
-        "its bound Resource's kind: a plain kind mismatch reaches ready and raises at first "
-        "use on the four lanes below (ADR-0549), while a section that fails "
-        "ProvisioningProfile.parse outright (a provider holding two sections, none, or a "
-        "section under the bound kind that is not an object) breaks every parse site instead. "
-        "A row whose state is torn_down or failed is inert — nothing runs against it, so it "
-        "needs no action. Remediation is not automated."
+        "its bound Resource's kind: a plain kind mismatch raises at first use on the four "
+        "lanes below (ADR-0549) for a System still live enough to reach them, while a section "
+        "that fails ProvisioningProfile.parse outright (a provider holding two sections, none, "
+        "or a section under the bound kind that is not an object) breaks every parse site "
+        "instead. state is reported per row so you can judge which rows are worth acting on. "
+        "Remediation is not automated."
     )
     lines.extend(_RAISING_LANES)
     return "\n".join(lines)
