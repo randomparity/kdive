@@ -1,8 +1,10 @@
+import json
 import os
 import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Generator
 from contextlib import closing, contextmanager
@@ -773,6 +775,65 @@ def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
     assert result.returncode == 5
     assert result.stdout == ""
     assert result.stderr == "provision-evidence-error code=query-unavailable\n"
+
+
+def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
+    accepted = (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef accepting dispatch lanes: default,state-fenced"
+    )
+    claim = (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef claimed provision job "
+        "11111111-1111-1111-1111-111111111111 lane=default attempt=0 "
+        "enqueued_at=2026-08-26T14:51:00.739273+00:00 "
+        "claim_at=2026-08-26T14:51:01.000000+00:00 queue_delay_s=0.260727"
+    )
+    provider = (
+        "local-libvirt provision system=22222222-2222-2222-2222-222222222222 "
+        "job=11111111-1111-1111-1111-111111111111 stage=resolve-arch event=start"
+    )
+    poisoned = f"{claim} secret=/sensitive/path"
+    payload = "\n".join(
+        (
+            json.dumps({"msg": accepted}),
+            "Traceback: /opt/kdive/private.py",
+            json.dumps({"msg": claim}),
+            json.dumps({"msg": poisoned}),
+            json.dumps({"msg": provider}),
+            "",
+        )
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/live-stack/filter-worker-journal-evidence.py")],
+        cwd=ROOT,
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout == f"{accepted}\n{claim}\n{provider}\n"
+
+
+def test_worker_journal_evidence_filter_fails_when_no_safe_record_exists() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/live-stack/filter-worker-journal-evidence.py")],
+        cwd=ROOT,
+        input='{"msg":"Traceback: /sensitive/path"}\n',
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() -> None:
