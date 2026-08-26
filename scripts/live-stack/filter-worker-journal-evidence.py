@@ -37,7 +37,7 @@ _PATTERNS: tuple[Pattern[str], ...] = (
 def _message(raw: str) -> str | None:
     try:
         payload: Any = json.loads(raw)
-    except UnicodeError, json.JSONDecodeError:
+    except (UnicodeError, json.JSONDecodeError):  # fmt: skip
         return None
     if not isinstance(payload, dict):
         return None

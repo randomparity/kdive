@@ -145,7 +145,7 @@ class _WorkerPool:
         return _WorkerConnection()
 
 
-def _contract_worker() -> job_worker.Worker:
+def _contract_worker(*, telemetry: object | None = None) -> job_worker.Worker:
     registry = SimpleNamespace(get=lambda _kind: object())
     return job_worker.Worker(
         cast(Any, _WorkerPool()),
@@ -153,6 +153,7 @@ def _contract_worker() -> job_worker.Worker:
         worker_id="fixed-worker-1",
         incarnation_credential=cast(Any, object()),
         secret_registry=cast(Any, object()),
+        config=job_worker.WorkerConfig(telemetry=cast(Any, telemetry)),
     )
 
 
@@ -213,6 +214,50 @@ def test_worker_claim_captures_dequeue_record_before_mutation(
     rendered = "\n".join(record.getMessage() for record in caplog.records)
     assert _PAYLOAD_SENTINEL not in rendered
     assert _AUTHORIZING_SENTINEL not in rendered
+
+
+def test_worker_claim_is_logged_before_queue_depth_query(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provision = _claimed_job(JobKind.PROVISION)
+
+    async def queue_is_running(_conn: object) -> bool:
+        return False
+
+    async def dequeue(_conn: object, _worker_id: str, **_kwargs: object) -> Job:
+        return provision
+
+    async def count_claimable(_conn: object, **_kwargs: object) -> int:
+        raise RuntimeError("telemetry depth query failed")
+
+    telemetry = SimpleNamespace(
+        enabled=True,
+        observe_queue_depth=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(job_worker.queue, "is_queue_paused", queue_is_running)
+    monkeypatch.setattr(job_worker.queue, "dequeue", dequeue)
+    monkeypatch.setattr(job_worker.queue, "count_claimable", count_claimable)
+    worker = _contract_worker(telemetry=telemetry)
+    caplog.clear()
+
+    with (
+        caplog.at_level(logging.INFO, logger="kdive.jobs.worker"),
+        pytest.raises(RuntimeError, match="telemetry depth query failed"),
+    ):
+        asyncio.run(worker.run_once("claim-loop-lane"))
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "claimed provision" in record.getMessage()
+    ]
+    assert messages == [
+        "worker fixed-worker-1 claimed provision job "
+        "11111111-1111-1111-1111-111111111111 lane=persisted-provision-lane attempt=3 "
+        "enqueued_at=2026-08-26T12:00:00+00:00 claim_at=2026-08-26T11:59:58+00:00 "
+        "queue_delay_s=0.000000"
+    ]
 
 
 def test_provision_stage_logs_completion_only_after_success(

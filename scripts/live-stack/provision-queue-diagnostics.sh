@@ -39,8 +39,11 @@ except (ImportError, OSError):
 
 try:
     raw = Path(os.environ["KDIVE_PROVISION_EVIDENCE_TARGET"]).read_text(encoding="utf-8")
-    fields = raw.removesuffix("\n").split("\t")
-    if len(fields) != 2 or "\n" in raw.removesuffix("\n"):
+    if not raw.endswith("\n"):
+        raise ValueError
+    record = raw.removesuffix("\n")
+    fields = record.split("\t")
+    if len(fields) != 2 or "\n" in record:
         raise ValueError
     job_id, system_id = (UUID(value) for value in fields)
 except (KeyError, OSError, UnicodeError, ValueError):

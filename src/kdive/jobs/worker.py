@@ -244,13 +244,14 @@ class Worker:
                 lease=self._lease,
                 accepted_lanes=single_lane,
             )
+            if job is not None:
+                _log_provision_claim(self._worker_id, job)
             if self._telemetry.enabled:
                 self._telemetry.observe_queue_depth(
                     await queue.count_claimable(conn, accepted_lanes=single_lane), lane=lane
                 )
         if job is None:
             return None
-        _log_provision_claim(self._worker_id, job)
         if self._telemetry.enabled and job.heartbeat_at is not None and job.created_at is not None:
             self._telemetry.record_time_to_claim(
                 job.kind.value, (job.heartbeat_at - job.created_at).total_seconds()
