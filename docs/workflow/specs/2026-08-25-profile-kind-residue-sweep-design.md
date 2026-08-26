@@ -399,17 +399,17 @@ identities.
    `_project_token` and the closed label vocabulary are what carry that second half.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
-   `redact_database_url`, which masks a URL **userinfo** password and blanket-redacts a
-   keyword/value conninfo mentioning `password`. It also blanket-redacts a URL whose **query**
-   names a credential keyword (`password`, `sslpassword`), which libpq reads there too. When
-   this design was written it did not: for a conninfo holding *both* a userinfo password and a
-   query credential, the userinfo branch fired, `urlunsplit` passed `parsed.query` through
-   verbatim, and the blanket-redaction fallback was never reached, so
+   `redact_database_url`, which masks a URL **userinfo** password and then blanket-redacts the
+   rendering if it still mentions `password` — which is also how a keyword/value conninfo is
+   handled. When this design was written the userinfo branch returned early instead: for a
+   conninfo holding *both* a userinfo password and a query credential, `urlunsplit` passed
+   `parsed.query` through verbatim and the blanket-redaction fallback was never reached, so
    `postgresql://kdive:<userinfo-pw>@db/kdive?password=<query-pw>` rendered with the second
-   credential intact. That defect predated this command and was shared with `verify-project`,
-   which prints through the same helper; it was tracked and fixed separately (#2077), since
-   `redact_database_url` sits outside this change's surface. Recorded because this design names
-   the function as a control, and a control's stated guarantee must match what it does.
+   credential intact — and libpq reads that query keyword, in preference to the userinfo one.
+   That defect predated this command and was shared with `verify-project`, which prints through
+   the same helper; it was tracked and fixed separately (#2077), since `redact_database_url`
+   sits outside this change's surface. Recorded because this design names the function as a
+   control, and a control's stated guarantee must match what it does.
    What is printed is `(system id, project, state, section label, resource
    kind)` — never the profile body, which is where a caller-supplied value could live.
 

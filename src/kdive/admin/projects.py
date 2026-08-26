@@ -153,35 +153,39 @@ async def verify_project(*, project: str) -> ProjectFundingStatus:
 def redact_database_url(url: str) -> str:
     """Mask the password in a Postgres conninfo so it is safe to print (ADR-0256).
 
-    Handles the ``postgresql://`` URL form carrying a userinfo password (password → ``***``,
-    host/port/db and a credential-free query intact). Returns the input unchanged when it
-    carries no password — the diagnostic value is the host/db, not the secret. Any *other*
-    string that mentions ``password`` is replaced wholesale with ``<redacted>``: a partial
-    mask could leak the tail of a real secret, so it is never attempted. That covers both a
-    libpq keyword/value conninfo (where the value may be quoted or spaced and a token regex
-    would only partially mask it) and a URL whose *query* names a credential keyword such as
-    ``password`` or ``sslpassword``, which libpq reads there too — masking the userinfo of
-    such a URL would print the second credential intact (#2077).
+    A ``postgresql://`` URL carrying a userinfo password is rebuilt with that password masked
+    (``***``), keeping host/port/db. The rendering is then held to one rule, which is also the
+    whole treatment of every other form: **if it still mentions** ``password`` **, it is
+    replaced wholesale** with ``<redacted>``. A partial mask could leak the tail of a real
+    secret, so it is never attempted — that is why a libpq keyword/value conninfo (whose value
+    may be quoted or spaced) goes wholesale, and why a URL carrying a second credential
+    somewhere the userinfo mask does not reach goes wholesale too. libpq reads connection
+    keywords from the URI **query** and percent-decodes them, and a query ``password`` wins
+    over the userinfo one, so masking only the userinfo would print the effective credential
+    (#2077); the check therefore runs over the percent-decoded rendering and covers the
+    fragment as well. A conninfo mentioning ``password`` nowhere is returned unchanged — the
+    diagnostic value is the host/db, not the secret.
 
     Args:
         url: A psycopg URL or keyword/value conninfo string.
 
     Returns:
-        A display-safe rendering with any password component masked.
+        A display-safe rendering: either the userinfo-masked URL, ``<redacted...>``, or the
+        input unchanged. It never contains the word ``password`` outside that marker.
     """
     parsed = urllib.parse.urlsplit(url)
-    query_names_credential = bool(re.search(r"password", parsed.query, re.IGNORECASE))
-    if parsed.scheme and parsed.password is not None and not query_names_credential:
+    rendered = url
+    if parsed.scheme and parsed.password is not None:
         host = parsed.hostname or ""
         if parsed.port is not None:
             host = f"{host}:{parsed.port}"
         netloc = f"{parsed.username or ''}:***@{host}"
-        return urllib.parse.urlunsplit(
+        rendered = urllib.parse.urlunsplit(
             (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
         )
-    if re.search(r"password", url, re.IGNORECASE):
+    if re.search(r"password", urllib.parse.unquote(rendered), re.IGNORECASE):
         return "<redacted: conninfo with password>"
-    return url
+    return rendered
 
 
 def format_verify_result(
