@@ -79,6 +79,24 @@ def test_record_provision_evidence_target_creates_private_exact_record(tmp_path:
     assert os.stat(target).st_mode & 0o777 == 0o600
 
 
+def test_record_provision_evidence_target_normalizes_restrictive_umask(tmp_path: Path) -> None:
+    target = tmp_path / "provision-target"
+    previous_umask = os.umask(0o777)
+    try:
+        spine.record_provision_evidence_target(
+            target,
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert os.stat(target).st_mode & 0o777 == 0o600
+    assert target.read_text() == (
+        "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222\n"
+    )
+
+
 def test_record_provision_evidence_target_refuses_existing_target(tmp_path: Path) -> None:
     target = tmp_path / "provision-target"
     target.write_text("first")
