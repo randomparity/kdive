@@ -50,15 +50,14 @@ execution progress. No public API or schema changes.
 
 **Steps**
 
-1. Add failing tests for `record_provision_evidence_target(path, job_id, system_id)`: it publishes
-   the exact two-UUID record by unique same-directory temporary file plus atomic no-replace link,
-   refuses any existing target (regular, symlink, or other), removes its temporary on every
-   collision/failure, and leaves exactly one winner under two concurrent writers. Run
+1. Add failing tests for `record_provision_evidence_target(path, job_id, system_id)`: it opens the
+   target with `O_CREAT|O_EXCL`, mode 0600; writes the exact two-UUID record; refuses any existing
+   target; and exposes an interrupted partial record for the consumer's malformed-input rejection
+   rather than inventing recovery. Run
    `uv run pytest tests/integration/live_stack/test_spine.py -k provision_evidence_target -q`.
    Expected: fail because the helper does not exist.
-2. Implement the private helper with exclusive first-publication semantics and call it in the named
-   SSH proof immediately after `systems.provision` supplies both the response job id and System id.
-   Re-run the selection; expected: pass.
+2. Implement the private single-writer helper and call it in the named SSH proof immediately after
+   `systems.provision` supplies both ids. Re-run the selection; expected: pass.
 3. Add failing script tests that require `set -euo pipefail`, source `env.sh`, validate the target's
    exact two UUIDs, pass the server DSN only through environment, use five-second connection and
    statement timeouts, and open a read-only transaction. Require an exact join on both job id and
@@ -105,7 +104,8 @@ execution progress. No public API or schema changes.
 - The authoritative claim timestamp is the `heartbeat_at` value returned by `dequeue` in the same
   database function call that changes the row from queued to running. The worker copies that value
   into an immutable journal record before any heartbeat renewal can mutate the row.
-- Claim log: `worker <id> claimed job <id> kind=<kind> lane=<persisted lane> attempt=<n> enqueued_at=<timestamp> claim_at=<initial-dequeue-heartbeat timestamp> queue_delay_s=<seconds>`.
+- Provision-claim log only:
+  `worker <id> claimed provision job <id> lane=<persisted lane> attempt=<n> enqueued_at=<timestamp> claim_at=<initial-dequeue-heartbeat timestamp> queue_delay_s=<seconds>`.
 - Provider stage log:
   `local-libvirt provision system=<id> job=<id-or-NONE> stage=<stage> event=<start|complete>`.
   Exact spans and exception semantics:
@@ -121,16 +121,17 @@ execution progress. No public API or schema changes.
 
 **Steps**
 
-1. Add failing tests for the worker startup and claim records. Construct a `Job` with distinct
-   persisted lane, enqueue timestamp, initial dequeue `heartbeat_at`, and attempt; assert every
-   field appears, payload/authorizing values do not, and a negative clock anomaly displays
-   `queue_delay_s=0` without changing either timestamp. Assert a later heartbeat mutation cannot
-   alter the already captured log record. Run:
+1. Add failing tests for the worker startup and provision-claim records. Construct a provision
+   `Job` with distinct persisted lane, enqueue timestamp, initial dequeue `heartbeat_at`, and
+   attempt; assert every field appears, payload/authorizing values do not, and a negative clock
+   anomaly displays `queue_delay_s=0` without changing either timestamp. Assert a later heartbeat
+   mutation cannot alter the captured record, and an unrelated job kind emits no new claim INFO.
+   Run:
    `uv run pytest tests/integration/live_stack/test_spine.py -k 'worker_claim or worker_lanes' -q`.
    Expected: fail because the records do not exist.
-2. Add the worker startup INFO line after configuration validation and before claim loops start.
-   Add the claim INFO line immediately after `queue.dequeue` returns a row, using the persisted
-   lane, `created_at`, and initial returned `heartbeat_at` as `claim_at`. Re-run; expected: pass.
+2. Add the startup INFO line after validation and before claim loops. Immediately after `dequeue`
+   returns, log only when `job.kind is JobKind.PROVISION`, using persisted lane, `created_at`, and
+   the initial returned `heartbeat_at` as `claim_at`. Re-run; expected: pass.
 3. Add a failing provider-stage test around the existing injected provision seams. Assert paired
    `event=start`/`event=complete` records in exact stage order, a missing completion when a stage
    raises, and that records omit profile data, paths, XML, guest output, and credentials. Run:
