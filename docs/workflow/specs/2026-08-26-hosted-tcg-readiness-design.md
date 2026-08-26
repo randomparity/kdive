@@ -52,10 +52,10 @@ because a future red proof must remain self-explaining.
 
 ## Components and data flow
 
-1. The hosted test exclusively publishes `<job UUID><TAB><System UUID><LF>` to the path named by
-   `KDIVE_PROVISION_EVIDENCE_TARGET`: unique same-directory temporary, atomic no-replace link, mode
-   0600, cleanup on every collision/failure. Any existing target is an error, so concurrent/retried
-   writers cannot replace the first proof identity.
+1. The hosted test exclusively creates the target named by `KDIVE_PROVISION_EVIDENCE_TARGET` with
+   `O_CREAT|O_EXCL`, mode 0600, and writes `<job UUID><TAB><System UUID><LF>`. Any existing target
+   is an error. Interruption may leave a partial file, which the consumer rejects as malformed; the
+   single-writer hosted proof needs no recovery or concurrent-writer protocol.
 2. `scripts/live-stack/provision-queue-diagnostics.sh TARGET_FILE` validates that exact two-UUID
    record, opens the server-role database with short connection and transaction-local statement
    timeouts, and queries exactly the named provision job whose internally generated,
@@ -70,8 +70,8 @@ because a future red proof must remain self-explaining.
    script emits either the fixed header plus one row or one sanitized fixed-code error line of at
    most 100 bytes. This makes successful proof evidence visible without replacing the spine verdict.
 4. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes, then one
-   immutable line per successful claim naming job id, kind, persisted lane, attempt, enqueue time,
-   initial dequeue `claim_at`, and non-negative queue delay.
+   immutable line only for a successful `JobKind.PROVISION` claim, naming job id, persisted lane,
+   attempt, enqueue time, initial dequeue `claim_at`, and non-negative queue delay.
 5. `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` emits start and completion around
    these exact calls: `_resolve_guest_arch`, `_materialize_rootfs`, `_prepare_baseline_kernel`,
    `prepare_overlay`, the whole overlay-customizer loop, `prepare_console`, and
@@ -128,10 +128,10 @@ entitled to runtime credentials.
 
 The SQL is a literal statement with no interpolated input, runs in a read-only transaction, has
 connect/statement and outer wall-clock bounds, and selects only ids, enums, counters, and
-timestamps. Target publication is atomic, no-replace, and mode 0600. The workflow retains the
-stop-commands shield so output cannot inject workflow commands. Worker/provider log templates
-contain only bounded identifiers, fixed stage/event names, and timestamps. Existing secret
-redaction remains the final logging control.
+timestamps. Target creation is exclusive and mode 0600. The workflow retains the stop-commands
+shield so output cannot inject workflow commands. Worker/provider log templates contain only
+bounded identifiers, fixed stage/event names, and timestamps. Existing secret redaction remains
+the final logging control.
 
 ### Out of scope
 
@@ -141,13 +141,14 @@ needed to diagnose this hosted proof.
 
 ## Verification
 
-Focused tests prove target publication is atomic no-replace, collision-clean, concurrent-one-winner,
-mode 0600, and records the exact response pair. Script tests reject malformed, mismatched, zero,
-and multiple targets; assert literal bounded read-only SQL; and enforce one sanitized fixed-code
-error line. Workflow-shape tests bind the same target path, outer 12-second timeout,
-stop-commands shield, and pre-cleanup order. Worker tests assert every claim field, immutable initial
-dequeue timestamp, and non-negative delay despite later heartbeat renewal. Provider tests assert
-paired records around each exact call, missing completion on a raised call, order, and redaction.
+Focused tests prove target creation is mode 0600 and exclusive, rejects an existing target, records
+the exact response pair, and leaves a partial interruption to the consumer's malformed-input check.
+Script tests reject malformed, mismatched, zero, and multiple targets; assert literal bounded
+read-only SQL; and enforce one sanitized fixed-code error line. Workflow-shape tests bind the same
+target path, outer 12-second timeout, stop-commands shield, and pre-cleanup order. Worker tests
+assert the provision claim fields, immutable initial dequeue timestamp, non-negative delay despite
+later renewal, and no new claim record for an unrelated job kind. Provider tests assert paired
+records around each exact call, missing completion on a raised call, order, and redaction.
 The final behavior proof runs only after review/simplification and guardrails: a hosted Ubuntu 26.04
 `live_vm_tcg (hosted)` job whose `headSha` equals final PR `headRefOid`, whose committed ppc64le
 image identity is reported, whose exact target report and immutable claim record agree, and in which

@@ -23,17 +23,18 @@ claimed handler/provider stall. Increasing the deadline would hide the same ambi
 
 The hosted proof records the queue and execution boundaries before changing timing:
 
-1. The hosted test exclusively publishes the provision response's job id and System id to a
-   mode-0600 workflow-temporary target by same-directory temporary plus atomic no-replace link. A
+1. The hosted test exclusively creates a mode-0600 workflow-temporary target with
+   `O_CREAT|O_EXCL` and writes the provision response's job id and System id. A partial record from
+   interruption is malformed and therefore unusable evidence; no recovery protocol is required. A
    read-only queue snapshot validates that pair and reports the exact joined System state plus
    persisted lane, job state, attempt, worker id, enqueue time, **last** heartbeat time, and lease
    expiry. It retains `ready`/`succeeded` and cannot substitute another job/System pair. Five-second
    connect/statement timeouts sit inside a 12-second whole-step timeout; failures are a bounded
    fixed-code line and nonzero when the target/exact join is unavailable, empty, multiply matched,
    mismatched, or timed out.
-2. A fixed worker logs its accepted lanes at startup and each successful claim with the persisted
-   lane, queue delay, and immutable initial `claim_at`: the `heartbeat_at` returned by the dequeue
-   database call before later renewals mutate the row.
+2. A fixed worker logs its accepted lanes at startup and, only for `JobKind.PROVISION`, logs the
+   persisted lane, queue delay, and immutable initial `claim_at`: the `heartbeat_at` returned by the
+   dequeue database call before later renewals mutate the row.
 3. Local-libvirt logs start and completion around each mapped synchronous provision call without
    logging paths, profile data, domain XML, guest output, or credentials.
 4. One usable hosted run selects the source correction from the first boundary lacking its expected
