@@ -32,6 +32,8 @@ execution progress. No public API or schema changes.
 
 **Files**
 
+- Create `scripts/live-stack/filter-worker-readiness-evidence.py`.
+- Modify `scripts/build-capture-bootstrap-manifest.py`.
 - Create `scripts/live-stack/provision-queue-diagnostics.sh`.
 - Modify `.github/workflows/live.yml`.
 - Modify `tests/scripts/test_live_stack_scripts.py`.
@@ -189,6 +191,29 @@ execution progress. No public API or schema changes.
   nonzero and becomes the workflow's existing fixed warning without replacing the spine verdict.
   The separate native proof keeps its pre-existing direct failure/cancellation journal capture.
 
+**Second evidence-selected correction**
+
+- Exact-head Ubuntu 26.04 run
+  [33013068295](https://github.com/randomparity/kdive/actions/runs/33013068295/job/98324100356)
+  retained the exact queued `default` provision row and reported only
+  `capture_bootstrap_manifest=false`; Postgres, MinIO, and capture recovery were true.
+- The root-side manifest build/install/producer verify and leaf `0:0:0644` assertion passed.
+  Diagnostic run
+  [33017429217](https://github.com/randomparity/kdive/actions/runs/33017429217/job/98339160715)
+  then reported `/usr/share/kdive`, uid/gid `0:0`, mode `0777`, and
+  `fingerprint_ancestor_replaceable` from the exact verifier under `kdive-worker-1`.
+- This proves the destination-parent/ambient-umask hypothesis: `_atomic_write` inherited mode
+  `0777`, the root producer validated only the leaf, and unprivileged no-follow readiness rejected
+  the replaceable parent.
+- `test_manifest_install_closes_root_producer_worker_consumer_mode_gap` drives the same `_install`
+  entry twice under umask `000`, with only `_prepare_install_parent` disabled in the legacy arm.
+  That arm reproduces parent mode `0777`, root-producer success, and runtime-verifier rejection;
+  the corrected arm requires parent mode `0755` and verifier success. Removing the normalization
+  call makes the corrected arm fail.
+- Retain the bounded readiness observation plus the fixed parent/reason diagnostic. Run
+  `verify_capture_bootstrap_manifest` under `kdive-worker-1` before any fixed worker starts, so an
+  accepted producer result proves the actual readiness identity and verifier.
+
 **Steps**
 
 1. Push the two evidence commits and dispatch `.github/workflows/live.yml` on this branch with the
@@ -244,19 +269,30 @@ installer's runtime-root producer, and require both the parent and new runtime r
 before the source fix. The source fix must normalize the selected installation parent to root:root
 mode 0755 before creating the runtime root, without weakening fingerprint attestation.
 
+Run [33013068295](https://github.com/randomparity/kdive/actions/runs/33013068295/job/98324100356)
+then isolated `capture_bootstrap_manifest=false` while every other readiness component was true.
+Run [33017429217](https://github.com/randomparity/kdive/actions/runs/33017429217/job/98339160715)
+proved the destination-parent cause by reporting `/usr/share/kdive` as `0:0:0777` and the exact
+reason `fingerprint_ancestor_replaceable`. The real-install regression failed with the
+normalization call removed because the corrected arm remained mode `0777`, then passed with
+no-follow root:root mode-0755 normalization restored. The workflow-shape regression requires the
+fixed parent/reason output and exact verifier identity.
+
 **Steps**
 
-1. Run adversarial branch review and simplification first. If either changes behavior, run the
-   required confirming review before proceeding.
-2. Run the focused script, worker, provider, and live-stack tests. Expected: pass.
+1. Run the focused readiness-filter, manifest installer, workflow-shape, worker, provider, and
+   live-stack tests. Expected: pass.
+2. Run adversarial branch review, security review, scope audit, and simplification. If a review or
+   simplification changes behavior, run the required confirming review before proceeding.
 3. Run repository guardrails only when the campaign orchestrator sequences the shared database test
-   environment: `just lint`, `just type`, `just test`, `prek run`, `just ci`. Expected: exit 0 each.
+   environment: `prek run --all-files`, `just ci`. Expected: exit 0 each.
 4. Push the final reviewed commit and dispatch the hosted workflow from that exact SHA. Require the
    run metadata to report Ubuntu 26.04, the committed ppc64le image identity, and `headSha` equal to
    `git rev-parse HEAD`. Require the exact queue target to agree with the immutable fixed-worker
    claim, and require provider records for that job/System to pair each mapped stage's
    start/completion in order through `define-start`; missing or inconsistent evidence rejects the
-   proof. Require transition to `ready`, the named SSH test pass, and a nonzero passed-proof summary.
+   proof. Require every readiness component true, transition to `ready`, the named SSH test pass,
+   and a nonzero passed-proof summary.
 5. Create/update the PR with `Closes #2056` only, wait for green CI, and require its `headRefOid` to
    equal the hosted-proved SHA and mergeability to be clean. Make no source/doc commit after the
    hosted proof; any change invalidates it and returns to step 1. Set `status:awaiting-merge`; stop

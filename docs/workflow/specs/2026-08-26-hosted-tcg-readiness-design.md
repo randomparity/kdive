@@ -2,7 +2,7 @@
 
 ## Scope and authority
 
-This design implements issue #2056 under scope token `q2056-498fae54` on branch
+This design implements issue #2056 under scope token `q2056-b6e4a669` on branch
 `feat/hosted-tcg-readiness-2056`, based on `main`. The operator requires the Ubuntu 26.04 hosted
 ppc64le TCG proof to reach `ready` and pass `test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
 The proof must expose the provision job's persisted lane and fixed-worker claim timing, and its
@@ -17,7 +17,9 @@ The permitted implementation surface is:
 - `docs/adr/0574-systemd-supervises-host-worker-incarnations.md`,
   `docs/adr/0581-hosted-provision-boundary-evidence.md`, and these issue-owned design artifacts;
 - `docs/guide/reference/config.md`;
-- `scripts/live-stack/filter-worker-journal-evidence.py` and
+- `scripts/build-capture-bootstrap-manifest.py`;
+- `scripts/live-stack/filter-worker-journal-evidence.py`,
+  `scripts/live-stack/filter-worker-readiness-evidence.py`, and
   `scripts/live-stack/provision-queue-diagnostics.sh`;
 - `src/kdive/config/external_env.py`, `src/kdive/jobs/capture_operations/bootstrap_attestation.py`,
   `src/kdive/jobs/capture_operations/bootstrap_elf.py`, `src/kdive/jobs/worker.py`, and
@@ -109,6 +111,25 @@ an attacker-replaceable ancestor even after the installer makes its
 installer's producer against a mode-0777 parent. The installer must make the selected parent and
 runtime root root:root mode 0755 before populating the runtime; attestation remains fail-closed.
 
+Exact-head Ubuntu 26.04 run
+[33013068295](https://github.com/randomparity/kdive/actions/runs/33013068295/job/98324100356)
+then identified the remaining pre-dequeue component. The exact job stayed queued on `default`,
+attempt 0, while the bounded slot-1 response reported Postgres, MinIO, and capture recovery true
+and `capture_bootstrap_manifest` false. The root-side manifest build, install, producer verify, and
+leaf `0:0:0644` assertion had already passed.
+
+The manifest producer's destination-parent contract was the concrete mismatch. `_atomic_write`
+created the destination parent under the privileged process's ambient umask, and `_install`
+validated only the leaf. Exact-head diagnostic run
+[33017429217](https://github.com/randomparity/kdive/actions/runs/33017429217/job/98339160715)
+reported `/usr/share/kdive`, uid/gid `0:0`, mode `0777`, and the allowlisted verifier reason
+`fingerprint_ancestor_replaceable` under the fixed worker identity. The observation proves the
+destination-parent/ambient-umask hypothesis: the root producer accepted a leaf whose world-writable
+parent the unprivileged no-follow readiness consumer rejected. The regression invokes the same
+`_install` entry twice under umask `000`, changing only whether `_prepare_install_parent` runs; the
+legacy arm reproduces mode `0777` and the verifier rejection, while the corrected arm requires
+root:root mode `0755` and verifier success.
+
 ## Components and data flow
 
 1. The hosted test exclusively creates the target named by `KDIVE_PROVISION_EVIDENCE_TARGET` with
@@ -149,7 +170,16 @@ runtime root root:root mode 0755 before populating the runtime; attestation rema
    parent and runtime root to root:root mode 0755, then removes group/world write bits recursively
    after populating the runtime. Every ancestor is therefore non-replaceable regardless of the
    hosted image's `/opt` mode or the invoking umask.
-9. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
+9. `scripts/build-capture-bootstrap-manifest.py` normalizes the installed manifest's destination
+   parent through an `O_DIRECTORY|O_NOFOLLOW` descriptor to root:root mode 0755 before its atomic
+   leaf write. The hosted workflow emits the fixed parent path/uid/gid/mode and an allowlisted
+   verifier reason while running `verify_capture_bootstrap_manifest` under `kdive-worker-1`, so an
+   accepted result proves the same identity and consumer as readiness.
+10. `scripts/live-stack/filter-worker-readiness-evidence.py` accepts at most 4096 bytes and exactly
+   the expected `/readyz` shape, then emits only `ready` plus the Postgres, MinIO,
+   capture-manifest, and capture-recovery booleans. The workflow bounds its loopback request at
+   eight seconds and captures it before cleanup on every outcome.
+11. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
    same proof's provision row with persisted lane and claim timestamp, show the System transition
    to `ready`, and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
@@ -165,9 +195,13 @@ fixed warning while preserving the original spine verdict. Such a run is not usa
 Worker/provider records are fixed-field INFO lines, not poll-loop output. The direct retained-journal
 capture keeps its existing time and line bounds, parses JSON messages, and emits only exact
 full-match lane, provision-claim, and provider-stage records; every other journal line is discarded.
-The lifecycle diagnostic response retains ADR-0574's bounded secret redaction. The new fixed records
+The lifecycle diagnostic response retains ADR-0574's bounded secret redaction. Those journal records
 contain no raw payloads, authorizing records, DSNs, environment values, dynamic exception text,
 paths, domain XML, console text, or secrets.
+The manifest diagnostic emits only its fixed `/usr/share/kdive` parent, numeric uid/gid/mode, and an
+allowlisted reason code; it never prints the caught exception. The readiness request is loopback-only,
+bounded to eight seconds and 4096 response bytes, and passes through an exact-shape filter. It emits
+no version object, dynamic exception, environment, or credential.
 
 The state deadline remains 600 seconds during diagnosis. It is not increased speculatively. A
 deadline change requires at least two completed hosted **end-to-end provision intervals**, each
