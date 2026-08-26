@@ -749,6 +749,29 @@ def test_provision_queue_diagnostics_sources_env_before_reporting_malformed_targ
     assert result.stderr == "provision-evidence-error code=target-malformed\n"
 
 
+def test_provision_queue_diagnostics_rejects_target_without_final_lf(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text(
+        "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 4
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=target-malformed\n"
+
+
 def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
     tmp_path: Path,
 ) -> None:
