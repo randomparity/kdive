@@ -2,7 +2,7 @@
 
 ## Scope and authority
 
-This design implements issue #2056 under scope token `q2056-a9c3e741` on branch
+This design implements issue #2056 under scope token `q2056-420ad62a` on branch
 `feat/hosted-tcg-readiness-2056`, based on `main`. The operator requires the Ubuntu 26.04 hosted
 ppc64le TCG proof to reach `ready` and pass `test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
 The proof must expose the provision job's persisted lane and fixed-worker claim timing, and its
@@ -49,6 +49,23 @@ with the exact missing evidence. Evidence that identifies a boundary outside the
 is likewise a scope blocker, not authority to expand. After a usable run selects the first broken
 boundary, correct it and run the hosted proof again. Diagnostic behavior stays in the final change
 because a future red proof must remain self-explaining.
+
+Run
+[32981623561](https://github.com/randomparity/kdive/actions/runs/32981623561/job/98219425910)
+provided the usable diagnostic. The exact provision job was persisted on `default` at
+`2026-08-26T14:51:00.739273Z` and remained `queued`, attempt 0, with no worker, heartbeat, or
+lease. The fixed worker advertised `default,state-fenced` at `14:50:18.567292Z`, then emitted no
+claim or provider-stage record. That selects worker readiness before dequeue rather than lane
+routing, handler dispatch, or local-libvirt.
+
+Source tracing makes the localized cause concrete. `Worker.run_once` returns before `dequeue` when
+its injected readiness probe is false. The process probe always calls
+`verify_capture_bootstrap_manifest`, whose default path is
+`/usr/share/kdive/capture-bootstrap-manifest.json`; the lifecycle installer creates the fixed
+worker's root-owned venv but does not install its matching manifest. The hosted workflow therefore
+builds the manifest as root from that venv's site-packages, installs it root:root mode 0644,
+verifies it against the same interpreter and source root, and does so before any lifecycle worker
+starts. The 600-second state deadline remains unchanged.
 
 ## Components and data flow
 
