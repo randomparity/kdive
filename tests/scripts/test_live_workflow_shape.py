@@ -452,6 +452,26 @@ def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:
     assert steps[evidence_index]["name"] == "Capture persisted provision boundary"
 
 
+def test_tcg_job_captures_bounded_worker_readiness_components() -> None:
+    spine_index, _ = _named_step(
+        "tcg", "Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)"
+    )
+    readiness_index, readiness = _named_step("tcg", "Capture worker readiness components")
+    diagnostic_index, _ = _named_step("tcg", "Capture worker lifecycle diagnostics")
+    cleanup_index, _ = _named_step("tcg", "Clean up live stack")
+    run = readiness["run"]
+
+    assert readiness["if"] == "always()"
+    assert "http://127.0.0.1:9465/readyz" in run
+    assert "--max-time 8" in run
+    assert "--max-filesize 4096" in run
+    assert "scripts/live-stack/filter-worker-readiness-evidence.py" in run
+    assert "::stop-commands::" in run
+    assert "worker readiness evidence unavailable" in run
+    assert "exit 0" in run
+    assert spine_index < readiness_index < diagnostic_index < cleanup_index
+
+
 @pytest.mark.parametrize(
     ("job", "condition"),
     (("tcg", "always()"), ("native", "failure() || cancelled()")),
