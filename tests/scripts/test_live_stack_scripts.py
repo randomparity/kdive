@@ -672,10 +672,11 @@ def test_live_stack_env_exports_required_defaults() -> None:
 
 
 def test_live_stack_lane_default_matches_the_process_default() -> None:
-    """env.sh's host-side lane fallback must equal core_settings' process default (#2058).
+    """Keep the host-side lane fallback equal to the process default (#2058).
 
-    Provision jobs route to the state-fenced lane (ADR-0550/0574), so a default-only fleet
-    never claims them and the hosted spine starves its own provision jobs.
+    Provision jobs persist on ``default``; restore/reprovision/snapshot use ``state-fenced``.
+    Matching the full process default keeps every active kind claimable without repeating a false
+    provision-routing premise.
     """
     env = (ROOT / "scripts/live-stack/env.sh").read_text()
     assert (
@@ -699,10 +700,31 @@ def test_client_urls_derive_from_the_configurable_ports() -> None:
 
 
 def test_live_stack_scripts_are_strict_bash() -> None:
-    for name in ("env.sh", "apply-migrations.sh", "up.sh", "down.sh", "status.sh"):
+    for name in (
+        "env.sh",
+        "apply-migrations.sh",
+        "up.sh",
+        "down.sh",
+        "status.sh",
+        "provision-queue-diagnostics.sh",
+    ):
         text = (ROOT / "scripts/live-stack" / name).read_text()
         assert text.startswith("#!/usr/bin/env bash\n"), f"{name}: missing bash shebang"
         assert "\nset -euo pipefail\n" in text, f"{name}: missing 'set -euo pipefail'"
+
+
+def test_provision_queue_diagnostics_is_exact_bounded_and_redacted() -> None:
+    text = (ROOT / "scripts/live-stack/provision-queue-diagnostics.sh").read_text()
+
+    assert "KDIVE_SERVER_DATABASE_URL" in text
+    assert "connect_timeout=5" in text
+    assert "SET TRANSACTION READ ONLY" in text
+    assert "SET LOCAL statement_timeout = '5s'" in text
+    assert "j.id = %s AND j.kind = 'provision' AND s.id = %s" in text
+    assert "last_heartbeat_at" in text
+    assert "provision-evidence-error code=" in text
+    for forbidden in ("j.payload,", "authorizing", "failure_context", "print(exc", "traceback"):
+        assert forbidden not in text
 
 
 def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() -> None:

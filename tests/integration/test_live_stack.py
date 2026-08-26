@@ -64,6 +64,7 @@ from tests.integration.live_stack.spine import (
     ok,
     phase,
     put_presigned,
+    record_provision_evidence_target,
     scalar,
     seed_metering,
     sha256_b64,
@@ -939,6 +940,11 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                         "ppc64le:provision",
                     )
                     system_id = data_str(env, "system_id")
+                    evidence_target = os.environ.get("KDIVE_PROVISION_EVIDENCE_TARGET")
+                    if evidence_target:
+                        record_provision_evidence_target(
+                            Path(evidence_target), env.object_id, system_id
+                        )
                     await await_system_state(op, "ppc64le:provision", system_id, "ready")
                 async with phase("ppc64le:systems_get"):
                     got = ok(

@@ -16,7 +16,8 @@ from __future__ import annotations
 import logging
 import socket
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -97,6 +98,25 @@ __all__ = [
 ]
 
 _log = logging.getLogger(__name__)
+
+
+@contextmanager
+def _provision_stage(system_id: UUID, job_id: UUID | None, stage: str) -> Iterator[None]:
+    """Log one bounded synchronous provision span."""
+    rendered_job_id = str(job_id) if job_id is not None else "NONE"
+    _log.info(
+        "local-libvirt provision system=%s job=%s stage=%s event=start",
+        system_id,
+        rendered_job_id,
+        stage,
+    )
+    yield
+    _log.info(
+        "local-libvirt provision system=%s job=%s stage=%s event=complete",
+        system_id,
+        rendered_job_id,
+        stage,
+    )
 
 
 class _LibvirtDomain(Protocol):
@@ -285,7 +305,8 @@ class LocalLibvirtProvisioning:
         # Resolve accel/emulator from live capabilities BEFORE creating any artifact (ADR-0340):
         # a fail-closed arch drift or a caps-read fault rejects with zero overlay/baseline and
         # skips the expensive rootfs materialization for a System that cannot be provisioned.
-        accel, emulator = self._resolve_guest_arch(profile.arch)
+        with _provision_stage(system_id, job_id, "resolve-arch"):
+            accel, emulator = self._resolve_guest_arch(profile.arch)
         # Snapshot which host artifacts pre-exist BEFORE materializing anything, so a failure after
         # materialization reclaims only what THIS call creates (ADR-0435): a pre-existing overlay,
         # baseline dir, or staged uploaded rootfs may back a live or recoverable prior attempt.
@@ -296,11 +317,16 @@ class LocalLibvirtProvisioning:
         # investigation-owned artifact (ADR-0441) and is deliberately NOT in this per-call reclaim.
         baseline_created = overlay_created = False
         try:
-            base = self._materialize_rootfs(section.rootfs, system_id, profile.arch, job_id=job_id)
+            with _provision_stage(system_id, job_id, "materialize-rootfs"):
+                base = self._materialize_rootfs(
+                    section.rootfs, system_id, profile.arch, job_id=job_id
+                )
             baseline_created = not pre_existing.baseline
-            baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
+            with _provision_stage(system_id, job_id, "prepare-baseline"):
+                baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
             overlay_created = not pre_existing.overlay
-            overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
+            with _provision_stage(system_id, job_id, "prepare-overlay"):
+                overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
             gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
             # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
             # allocated. drgn-live no longer needs a profile credential — it authenticates with the
@@ -326,11 +352,14 @@ class LocalLibvirtProvisioning:
                 accel=accel,
                 emulator=emulator,
             )
-            if overlay.created:
-                for customize in overlay_customizers:
-                    customize(overlay.path)
-            self._files.prepare_console(system_id)
-            self._define_and_start(xml, system_id)
+            with _provision_stage(system_id, job_id, "customize-overlay"):
+                if overlay.created:
+                    for customize in overlay_customizers:
+                        customize(overlay.path)
+            with _provision_stage(system_id, job_id, "prepare-console"):
+                self._files.prepare_console(system_id)
+            with _provision_stage(system_id, job_id, "define-start"):
+                self._define_and_start(xml, system_id)
         except CategorizedError:
             self._reclaim_materialized_on_failure(
                 system_id,

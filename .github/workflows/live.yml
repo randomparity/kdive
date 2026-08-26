@@ -415,6 +415,7 @@ jobs:
           # member holds SELECT/INSERT/UPDATE on budgets+quotas (migration 0107), fitting the
           # suite's out-of-band seeding.
           export KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}"
+          export KDIVE_PROVISION_EVIDENCE_TARGET="$RUNNER_TEMP/kdive-provision-evidence.target"
 
           scripts/live-vm/preflight-env.sh tcg
           # Run pytest directly — not through the justfile recipe, whose exit-5 tolerance ("no
@@ -436,11 +437,29 @@ jobs:
           operator_name="$(id -un)"
           preserve_names="PATH,CI,GITHUB_ACTIONS,GITHUB_WORKSPACE,RUNNER_ARCH,RUNNER_OS"
           preserve_names+=",RUNNER_TEMP,RUNNER_TOOL_CACHE,UV_CACHE_DIR,XDG_RUNTIME_DIR"
-          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT"
+          preserve_names+=",TCG_IMAGE_INPUT,DEBUGINFOD_INPUT,BUNDLE_INPUT,KDIVE_PROVISION_EVIDENCE_TARGET"
           exec sudo --preserve-env="$preserve_names" \
             --user="$operator_name" --group=kdive-live-control \
             env "HOME=$HOME" "USER=$operator_name" "LOGNAME=$operator_name" \
             /bin/bash -e -u -o pipefail "$RUNNER_TEMP/spine-tcg.sh"
+
+      - name: Capture persisted provision boundary
+        if: always()
+        # This metadata-only read is evidence, never the verdict. Bound the whole process (target
+        # parse, Python import, connect, query, teardown), and shield its fixed output anyway.
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          evidence_status=0
+          timeout --signal=TERM --kill-after=2s 12s \
+            scripts/live-stack/provision-queue-diagnostics.sh \
+            "$RUNNER_TEMP/kdive-provision-evidence.target" || evidence_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((evidence_status != 0)); then
+            echo "provision boundary evidence unavailable" >&2
+          fi
+          exit 0
 
       - name: Capture worker lifecycle diagnostics
         if: failure() || cancelled()

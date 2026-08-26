@@ -409,6 +409,28 @@ def _named_step(job: str, name: str) -> tuple[int, dict]:
     return index, steps[index]
 
 
+def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    spine_index, spine_step = _named_step(
+        "tcg", "Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)"
+    )
+    evidence_index, evidence = _named_step("tcg", "Capture persisted provision boundary")
+    diagnostic_index, _ = _named_step("tcg", "Capture worker lifecycle diagnostics")
+    cleanup_index, _ = _named_step("tcg", "Clean up live stack")
+    target = "$RUNNER_TEMP/kdive-provision-evidence.target"
+
+    assert f'export KDIVE_PROVISION_EVIDENCE_TARGET="{target}"' in spine_step["run"]
+    assert evidence["if"] == "always()"
+    assert target in evidence["run"]
+    assert "timeout --signal=TERM --kill-after=2s 12s" in evidence["run"]
+    assert "scripts/live-stack/provision-queue-diagnostics.sh" in evidence["run"]
+    assert "::stop-commands::" in evidence["run"]
+    assert "provision boundary evidence unavailable" in evidence["run"]
+    assert "exit 0" in evidence["run"]
+    assert spine_index < evidence_index < diagnostic_index < cleanup_index
+    assert steps[evidence_index]["name"] == "Capture persisted provision boundary"
+
+
 @pytest.mark.parametrize("job", ("tcg", "native"))
 def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str) -> None:
     """Diagnostics are observational and must run before destructive teardown (#1939).
