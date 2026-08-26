@@ -15,7 +15,8 @@ _INTERPRETER_RE = re.compile(r"Requesting program interpreter:\s*([^\]]+)")
 _LOADER_MAPPING_RE = re.compile(
     r"^(?:(?P<name>[^\s=>]+)\s+=>\s+)?(?P<path>/[^\s]+)\s+\(0x[0-9a-fA-F]+\)$"
 )
-_LOADER_VIRTUAL_RE = re.compile(r"^linux-(?:vdso|gate)[^\s]*\s+\(0x[0-9a-fA-F]+\)$")
+# A kernel vDSO has no filesystem path and may lack DT_SONAME; glibc then prints only its address.
+_LOADER_VIRTUAL_RE = re.compile(r"^(?:linux-(?:vdso|gate)[^\s]*\s+)?\(0x[0-9a-fA-F]+\)$")
 _LOADER_TRY_RE = re.compile(r"\btrying file=(?P<path>/[^\s]+)\s*$")
 _MAX_LOADER_OUTPUT_BYTES = 1_048_576
 _LOADER_TIMEOUT_SECONDS = 10.0

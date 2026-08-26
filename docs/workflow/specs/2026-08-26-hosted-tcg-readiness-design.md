@@ -81,6 +81,15 @@ builds the manifest as root from that venv's site-packages, installs it root:roo
 verifies it against the same interpreter and source root, and does so before any lifecycle worker
 starts. The 600-second state deadline remains unchanged.
 
+The first exact-head verification run
+[32998642219](https://github.com/randomparity/kdive/actions/runs/32998642219/job/98274351467)
+failed at manifest construction before worker startup. Its bounded error reported the
+address-only loader entry `(0x...)`. glibc initializes the kernel vDSO with an empty name and uses
+`DT_SONAME` only when the kernel image supplies it; this runner's vDSO therefore exercised a valid
+virtual mapping the strict parser did not admit. The parser now accepts either the named
+`linux-vdso*`/`linux-gate*` form or an address-only virtual mapping while retaining absolute,
+existing-file validation for every file-backed dependency.
+
 ## Components and data flow
 
 1. The hosted test exclusively creates the target named by `KDIVE_PROVISION_EVIDENCE_TARGET` with
@@ -111,7 +120,11 @@ starts. The 600-second state deadline remains unchanged.
    overlay-customizer loop, console preparation, and domain definition/start. An exception
    deliberately leaves the stage start unmatched. No profile, XML, path, credential, or guest output
    is logged.
-6. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
+6. `src/kdive/jobs/capture_operations/bootstrap_elf.py` treats a syntax-valid address-only loader
+   entry as an unnamed kernel vDSO. The entry contributes no file to the attested closure; malformed
+   addresses, unresolved dependencies, non-absolute file mappings, and other off-grammar output
+   still fail closed.
+7. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
    same proof's provision row with persisted lane and claim timestamp, show the System transition
    to `ready`, and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
@@ -185,7 +198,10 @@ read-only SQL; and enforce one sanitized fixed-code error line. Workflow-shape t
 target path, outer 12-second timeout, stop-commands shield, and pre-cleanup order. Worker tests
 assert the provision claim fields, immutable initial dequeue timestamp, non-negative delay despite
 later renewal, and no new claim record for an unrelated job kind. Provider tests assert paired
-records around each exact call, missing completion on a raised call, order, and redaction.
+records around each exact call, missing completion on a raised call, order, and redaction. Loader
+parser tests prove named and unnamed virtual mappings contribute no file while malformed output
+still fails closed.
+
 The final behavior proof runs only after review/simplification and guardrails: a hosted Ubuntu 26.04
 `live_vm_tcg (hosted)` job whose `headSha` equals final PR `headRefOid`, whose committed ppc64le
 image identity is reported, whose exact target report and immutable claim record agree, and in which

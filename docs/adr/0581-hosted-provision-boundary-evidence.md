@@ -29,6 +29,14 @@ verifies `/usr/share/kdive/capture-bootstrap-manifest.json`, while the hosted li
 built the root-owned worker venv but never built/installed its matching manifest. The missing
 attestation held the healthy-looking systemd worker not-ready and starved every queue lane.
 
+Exact-head hosted run
+[32998642219](https://github.com/randomparity/kdive/actions/runs/32998642219/job/98274351467)
+then failed before worker startup while building that manifest. Ubuntu 26.04's runtime loader
+reported its unnamed kernel vDSO as the valid address-only virtual mapping `(0x...)`.
+`parse_loader_list` admitted only the named `linux-vdso*` and `linux-gate*` forms, so it rejected
+the same non-file mapping when the vDSO omitted `DT_SONAME`. The manifest builder therefore failed
+closed on a valid loader trace rather than reaching the worker proof.
+
 ## Decision
 
 The hosted proof records the queue and execution boundaries before changing timing:
@@ -64,6 +72,9 @@ The hosted proof records the queue and execution boundaries before changing timi
    manifest as root from that venv's root-owned site-packages, installs it root:root mode 0644 at
    the readiness verifier's default path, and verifies its runtime identity before any lifecycle
    worker starts.
+7. The strict runtime-loader parser admits both named Linux vDSO mappings and glibc's address-only
+   form for an unnamed kernel vDSO. The address remains syntax-checked; file-backed mappings still
+   require an absolute, existing regular-file path, and every other unparseable line still fails.
 
 The diagnostics remain after the fix so a future red hosted proof with usable captures identifies
 its own boundary.
@@ -78,6 +89,10 @@ lines per provision; no MCP contract or database schema changes. The snapshot na
 empty, multiply matched, mismatched, or timed-out exact-target read and exits nonzero; its workflow
 wrapper warns and preserves the spine's pre-existing verdict rather than replacing it. Such a run
 is not usable diagnosis evidence.
+
+The manifest build now treats glibc's address-only unnamed-vDSO entry as virtual rather than as a
+missing file dependency. Its no-path shape cannot add an unattested file to the closure; malformed
+addresses and all other off-grammar loader output remain errors.
 
 ## Considered & rejected
 

@@ -215,7 +215,16 @@ execution progress. No public API or schema changes.
 
 **Files**
 
-- No new surface unless the hosted evidence exposes a defect in the already named boundary.
+- `src/kdive/jobs/capture_operations/bootstrap_elf.py`
+- `tests/jobs/capture_operations/test_manifest.py`
+
+Exact-head hosted run
+[32998642219](https://github.com/randomparity/kdive/actions/runs/32998642219/job/98274351467)
+failed before worker startup because Ubuntu 26.04 emitted the valid unnamed-vDSO loader line
+`(0x...)`. Add
+`test_loader_list_parser_ignores_address_only_virtual_mapping`, require it to fail with the hosted
+error, then make `_LOADER_VIRTUAL_RE` admit the syntax-checked address-only form without weakening
+file-backed mapping checks. The focused parser selection must report `5 passed`.
 
 **Steps**
 
