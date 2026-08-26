@@ -38,9 +38,9 @@ ping was slow" instead, and the two are indistinguishable downstream.
 
 The failure mode is worse than a flake because it hides rather than fires. A flaky assertion
 reddens and gets fixed. This drops a test from the run and reports success. Nor can it be
-chased by re-running: three consecutive runs in the gate's own topology on an idle host
-produced an identical summary line and byte-identical `-rs` blocks. It needs host load, which
-is the condition under which nobody is watching the skip count.
+chased by re-running: repeated runs in the gate's own topology on an idle host reproduce
+nothing — the summary line and the `-rs` block come back identical. It needs host load, which
+is the condition under which nobody is reading the skip count.
 
 ## Decision
 
@@ -78,8 +78,16 @@ or in the endpoint. It fails now, and names the key.
 The skip count becomes a function of each process's first probe rather than of per-test host
 load. Under xdist every worker latches separately, so a daemon that flaps *between* worker
 startups can still produce two verdicts inside one run. A daemon that flaps *during* the run
-cannot. The residual is bounded by worker count rather than by test count, and closing it
-needs cross-process machinery this record rejects below.
+cannot.
+
+That residual is not #2074 at a lower rate — it is a different, visible failure. A worker that
+latches "up" cannot skip a gated test for the rest of the run, and a worker that latches "down"
+skips *every* gated test it owns. So the outcome is either the full set or a whole worker's
+worth of it, never the single test that vanishes from a green summary and gets attributed to
+nothing. A delta that size is legible in the summary line; the one-test delta was not, which is
+why the original report took four observations to pin down. Closing the residual completely
+needs cross-process machinery this record rejects below, and it would buy determinism the
+summary line can already show.
 
 A host whose Docker daemon is down when the first gated test runs skips all of them, even if
 the daemon comes up later in the same run. That is the decision, not a gap in it: one answer
@@ -107,9 +115,10 @@ no gated test at all, and because it does not remove the cross-worker residual: 
 for the runs that need it and costs nothing for the runs that do not.
 
 **Propagating one master verdict to every xdist worker through `workerinput`** — closes the
-cross-worker residual completely. Rejected as machinery out of proportion to the hazard, which
-needs a daemon flapping within the few seconds that separate worker startups. Worth
-revisiting if a run is ever observed carrying two verdicts.
+cross-worker residual completely. Rejected as machinery out of proportion to what is left once
+the latch is in: a daemon flapping within the few seconds that separate worker startups, whose
+outcome is a whole worker's gated tests skipping at once rather than a single test going
+missing. Worth revisiting if a run is ever observed carrying two verdicts.
 
 **`functools.cache` on `docker_available`** — the same latch in one line. Rejected because
 `cache_clear()` is the only reset it offers, and clearing is the wrong operation: a test that
