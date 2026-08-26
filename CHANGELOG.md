@@ -782,6 +782,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Point at the project-token control instead of restating it
 - Align the records with the shipped report, and strip review transcript
 - Specify what the report must say, not the bytes it prints
+- Name what the latch buys, not just how much residual is left
 
 ### Fixed
 
@@ -1272,6 +1273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop the closing block's two classes overlapping
 - Make the runbook block self-contained and match its precedent
 - Classify listed rows by the label vocabulary, not by prose
+- Latch a skip gate's resource probe once per process
 
 ### Build
 
