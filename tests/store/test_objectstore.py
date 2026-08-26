@@ -74,8 +74,15 @@ def _suspend_versioning_or_skip(store: ObjectStore) -> Iterator[None]:
         )
 
 
-def _legacy_inventory_ids_or_skip(store: ObjectStore, key: str) -> tuple[str, ...]:
-    """Return suspended-write identities, or skip when inventory lacks them."""
+def _legacy_inventory_ids(store: ObjectStore, key: str) -> tuple[str, ...]:
+    """Return the suspended-write identities inventory reports for ``key``.
+
+    Only *unsupported version inventory* skips, and it is a capability answer the endpoint
+    gives explicitly. An empty listing is not: reaching this line means the endpoint has
+    already accepted versioning suspension and answered the listing, so a key written a
+    moment ago and absent from its own inventory is a defect in the store or the endpoint.
+    Skipping on it dropped this test from a green run (#2074, ADR-0580).
+    """
     try:
         page = store.list_version_page(key)
     except CategorizedError as error:
@@ -84,7 +91,11 @@ def _legacy_inventory_ids_or_skip(store: ObjectStore, key: str) -> tuple[str, ..
         raise
     version_ids = tuple(entry.version_id for entry in page.entries if entry.key == key)
     if not version_ids:
-        pytest.skip("object-store version inventory does not expose a suspended legacy identity")
+        pytest.fail(
+            f"version inventory reports no identity for {key!r}, which was written under "
+            f"suspended versioning a moment earlier; the listing returned "
+            f"{tuple(entry.key for entry in page.entries)!r}"
+        )
     return version_ids
 
 
@@ -148,6 +159,32 @@ def test_version_values_are_immutable() -> None:
         page.is_truncated = True  # ty: ignore[invalid-assignment]
     with pytest.raises(FrozenInstanceError):
         batch.history_complete = False  # ty: ignore[invalid-assignment]
+
+
+def test_legacy_inventory_ids_returns_the_suspended_null_identity() -> None:
+    client = _VersionClient(
+        [{"Versions": [_version("p/legacy", "null", latest=True)], "IsTruncated": False}]
+    )
+
+    assert _legacy_inventory_ids(ObjectStore(client, "bucket"), "p/legacy") == ("null",)
+
+
+def test_legacy_inventory_ids_fails_when_a_just_written_key_is_absent() -> None:
+    """An empty listing is a defect, not a capability answer, so it must not skip (#2074).
+
+    The ``skip`` catch is load-bearing: a regression skips instead of failing, which would
+    skip *this* test and leave the suite green — the silent-coverage-loss shape ADR-0580
+    exists to forbid.
+    """
+    client = _VersionClient(
+        [{"Versions": [_version("p/other", "v1", latest=True)], "IsTruncated": False}]
+    )
+
+    try:
+        with pytest.raises(pytest.fail.Exception, match="reports no identity"):
+            _legacy_inventory_ids(ObjectStore(client, "bucket"), "p/legacy")
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"an empty inventory must fail the test, not skip it: {exc}")
 
 
 def test_list_version_page_lists_data_and_markers_with_continuation() -> None:
@@ -1743,7 +1780,7 @@ def test_minio_suspended_versioning_exposes_legacy_null_when_supported(
         with _suspend_versioning_or_skip(minio_store):
             minio_store._client.put_object(Bucket=minio_store._bucket, Key=key, Body=b"payload")
             wrote_legacy_version = True
-            observed_version_ids = _legacy_inventory_ids_or_skip(minio_store, key)
+            observed_version_ids = _legacy_inventory_ids(minio_store, key)
             assert observed_version_ids == ("null",)
             minio_store.delete_version(key, "null")
             deleted_legacy_version = True

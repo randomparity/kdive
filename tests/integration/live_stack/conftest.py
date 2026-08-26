@@ -36,13 +36,28 @@ def _issuer_reachable(issuer: OidcIssuer) -> bool:
         return False
 
 
+# Session-memoized per JWKS URI, for the same reason as _SKEW_CACHE below: require_issuer()
+# is called from seven test modules and the fetch it gates on costs up to five seconds, so
+# re-probing per test made a slow issuer under suite load indistinguishable from an absent
+# one — one test would drop out of a green run and the skip count varied between runs on an
+# unchanged tree (#2074, ADR-0580). One answer per process, latched both ways.
+_ISSUER_REACHABLE: dict[str, bool] = {}
+
+
 def require_issuer() -> OidcIssuer:
-    """Skip unless the mock-OIDC issuer is configured and its JWKS is reachable."""
+    """Skip unless the mock-OIDC issuer is configured and its JWKS answered this session.
+
+    Reachability is probed once per JWKS URI and latched. An issuer that answered at
+    session start stays reachable as far as this process is concerned, so a later outage
+    fails the tests that need it rather than skipping them.
+    """
     base_url = os.environ.get("KDIVE_OIDC_ISSUER")
     if not base_url:
         pytest.skip("KDIVE_OIDC_ISSUER unset; start the issuer (`docker compose up -d oidc`)")
     issuer = oidc_issuer_from_env()
-    if not _issuer_reachable(issuer):
+    if issuer.jwks_uri not in _ISSUER_REACHABLE:
+        _ISSUER_REACHABLE[issuer.jwks_uri] = _issuer_reachable(issuer)
+    if not _ISSUER_REACHABLE[issuer.jwks_uri]:
         pytest.skip(f"mock-OIDC issuer JWKS unreachable at {issuer.jwks_uri}")
     return issuer
 
