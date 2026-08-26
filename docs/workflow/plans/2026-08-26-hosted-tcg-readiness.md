@@ -176,6 +176,10 @@ execution progress. No public API or schema changes.
   site-packages, installs `/usr/share/kdive/capture-bootstrap-manifest.json`, verifies it against
   the same interpreter/source root, and checks ownership and mode. Expected focused output:
   `1 passed`.
+- The hosted TCG lifecycle diagnostics step runs under `if: always()` before cleanup so its bounded
+  journal exposes the immutable provision `claim_at` and provider stages on a successful final
+  proof. The shared workflow-shape test requires this success path only for `tcg`; native capture
+  keeps its existing failure/cancellation condition.
 
 **Steps**
 

@@ -481,8 +481,9 @@ jobs:
           exit 0
 
       - name: Capture worker lifecycle diagnostics
-        if: failure() || cancelled()
+        if: always()
         # Observational only: the workflow verdict belongs to the spine step above. The
+        # Successful TCG proofs need this journal's immutable provision claim_at evidence too.
         # ::stop-commands:: token keeps a journal-sourced "::error::" line from being parsed as
         # workflow commands, and every failure path degrades to a warning + exit 0 — diagnostics
         # are best-effort evidence, never a gate (#1939).

@@ -80,12 +80,14 @@ starts. The 600-second state deadline remains unchanged.
    System state, so `ready`/`succeeded` remains visible. Zero or multiple matches, a job/System
    mismatch, malformed target data, or an unavailable query is nonzero. The one row uses a fixed
    literal-tab-separated header and explicit `NONE` values.
-3. `.github/workflows/live.yml` gives the hosted TCG spine a workflow-temporary target path and
-   invokes the script in a small `if: always()` step before failure-only journal capture and
-   cleanup, under its own `::stop-commands::` shield. GNU
-   `timeout --signal=TERM --kill-after=2s 12s` bounds the entire invocation, not only SQL. The
-   script emits either the fixed header plus one row or one sanitized fixed-code error line of at
-   most 100 bytes. This makes successful proof evidence visible without replacing the spine verdict.
+3. `.github/workflows/live.yml` gives the hosted TCG spine a workflow-temporary target path,
+   invokes the script in an `if: always()` step, then captures the bounded fixed-worker journal on
+   every TCG outcome before cleanup. Both captures use `::stop-commands::` shields and exit zero, so
+   evidence never replaces the spine verdict. GNU
+   `timeout --signal=TERM --kill-after=2s 12s` bounds the whole queue diagnostic, not only SQL; its
+   output is either the fixed header plus one row or one sanitized fixed-code error line of at most
+   100 bytes. The existing 55-minute/400-line journal bound retains immutable claim timing and
+   provider stages on both green and red proofs.
 4. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes, then one
    immutable line only for a successful `JobKind.PROVISION` claim, naming job id, persisted lane,
    attempt, enqueue time, initial dequeue `claim_at`, and non-negative queue delay.
