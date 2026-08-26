@@ -439,6 +439,21 @@ _select_libvirt_tuple() {
   fi
 }
 
+_prepare_attested_runtime_root() {
+  local runtime_root="$1" owner="$2" group="$3" parent
+  parent="$(dirname -- "$runtime_root")"
+  if [[ ! -d $parent || -L $parent ]]; then
+    echo "lifecycle runtime parent must be a real directory: $parent" >&2
+    return 1
+  fi
+  install -d -o "$owner" -g "$group" -m 0755 -- "$parent"
+  if [[ -L $runtime_root || (-e $runtime_root && ! -d $runtime_root) ]]; then
+    echo "lifecycle runtime root must be a real directory: $runtime_root" >&2
+    return 1
+  fi
+  install -d -o "$owner" -g "$group" -m 0755 -- "$runtime_root"
+}
+
 _prepare_source_link() {
   local source_root="$1" install_link="$2"
   if [[ -L $install_link ]] &&
@@ -546,7 +561,8 @@ done
 
 install -d -o root -g root -m 0755 /usr/local/libexec /etc/kdive
 install -d -o root -g root -m 0700 /etc/kdive/credentials
-install -d -o root -g root -m 0755 "$state_root" /opt/kdive-live-worker-lifecycle
+install -d -o root -g root -m 0755 "$state_root"
+_prepare_attested_runtime_root /opt/kdive-live-worker-lifecycle root root
 install -d -o root -g root -m 0711 "$state_root/slots"
 _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
   "$operator_uid" "$libvirt_group_gid" 0 0

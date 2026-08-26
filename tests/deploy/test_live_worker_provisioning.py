@@ -91,6 +91,8 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert "--witness-dsn" not in source
     create = "uv venv --python /usr/bin/python3 /opt/kdive-live-worker-lifecycle/.venv"
     install = "uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive"
+    prepare = "_prepare_attested_runtime_root /opt/kdive-live-worker-lifecycle root root"
+    assert source.index(prepare) < source.index(create)
     assert source.index(create) < source.index(install)
     assert "-m 0600" in source
     assert "/etc/kdive/credentials/live-worker-witness.dsn" in source
@@ -105,6 +107,28 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert "getent group kvm >/dev/null" in source
     assert '--groups "$libvirt_group,kvm"' in source
     assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
+
+
+def test_installer_hardens_runtime_install_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "opt"
+    parent.mkdir()
+    parent.chmod(0o777)
+    runtime_root = parent / "kdive-live-worker-lifecycle"
+    command = r"""
+source "$1"
+_prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(runtime_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
 
 
 def test_installer_reports_socket_activation_failure_context() -> None:
