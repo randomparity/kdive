@@ -42,7 +42,7 @@ def redact_url_credentials(url: str) -> str:
                 host = parts.hostname or ""
                 if ":" in host:
                     host = f"[{host}]"
-                if parts.port:
+                if parts.port is not None:
                     host = f"{host}:{parts.port}"
                 url = urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
             return url
