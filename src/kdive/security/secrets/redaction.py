@@ -28,12 +28,20 @@ def redact_url_credentials(url: str) -> str:
     schemeless/relative inputs (via a regex fallback, since ``urlsplit`` only exposes
     credentials when a ``//netloc`` is present). Never raises: a value that cannot be
     parsed is redacted to ``REDACTION`` rather than echoed.
+
+    ``parts.hostname`` strips the brackets from an IPv6 literal, so they are put back — the
+    same treatment ``redact_database_url`` applies (#2080), since the two must not disagree
+    about how a host is rendered. Without them the remaining string is no longer a parseable
+    URL and its host and port stop being separable, so the redacted value no longer names the
+    endpoint it was contacted at (#2086).
     """
     try:
         parts = urlsplit(url)
         if parts.netloc:
             if parts.username or parts.password:
                 host = parts.hostname or ""
+                if ":" in host:
+                    host = f"[{host}]"
                 if parts.port:
                     host = f"{host}:{parts.port}"
                 url = urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
