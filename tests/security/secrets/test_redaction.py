@@ -41,6 +41,34 @@ def test_redact_url_credentials_handles_userinfo_with_empty_host() -> None:
     assert redact_url_credentials("https://user:pass@:5432/db") == "https://:5432/db"
 
 
+def test_redact_url_credentials_keeps_ipv6_brackets_with_port() -> None:
+    # Without the brackets, "2001:db8::1:5432" cannot be split back into host and port.
+    url = "postgresql://u:p@[2001:db8::1]:5432/db"  # pragma: allowlist secret
+    assert redact_url_credentials(url) == "postgresql://[2001:db8::1]:5432/db"
+
+
+def test_redact_url_credentials_keeps_ipv6_brackets_without_port() -> None:
+    url = "https://u:p@[::1]/x"  # pragma: allowlist secret
+    assert redact_url_credentials(url) == "https://[::1]/x"
+
+
+def test_redact_url_credentials_keeps_ipv6_brackets_with_zone_id() -> None:
+    # urlsplit accepts a percent-encoded zone id inside the brackets and reports it as the host.
+    url = "https://u:p@[fe80::1%25eth0]:8443/x"  # pragma: allowlist secret
+    assert redact_url_credentials(url) == "https://[fe80::1%25eth0]:8443/x"
+
+
+def test_redact_url_credentials_leaves_ipv4_host_unbracketed() -> None:
+    url = "https://u:p@192.0.2.1:8443/x"  # pragma: allowlist secret
+    assert redact_url_credentials(url) == "https://192.0.2.1:8443/x"
+
+
+def test_redact_url_credentials_fails_closed_on_unparseable_port() -> None:
+    # A non-numeric port raises out of parts.port; the value must be redacted, never echoed.
+    url = "postgresql://u:p@[2001:db8::1]:notaport/db"  # pragma: allowlist secret
+    assert redact_url_credentials(url) == REDACTION
+
+
 def test_redactor_masks_value_with_regex_metacharacters() -> None:
     redactor = Redactor(["a.b*c+(d)"], registry=SecretRegistry())
     assert redactor.redact_text("prefix a.b*c+(d) suffix") == f"prefix {REDACTION} suffix"
