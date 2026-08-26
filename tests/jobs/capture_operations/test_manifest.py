@@ -201,9 +201,16 @@ def test_runtime_verifier_rejects_replace_capable_ancestor(tmp_path: Path) -> No
     manifest = tmp_path / "manifest.json"
     _write_manifest(manifest, _fixture_manifest(executable))
     selected.parent.chmod(0o777)
+    metadata = selected.parent.stat()
 
-    with pytest.raises(PermissionError, match="fingerprint ancestor.*replaceable"):
+    with pytest.raises(PermissionError) as error:
         verify_capture_bootstrap_manifest(manifest, executable, expected_uid=os.getuid())
+
+    assert str(error.value) == (
+        "capture bootstrap fingerprint ancestor is replaceable: "
+        f"path={str(selected.parent)!r} uid={metadata.st_uid} "
+        f"gid={metadata.st_gid} mode=0777"
+    )
 
 
 def test_fingerprint_refuses_symlink(tmp_path: Path) -> None:

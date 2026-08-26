@@ -25,37 +25,50 @@ def _open_component(parent_fd: int, name: str, *, directory: bool) -> int:
         ) from error
 
 
-def _verify_ancestor(metadata: os.stat_result, child: os.stat_result, expected_uid: int) -> None:
+def _verify_ancestor(
+    path: Path,
+    metadata: os.stat_result,
+    child: os.stat_result,
+    expected_uid: int,
+) -> None:
     mode = metadata.st_mode
+    details = (
+        f"path={str(path)!r} uid={metadata.st_uid} gid={metadata.st_gid} "
+        f"mode={stat.S_IMODE(mode):04o}"
+    )
     if not stat.S_ISDIR(mode) or not _approved(metadata, expected_uid):
-        raise PermissionError("capture bootstrap fingerprint ancestor has an unapproved owner")
+        raise PermissionError(
+            f"capture bootstrap fingerprint ancestor has an unapproved owner: {details}"
+        )
     writable_by_others = bool(mode & (stat.S_IWGRP | stat.S_IWOTH))
     sticky_protected = bool(mode & stat.S_ISVTX) and _approved(child, expected_uid)
     if writable_by_others and not sticky_protected:
-        raise PermissionError("capture bootstrap fingerprint ancestor is replaceable")
+        raise PermissionError(f"capture bootstrap fingerprint ancestor is replaceable: {details}")
 
 
 def _open_attested(path: Path, expected_uid: int) -> tuple[int, os.stat_result]:
     if not path.is_absolute() or not path.parts[1:]:
         raise PermissionError("capture bootstrap fingerprint path must be an absolute file path")
-    parent_fd = os.open("/", _DIRECTORY_FLAGS)
+    parent_path = Path("/")
+    parent_fd = os.open(parent_path, _DIRECTORY_FLAGS)
     parent_metadata = os.fstat(parent_fd)
     try:
         for component in path.parts[1:-1]:
             child_fd = _open_component(parent_fd, component, directory=True)
             try:
                 child_metadata = os.fstat(child_fd)
-                _verify_ancestor(parent_metadata, child_metadata, expected_uid)
+                _verify_ancestor(parent_path, parent_metadata, child_metadata, expected_uid)
             except BaseException:
                 os.close(child_fd)
                 raise
             os.close(parent_fd)
             parent_fd = child_fd
+            parent_path /= component
             parent_metadata = child_metadata
         file_fd = _open_component(parent_fd, path.name, directory=False)
         try:
             file_metadata = os.fstat(file_fd)
-            _verify_ancestor(parent_metadata, file_metadata, expected_uid)
+            _verify_ancestor(parent_path, parent_metadata, file_metadata, expected_uid)
         except BaseException:
             os.close(file_fd)
             raise
