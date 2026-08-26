@@ -13,8 +13,172 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.outcomes import Skipped
 
 from tests.support import xdist_backend
+
+
+class _CountingProbe:
+    """A stand-in for the Docker ping that records how often it was asked.
+
+    Answers are consumed in order and the last one repeats, so ``_CountingProbe(True,
+    False)`` models a daemon that answers at session start and stops answering afterwards
+    — the #2074 condition. A call count of one is the assertion that matters.
+    """
+
+    def __init__(self, *answers: bool) -> None:
+        self._answers = answers
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        return self._answers[min(self.calls - 1, len(self._answers) - 1)]
+
+
+@pytest.fixture
+def docker_unlatched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the session Docker verdict for one test and put the real one back after.
+
+    ``monkeypatch`` restores whatever the module held, not ``None``: a fabricated verdict
+    left behind would be trusted by every later Docker-gated test in this worker, and an
+    unset latch would make the next one re-probe under load, which is the behaviour
+    ADR-0580 removes.
+    """
+    monkeypatch.setattr(xdist_backend, "_docker_verdict", None)
+
+
+def test_docker_available_probes_once_and_reuses_the_verdict(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe = _CountingProbe(True, False)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+
+    first = xdist_backend.docker_available()
+    second = xdist_backend.docker_available()
+
+    # A second probe would have answered False; the latched verdict does not.
+    assert (first, second) == (True, True)
+    assert probe.calls == 1
+
+
+def test_docker_available_latches_an_unavailable_verdict_too(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon that comes up mid-run does not un-skip the tests already skipped."""
+    probe = _CountingProbe(False, True)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+
+    first = xdist_backend.docker_available()
+    second = xdist_backend.docker_available()
+
+    assert (first, second) == (False, False)
+    assert probe.calls == 1
+
+
+def test_skip_without_docker_stops_skipping_once_the_daemon_has_answered(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #2074 property: a run that had Docker cannot lose a test to a slow ping.
+
+    The second call is caught rather than allowed to propagate — a regression here would
+    otherwise skip *this* test, which is exactly the silent-coverage-loss shape under test.
+    """
+    monkeypatch.delenv("KDIVE_REQUIRE_DOCKER", raising=False)
+    probe = _CountingProbe(True, False)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+
+    xdist_backend.skip_without_docker()
+    try:
+        xdist_backend.skip_without_docker()
+    except Skipped as exc:
+        pytest.fail(f"a latched-available verdict must never skip a later test: {exc}")
+
+    assert probe.calls == 1
+
+
+def test_skip_without_docker_keeps_skipping_on_a_latched_unavailable_verdict(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KDIVE_REQUIRE_DOCKER", raising=False)
+    probe = _CountingProbe(False, True)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+
+    for _ in range(2):
+        with pytest.raises(Skipped, match="Docker unavailable"):
+            xdist_backend.skip_without_docker()
+
+    assert probe.calls == 1
+
+
+def test_require_docker_answers_before_the_probe_and_leaves_the_latch_unset(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``KDIVE_REQUIRE_DOCKER=1`` still short-circuits, and does not decide the session."""
+    probe = _CountingProbe(False)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+    monkeypatch.setenv("KDIVE_REQUIRE_DOCKER", "1")
+
+    xdist_backend.skip_without_docker()
+    assert probe.calls == 0
+    assert xdist_backend._docker_verdict is None
+
+    # Unset, the very next call probes for real — proving the count above was a
+    # short-circuit and not a latch this test had already taken.
+    monkeypatch.delenv("KDIVE_REQUIRE_DOCKER")
+    with pytest.raises(Skipped, match="Docker unavailable"):
+        xdist_backend.skip_without_docker()
+    assert probe.calls == 1
+
+
+def test_acquisition_failure_raises_once_the_daemon_has_answered(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A daemon that dies mid-run reddens the run instead of shrinking it (ADR-0580).
+
+    The ``Skipped`` catch is load-bearing: a regression converts the acquisition failure
+    back into a skip, which would skip *this* test and leave the suite green — the same
+    silent-coverage-loss shape the test exists to forbid.
+    """
+    probe = _CountingProbe(True, False)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+    assert xdist_backend.docker_available() is True  # the session-start verdict
+
+    def _start(_labels: Mapping[str, str]) -> tuple[str, str]:
+        raise RuntimeError("daemon went away")
+
+    try:
+        with (
+            pytest.raises(RuntimeError, match="daemon went away"),
+            xdist_backend.shared_container_or_skip(
+                tmp_path, "pg", start=_start, stop=lambda _cid: None, require_docker=False
+            ),
+        ):
+            pass  # pragma: no cover - acquisition raises before the body runs
+    except Skipped as exc:
+        pytest.fail(f"a latched-available verdict must raise, not skip: {exc}")
+
+    assert probe.calls == 1
+
+
+def test_acquisition_failure_still_skips_when_the_daemon_never_answered(
+    docker_unlatched: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The skip a laptop without Docker relies on is unchanged."""
+    probe = _CountingProbe(False)
+    monkeypatch.setattr(xdist_backend, "_probe_docker", probe)
+
+    def _start(_labels: Mapping[str, str]) -> tuple[str, str]:
+        raise RuntimeError("cannot connect to the docker daemon")
+
+    with (
+        pytest.raises(Skipped, match="Docker unavailable for testcontainers"),
+        xdist_backend.shared_container_or_skip(
+            tmp_path, "pg", start=_start, stop=lambda _cid: None, require_docker=False
+        ),
+    ):
+        pass  # pragma: no cover - acquisition skips before the body runs
+
+    assert probe.calls == 1
 
 
 def test_worker_id_defaults_to_master(monkeypatch: pytest.MonkeyPatch) -> None:

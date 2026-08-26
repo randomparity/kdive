@@ -88,9 +88,8 @@ def with_database_name(url: str, dbname: str) -> str:
     return urlunsplit(parts._replace(path=f"/{dbname}"))
 
 
-def docker_available() -> bool:
-    """True if the Docker daemon answers a ping. Used to decide whether a container
-    failure means 'Docker is down' (skip) or a real error (propagate)."""
+def _probe_docker() -> bool:
+    """Ping the Docker daemon once. Every failure mode means "not usable"."""
     try:
         from testcontainers.core.docker_client import DockerClient
 
@@ -100,9 +99,39 @@ def docker_available() -> bool:
     return True
 
 
+# The session verdict: None until the first probe, then that probe's answer forever.
+# Reset only by a test that fabricates a verdict, and only via `monkeypatch` so the real
+# one comes back (ADR-0580).
+_docker_verdict: bool | None = None
+
+
+def docker_available() -> bool:
+    """Whether this process's Docker daemon answered, probed once and latched (ADR-0580).
+
+    Decides whether a container failure means "Docker is down" (skip) or a real error
+    (propagate). The answer is a property of the *session*, not of the instant a given test
+    happens to ask: re-pinging per test made a slow ping under suite load indistinguishable
+    from an absent daemon, so one test would drop out of a green run and the skip count
+    varied between runs on an unchanged tree (#2074).
+
+    Latching cuts both ways on purpose. A daemon that answered at session start keeps
+    answering as far as this process is concerned, so a later outage surfaces as a test
+    failure rather than a skip; a daemon that was down stays down, so the gated tests skip
+    as a set instead of some of them.
+    """
+    global _docker_verdict
+    if _docker_verdict is None:
+        _docker_verdict = _probe_docker()
+    return _docker_verdict
+
+
 def skip_without_docker() -> None:
     """Skip the calling test when Docker is unusable, unless ``KDIVE_REQUIRE_DOCKER=1``
-    (then the test runs and is allowed to fail loudly on a broken runner)."""
+    (then the test runs and is allowed to fail loudly on a broken runner).
+
+    The env override answers before the probe and leaves the session verdict undecided, so
+    setting it never commits this process to an answer it did not measure.
+    """
     if os.environ.get("KDIVE_REQUIRE_DOCKER") == "1":
         return
     if not docker_available():
@@ -310,11 +339,14 @@ def shared_container_or_skip(
     """Yield the shared server URL, turning a genuine Docker-down failure into a skip.
 
     Drives :func:`shared_container` but scopes the skip to *acquisition*: only when
-    ``__enter__`` fails **and** Docker is actually down (and not ``require_docker``)
-    does this skip. A failure while Docker is up (disk full, write error) propagates,
-    and any failure in the consuming ``with`` body propagates too (the ``yield`` is
-    outside the skip-catch). This is the tricky usage contract of ``shared_container``,
-    kept here once rather than re-implemented by each fixture.
+    ``__enter__`` fails **and** this session's latched Docker verdict is "down" (and not
+    ``require_docker``) does this skip. A failure while Docker is up (disk full, write
+    error) propagates, and any failure in the consuming ``with`` body propagates too (the
+    ``yield`` is outside the skip-catch). This is the tricky usage contract of
+    ``shared_container``, kept here once rather than re-implemented by each fixture.
+
+    The verdict is the session's, not a fresh ping (ADR-0580), so an outage that begins
+    after Docker has already answered reddens the run instead of quietly shrinking it.
     """
     manager = shared_container(root, name, start=start, stop=stop)
     try:
