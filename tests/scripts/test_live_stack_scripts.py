@@ -1031,6 +1031,75 @@ def test_worker_journal_evidence_filter_fails_when_no_safe_record_exists() -> No
     assert result.stderr == ""
 
 
+def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> None:
+    payload = json.dumps(
+        {
+            "ready": False,
+            "checks": {
+                "postgres": True,
+                "minio": True,
+                "capture_bootstrap_manifest": False,
+                "capture_recovery": True,
+            },
+            "version": {
+                "version": "0.4.1-dev",
+                "commit": "0123456789abcdef",
+                "built_at": None,
+            },
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/live-stack/filter-worker-readiness-evidence.py")],
+        cwd=ROOT,
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout == (
+        "worker_readiness ready=false postgres=true minio=true "
+        "capture_bootstrap_manifest=false capture_recovery=true\n"
+    )
+    assert "version" not in result.stdout
+    assert "commit" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "{}",
+        '{"ready":false,"checks":{"postgres":true}}',
+        (
+            '{"ready":false,"checks":{"postgres":true,"minio":true,'
+            '"capture_bootstrap_manifest":false,"capture_recovery":true,'
+            '"unexpected":"private"},"version":{}}'
+        ),
+        "x" * 4097,
+    ),
+)
+def test_worker_readiness_evidence_filter_rejects_non_exact_or_oversized_input(
+    payload: str,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/live-stack/filter-worker-readiness-evidence.py")],
+        cwd=ROOT,
+        input=payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
 def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() -> None:
     text = (ROOT / "scripts/live-stack/lib.sh").read_text()
     assert "restart_host_processes" in text

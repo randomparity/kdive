@@ -480,6 +480,27 @@ jobs:
           fi
           exit 0
 
+      - name: Capture worker readiness components
+        if: always()
+        # The fixed slot-1 listener is loopback-only and its /readyz body contains component
+        # booleans plus build identity. Bound the request, then pass it through an exact-shape
+        # filter that emits only the four non-secret booleans. This distinguishes a pre-dequeue
+        # readiness stall without exposing exception text, environment, paths, or credentials.
+        run: |
+          set -uo pipefail
+          command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
+          printf '::stop-commands::%s\n' "$command_token"
+          readiness_status=0
+          curl --silent --show-error --connect-timeout 2 --max-time 8 --max-filesize 4096 \
+            http://127.0.0.1:9465/readyz |
+            python3 scripts/live-stack/filter-worker-readiness-evidence.py \
+              || readiness_status=$?
+          printf '::%s::\n' "$command_token"
+          if ((readiness_status != 0)); then
+            echo "worker readiness evidence unavailable" >&2
+          fi
+          exit 0
+
       - name: Capture worker lifecycle diagnostics
         if: always()
         # Observational only: the workflow verdict belongs to the spine step above. The
