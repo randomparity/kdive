@@ -154,6 +154,8 @@ execution progress. No public API or schema changes.
 
 - The classification contract is deterministic:
   - queued + no worker and no matching claim record selects worker readiness/claiming;
+  - running + no matching claim record selects the dequeue-to-claim-record publication boundary
+    and is unusable for claim-timing proof;
   - running + matching immutable claim record + no provider stage selects handler dispatch;
   - running + last unmatched provider-stage start selects that exact mapped call;
   - terminal selects its existing categorized failure instead of a timeout.

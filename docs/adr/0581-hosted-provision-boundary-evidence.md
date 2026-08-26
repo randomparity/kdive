@@ -65,12 +65,14 @@ The hosted proof records the queue and execution boundaries before changing timi
    the readiness verifier's default path, and verifies its runtime identity before any lifecycle
    worker starts.
 
-The diagnostics remain after the fix so every future red hosted proof identifies its own boundary.
+The diagnostics remain after the fix so a future red hosted proof with usable captures identifies
+its own boundary.
 
 ## Consequences
 
-A successful and a failed hosted run both expose persisted lane and immutable claim timing. A
-queued row and a running row no longer look alike. A claimed provider stall names the last entered
+Ordinary successful and failed hosted runs expose persisted lane and immutable claim timing. A
+running row without a matching claim record instead localizes the dequeue-to-journal publication
+boundary and is unusable for claim-timing proof. A claimed provider stall names the last entered
 mapped call. The workflow gains one bounded local database read, and normal workers gain a few INFO
 lines per provision; no MCP contract or database schema changes. The snapshot names an unavailable,
 empty, multiply matched, mismatched, or timed-out exact-target read and exits nonzero; its workflow
