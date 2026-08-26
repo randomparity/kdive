@@ -59,6 +59,7 @@ def record_provision_evidence_target(target: Path, job_id: str, system_id: str) 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(target, flags, 0o600)
     with os.fdopen(fd, "wb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
         stream.write(record)
 
 
