@@ -244,6 +244,25 @@ jobs:
             fi
           done
 
+      - name: Build and install fixed-worker capture manifest
+        run: |
+          set -euo pipefail
+          worker_python=/opt/kdive-live-worker-lifecycle/.venv/bin/python
+          source_root="$(
+            "$worker_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+          )"
+          staged=/var/tmp/kdive-live-capture-bootstrap-manifest.json
+          sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py build \
+            --interpreter "$worker_python" --source-root "$source_root" --output "$staged"
+          sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py install \
+            --staged "$staged" \
+            --destination /usr/share/kdive/capture-bootstrap-manifest.json
+          sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py verify \
+            --interpreter "$worker_python" --source-root "$source_root" \
+            --manifest /usr/share/kdive/capture-bootstrap-manifest.json
+          sudo test "$(stat -Lc '%u:%g:%a' \
+            /usr/share/kdive/capture-bootstrap-manifest.json)" = "0:0:644"
+
       - name: Prove systemd worker lifecycle against disposable Postgres
         run: |
           set -euo pipefail

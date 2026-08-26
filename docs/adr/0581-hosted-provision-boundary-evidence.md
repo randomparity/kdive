@@ -19,6 +19,16 @@ repeated that shape: replacement worker start at `2026-08-26T12:36:42Z`, one
 or provider boundary, so the evidence cannot distinguish an unclaimed default-lane row from a
 claimed handler/provider stall. Increasing the deadline would hide the same ambiguity.
 
+Run [32981623561](https://github.com/randomparity/kdive/actions/runs/32981623561/job/98219425910)
+made the boundary decisive. The exact provision row persisted on `default` at
+`2026-08-26T14:51:00.739273Z` and remained `queued`, attempt 0, with no worker or heartbeat. The
+fixed worker had logged `accepting dispatch lanes: default,state-fenced` at `14:50:18.567292Z`, but
+logged no claim or provider stage. A fresh database seeds `queue_paused=false`; therefore
+`Worker.run_once` was returning at its readiness gate before `dequeue`. That probe unconditionally
+verifies `/usr/share/kdive/capture-bootstrap-manifest.json`, while the hosted lifecycle install
+built the root-owned worker venv but never built/installed its matching manifest. The missing
+attestation held the healthy-looking systemd worker not-ready and starved every queue lane.
+
 ## Decision
 
 The hosted proof records the queue and execution boundaries before changing timing:
@@ -48,6 +58,10 @@ The hosted proof records the queue and execution boundaries before changing timi
    deadline is the larger total plus 50 percent, capped at 900 seconds; stage pairs diagnose the
    total but never size it. A missing `ready` timestamp or a margin above the cap authorizes no
    increase, and the separate post-ready SSH budget is likewise not provision-timing evidence.
+6. After installing the fixed-worker venv, the hosted workflow builds the capture-bootstrap
+   manifest as root from that venv's root-owned site-packages, installs it root:root mode 0644 at
+   the readiness verifier's default path, and verifies its runtime identity before any lifecycle
+   worker starts.
 
 The diagnostics remain after the fix so every future red hosted proof identifies its own boundary.
 

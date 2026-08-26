@@ -409,6 +409,27 @@ def _named_step(job: str, name: str) -> tuple[int, dict]:
     return index, steps[index]
 
 
+def test_tcg_installs_manifest_for_the_fixed_worker_before_starting_it() -> None:
+    install_index, _ = _named_step("tcg", "Install the fixed live-worker lifecycle host contract")
+    manifest_index, manifest = _named_step("tcg", "Build and install fixed-worker capture manifest")
+    proof_index, _ = _named_step(
+        "tcg", "Prove systemd worker lifecycle against disposable Postgres"
+    )
+    spine_index, _ = _named_step(
+        "tcg", "Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)"
+    )
+    run = manifest["run"]
+
+    assert "/opt/kdive-live-worker-lifecycle/.venv/bin/python" in run
+    assert 'sysconfig.get_path("purelib")' in run
+    assert "build-capture-bootstrap-manifest.py build" in run
+    assert "build-capture-bootstrap-manifest.py install" in run
+    assert "build-capture-bootstrap-manifest.py verify" in run
+    assert "/usr/share/kdive/capture-bootstrap-manifest.json" in run
+    assert "0:0:644" in run
+    assert install_index < manifest_index < proof_index < spine_index
+
+
 def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     spine_index, spine_step = _named_step(
