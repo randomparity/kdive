@@ -91,6 +91,12 @@ virtual mapping the strict parser did not admit. The parser now accepts either t
 `linux-vdso*`/`linux-gate*` form or an address-only virtual mapping while retaining absolute,
 existing-file validation for every file-backed dependency.
 
+The next exact-head run
+[33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
+passed loader parsing but rejected a replaceable installed-runtime ancestor. The lifecycle
+installer set recursive root ownership without removing group/world write bits inherited from its
+invoking umask. It now removes those bits before manifest construction.
+
 ## Components and data flow
 
 1. The hosted test exclusively creates the target named by `KDIVE_PROVISION_EVIDENCE_TARGET` with
@@ -125,7 +131,10 @@ existing-file validation for every file-backed dependency.
    entry as an unnamed kernel vDSO. The entry contributes no file to the attested closure; malformed
    addresses, unresolved dependencies, non-absolute file mappings, and other off-grammar output
    still fail closed.
-7. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
+7. `deploy/systemd/install-live-worker-lifecycle.sh` removes group/world write bits recursively
+   after normalizing the installed runtime's ownership, making every installer-owned ancestor
+   non-replaceable regardless of the invoking umask.
+8. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
    same proof's provision row with persisted lane and claim timestamp, show the System transition
    to `ready`, and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.

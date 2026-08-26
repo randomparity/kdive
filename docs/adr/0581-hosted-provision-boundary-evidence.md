@@ -37,6 +37,11 @@ reported its unnamed kernel vDSO as the valid address-only virtual mapping `(0x.
 the same non-file mapping when the vDSO omitted `DT_SONAME`. The manifest builder therefore failed
 closed on a valid loader trace rather than reaching the worker proof.
 
+Run [33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
+accepted the loader trace, then failed the same build because an installed-runtime ancestor was
+group/world writable. The installer normalized ownership but inherited descendant write bits from
+its invoking umask, violating the attestation's non-replaceable-ancestor invariant.
+
 ## Decision
 
 The hosted proof records the queue and execution boundaries before changing timing:
@@ -78,6 +83,8 @@ The hosted proof records the queue and execution boundaries before changing timi
 7. The strict runtime-loader parser admits both named Linux vDSO mappings and glibc's address-only
    form for an unnamed kernel vDSO. The address remains syntax-checked; file-backed mappings still
    require an absolute, existing regular-file path, and every other unparseable line still fails.
+8. The lifecycle installer removes group/world write bits recursively after normalizing the
+   installed runtime's ownership, before workers or manifest construction can consume it.
 
 The diagnostics remain after the fix so a future red hosted proof with usable captures identifies
 its own boundary.
