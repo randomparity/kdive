@@ -487,13 +487,18 @@ def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> No
     the state a red proof reaches — so the step also reads the worker units' journal
     directly (system units per ADR-0574, so a ``--user`` read would see nothing), inside
     the ::stop-commands:: guard because journal text can carry workflow-command-shaped
-    lines, and best-effort like every other capture (#1939).
+    lines, and best-effort like every other capture (#1939). Only the hosted TCG proof
+    applies #2056's fixed-record filter; native retains its pre-existing direct diagnostics.
     """
     _, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
     run = diagnostic["run"]
     assert "journalctl -u 'kdive-live-worker@*'" in run
-    assert "--output=cat" in run
-    assert "scripts/live-stack/filter-worker-journal-evidence.py" in run
+    if job == "tcg":
+        assert "--output=cat" in run
+        assert "scripts/live-stack/filter-worker-journal-evidence.py" in run
+    else:
+        assert "--output=cat" not in run
+        assert "scripts/live-stack/filter-worker-journal-evidence.py" not in run
     assert "--no-pager" in run
     assert "--since" in run
     assert (
