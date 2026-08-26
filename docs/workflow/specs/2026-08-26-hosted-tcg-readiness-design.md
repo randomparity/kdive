@@ -37,6 +37,8 @@ failure context. Local-libvirt logs start and completion for each synchronous pr
 Together the last emitted boundary is decisive:
 
 - queued row with no worker and no matching claim record: worker claim/readiness boundary;
+- running row without a matching claim record: dequeue-to-claim-record publication boundary; the
+  run is unusable for claim-timing proof;
 - running row with a matching claim record but no provider-stage entry: handler dispatch boundary;
 - running row whose journal ends with an unmatched named stage start: that mapped provider call;
 - terminal row or System error: existing failure context is authoritative instead of a timeout.

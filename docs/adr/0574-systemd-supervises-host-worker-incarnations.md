@@ -105,6 +105,15 @@ database, and object-store credentials, before bounding output. Both live workfl
 output in an `if: failure() || cancelled()` step before any cleanup. The lifecycle repair does not
 promise post-stop augmentation or durable cross-run journal archives.
 
+### Amendment (2026-08-26): hosted TCG diagnostics also run on success (#2056)
+
+This amendment qualifies only the preceding claim that both live workflows print diagnostics
+under `if: failure() || cancelled()`. [ADR-0581](0581-hosted-provision-boundary-evidence.md)
+requires the hosted TCG workflow to print the same bounded, redacted diagnostics on every outcome
+before cleanup so a successful proof retains its immutable provision claim record. The native
+workflow condition and ADR-0574's lifecycle, credential, witness, and cleanup decisions remain in
+force.
+
 ## Consequences
 
 Supported host-process operation now requires systemd system units, provisioned worker accounts,
