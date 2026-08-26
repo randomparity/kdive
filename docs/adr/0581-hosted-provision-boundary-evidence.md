@@ -49,6 +49,25 @@ identified `/opt`, owned by uid/gid `0:0` with mode `0777`. The installer select
 world-writable directory but hardened only the child, leaving every installed runtime file
 replaceable through its parent.
 
+Exact-head Ubuntu 26.04 run
+[33013068295](https://github.com/randomparity/kdive/actions/runs/33013068295/job/98324100356)
+then distinguished the four worker readiness checks. Postgres, MinIO, and capture recovery were
+true, while `capture_bootstrap_manifest` alone was false. The exact provision row remained queued
+on `default`, attempt 0, with no worker or lease. The manifest's root-side build, installation,
+producer verification, and leaf `0:0:0644` check had all passed before worker startup.
+
+The producer and readiness consumer did not verify the same filesystem boundary. Manifest install
+created the destination parent with `Path.mkdir` under the privileged process's ambient umask and
+validated only the leaf file. Exact-head diagnostic run
+[33017429217](https://github.com/randomparity/kdive/actions/runs/33017429217/job/98339160715)
+named `/usr/share/kdive`, uid/gid `0:0`, mode `0777`, and reported the fixed verifier reason
+`fingerprint_ancestor_replaceable` under the slot-1 worker identity. This proves the
+destination-parent/ambient-umask hypothesis: the root producer accepted the leaf while the
+unprivileged readiness consumer rejected its world-writable ancestor before dequeue. The
+regression drives the same `_install` entry under umask `000` with only parent normalization
+disabled, reproduces mode `0777` plus the readiness rejection, then requires the corrected path to
+produce root:root mode `0755` and pass the same runtime verifier.
+
 ## Decision
 
 The hosted proof records the queue and execution boundaries before changing timing:
@@ -95,6 +114,13 @@ The hosted proof records the queue and execution boundaries before changing timi
    root:root mode 0755 before populating the runtime, then removes group/world write bits
    recursively. A mode-0777 `/opt` from the hosted image can no longer invalidate the otherwise
    root-owned runtime.
+9. Manifest installation normalizes its destination parent through an
+   `O_DIRECTORY|O_NOFOLLOW` descriptor to root:root mode 0755 before the atomic leaf write. The
+   hosted workflow reports only the fixed destination-parent path/uid/gid/mode and an allowlisted
+   verifier reason, then invokes `verify_capture_bootstrap_manifest` under the fixed slot-1 worker
+   identity. Producer success therefore proves the same path, identity, and verifier that gates
+   dequeue. A bounded loopback `/readyz` capture emits only the four component booleans and stays
+   before cleanup on every hosted outcome.
 
 The diagnostics remain after the fix so a future red hosted proof with usable captures identifies
 its own boundary.
@@ -113,6 +139,12 @@ is not usable diagnosis evidence.
 The manifest build now treats glibc's address-only unnamed-vDSO entry as virtual rather than as a
 missing file dependency. Its no-path shape cannot add an unattested file to the closure; malformed
 addresses and all other off-grammar loader output remain errors.
+
+Manifest installation no longer inherits its destination-parent authority from an ambient umask,
+and a root-only producer check can no longer certify a manifest the fixed worker rejects. The
+retained diagnostics expose only the fixed manifest-parent path, numeric ownership/mode, an
+allowlisted verifier reason, and readiness component booleans; they omit raw exception text, build
+identity, environment, and credentials.
 
 ## Considered & rejected
 
