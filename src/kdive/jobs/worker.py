@@ -85,6 +85,30 @@ DEFAULT_ACCEPTED_LANES: tuple[str, ...] = tuple(sorted(_routed_lanes()))
 """Every lane a job kind routes to — the safe default, since a lane with no consumer starves."""
 
 
+def _log_provision_claim(worker_id: str, job: Job) -> None:
+    """Log the immutable initial claim boundary for provision jobs only."""
+    if job.kind is not JobKind.PROVISION:
+        return
+    claim_at = job.heartbeat_at
+    enqueued_at = job.created_at
+    delay_s = (
+        max(0.0, (claim_at - enqueued_at).total_seconds())
+        if claim_at is not None and enqueued_at is not None
+        else 0.0
+    )
+    _log.info(
+        "worker %s claimed provision job %s lane=%s attempt=%d enqueued_at=%s "
+        "claim_at=%s queue_delay_s=%.6f",
+        worker_id,
+        job.id,
+        job.dispatch_lane,
+        job.attempt,
+        enqueued_at.isoformat() if enqueued_at is not None else "NONE",
+        claim_at.isoformat() if claim_at is not None else "NONE",
+        delay_s,
+    )
+
+
 def worker_pool_floor(accepted_lanes: Sequence[str]) -> int:
     """The smallest ``pool.max_size`` a worker accepting ``accepted_lanes`` can run on.
 
@@ -171,6 +195,11 @@ class Worker:
                 "pool sized to exactly 2*lanes stops claiming under full dispatch"
             )
         _warn_on_unconsumed_lanes(config.accepted_lanes)
+        _log.info(
+            "worker %s accepting dispatch lanes: %s",
+            worker_id,
+            ",".join(config.accepted_lanes),
+        )
         self._pool = pool
         self._registry = registry
         self._worker_id = worker_id
@@ -221,6 +250,7 @@ class Worker:
                 )
         if job is None:
             return None
+        _log_provision_claim(self._worker_id, job)
         if self._telemetry.enabled and job.heartbeat_at is not None and job.created_at is not None:
             self._telemetry.record_time_to_claim(
                 job.kind.value, (job.heartbeat_at - job.created_at).total_seconds()

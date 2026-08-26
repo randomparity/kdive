@@ -29,6 +29,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 import psycopg
@@ -50,6 +51,15 @@ REMOTE_ALLOCATION_DISK_GB = 10
 LOCAL_ALLOCATION_DISK_GB = 10
 
 _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
+
+
+def record_provision_evidence_target(target: Path, job_id: str, system_id: str) -> None:
+    """Exclusively publish the hosted proof's exact provision job/System identity."""
+    record = f"{UUID(job_id)}\t{UUID(system_id)}\n".encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(target, flags, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(record)
 
 
 # --- phase-failure naming contract (ADR-0042 §4, ADR-0045 §2) -------------------------------

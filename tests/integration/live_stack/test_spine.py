@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
 import tests.integration.live_stack.spine as spine
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs import worker as job_worker
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.local_libvirt.lifecycle import provisioning
 from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
@@ -52,6 +61,97 @@ def _system(status: str, *, category: ErrorCategory | None = None) -> ToolRespon
         status=status,
         error_category=category.value if category else None,
     )
+
+
+def test_record_provision_evidence_target_creates_private_exact_record(tmp_path: Path) -> None:
+    target = tmp_path / "provision-target"
+
+    spine.record_provision_evidence_target(
+        target,
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
+
+    assert target.read_text() == (
+        "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222\n"
+    )
+    assert os.stat(target).st_mode & 0o777 == 0o600
+
+
+def test_record_provision_evidence_target_refuses_existing_target(tmp_path: Path) -> None:
+    target = tmp_path / "provision-target"
+    target.write_text("first")
+
+    with pytest.raises(FileExistsError):
+        spine.record_provision_evidence_target(
+            target,
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        )
+
+    assert target.read_text() == "first"
+
+
+def _claimed_job(kind: JobKind) -> Job:
+    enqueued_at = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
+    return Job.model_construct(
+        id=UUID("11111111-1111-1111-1111-111111111111"),
+        created_at=enqueued_at,
+        updated_at=enqueued_at,
+        kind=kind,
+        dispatch_lane="default",
+        state=JobState.RUNNING,
+        attempt=1,
+        max_attempts=3,
+        worker_id="fixed-worker-1",
+        heartbeat_at=enqueued_at + timedelta(seconds=2),
+        authorizing={"principal": "operator", "agent_session": None, "project": "spine-proj"},
+        dedup_key="provision",
+    )
+
+
+def test_worker_logs_immutable_provision_claim_only(caplog: pytest.LogCaptureFixture) -> None:
+    provision = _claimed_job(JobKind.PROVISION)
+    with caplog.at_level(logging.INFO, logger="kdive.jobs.worker"):
+        job_worker._log_provision_claim("fixed-worker-1", provision)
+        job_worker._log_provision_claim("fixed-worker-1", _claimed_job(JobKind.INSTALL))
+
+    records = [
+        record.getMessage()
+        for record in caplog.records
+        if "claimed provision" in record.getMessage()
+    ]
+    assert records == [
+        "worker fixed-worker-1 claimed provision job "
+        "11111111-1111-1111-1111-111111111111 lane=default attempt=1 "
+        "enqueued_at=2026-08-26T12:00:00+00:00 claim_at=2026-08-26T12:00:02+00:00 "
+        "queue_delay_s=2.000000"
+    ]
+
+
+def test_provision_stage_logs_completion_only_after_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    system_id = UUID("22222222-2222-2222-2222-222222222222")
+    job_id = UUID("11111111-1111-1111-1111-111111111111")
+
+    with caplog.at_level(
+        logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
+    ):
+        with provisioning._provision_stage(system_id, job_id, "prepare-baseline"):
+            pass
+        with (
+            pytest.raises(RuntimeError, match="stalled"),
+            provisioning._provision_stage(system_id, job_id, "prepare-overlay"),
+        ):
+            raise RuntimeError("stalled")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert [message.rsplit(" event=", 1)[-1] for message in messages] == [
+        "start",
+        "complete",
+        "start",
+    ]
 
 
 async def _no_sleep(_seconds: float) -> None:
