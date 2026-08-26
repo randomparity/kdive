@@ -1284,6 +1284,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Keep the brackets on an IPv6 host when redacting a URL
+- Preserve explicit port zero in redacted URLs
 
 ### Build
 
