@@ -13,6 +13,7 @@ for provision timing.
 The permitted implementation surface is:
 
 - `.github/workflows/live.yml`;
+- `deploy/systemd/install-live-worker-lifecycle.sh`;
 - `docs/adr/0574-systemd-supervises-host-worker-incarnations.md`,
   `docs/adr/0581-hosted-provision-boundary-evidence.md`, and these issue-owned design artifacts;
 - `docs/guide/reference/config.md`;
@@ -21,7 +22,8 @@ The permitted implementation surface is:
 - `src/kdive/config/external_env.py`,
   `src/kdive/jobs/capture_operations/bootstrap_elf.py`, `src/kdive/jobs/worker.py`, and
   `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`; and
-- `tests/integration/live_stack/spine.py`, `tests/integration/live_stack/test_spine.py`,
+- `tests/deploy/test_live_worker_provisioning.py`,
+  `tests/integration/live_stack/spine.py`, `tests/integration/live_stack/test_spine.py`,
   `tests/integration/test_live_stack.py`, `tests/jobs/capture_operations/test_manifest.py`,
   `tests/scripts/test_live_stack_scripts.py`, and `tests/scripts/test_live_workflow_shape.py`.
 

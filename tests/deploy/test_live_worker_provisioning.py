@@ -99,7 +99,8 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
         "_link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python" in source
     )
     ownership = "chown -R root:root /opt/kdive-live-worker-lifecycle"
-    harden = "chmod -R go-w /opt/kdive-live-worker-lifecycle"
+    harden = "chmod -R -P go-w /opt/kdive-live-worker-lifecycle"
+    assert "if [[ -L /opt/kdive-live-worker-lifecycle ]]" in source
     assert source.index(ownership) < source.index(harden)
     assert "getent group kvm >/dev/null" in source
     assert '--groups "$libvirt_group,kvm"' in source
