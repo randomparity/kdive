@@ -217,15 +217,22 @@ execution progress. No public API or schema changes.
 **Files**
 
 - `src/kdive/jobs/capture_operations/bootstrap_elf.py`
+- `deploy/systemd/install-live-worker-lifecycle.sh`
+- `tests/deploy/test_live_worker_provisioning.py`
 - `tests/jobs/capture_operations/test_manifest.py`
 
 Exact-head hosted run
 [32998642219](https://github.com/randomparity/kdive/actions/runs/32998642219/job/98274351467)
 failed before worker startup because Ubuntu 26.04 emitted the valid unnamed-vDSO loader line
-`(0x...)`. Add
-`test_loader_list_parser_ignores_address_only_virtual_mapping`, require it to fail with the hosted
-error, then make `_LOADER_VIRTUAL_RE` admit the syntax-checked address-only form without weakening
-file-backed mapping checks. The focused parser selection must report `5 passed`.
+`(0x...)`. Add `test_loader_list_parser_ignores_address_only_virtual_mapping`, require it to fail
+with the hosted error, then make `_LOADER_VIRTUAL_RE` admit the syntax-checked address-only form
+without weakening file-backed mapping checks. The focused parser selection must report `5 passed`.
+
+Run [33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
+then exposed the next source cause: the installer normalized recursive ownership but retained
+ambient group/world write bits, so manifest fingerprinting rejected a replaceable ancestor.
+`test_installer_reads_dsn_from_stdin_and_pins_install_order` requires recursive write-bit hardening
+after ownership normalization; the focused test must pass before proof repeats.
 
 **Steps**
 

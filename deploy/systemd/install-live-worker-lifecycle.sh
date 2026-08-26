@@ -604,6 +604,8 @@ uv venv --python /usr/bin/python3 /opt/kdive-live-worker-lifecycle/.venv
 uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
+# The readiness attestation rejects any replaceable ancestor, independent of the invoking umask.
+chmod -R go-w /opt/kdive-live-worker-lifecycle
 chmod 0755 /opt/kdive-live-worker-lifecycle
 
 revision_temp="$(mktemp /opt/kdive-live-worker-lifecycle/.revision.XXXXXX)"
