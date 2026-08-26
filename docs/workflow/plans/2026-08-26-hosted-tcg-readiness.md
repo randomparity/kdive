@@ -293,9 +293,13 @@ fixed parent/reason output and exact verifier identity.
    start/completion in order through `define-start`; missing or inconsistent evidence rejects the
    proof. Require every readiness component true, transition to `ready`, the named SSH test pass,
    and a nonzero passed-proof summary.
-5. Create/update the PR with `Closes #2056` only, wait for green CI, and require its `headRefOid` to
-   equal the hosted-proved SHA and mergeability to be clean. Make no source/doc commit after the
-   hosted proof; any change invalidates it and returns to step 1. Set `status:awaiting-merge`; stop
+5. Create/update the PR with `Closes #2056` only, wait for green CI, and require mergeability to be
+   CLEAN/MERGEABLE with `headRefOid` equal to the hosted-proved SHA. Make no source/doc commit after
+   the hosted proof; any change invalidates it and returns to step 1 before publication.
+6. Publish one verified `WORK:REVIEW` annotation for that exact PR head after the applicable
+   reviews and checks, then re-read the PR and require the same green, CLEAN/MERGEABLE head.
+7. Set and confirm `status:awaiting-merge`, re-read the same exact green/CLEAN/MERGEABLE PR head,
+   then post and verify a successful `WORK:TRAJECTORY` recording that awaiting-merge handoff. Stop
    without merging.
 
 ## Rollback
