@@ -171,3 +171,12 @@ def test_redaction_filter_rebuilds_only_on_version_change() -> None:
     assert _emit("before any-secret") == "before any-secret"
     registry.register("any-secret", scope=None)
     assert REDACTION in _emit("now any-secret leaks")
+
+
+def test_redact_url_credentials_preserves_explicit_port_zero() -> None:
+    redacted = redact_url_credentials(
+        "https://u:p@host:0/x"  # pragma: allowlist secret
+    )
+    assert redacted == "https://host:0/x"
+    assert "u:p@" not in redacted
+    assert "@" not in redacted
