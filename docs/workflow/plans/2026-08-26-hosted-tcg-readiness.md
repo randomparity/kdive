@@ -113,6 +113,7 @@ execution progress. No public API or schema changes.
   - `materialize-rootfs`: `_materialize_rootfs(...)`;
   - `prepare-baseline`: `_prepare_baseline_kernel(...)`;
   - `prepare-overlay`: `self._files.prepare_overlay(...)`;
+  - `render-domain`: gdb/SSH port reuse plus `render_domain_xml(...)`;
   - `customize-overlay`: the complete `for customize in overlay_customizers` loop;
   - `prepare-console`: `self._files.prepare_console(system_id)`;
   - `define-start`: `self._define_and_start(xml, system_id)`.

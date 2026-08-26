@@ -327,31 +327,35 @@ class LocalLibvirtProvisioning:
             overlay_created = not pre_existing.overlay
             with _provision_stage(system_id, job_id, "prepare-overlay"):
                 overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
-            gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
-            # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
-            # allocated. drgn-live no longer needs a profile credential — it authenticates with the
-            # per-System bootstrap key (ADR-0289/0315). Reuse-on-retry (_ssh_port_for) is unchanged.
-            ssh_port = self._ssh_port_for(system_id)
-            if self._guest_egress:
-                # Positive, greppable signal for a security-relevant state: the operator opted this
-                # resource into guest egress, so the guest NIC renders restrict=off (ADR-0313).
-                _log.info(
-                    "provisioning System %s with guest egress enabled (restrict=off): the guest "
-                    "can reach the network; the network-zone firewall is the enforcement boundary",
+            with _provision_stage(system_id, job_id, "render-domain"):
+                gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
+                # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is
+                # always allocated. drgn-live no longer needs a profile credential — it
+                # authenticates with the per-System bootstrap key (ADR-0289/0315).
+                # Reuse-on-retry (_ssh_port_for) is unchanged.
+                ssh_port = self._ssh_port_for(system_id)
+                if self._guest_egress:
+                    # Positive, greppable signal for a security-relevant state: the operator opted
+                    # this resource into guest egress, so the guest NIC renders restrict=off
+                    # (ADR-0313).
+                    _log.info(
+                        "provisioning System %s with guest egress enabled (restrict=off): "
+                        "the guest can reach the network; the network-zone firewall is the "
+                        "enforcement boundary",
+                        system_id,
+                    )
+                xml = render_domain_xml(  # validates the profile
                     system_id,
+                    profile,
+                    disk_path=overlay.path,
+                    gdb_port=gdb_port,
+                    ssh_port=ssh_port,
+                    kernel_path=baseline.kernel,
+                    initrd_path=baseline.initrd,
+                    guest_egress=self._guest_egress,
+                    accel=accel,
+                    emulator=emulator,
                 )
-            xml = render_domain_xml(  # validates the profile
-                system_id,
-                profile,
-                disk_path=overlay.path,
-                gdb_port=gdb_port,
-                ssh_port=ssh_port,
-                kernel_path=baseline.kernel,
-                initrd_path=baseline.initrd,
-                guest_egress=self._guest_egress,
-                accel=accel,
-                emulator=emulator,
-            )
             with _provision_stage(system_id, job_id, "customize-overlay"):
                 if overlay.created:
                     for customize in overlay_customizers:

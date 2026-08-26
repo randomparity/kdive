@@ -154,6 +154,39 @@ def test_provision_stage_logs_completion_only_after_success(
     ]
 
 
+def test_provision_logs_every_mapped_provider_stage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from tests.providers.local_libvirt.test_provisioning import _profile, _prov, _ProvConn
+
+    system_id = UUID("22222222-2222-2222-2222-222222222222")
+    job_id = UUID("11111111-1111-1111-1111-111111111111")
+    with caplog.at_level(
+        logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
+    ):
+        _prov(_ProvConn()).provision(system_id, _profile(), job_id=job_id)
+
+    observed = [
+        (
+            message.split(" stage=", 1)[1].split(" event=", 1)[0],
+            message.rsplit(" event=", 1)[1],
+        )
+        for record in caplog.records
+        if (message := record.getMessage()).startswith("local-libvirt provision ")
+    ]
+    stages = (
+        "resolve-arch",
+        "materialize-rootfs",
+        "prepare-baseline",
+        "prepare-overlay",
+        "render-domain",
+        "customize-overlay",
+        "prepare-console",
+        "define-start",
+    )
+    assert observed == [(stage, event) for stage in stages for event in ("start", "complete")]
+
+
 async def _no_sleep(_seconds: float) -> None:
     return None
 
