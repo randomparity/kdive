@@ -39,8 +39,15 @@ closed on a valid loader trace rather than reaching the worker proof.
 
 Run [33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
 accepted the loader trace, then failed the same build because an installed-runtime ancestor was
-group/world writable. The installer normalized ownership but inherited descendant write bits from
-its invoking umask, violating the attestation's non-replaceable-ancestor invariant.
+replaceable. Removing group/world write bits recursively from the installed runtime did not change
+the generic artifact in run
+[33004795604](https://github.com/randomparity/kdive/actions/runs/33004795604/job/98295552657).
+The rejection had suppressed the path, so a fixed-form diagnostic exposed only the failing path,
+uid/gid, and mode. Run
+[33005759211](https://github.com/randomparity/kdive/actions/runs/33005759211/job/98298954459)
+identified `/opt`, owned by uid/gid `0:0` with mode `0777`. The installer selected a child of that
+world-writable directory but hardened only the child, leaving every installed runtime file
+replaceable through its parent.
 
 ## Decision
 
@@ -83,8 +90,11 @@ The hosted proof records the queue and execution boundaries before changing timi
 7. The strict runtime-loader parser admits both named Linux vDSO mappings and glibc's address-only
    form for an unnamed kernel vDSO. The address remains syntax-checked; file-backed mappings still
    require an absolute, existing regular-file path, and every other unparseable line still fails.
-8. The lifecycle installer removes group/world write bits recursively after normalizing the
-   installed runtime's ownership, before workers or manifest construction can consume it.
+8. Fingerprint ancestor failures name only the rejected path, uid/gid, and permission bits. The
+   lifecycle installer normalizes its selected runtime installation parent and runtime root to
+   root:root mode 0755 before populating the runtime, then removes group/world write bits
+   recursively. A mode-0777 `/opt` from the hosted image can no longer invalidate the otherwise
+   root-owned runtime.
 
 The diagnostics remain after the fix so a future red hosted proof with usable captures identifies
 its own boundary.

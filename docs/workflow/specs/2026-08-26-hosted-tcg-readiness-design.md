@@ -2,7 +2,7 @@
 
 ## Scope and authority
 
-This design implements issue #2056 under scope token `q2056-81f35d35` on branch
+This design implements issue #2056 under scope token `q2056-498fae54` on branch
 `feat/hosted-tcg-readiness-2056`, based on `main`. The operator requires the Ubuntu 26.04 hosted
 ppc64le TCG proof to reach `ready` and pass `test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
 The proof must expose the provision job's persisted lane and fixed-worker claim timing, and its
@@ -19,7 +19,7 @@ The permitted implementation surface is:
 - `docs/guide/reference/config.md`;
 - `scripts/live-stack/filter-worker-journal-evidence.py` and
   `scripts/live-stack/provision-queue-diagnostics.sh`;
-- `src/kdive/config/external_env.py`,
+- `src/kdive/config/external_env.py`, `src/kdive/jobs/capture_operations/bootstrap_attestation.py`,
   `src/kdive/jobs/capture_operations/bootstrap_elf.py`, `src/kdive/jobs/worker.py`, and
   `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`; and
 - `tests/deploy/test_live_worker_provisioning.py`,
@@ -95,9 +95,19 @@ existing-file validation for every file-backed dependency.
 
 The next exact-head run
 [33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
-passed loader parsing but rejected a replaceable installed-runtime ancestor. The lifecycle
-installer set recursive root ownership without removing group/world write bits inherited from its
-invoking umask. It now removes those bits before manifest construction.
+passed loader parsing but rejected a replaceable installed-runtime ancestor. Recursive descendant
+hardening did not change the generic terminal artifact in run
+[33004795604](https://github.com/randomparity/kdive/actions/runs/33004795604/job/98295552657).
+The attestation error had suppressed the rejected path, so a fixed-form diagnostic added only that
+path, uid/gid, and permission bits. Run
+[33005759211](https://github.com/randomparity/kdive/actions/runs/33005759211/job/98298954459)
+then identified `/opt`, uid/gid `0:0`, mode `0777`.
+
+The evidence supports one falsifiable hypothesis: the hosted image's world-writable `/opt` remains
+an attacker-replaceable ancestor even after the installer makes its
+`/opt/kdive-live-worker-lifecycle` child root-owned and non-writable. A regression exercises the
+installer's producer against a mode-0777 parent. The installer must make the selected parent and
+runtime root root:root mode 0755 before populating the runtime; attestation remains fail-closed.
 
 ## Components and data flow
 
@@ -133,10 +143,13 @@ invoking umask. It now removes those bits before manifest construction.
    entry as an unnamed kernel vDSO. The entry contributes no file to the attested closure; malformed
    addresses, unresolved dependencies, non-absolute file mappings, and other off-grammar output
    still fail closed.
-7. `deploy/systemd/install-live-worker-lifecycle.sh` removes group/world write bits recursively
-   after normalizing the installed runtime's ownership, making every installer-owned ancestor
-   non-replaceable regardless of the invoking umask.
-8. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
+7. `src/kdive/jobs/capture_operations/bootstrap_attestation.py` names only the rejected ancestor
+   path, uid/gid, and permission bits when ownership or replaceability checks fail.
+8. `deploy/systemd/install-live-worker-lifecycle.sh` normalizes the selected runtime installation
+   parent and runtime root to root:root mode 0755, then removes group/world write bits recursively
+   after populating the runtime. Every ancestor is therefore non-replaceable regardless of the
+   hosted image's `/opt` mode or the invoking umask.
+9. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
    same proof's provision row with persisted lane and claim timestamp, show the System transition
    to `ready`, and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.

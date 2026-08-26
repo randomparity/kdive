@@ -229,10 +229,20 @@ with the hosted error, then make `_LOADER_VIRTUAL_RE` admit the syntax-checked a
 without weakening file-backed mapping checks. The focused parser selection must report `5 passed`.
 
 Run [33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
-then exposed the next source cause: the installer normalized recursive ownership but retained
-ambient group/world write bits, so manifest fingerprinting rejected a replaceable ancestor.
-`test_installer_reads_dsn_from_stdin_and_pins_install_order` requires recursive write-bit hardening
-after ownership normalization; the focused test must pass before proof repeats.
+exposed a replaceable ancestor after the installer normalized recursive ownership. Run
+[33004795604](https://github.com/randomparity/kdive/actions/runs/33004795604/job/98295552657)
+repeated the generic rejection after descendant write-bit hardening. A path-, uid/gid-, and
+mode-bearing diagnostic then made run
+[33005759211](https://github.com/randomparity/kdive/actions/runs/33005759211/job/98298954459)
+identify `/opt`, owned by uid/gid `0:0` with mode `0777`, as the rejected ancestor.
+
+The falsifiable hypothesis is that Ubuntu 26.04's hosted image makes `/opt` world-writable, while
+the lifecycle installer creates `/opt/kdive-live-worker-lifecycle` and hardens only that child.
+Consequently every installed runtime file remains replaceable through `/opt`, independent of its
+own ownership and mode. The regression must construct a mode-0777 installation parent, run the
+installer's runtime-root producer, and require both the parent and new runtime root to be mode 0755
+before the source fix. The source fix must normalize the selected installation parent to root:root
+mode 0755 before creating the runtime root, without weakening fingerprint attestation.
 
 **Steps**
 
