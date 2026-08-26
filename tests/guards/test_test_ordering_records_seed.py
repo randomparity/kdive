@@ -1,18 +1,20 @@
-"""Guard: the weekly test-ordering workflow records a concrete, reproducible hash seed.
+"""Guard: the weekly test-ordering workflow covers reproducible assertions and collection.
 
 ADR-0577's `--tb=short` trade is "escalate or re-run to get full detail" — except in the
-weekly ordering job, where `PYTHONHASHSEED: random` drew a per-process seed CPython never
-records, so re-running the job was a different run, not a reproduction (#2065). The job now
-seeds with the run's number and records that value in the step log and the job summary before
-the suite runs, so a red run names the concrete seed: `PYTHONHASHSEED=<seed> just test`
-locally reproduces the collection and assertion order. This guard keeps that contract from
-regressing to an unrecordable seed, or to a record that names a seed the suite did not run
-under.
+weekly ordering job, where `PYTHONHASHSEED: random` once drew a per-process seed CPython
+never records. The job now records one concrete per-run seed before running assertions, so
+`PYTHONHASHSEED=<seed> just test` reproduces a red run (#2065).
+
+Sharing that seed across xdist workers removed the old accidental collection-mismatch abort.
+The companion `just test-collect-order` recipe replaces it directly: collect the shared
+`_TEST_MARKERS` tier under fixed seeds 1 and 2, then diff ordered node IDs. These guards keep
+both contracts reproducible and wired into the weekly workflow (#2072).
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -35,6 +37,46 @@ _SEED_EXPANSION = re.compile(r"\$\{?PYTHONHASHSEED\b")
 #: The shell verbs that write a value out. A step that only mentions the variable records
 #: nothing.
 _RECORDING_VERB = re.compile(r"\b(?:echo|printf|tee)\b")
+
+#: The just recipe added beside the recorded-seed suite to detect collection order drift.
+_JUST_COLLECT_ORDER = re.compile(r"(?:^|[^\w-])just test-collect-order(?:\s|$)")
+
+
+def _collection_order_recipe() -> str:
+    """Return the collection-order recipe body without accepting a similarly named recipe."""
+    justfile = (_ROOT / "justfile").read_text(encoding="utf-8")
+    match = re.search(
+        r"(?m)^test-collect-order(?: [^:\n]*)?:\n"
+        r"(?P<body>(?:(?:^[ \t].*|^)\n)*)",
+        justfile,
+    )
+    assert match is not None, "justfile has no `test-collect-order` recipe"
+    return match.group("body")
+
+
+def _write_collection_fixture(tmp_path: Path, parametrization: str) -> Path:
+    """Write one isolated parametrized test module for the recipe's behavioral guard."""
+    test_file = tmp_path / "test_hash_collection.py"
+    test_file.write_text(
+        "import pytest\n\n"
+        f"VALUES = {parametrization}\n\n"
+        '@pytest.mark.parametrize("value", VALUES)\n'
+        "def test_value(value):\n"
+        "    assert value\n",
+        encoding="utf-8",
+    )
+    return test_file
+
+
+def _run_collection_order(test_file: Path) -> subprocess.CompletedProcess[str]:
+    """Run the public recipe against one isolated module and retain its useful diff."""
+    return subprocess.run(
+        ["just", "test-collect-order", str(test_file)],
+        cwd=_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _jobs() -> dict[str, object]:
@@ -157,3 +199,62 @@ def test_the_seed_is_recorded_before_the_suite_runs() -> None:
         "the seed is recorded after the test step, so a red test run never records the "
         "seed it ran under"
     )
+
+
+def test_the_ordering_job_runs_the_collection_order_detector() -> None:
+    """The weekly workflow must check collection drift as well as assertion ordering."""
+    job = _ordering_job()
+    runs: list[str] = []
+    for step in _job_steps(job):
+        if not isinstance(step, dict):
+            continue
+        run = step.get("run")
+        if isinstance(run, str):
+            runs.append(run)
+    assert any(_JUST_COLLECT_ORDER.search(run) for run in runs), (
+        "the weekly ordering job never runs `just test-collect-order`, so a parametrization "
+        "backed by an unsorted set can change collection order without failing"
+    )
+
+
+def test_collection_order_recipe_reuses_the_gated_marker_tier_and_fixed_seeds() -> None:
+    """Direct collection must share `_TEST_MARKERS` and remain exactly reproducible."""
+    recipe = _collection_order_recipe()
+    assert "{{_TEST_MARKERS}}" in recipe, (
+        "`test-collect-order` re-types or omits the gated marker expression instead of reusing "
+        "`_TEST_MARKERS`"
+    )
+    assert re.search(r"PYTHONHASHSEED=[\"']?1[\"']?", recipe), (
+        "`test-collect-order` does not collect under the concrete valid seed 1"
+    )
+    assert re.search(r"PYTHONHASHSEED=[\"']?2[\"']?", recipe), (
+        "`test-collect-order` does not collect under the concrete valid seed 2"
+    )
+
+
+def test_collection_order_recipe_passes_stable_collection(tmp_path: Path) -> None:
+    """A list-backed parametrization has the same ordered node IDs under both seeds."""
+    test_file = _write_collection_fixture(tmp_path, '["alpha", "bravo", "charlie"]')
+
+    result = _run_collection_order(test_file)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_collection_order_recipe_fails_reproducibly_with_node_id_diff(tmp_path: Path) -> None:
+    """An unsorted set must fail identically and name the reordered parametrized tests."""
+    test_file = _write_collection_fixture(
+        tmp_path,
+        '{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"}',
+    )
+
+    first = _run_collection_order(test_file)
+    second = _run_collection_order(test_file)
+
+    assert first.returncode == 1, first.stdout + first.stderr
+    assert second.returncode == 1, second.stdout + second.stderr
+    assert first.stdout == second.stdout
+    assert "--- PYTHONHASHSEED=1" in first.stdout
+    assert "+++ PYTHONHASHSEED=2" in first.stdout
+    assert "-test_hash_collection.py::test_value[" in first.stdout
+    assert "+test_hash_collection.py::test_value[" in first.stdout
