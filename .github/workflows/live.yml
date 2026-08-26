@@ -262,6 +262,81 @@ jobs:
             --manifest /usr/share/kdive/capture-bootstrap-manifest.json
           sudo test "$(stat -Lc '%u:%g:%a' \
             /usr/share/kdive/capture-bootstrap-manifest.json)" = "0:0:644"
+          read -r parent_uid parent_gid parent_mode < <(
+            sudo stat -Lc '%u %g %a' /usr/share/kdive
+          )
+          case "$parent_mode" in
+            [0-7][0-7][0-7]) parent_mode="0${parent_mode}" ;;
+            [0-7][0-7][0-7][0-7]) ;;
+            *) echo "capture manifest parent mode is not octal" >&2; exit 1 ;;
+          esac
+          printf 'capture_manifest_parent path=/usr/share/kdive uid=%s gid=%s mode=%s\n' \
+            "$parent_uid" "$parent_gid" "$parent_mode"
+          # Invoke the exact readiness verifier as the fixed worker, but emit only an allowlisted
+          # reason code. The raw exception may carry attested paths and is never printed.
+          sudo --user=kdive-worker-1 --group=kdive-worker-1 \
+            "$worker_python" - <<'PY'
+          from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
+
+          exact_reasons = {
+              "capture bootstrap fingerprint path must be an absolute file path": (
+                  "fingerprint_path_not_absolute"
+              ),
+              "capture bootstrap fingerprint path is not safely openable": (
+                  "fingerprint_path_not_safely_openable"
+              ),
+              "capture bootstrap fingerprint must be a regular file": (
+                  "fingerprint_not_regular_file"
+              ),
+              "capture bootstrap fingerprint file has an unapproved owner": (
+                  "fingerprint_file_unapproved_owner"
+              ),
+              "capture bootstrap fingerprint file is group/world writable": (
+                  "fingerprint_file_group_or_world_writable"
+              ),
+              "capture bootstrap attested path changed during verification": (
+                  "attested_path_changed"
+              ),
+              "capture bootstrap manifest has the wrong owner": "manifest_wrong_owner",
+              "capture bootstrap manifest must have mode 0644": "manifest_wrong_mode",
+              "capture bootstrap manifest contains malformed JSON": "manifest_malformed_json",
+              "capture bootstrap manifest has an unsupported schema": "manifest_schema_drift",
+              "capture bootstrap manifest architecture drift": "manifest_architecture_drift",
+              "capture bootstrap manifest interpreter drift": "manifest_interpreter_drift",
+              "capture bootstrap runtime ELF closure drift": "runtime_elf_closure_drift",
+              "capture bootstrap import-trace drift": "import_trace_drift",
+          }
+          prefix_reasons = (
+              (
+                  "capture bootstrap fingerprint ancestor has an unapproved owner:",
+                  "fingerprint_ancestor_unapproved_owner",
+              ),
+              (
+                  "capture bootstrap fingerprint ancestor is replaceable:",
+                  "fingerprint_ancestor_replaceable",
+              ),
+              ("capture bootstrap fingerprint drift:", "fingerprint_drift"),
+              ("capture bootstrap manifest exceeds ", "manifest_oversized"),
+          )
+
+          try:
+              verify_capture_bootstrap_manifest()
+          except Exception as error:
+              message = str(error)
+              reason = exact_reasons.get(message)
+              if reason is None:
+                  reason = next(
+                      (
+                          code
+                          for prefix, code in prefix_reasons
+                          if message.startswith(prefix)
+                      ),
+                      "unclassified",
+                  )
+              print(f"capture_manifest_verification status=rejected reason={reason}")
+          else:
+              print("capture_manifest_verification status=accepted reason=none")
+          PY
 
       - name: Prove systemd worker lifecycle against disposable Postgres
         run: |
