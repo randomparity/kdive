@@ -747,6 +747,34 @@ def test_provision_queue_diagnostics_sources_env_before_reporting_malformed_targ
     assert result.stderr == "provision-evidence-error code=target-malformed\n"
 
 
+def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "psycopg.py").write_text(
+        'raise ImportError("driver missing at /sensitive/path")\n',
+        encoding="utf-8",
+    )
+    target = tmp_path / "target"
+    target.write_text(
+        "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 5
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=query-unavailable\n"
+
+
 def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() -> None:
     text = (ROOT / "scripts/live-stack/lib.sh").read_text()
     assert "restart_host_processes" in text
