@@ -108,6 +108,8 @@ def _reportable(uri: str) -> str:
     """
     parsed = urlsplit(uri)
     host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
     try:
         port = parsed.port
     except ValueError:
