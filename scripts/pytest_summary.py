@@ -27,6 +27,7 @@ runner's ambient ``python3``.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -127,8 +128,12 @@ def _render(root: ET.Element, path: Path) -> str:
 
     rendered = "\n".join(lines) + "\n"
     if len(rendered.encode("utf-8")) > MAX_BYTES:
-        rendered = rendered.encode("utf-8")[:MAX_BYTES].decode("utf-8", "ignore")
-        rendered += "\n\n(summary truncated)\n"
+        suffix = "\n\n(summary truncated)\n"
+        budget = MAX_BYTES - len(suffix.encode("utf-8")) - 2
+        rendered = rendered.encode("utf-8")[:budget].decode("utf-8", "ignore")
+        if rendered.count("`") % 2:
+            rendered += " `"
+        rendered += suffix
     return rendered
 
 
@@ -187,14 +192,13 @@ def _reason(outcome: ET.Element) -> str:
 
 
 def _span(text: str) -> str:
-    """Make ``text`` safe to sit inside a markdown code span.
+    """Make ``text`` safe to sit inside a single-line markdown code span.
 
-    A code span already neutralises HTML and every other markdown construct, so the only
-    character that has to change is the backtick that would close the span — leaving the rest
-    of an arbitrary node id or assertion diff rendered as live markup. Node ids stay otherwise
-    verbatim so they can be pasted straight back into pytest.
+    Control whitespace is collapsed so it cannot end the span, while ordinary spaces remain
+    verbatim in pasteable node ids. Backticks are replaced because they would close the span and
+    leave the rest of an arbitrary node id or assertion diff rendered as live markup.
     """
-    return text.replace("`", "'")
+    return re.sub(r"[^\S ]+", " ", text).replace("`", "'")
 
 
 def _int(element: ET.Element, attribute: str) -> int:

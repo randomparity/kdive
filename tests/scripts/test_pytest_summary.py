@@ -34,7 +34,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.pytest_summary import MAX_FAILURES, main, summarize
+import scripts.pytest_summary as pytest_summary
+from scripts.pytest_summary import MAX_BYTES, MAX_FAILURES, main, summarize
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "pytest_summary.py"
 
@@ -312,6 +313,49 @@ def test_enormous_node_ids_hit_the_byte_ceiling(tmp_path: Path) -> None:
     assert "summary truncated" in summary
 
 
+def test_byte_ceiling_keeps_an_oversized_node_id_inside_its_code_span(tmp_path: Path) -> None:
+    payload = f"**bold**{'x' * MAX_BYTES}"
+    report = (
+        '<testsuites><testsuite errors="0" failures="1" skipped="0" tests="1" time="1.0">'
+        f'<testcase classname="tests.sample.test_sample" name="test[{payload}]" '
+        'file="tests/sample/test_sample.py">'
+        '<failure message="boom">boom</failure></testcase></testsuite></testsuites>'
+    )
+
+    summary = summarize(_report(tmp_path, report))
+    failure_line = next(line for line in summary.splitlines() if line.startswith("- `"))
+
+    assert "**bold**" in failure_line
+    assert failure_line.count("`") == 2
+    assert "summary truncated" in summary
+
+
+def test_byte_ceiling_closes_a_span_cut_immediately_after_its_opener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases = "".join(
+        f'<testcase classname="tests.sample.test_sample" name="test_{name}" '
+        'file="tests/sample/test_sample.py">'
+        '<failure message="boom">boom</failure></testcase>'
+        for name in ("first", "second")
+    )
+    report = (
+        '<testsuites><testsuite errors="0" failures="2" skipped="0" tests="2" time="1.0">'
+        f"{cases}</testsuite></testsuites>"
+    )
+    path = _report(tmp_path, report)
+    untruncated = summarize(path)
+    second_line = "- `tests/sample/test_sample.py::test_second"
+    after_opening_tick = len(untruncated[: untruncated.index(second_line)].encode("utf-8")) + 3
+    suffix_bytes = len(b"\n\n(summary truncated)\n")
+    monkeypatch.setattr(pytest_summary, "MAX_BYTES", after_opening_tick + suffix_bytes + 2)
+
+    summary = summarize(path)
+    cut_line = [line for line in summary.splitlines() if line.startswith("- `")][-1]
+
+    assert cut_line == "- ` `"
+
+
 def test_one_enormous_reason_cannot_blow_the_budget(tmp_path: Path) -> None:
     # `CI` being set disables pytest's assertion-explanation truncation (ADR-0577), so a single
     # failure comparing two large structures carries a reason with no upper bound of its own.
@@ -331,6 +375,35 @@ def test_a_backtick_in_a_reason_cannot_escape_its_code_span(tmp_path: Path) -> N
     # The spans are what make the rest safe, so both have to still be spans: the line carries
     # exactly two, one around the node id and one around the reason.
     assert line.count("`") == 4, f"code spans are unbalanced: {line}"
+
+
+def test_control_whitespace_in_a_node_id_cannot_escape_its_code_span(tmp_path: Path) -> None:
+    report = """<testsuites><testsuite errors="0" failures="1" skipped="0" tests="1" time="1.0">
+<testcase classname="tests.sample.test_sample"
+name="test_attack&#10;&#10;## Injected heading&#10;&#10;**bold**"
+file="tests/sample/test_sample.py"><failure message="boom">boom</failure></testcase>
+</testsuite></testsuites>"""
+
+    summary = summarize(_report(tmp_path, report))
+    failure_lines = [line for line in summary.splitlines() if line.startswith("- `")]
+
+    assert failure_lines == [
+        "- `tests/sample/test_sample.py::test_attack ## Injected heading **bold**` — `boom`"
+    ]
+    assert failure_lines[0].count("`") == 4
+    assert "## Injected heading" not in summary.splitlines()
+    assert "**bold**" not in summary.splitlines()
+
+
+def test_ordinary_spaces_in_a_node_id_remain_pasteable(tmp_path: Path) -> None:
+    report = """<testsuites><testsuite errors="0" failures="1" skipped="0" tests="1" time="1.0">
+<testcase classname="tests.sample.test_sample" name="test_param[a  b]"
+file="tests/sample/test_sample.py"><failure message="boom">boom</failure></testcase>
+</testsuite></testsuites>"""
+
+    summary = summarize(_report(tmp_path, report))
+
+    assert "tests/sample/test_sample.py::test_param[a  b]" in summary
 
 
 def test_angle_brackets_in_a_node_id_survive_verbatim(tmp_path: Path) -> None:

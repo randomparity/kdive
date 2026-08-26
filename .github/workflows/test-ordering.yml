@@ -1,20 +1,20 @@
 name: Test ordering
 
-# Weekly run of the test suite under a concrete per-run PYTHONHASHSEED. The PR gate
+# Weekly checks for both hash-order-dependent collection and assertions. The PR gate
 # (ci.yml) pins PYTHONHASHSEED=0 so pytest-xdist workers collect parametrized tests in the
-# same order; that pin also masks tests whose collection or assertions depend on set/dict
-# iteration order. This job sets the seed to the run's number instead: a per-workflow
-# counter that changes every run and stays in CPython's PYTHONHASHSEED range [0, 4294967295]
-# (github.run_id already exceeds that range, and an out-of-range seed fatals every
-# interpreter at startup), so the iteration order — and any order-dependent test —
-# exercises a different order weekly. The seed is recorded in the step log and the job
-# summary before the suite runs, so a red run names the concrete seed:
-# `PYTHONHASHSEED=<seed> just test` locally reproduces the collection and assertion order
-# (ADR-0577, #2065).
+# same order; that pin masks tests whose collection or assertions depend on set/dict
+# iteration order.
 #
-# The shared seed also means every xdist worker collects identically, so the prior
-# per-worker collection-mismatch abort no longer fires; the surface is order-dependent
-# assertions under a per-run changing order.
+# `just test-collect-order` replaces the old accidental per-worker xdist detector directly:
+# it collects the gated marker tier under two fixed valid seeds and diffs the ordered node
+# IDs, so an unsorted parametrization fails with a deterministic, locally reproducible diff.
+#
+# The assertion suite uses the run's number: a per-workflow counter that changes every run
+# and stays in CPython's PYTHONHASHSEED range [0, 4294967295] (github.run_id already exceeds
+# that range, and an out-of-range seed fatals every interpreter at startup). The seed is
+# recorded in the step log and summary before the suite runs, so a red run names the
+# concrete seed: `PYTHONHASHSEED=<seed> just test` locally reproduces its collection and
+# assertion order (ADR-0577, #2065, #2072).
 
 on:
   schedule:
@@ -86,6 +86,10 @@ jobs:
         # (ADR-0553, #1913). Fixing only ci.yml would leave the weekly run failing in the
         # thousands-of-errors shape that issue is about.
         run: just pull-test-images
+
+      - name: Collection order is hash-seed-independent
+        # Fixed seeds make both the verdict and any ordered node-id diff reproducible.
+        run: just test-collect-order
 
       - name: Test (per-run hash seed)
         # KDIVE_REQUIRE_DOCKER=1 turns the db suite's skip-when-no-Docker into a hard

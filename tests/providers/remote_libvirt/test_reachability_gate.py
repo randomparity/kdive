@@ -78,6 +78,25 @@ def test_an_unusable_port_is_a_configuration_error_naming_the_uri(uri: str, prob
     assert "host.example" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    ("authority", "reportable"),
+    [
+        ("[2001:db8::1]:16514", "qemu+tls://[2001:db8::1]:16514/system"),
+        ("[::1]", "qemu+tls://[::1]/system"),
+        ("host.example:16514", "qemu+tls://host.example:16514/system"),
+        ("192.0.2.1:16514", "qemu+tls://192.0.2.1:16514/system"),
+    ],
+)
+def test_failure_reports_preserve_host_uri_syntax(authority: str, reportable: str) -> None:
+    uri = (
+        f"qemu+tls://{_USERINFO}@{authority}/system"
+        "?pkipath=/tmp/kdive-remote-pki-secret&opaque=value#fragment"
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        require_reachable(uri, timeout=1.0, resolve=lambda _host, _port: [])
+    assert excinfo.value.details["uri"] == reportable
+
+
 def test_every_resolved_address_shares_one_deadline() -> None:
     """A dual-stack host must cost the timeout once, not once per address.
 

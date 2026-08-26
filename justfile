@@ -83,10 +83,11 @@ format:
 type:
     uv run ty check
 
-# The gated-tier exclusion, defined once so what `test`, `test-verbose`, `test-lf`, and
-# `test-changed` select cannot drift apart. The bare expression rather than `-m "…"`, because
-# `test-changed` is a bash recipe that needs it as a shell value. Split from the parallelism
-# below: the recipes deliberately differ on parallelism and must not differ on selection.
+# The gated-tier exclusion, defined once so what `test`, `test-verbose`, `test-lf`,
+# `test-changed`, and `test-collect-order` select cannot drift apart. The bare expression
+# rather than `-m "…"`, because bash recipes need it as a shell value. Split from the
+# parallelism below: the recipes deliberately differ on parallelism and must not differ on
+# selection.
 _TEST_MARKERS := 'not live_vm and not live_stack and not agent_smoke'
 
 # Worker count and the cap, explained under `test:` below. Its own variable because `test-lf`
@@ -120,13 +121,13 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # instead of running its up-front chunk to completion (the `load` default); durations here
 # range from ~2ms to hundreds of ms per test, so worksteal shortens the straggler tail
 # (#1332). It only changes execution order, not collection order, so it doesn't interact
-# with the ordering guard below. PYTHONHASHSEED is pinned so every xdist worker collects
-# parametrized tests in the same order — a parametrize source backed by a set is ordered by
-# the hash seed, which differs per worker, and xdist then aborts with "Different tests were
-# collected". It defaults to 0 but is overridable: the weekly test-ordering workflow sets
-# the run number as the seed — a concrete value, recorded in that run's log and job summary,
-# so a red run is reproducible with `PYTHONHASHSEED=<seed> just test` (#2065) — to surface
-# any new ordering-dependent test the pinned seed would otherwise mask.
+# with the collection detector below. PYTHONHASHSEED is pinned so every xdist worker
+# collects parametrized tests in the same order. It defaults to 0 but is overridable: the
+# weekly test-ordering workflow sets the run number as a concrete seed, records it in the
+# log and job summary, and surfaces order-dependent assertions reproducibly with
+# `PYTHONHASHSEED=<seed> just test` (#2065). That workflow also runs `test-collect-order`
+# under the fixed seeds 1 and 2, directly detecting parametrization backed by an unsorted
+# set from the resulting ordered node-id diff (#2072).
 #
 # `-q` bounds nothing on the failure path: it drops the per-test progress line and the header
 # and nothing else. Every failure still prints a traceback under pytest's default `--tb=auto`,
@@ -142,6 +143,26 @@ _TEST_XDIST := _TEST_WORKERS + ' --dist worksteal'
 # actually needed.
 test:
     PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "{{_TEST_MARKERS}}" {{_TEST_XDIST}} -q --tb=short
+
+
+# Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
+# weekly suite's shared per-run seed makes every xdist worker collect identically, so
+# collection drift needs a separate comparison rather than an xdist mismatch. Both direct
+# pytest runs select the same gated tier as `test` through `_TEST_MARKERS`; fixed valid
+# PYTHONHASHSEED values make the verdict and the unified node-id diff reproducible locally.
+# Optional arguments exist for a focused reproduction; without them the whole tier is
+# collected. As in `test-verbose`, interpolation is unquoted and shell-split.
+test-collect-order *PATHS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    first="$(mktemp)"
+    second="$(mktemp)"
+    trap 'rm -f "$first" "$second"' EXIT
+    PYTHONHASHSEED=1 uv run python -m pytest -m "{{_TEST_MARKERS}}" \
+      --collect-only -q {{PATHS}} | sed -n '/::/p' > "$first"
+    PYTHONHASHSEED=2 uv run python -m pytest -m "{{_TEST_MARKERS}}" \
+      --collect-only -q {{PATHS}} | sed -n '/::/p' > "$second"
+    diff -u --label PYTHONHASHSEED=1 --label PYTHONHASHSEED=2 "$first" "$second"
 
 # Same selection as `test:` with full error output for inspection: `-vv` restores complete
 # assertion introspection and diffs and `--tb=long` keeps every frame, where `test:` runs
