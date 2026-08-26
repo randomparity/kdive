@@ -659,16 +659,10 @@ jobs:
           set -uo pipefail
           command_token="kdive-$(tr -d - < /proc/sys/kernel/random/uuid)"
           printf '::stop-commands::%s\n' "$command_token"
-          # Same terminated-fleet journal capture as the tcg step (#2056): the witness is
-          # null once the fleet has stopped, so read the system units' retained entries
-          # through the fixed-record filter. The window spans this job's 90-minute ceiling.
-          journal_status=0
+          # The witness is null once the fleet has stopped, so read the system units' retained
+          # entries directly. Window spans this job's 90-minute ceiling; warn-and-continue (#1939).
           journalctl -u 'kdive-live-worker@*' --since '-95min' -n 400 --no-pager \
-            --output=cat |
-            python3 scripts/live-stack/filter-worker-journal-evidence.py || journal_status=$?
-          if ((journal_status != 0)); then
-            echo "worker journal capture was unavailable or withheld" >&2
-          fi
+            || echo "worker journal capture was unavailable or withheld" >&2
           diagnostic_status=0
           scripts/live-stack/worker-lifecycle.sh diagnostics || diagnostic_status=$?
           printf '::%s::\n' "$command_token"

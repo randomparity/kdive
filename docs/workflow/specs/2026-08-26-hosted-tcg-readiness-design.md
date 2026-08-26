@@ -166,6 +166,10 @@ server-role DSN. The design adds one read-only diagnostic query and adds log out
 queue metadata. It does not widen GitHub token permissions, network exposure, or worker database
 permissions.
 
+Manifest construction crosses from the trusted fixed-worker interpreter and its `PT_INTERP` into
+runtime-loader output, then crosses a root privilege boundary when the resulting attestation is
+installed at the worker readiness verifier's default path.
+
 ### Actors and trust
 
 The local CI job and repository checkout are trusted operators for this ephemeral proof.
@@ -174,6 +178,11 @@ the caller's provisioning profile; the diagnostic still fails closed if it canno
 exactly one System. Caller-controlled profile fields and guest output remain potentially untrusted
 and are not emitted. GitHub log readers are authorized repository collaborators but are not
 entitled to runtime credentials.
+The build-time interpreter, its selected loader, and the checked-out source are trusted inputs for
+this repository-owned proof. Loader-produced text is accepted only as structural evidence; an
+address-only entry represents no file, while every file-backed mapping remains subject to
+filesystem validation. Runtime verification does not trust a replaced loader or dependency merely
+because it appeared in build-time output.
 
 ### Controls
 
@@ -183,6 +192,12 @@ timestamps. Target creation is exclusive and mode 0600. The workflow retains the
 shield so output cannot inject workflow commands. Worker/provider log templates contain only
 bounded identifiers, fixed stage/event names, and timestamps. Existing secret redaction remains
 the final logging control.
+The loader runs with a scrubbed environment, a ten-second deadline, and a one-MiB-per-stream cap.
+Its full-line grammar admits only named or address-only Linux virtual mappings and absolute
+file-backed mappings; file paths must resolve to existing regular files. The installed manifest is
+root-owned mode 0644. Runtime verification fingerprints its declared interpreter, loader, and
+dependencies before recomputing the closure, so a replaced loader cannot hide a file-backed
+dependency through the address-only form.
 
 ### Out of scope
 
