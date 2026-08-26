@@ -1277,6 +1277,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Latch a skip gate's resource probe once per process
 - Redact a conninfo whose URI query names a credential
 - Hold the masked conninfo rendering to the blanket rule
+- Loosen profile-kind ordering fixture's precondition pin
 
 ### Build
 
