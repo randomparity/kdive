@@ -257,6 +257,64 @@ def test_redact_database_url_blanket_redacts_url_with_credential_query() -> None
         assert "redacted" in redacted.lower()
 
 
+def test_redact_database_url_redacts_password_holding_a_uri_delimiter() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    # libpq accepts a raw `#` or `?` in a userinfo password; `urlsplit` splits the string there
+    # instead and reports no password, so the conninfo used to be returned verbatim with the
+    # live credential in it (#2080). libpq's own parser reads the credential, the two readings
+    # disagree, and a mask that cannot be trusted to cover the whole secret goes wholesale.
+    for secret in ("se#cret", "se?cret"):  # pragma: allowlist secret - test literals
+        redacted = redact_database_url(f"postgresql://kdive:{secret}@db.example/kdive")
+
+        assert "redacted" in redacted.lower()
+        for fragment in (secret, secret[:3], secret[-4:]):
+            assert fragment not in redacted, fragment
+
+
+def test_redact_database_url_redacts_unparseable_conninfo() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    secret = "s3cr3t"  # noqa: S105 # pragma: allowlist secret - test literal
+    # A redaction helper must not be the thing that raises on the malformed input it exists to
+    # render safe (#2076): returning at all is half of what each case asserts. Each shape
+    # defeats a different parser — libpq rejects the unterminated IPv6 host and the outright
+    # garbage, while `urlsplit` accepts the non-numeric port only to raise when it is read back.
+    for conninfo in (
+        f"postgresql://kdive:{secret}@[::1:5432/kdive",
+        f"postgresql://kdive:{secret}@db.example:notaport/kdive",
+        f"not a conninfo at all !! {secret}",
+    ):
+        redacted = redact_database_url(conninfo)
+
+        assert "redacted" in redacted.lower()
+        for fragment in (secret, secret[:3], secret[-4:]):
+            assert fragment not in redacted, fragment
+
+
+def test_redact_database_url_keeps_ipv6_host_bracketed() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    secret = "p4ss-w0rd"  # noqa: S105 # pragma: allowlist secret - test literal
+    # `urlsplit().hostname` drops the brackets an IPv6 literal needs, which left a masked
+    # rendering that was no longer a parseable URI (#2080) — display only, but the same
+    # wrong-parser cause.
+    redacted = redact_database_url(f"postgresql://kdive:{secret}@[::1]:5432/kdive")
+
+    assert redacted == "postgresql://kdive:***@[::1]:5432/kdive"
+
+
+def test_redact_database_url_masks_percent_encoded_password() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    # libpq percent-decodes a userinfo password, `urlsplit` does not, so the two readings are
+    # compared decoded — otherwise every password carrying an escaped character would lose the
+    # host/db to a wholesale redaction it does not need.
+    redacted = redact_database_url("postgresql://kdive:p%40ss@db.example/kdive")
+
+    assert redacted == "postgresql://kdive:***@db.example/kdive"
+
+
 def test_redact_database_url_keeps_credential_free_query() -> None:
     from kdive.admin.projects import redact_database_url
 

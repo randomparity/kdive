@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import AsyncConnectionPool
 
 
@@ -150,44 +152,76 @@ async def verify_project(*, project: str) -> ProjectFundingStatus:
     )
 
 
+_REDACTED_CONNINFO = "<redacted: conninfo with password>"
+
+
+def _mask_userinfo_password(parsed: urllib.parse.SplitResult) -> str:
+    """Rebuild ``parsed`` with its userinfo password replaced by ``***``.
+
+    ``parsed.hostname`` strips the brackets from an IPv6 literal, so they are put back —
+    without them the masked rendering is no longer a parseable URI (#2080). ``parsed.port``
+    raises ``ValueError`` when the port is not a number; the caller turns that into the
+    wholesale marker.
+    """
+    host = parsed.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    netloc = f"{parsed.username or ''}:***@{host}"
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
 def redact_database_url(url: str) -> str:
     """Mask the password in a Postgres conninfo so it is safe to print (ADR-0256).
 
-    A ``postgresql://`` URL whose userinfo password ``urlsplit`` recognises is rebuilt with that
-    password masked (``***``), keeping host/port/db. The rendering is then held to one rule,
-    which is also the whole treatment of every other form: **if it still mentions** ``password``
-    **, it is replaced wholesale** with ``<redacted: conninfo with password>``. A partial mask
-    could leak the tail of a real secret, so it is never attempted — that is why a libpq
-    keyword/value conninfo (whose value may be quoted or spaced) goes wholesale, and why a URL
-    carrying a second credential somewhere the userinfo mask does not reach goes wholesale too.
-    libpq reads connection keywords from the URI **query** and percent-decodes them, and a query
-    ``password`` wins over the userinfo one, so masking only the userinfo would print the
-    effective credential (#2077); the check therefore runs over the percent-decoded rendering
-    and covers the fragment as well. A conninfo mentioning ``password`` nowhere is returned
-    unchanged — the diagnostic value is the host/db, not the secret.
+    Which credential the string actually carries is decided by libpq's own parser,
+    ``psycopg.conninfo.conninfo_to_dict``. ``urllib.parse`` is not a conninfo parser: it splits
+    a userinfo password at a raw ``#`` or ``?``, so it reports no password at all for a string
+    libpq reads as carrying one, and the conninfo used to be printed as it came (#2080).
 
-    Not covered: a userinfo password containing a raw ``#`` or ``?`` splits elsewhere, so
-    ``urlsplit`` reports no password at all and the conninfo is returned as it came (#2080).
+    A ``postgresql://`` URL is rebuilt with its userinfo password masked (``***``), keeping
+    host/port/db, but only when ``urlsplit`` reads the same credential libpq does — that is the
+    one case where the span being overwritten is known to be the whole secret. The rendering is
+    then held to one rule, which is also the whole treatment of every other form: **if it still
+    mentions** ``password``**, it is replaced wholesale** with the marker. A partial mask could
+    leak the tail of a real secret, so it is never attempted — that is why a libpq keyword/value
+    conninfo (whose value may be quoted or spaced) goes wholesale, and why a URL carrying a
+    second credential somewhere the userinfo mask does not reach goes wholesale too. libpq reads
+    connection keywords from the URI **query** and percent-decodes them, and a query ``password``
+    wins over the userinfo one, so masking only the userinfo would print the effective credential
+    (#2077); the check therefore runs over the percent-decoded rendering and covers the fragment
+    as well.
+
+    Every other way of not reaching a rendering it can vouch for ends at that same marker rather
+    than raising out of a helper whose job is to make output printable (#2076): a conninfo libpq
+    rejects, and a URL whose port is not a number, are both redacted wholesale. A conninfo
+    mentioning ``password`` nowhere is returned unchanged — the diagnostic value is the host/db,
+    not the secret.
 
     Args:
         url: A psycopg URL or keyword/value conninfo string.
 
     Returns:
         A display-safe rendering: either the userinfo-masked URL, the redaction marker, or the
-        input unchanged. It never contains the word ``password`` outside that marker.
+        input unchanged. It never contains the word ``password`` outside that marker, and it
+        never raises.
     """
-    parsed = urllib.parse.urlsplit(url)
-    rendered = url
-    if parsed.scheme and parsed.password is not None:
-        host = parsed.hostname or ""
-        if parsed.port is not None:
-            host = f"{host}:{parsed.port}"
-        netloc = f"{parsed.username or ''}:***@{host}"
-        rendered = urllib.parse.urlunsplit(
-            (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
-        )
+    try:
+        password = conninfo_to_dict(url).get("password")
+        parsed = urllib.parse.urlsplit(url)
+        if password is None:
+            rendered = url
+        elif parsed.scheme and urllib.parse.unquote(parsed.password or "") == password:
+            rendered = _mask_userinfo_password(parsed)
+        else:
+            return _REDACTED_CONNINFO
+    except psycopg.ProgrammingError, ValueError:
+        return _REDACTED_CONNINFO
     if re.search(r"password", urllib.parse.unquote(rendered), re.IGNORECASE):
-        return "<redacted: conninfo with password>"
+        return _REDACTED_CONNINFO
     return rendered
 
 
