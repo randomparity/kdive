@@ -427,6 +427,14 @@ def test_tcg_installs_manifest_for_the_fixed_worker_before_starting_it() -> None
     assert "build-capture-bootstrap-manifest.py verify" in run
     assert "/usr/share/kdive/capture-bootstrap-manifest.json" in run
     assert "0:0:644" in run
+    assert "--user=kdive-worker-1 --group=kdive-worker-1" in run
+    assert "verify_capture_bootstrap_manifest" in run
+    assert "sudo stat -Lc '%u %g %a' /usr/share/kdive" in run
+    assert "capture_manifest_parent path=/usr/share/kdive uid=%s gid=%s mode=%s" in run
+    assert "fingerprint_path_not_safely_openable" in run
+    assert "capture_manifest_verification status=rejected reason={reason}" in run
+    assert "capture_manifest_verification status=accepted reason=none" in run
+    assert "print(error)" not in run
     assert install_index < manifest_index < proof_index < spine_index
 
 
