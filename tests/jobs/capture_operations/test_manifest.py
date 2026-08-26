@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import runpy
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -403,6 +406,79 @@ def test_verify_rejects_wrong_interpreter_and_import_trace_drift(tmp_path: Path)
     )
     assert drift.returncode != 0
     assert "import trace" in drift.stderr
+
+
+def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = tmp_path / "staged.json"
+    built = _run(
+        "build",
+        "--interpreter",
+        sys.executable,
+        "--source-root",
+        str(_ROOT / "src"),
+        "--output",
+        str(staged),
+    )
+    assert built.returncode == 0, built.stderr
+
+    namespace = runpy.run_path(str(_SCRIPT))
+    install = namespace["_install"]
+    prepare_parent = namespace["_prepare_install_parent"]
+    script_os = install.__globals__["os"]
+    legacy_destination = tmp_path / "legacy" / "kdive" / "capture-bootstrap-manifest.json"
+    destination = tmp_path / "fixed" / "kdive" / "capture-bootstrap-manifest.json"
+    root_owned_destinations = {legacy_destination, destination}
+    for trusted_parent in (legacy_destination.parent.parent, destination.parent.parent):
+        trusted_parent.mkdir()
+        trusted_parent.chmod(0o755)
+    monkeypatch.setattr(script_os, "geteuid", lambda: 0)
+    monkeypatch.setattr(script_os, "fchown", lambda *_args: None)
+    real_stat = Path.stat
+
+    def root_owned_destination(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        metadata = real_stat(self, follow_symlinks=follow_symlinks)
+        if self not in root_owned_destinations:
+            return metadata
+        fields = list(metadata)
+        fields[stat.ST_UID] = 0
+        fields[stat.ST_GID] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "stat", root_owned_destination)
+    previous_umask = os.umask(0)
+    try:
+        monkeypatch.setitem(
+            install.__globals__,
+            "_prepare_install_parent",
+            lambda *_args, **_kwargs: None,
+        )
+        install(SimpleNamespace(staged=staged, destination=legacy_destination))
+        monkeypatch.setitem(install.__globals__, "_prepare_install_parent", prepare_parent)
+        install(SimpleNamespace(staged=staged, destination=destination))
+    finally:
+        os.umask(previous_umask)
+
+    legacy_parent = legacy_destination.parent
+    assert stat.S_IMODE(real_stat(legacy_parent).st_mode) == 0o777
+    producer_verify = _run(
+        "verify",
+        "--manifest",
+        str(legacy_destination),
+        "--interpreter",
+        sys.executable,
+        "--source-root",
+        str(_ROOT / "src"),
+    )
+    assert producer_verify.returncode == 0, producer_verify.stderr
+    with pytest.raises(PermissionError, match="ancestor is replaceable"):
+        verify_capture_bootstrap_manifest(
+            legacy_destination, Path(sys.executable), expected_uid=os.getuid()
+        )
+
+    assert stat.S_IMODE(real_stat(destination.parent).st_mode) == 0o755
+    verify_capture_bootstrap_manifest(destination, Path(sys.executable), expected_uid=os.getuid())
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="unprivileged refusal requires a non-root test uid")

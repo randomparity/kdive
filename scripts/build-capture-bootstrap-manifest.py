@@ -173,12 +173,33 @@ def _build(args: argparse.Namespace) -> None:
     print("changed" if changed else "unchanged")
 
 
+def _prepare_install_parent(path: Path, *, owner_uid: int, group_gid: int) -> bool:
+    path.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(path, flags)
+    except OSError as error:
+        raise RuntimeError("manifest destination parent must be a real directory") from error
+    try:
+        metadata = os.fstat(directory_fd)
+        ownership_changed = metadata.st_uid != owner_uid or metadata.st_gid != group_gid
+        mode_changed = stat.S_IMODE(metadata.st_mode) != 0o755
+        if ownership_changed:
+            os.fchown(directory_fd, owner_uid, group_gid)
+        if mode_changed:
+            os.fchmod(directory_fd, 0o755)
+        return ownership_changed or mode_changed
+    finally:
+        os.close(directory_fd)
+
+
 def _install(args: argparse.Namespace) -> None:
     if os.geteuid() != 0:
         raise PermissionError("capture bootstrap manifest installation requires root")
     staged = args.staged.resolve(strict=True)
     data = staged.read_bytes()
-    changed = _atomic_write(args.destination, data, 0o644)
+    changed = _prepare_install_parent(args.destination.parent, owner_uid=0, group_gid=0)
+    changed = _atomic_write(args.destination, data, 0o644) or changed
     installed = args.destination.stat()
     if installed.st_uid != 0 or installed.st_gid != 0:
         os.chown(args.destination, 0, 0)
