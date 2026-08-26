@@ -3,8 +3,6 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
-repo_root="$(cd "${script_dir}/../.." && pwd)"
-readonly repo_root
 # shellcheck source=scripts/live-stack/env.sh
 source "${script_dir}/env.sh"
 

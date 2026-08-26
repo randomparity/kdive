@@ -727,6 +727,26 @@ def test_provision_queue_diagnostics_is_exact_bounded_and_redacted() -> None:
         assert forbidden not in text
 
 
+def test_provision_queue_diagnostics_sources_env_before_reporting_malformed_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("malformed\n")
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 4
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=target-malformed\n"
+
+
 def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() -> None:
     text = (ROOT / "scripts/live-stack/lib.sh").read_text()
     assert "restart_host_processes" in text
