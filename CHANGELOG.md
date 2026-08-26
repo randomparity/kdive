@@ -1281,6 +1281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read a conninfo with libpq's parser, not urlsplit
 - Name the mask helper for what it returns
 - Preserve IPv6 brackets in reports
+- Keep pytest node IDs inside code spans
 
 ### Security
 
