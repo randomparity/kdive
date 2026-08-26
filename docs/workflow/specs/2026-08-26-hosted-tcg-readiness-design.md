@@ -94,10 +94,11 @@ starts. The 600-second state deadline remains unchanged.
    immutable line only for a successful `JobKind.PROVISION` claim, naming job id, persisted lane,
    attempt, enqueue time, initial dequeue `claim_at`, and non-negative queue delay.
 5. `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` emits start and completion around
-   these exact calls: `_resolve_guest_arch`, `_materialize_rootfs`, `_prepare_baseline_kernel`,
-   `prepare_overlay`, the whole overlay-customizer loop, `prepare_console`, and
-   `_define_and_start`. An exception deliberately leaves the start unmatched. No profile, XML,
-   path, credential, or guest output is logged.
+   guest-architecture resolution, rootfs materialization, baseline preparation, overlay preparation,
+   the `render-domain` interval covering gdb/SSH port reuse and `render_domain_xml`, the whole
+   overlay-customizer loop, console preparation, and domain definition/start. An exception
+   deliberately leaves the stage start unmatched. No profile, XML, path, credential, or guest output
+   is logged.
 6. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
    same proof's provision row with persisted lane and claim timestamp, show the System transition
    to `ready`, and pass
