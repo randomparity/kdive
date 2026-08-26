@@ -783,6 +783,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align the records with the shipped report, and strip review transcript
 - Specify what the report must say, not the bytes it prints
 - Name what the latch buys, not just how much residual is left
+- Name the real marker and the uncovered conninfo shape
 
 ### Fixed
 
@@ -1274,6 +1275,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the runbook block self-contained and match its precedent
 - Classify listed rows by the label vocabulary, not by prose
 - Latch a skip gate's resource probe once per process
+- Redact a conninfo whose URI query names a credential
+- Hold the masked conninfo rendering to the blanket rule
 
 ### Build
 
