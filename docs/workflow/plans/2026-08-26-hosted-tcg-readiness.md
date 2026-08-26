@@ -235,8 +235,10 @@ file-backed mapping checks. The focused parser selection must report `5 passed`.
    environment: `just lint`, `just type`, `just test`, `prek run`, `just ci`. Expected: exit 0 each.
 4. Push the final reviewed commit and dispatch the hosted workflow from that exact SHA. Require the
    run metadata to report Ubuntu 26.04, the committed ppc64le image identity, and `headSha` equal to
-   `git rev-parse HEAD`. Require the exact queue target's lane, matching immutable fixed-worker
-   `claim_at`, transition to `ready`, the named SSH test pass, and a nonzero passed-proof summary.
+   `git rev-parse HEAD`. Require the exact queue target to agree with the immutable fixed-worker
+   claim, and require provider records for that job/System to pair each mapped stage's
+   start/completion in order through `define-start`; missing or inconsistent evidence rejects the
+   proof. Require transition to `ready`, the named SSH test pass, and a nonzero passed-proof summary.
 5. Create/update the PR with `Closes #2056` only, wait for green CI, and require its `headRefOid` to
    equal the hosted-proved SHA and mergeability to be clean. Make no source/doc commit after the
    hosted proof; any change invalidates it and returns to step 1. Set `status:awaiting-merge`; stop

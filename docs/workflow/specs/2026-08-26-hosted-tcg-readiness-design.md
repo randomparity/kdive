@@ -2,7 +2,7 @@
 
 ## Scope and authority
 
-This design implements issue #2056 under scope token `q2056-b90d2dca` on branch
+This design implements issue #2056 under scope token `q2056-81f35d35` on branch
 `feat/hosted-tcg-readiness-2056`, based on `main`. The operator requires the Ubuntu 26.04 hosted
 ppc64le TCG proof to reach `ready` and pass `test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
 The proof must expose the provision job's persisted lane and fixed-worker claim timing, and its
@@ -18,11 +18,12 @@ The permitted implementation surface is:
 - `docs/guide/reference/config.md`;
 - `scripts/live-stack/filter-worker-journal-evidence.py` and
   `scripts/live-stack/provision-queue-diagnostics.sh`;
-- `src/kdive/config/external_env.py`, `src/kdive/jobs/worker.py`, and
+- `src/kdive/config/external_env.py`,
+  `src/kdive/jobs/capture_operations/bootstrap_elf.py`, `src/kdive/jobs/worker.py`, and
   `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`; and
 - `tests/integration/live_stack/spine.py`, `tests/integration/live_stack/test_spine.py`,
-  `tests/integration/test_live_stack.py`, `tests/scripts/test_live_stack_scripts.py`, and
-  `tests/scripts/test_live_workflow_shape.py`.
+  `tests/integration/test_live_stack.py`, `tests/jobs/capture_operations/test_manifest.py`,
+  `tests/scripts/test_live_stack_scripts.py`, and `tests/scripts/test_live_workflow_shape.py`.
 
 Issues #2069, #2072, #2087, and #2089 and their files are excluded. There is no migration and no
 merge authorization.
@@ -204,8 +205,11 @@ still fails closed.
 
 The final behavior proof runs only after review/simplification and guardrails: a hosted Ubuntu 26.04
 `live_vm_tcg (hosted)` job whose `headSha` equals final PR `headRefOid`, whose committed ppc64le
-image identity is reported, whose exact target report and immutable claim record agree, and in which
-`test_ppc64le_guest_is_ssh_reachable_over_the_wire` passes with a nonzero passed-proof summary.
+image identity is reported, and whose exact queue target agrees with the immutable claim record.
+The retained provider records for that job and System must be present and pair each mapped stage's
+start/completion in order through `define-start`; missing, inconsistent, or off-target records
+reject the proof. The System must reach `ready`, and
+`test_ppc64le_guest_is_ssh_reachable_over_the_wire` must pass with a nonzero passed-proof summary.
 Any later commit invalidates the hosted proof.
 
 The repository guardrails are `just lint`, `just type`, `just test`, `prek run`, and `just ci`.

@@ -60,8 +60,11 @@ The hosted proof records the queue and execution boundaries before changing timi
    was unavailable; a second inconclusive run parks without a source or deadline guess. The TCG
    lifecycle journal capture runs on every outcome before cleanup, so the final hosted run can
    report the immutable claim record even when the spine succeeds. That run occurs after
-   review/simplification/guardrails, must have the same SHA as the PR head, report its provision
-   lane and immutable claim timestamp, reach `ready`, and pass
+   review/simplification/guardrails and must have the same SHA as the PR head. Its exact queue
+   target and immutable claim record must agree, and its retained provider records must name that
+   job and System and pair each mapped stage's start/completion in order through `define-start`.
+   Missing, inconsistent, or off-target provider evidence rejects the proof even if the spine is
+   green. The System must reach `ready` and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
 5. The 600-second state deadline stays unchanged unless at least two hosted runs record completed
    end-to-end intervals from immutable provision-job `claim_at` through System `ready`. A proposed
