@@ -158,6 +158,25 @@ execution progress. No public API or schema changes.
   - running + last unmatched provider-stage start selects that exact mapped call;
   - terminal selects its existing categorized failure instead of a timeout.
 
+**Evidence-selected correction**
+
+- Hosted run
+  [32981623561](https://github.com/randomparity/kdive/actions/runs/32981623561/job/98219425910)
+  persisted the exact provision job on `default` at `2026-08-26T14:51:00.739273Z`; it remained
+  `queued`, attempt 0, with no worker, heartbeat, lease, claim record, or provider stage. The fixed
+  worker advertised `default,state-fenced` at `14:50:18.567292Z`.
+- The source boundary is `Worker.run_once` returning before `dequeue` when the worker probe is not
+  ready. `run_worker` unconditionally includes `verify_capture_bootstrap_manifest`, but the hosted
+  lifecycle path installed the fixed-worker venv without its matching default-path manifest.
+- The focused regression is
+  `tests/scripts/test_live_workflow_shape.py::test_tcg_installs_manifest_for_the_fixed_worker_before_starting_it`.
+  It requires build, privileged install, runtime-identity verification, root:root mode 0644, and
+  ordering after venv installation but before lifecycle proof or spine startup.
+- The implementation adds one `.github/workflows/live.yml` step that builds from the fixed venv's
+  site-packages, installs `/usr/share/kdive/capture-bootstrap-manifest.json`, verifies it against
+  the same interpreter/source root, and checks ownership and mode. Expected focused output:
+  `1 passed`.
+
 **Steps**
 
 1. Push the two evidence commits and dispatch `.github/workflows/live.yml` on this branch with the
