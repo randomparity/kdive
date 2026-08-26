@@ -25,12 +25,16 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
-import psycopg
-
 
 def fail(code: str, status: int) -> None:
     print(f"provision-evidence-error code={code}", file=sys.stderr)
     raise SystemExit(status)
+
+
+try:
+    import psycopg
+except (ImportError, OSError):
+    fail("query-unavailable", 5)
 
 
 try:
