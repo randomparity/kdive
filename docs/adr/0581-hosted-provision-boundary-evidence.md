@@ -9,35 +9,56 @@ Accepted
 Hosted Ubuntu 26.04 ppc64le TCG runs leave a System in `provisioning` for the full state deadline.
 PR #2057 exposed the state timeline and worker journal. PR #2060 attributed the stall to a
 `state-fenced` provision lane, but current source routes `JobKind.PROVISION` to `default`; only
-restore, reprovision, and snapshot are state-fenced. The post-#2060 journal contains a running fixed
-worker and no claim or provider evidence, so it cannot distinguish an unclaimed default-lane row
-from a claimed handler/provider stall. Increasing the deadline would hide the same ambiguity.
+restore, reprovision, and snapshot are state-fenced. Post-#2060 run
+[32604993978](https://github.com/randomparity/kdive/actions/runs/32604993978/job/97108664284)
+logged the replacement worker starting at `2026-08-22T23:51:50Z`, then no worker entry before the
+`ppc64le:provision: t+0s provisioning` timeline exhausted at `2026-08-23T00:02:37Z`. Current run
+[32968397867](https://github.com/randomparity/kdive/actions/runs/32968397867/job/98176108436)
+repeated that shape: replacement worker start at `2026-08-26T12:36:42Z`, one
+`t+0s provisioning` state, and timeout at `2026-08-26T12:47:31Z`. Neither journal carries a claim
+or provider boundary, so the evidence cannot distinguish an unclaimed default-lane row from a
+claimed handler/provider stall. Increasing the deadline would hide the same ambiguity.
 
 ## Decision
 
 The hosted proof records the queue and execution boundaries before changing timing:
 
-1. A bounded, read-only queue snapshot reports a provisioning System's provision job id, persisted
-   lane, job state, attempt, worker id, enqueue time, claim time, and lease expiry before cleanup.
-2. A fixed worker logs its accepted lanes at startup and each successful claim with the job's
-   persisted lane and database-derived queue delay.
-3. Local-libvirt logs entry into each synchronous provision stage without logging paths, profile
-   data, domain XML, guest output, or credentials.
-4. The first hosted run selects the source correction from the first boundary lacking its expected
-   successor. The final hosted run must reach `ready` and pass the named SSH proof.
-5. The 600-second state deadline stays unchanged unless the boundary evidence measures ongoing
-   hosted work at that deadline. Any later change must cite that hosted measurement; the separate
-   post-ready SSH budget is not provision-timing evidence.
+1. The hosted test exclusively publishes the provision response's job id and System id to a
+   mode-0600 workflow-temporary target by same-directory temporary plus atomic no-replace link. A
+   read-only queue snapshot validates that pair and reports the exact joined System state plus
+   persisted lane, job state, attempt, worker id, enqueue time, **last** heartbeat time, and lease
+   expiry. It retains `ready`/`succeeded` and cannot substitute another job/System pair. Five-second
+   connect/statement timeouts sit inside a 12-second whole-step timeout; failures are a bounded
+   fixed-code line and nonzero when the target/exact join is unavailable, empty, multiply matched,
+   mismatched, or timed out.
+2. A fixed worker logs its accepted lanes at startup and each successful claim with the persisted
+   lane, queue delay, and immutable initial `claim_at`: the `heartbeat_at` returned by the dequeue
+   database call before later renewals mutate the row.
+3. Local-libvirt logs start and completion around each mapped synchronous provision call without
+   logging paths, profile data, domain XML, guest output, or credentials.
+4. One usable hosted run selects the source correction from the first boundary lacking its expected
+   successor. One unchanged redispatch is allowed only when the diagnostic infrastructure itself
+   was unavailable; a second inconclusive run parks without a source or deadline guess. The final
+   hosted run occurs after review/simplification/guardrails, must have the same SHA as the PR head,
+   report its provision lane and immutable claim timestamp, reach `ready`, and pass
+   `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
+5. The 600-second state deadline stays unchanged unless at least two hosted runs record completed
+   end-to-end intervals from immutable provision-job `claim_at` through System `ready`. A proposed
+   deadline is the larger total plus 50 percent, capped at 900 seconds; stage pairs diagnose the
+   total but never size it. A missing `ready` timestamp or a margin above the cap authorizes no
+   increase, and the separate post-ready SSH budget is likewise not provision-timing evidence.
 
 The diagnostics remain after the fix so every future red hosted proof identifies its own boundary.
 
 ## Consequences
 
-A successful and a failed hosted run both expose persisted lane and claim timing. A queued row and
-a running row no longer look alike. A claimed provider stall names the last entered stage. The
-workflow gains one bounded local database read, and normal workers gain a few INFO lines per
-provision; no MCP contract or database schema changes. Diagnostics stay observational and cannot
-turn a red proof green or a green proof red.
+A successful and a failed hosted run both expose persisted lane and immutable claim timing. A
+queued row and a running row no longer look alike. A claimed provider stall names the last entered
+mapped call. The workflow gains one bounded local database read, and normal workers gain a few INFO
+lines per provision; no MCP contract or database schema changes. The snapshot names an unavailable,
+empty, multiply matched, mismatched, or timed-out exact-target read and exits nonzero; its workflow
+wrapper warns and preserves the spine's pre-existing verdict rather than replacing it. Such a run
+is not usable diagnosis evidence.
 
 ## Considered & rejected
 
@@ -45,15 +66,22 @@ turn a red proof green or a green proof red.
   `66541e9d7a59922b9fb180a40284bc3370f68a04`,
   `dispatch_lane_for_kind(JobKind.PROVISION)` returns `default` because `PROVISION` is absent from
   `STATE_FENCED_JOB_KINDS`; the premise does not describe the persisted row.
-- **Increase the provision state deadline from the SSH budget.** verified: hosted run 32968397867
-  spent 600 seconds in `provisioning`, while the 900-second SSH budget starts only after `ready`;
-  the latter measures a different phase and cannot justify the former.
-- **Capture only the worker journal.** verified: hosted runs 32604993978 and 32968397867 show only
-  worker process startup while the System remains `provisioning`; without the row's state and claim
-  columns, both an idle worker and a busy silent handler fit the evidence.
+- **Increase the provision state deadline from the SSH budget.** verified: in the
+  `live_vm_tcg (hosted)` job of run 32968397867, the pytest failure reports
+  `deadline_s = 600.0` and only `ppc64le:provision: t+0s provisioning`; the 900-second SSH budget
+  appears later in the test and starts only after `ready`. Those are different phases.
+- **Capture only the worker journal.** verified: the `live_vm_tcg (hosted)` jobs linked in Context
+  contain fixed-worker startup at `23:51:50Z` / `12:36:42Z` and no subsequent worker entry while
+  pytest reports only `t+0s provisioning`; without the row's state and claim columns, both an idle
+  worker and a busy silent handler fit the excerpts.
+- **Do nothing and accept the timeout as sufficient evidence.** judgment: the same externally
+  visible state represents two corrections in different components, so acting from it would guess
+  rather than diagnose the requested source cause.
+- **Retain only the queue snapshot.** judgment: it distinguishes queued from running but a running
+  row still leaves handler dispatch and every synchronous provider stage indistinguishable.
+- **Add temporary diagnostics and remove them after the confirming run.** judgment: removing the
+  only boundary evidence recreates #2056's diagnostic gap on the next regression; the retained
+  metadata and fixed-token INFO lines are bounded.
 - **Expose queue internals through the public MCP job envelope.** judgment: that widens a public
   contract and unrelated consumers when an issue-local, read-only hosted diagnostic settles the
   question with less surface.
-- **Remove diagnostics after the source fix.** judgment: a future regression would recreate the
-  evidence gap and require another hosted instrumentation cycle; bounded metadata-only evidence is
-  cheaper to retain.

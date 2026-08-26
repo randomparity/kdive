@@ -25,59 +25,86 @@ still show one `provisioning` state for the full 600-second state deadline and a
 whose journal contains only process startup. That evidence cannot distinguish an unclaimed
 `default`-lane row from a claimed handler/provider stall.
 
-The first implementation slice therefore makes that distinction directly. On every hosted TCG
-run, before cleanup, a bounded read-only diagnostic reports each provisioning System's provision
-job id, persisted `dispatch_lane`, job state, attempt, worker id, enqueue timestamp, claim timestamp,
-and lease expiry. The report excludes payload, authorizing data, credentials, and failure context.
-The fixed worker also logs the accepted lane set at startup and logs each successful claim with the
-persisted lane and database-derived queue delay. Local-libvirt logs the start of each synchronous
-provision stage before entering it. Together the last emitted boundary is decisive:
+The first implementation slice therefore makes that distinction directly. The named hosted test
+exclusively publishes its returned provision job id and System id in a workflow-owned target file
+immediately after `systems.provision` succeeds. Before cleanup, a bounded read-only diagnostic
+queries exactly that pair regardless of current System state and reports persisted lane, job state,
+attempt, worker id, enqueue timestamp, **last** heartbeat timestamp, and lease expiry. The initial
+claim timestamp is not that mutable row value: it is the `heartbeat_at` returned by `dequeue` in the
+same database call that changes queued to running, copied immediately into an immutable worker
+journal record before renewals. The report excludes payload, authorizing data, credentials, and
+failure context. Local-libvirt logs start and completion for each synchronous provision stage.
+Together the last emitted boundary is decisive:
 
-- queued row with no worker and no claim timestamp: worker claim/readiness boundary;
-- running row with worker and claim timestamp, but no provider-stage entry: handler dispatch boundary;
-- running row whose journal stops after a named provider stage: that provider stage;
+- queued row with no worker and no matching claim record: worker claim/readiness boundary;
+- running row with a matching claim record but no provider-stage entry: handler dispatch boundary;
+- running row whose journal ends with an unmatched named stage start: that mapped provider call;
 - terminal row or System error: existing failure context is authoritative instead of a timeout.
 
-The diagnostic commit is dispatched once on the hosted workflow. The source correction is then
-made at the first broken boundary, followed by another hosted dispatch. Diagnostic behavior stays
-in the final change because a future red proof must remain self-explaining.
+One **usable** diagnostic dispatch is required before any source correction. When the only failure
+is diagnostic infrastructure (the bounded snapshot or journal is unavailable), the branch may be
+redispatched once unchanged. A second unavailable, truncated, ambiguous, or internally
+inconsistent result is fail-loud: make no source or deadline change and park the unattended quest
+with the exact missing evidence. Evidence that identifies a boundary outside the permitted surface
+is likewise a scope blocker, not authority to expand. After a usable run selects the first broken
+boundary, correct it and run the hosted proof again. Diagnostic behavior stays in the final change
+because a future red proof must remain self-explaining.
 
 ## Components and data flow
 
-1. `scripts/live-stack/provision-queue-diagnostics.sh` opens the server-role database with a short
-   connect timeout and transaction-local statement timeout. One fixed query joins provisioning
-   Systems to provision jobs by `payload->>'system_id'`, orders deterministically, and caps rows.
-   It emits tab-separated fields with a header and explicit `NONE` values.
-2. `.github/workflows/live.yml` invokes that script under the workflow's existing
-   `::stop-commands::` shield in both lifecycle-diagnostics steps. In the hosted TCG job, a small
-   always-run provision-boundary step executes before failure-only journal capture, so successful
-   proof evidence includes the persisted lane and claim time too. Diagnostic failure is named and
-   cannot replace the spine verdict.
-3. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes, then one
-   line per successful claim naming job id, kind, persisted lane, attempt, enqueue time, claim time,
-   and non-negative queue delay.
-4. `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` emits a bounded set of stage-entry
-   lines for arch resolution, rootfs materialization, baseline extraction, overlay preparation,
-   overlay customization, console preparation, and domain define/start. No profile, XML, path,
-   credential, or guest output is logged.
-5. The hosted dispatch selects the correction. The final hosted dispatch must show the provision
-   row claimed, the System transition to `ready`, and the named SSH proof passing. The existing
-   zero-proof guard remains unchanged.
+1. The hosted test exclusively publishes `<job UUID><TAB><System UUID><LF>` to the path named by
+   `KDIVE_PROVISION_EVIDENCE_TARGET`: unique same-directory temporary, atomic no-replace link, mode
+   0600, cleanup on every collision/failure. Any existing target is an error, so concurrent/retried
+   writers cannot replace the first proof identity.
+2. `scripts/live-stack/provision-queue-diagnostics.sh TARGET_FILE` validates that exact two-UUID
+   record, opens the server-role database with short connection and transaction-local statement
+   timeouts, and queries exactly the named provision job whose internally generated,
+   `SystemPayload`-validated `payload.system_id` equals the named System. It does not filter on
+   System state, so `ready`/`succeeded` remains visible. Zero or multiple matches, a job/System
+   mismatch, malformed target data, or an unavailable query is nonzero. The one row uses a fixed
+   literal-tab-separated header and explicit `NONE` values.
+3. `.github/workflows/live.yml` gives the hosted TCG spine a workflow-temporary target path and
+   invokes the script in a small `if: always()` step before failure-only journal capture and
+   cleanup, under its own `::stop-commands::` shield. GNU
+   `timeout --signal=TERM --kill-after=2s 12s` bounds the entire invocation, not only SQL. The
+   script emits either the fixed header plus one row or one sanitized fixed-code error line of at
+   most 100 bytes. This makes successful proof evidence visible without replacing the spine verdict.
+4. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes, then one
+   immutable line per successful claim naming job id, kind, persisted lane, attempt, enqueue time,
+   initial dequeue `claim_at`, and non-negative queue delay.
+5. `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` emits start and completion around
+   these exact calls: `_resolve_guest_arch`, `_materialize_rootfs`, `_prepare_baseline_kernel`,
+   `prepare_overlay`, the whole overlay-customizer loop, `prepare_console`, and
+   `_define_and_start`. An exception deliberately leaves the start unmatched. No profile, XML,
+   path, credential, or guest output is logged.
+6. A usable diagnostic dispatch selects the correction. The final hosted dispatch must report the
+   same proof's provision row with persisted lane and claim timestamp, show the System transition
+   to `ready`, and pass
+   `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
+   The existing zero-proof guard remains unchanged.
 
 ## Failure handling and bounds
 
-The queue snapshot has a five-second connect timeout, a five-second SQL statement timeout, a
-20-row ceiling, and no retries. An unavailable snapshot prints one warning and returns nonzero;
-the workflow wrapper records that warning but preserves the original test verdict. Worker and
-provider diagnostics are INFO lines with one line per lifecycle boundary, not poll-loop output.
-Journal capture keeps its existing time and line bounds. No diagnostic prints raw payloads,
-authorizing records, DSNs, environment values, domain XML, console text, or secrets.
+The queue snapshot has a five-second connect timeout, a five-second SQL statement timeout, and an
+exact one-row result. The workflow's 12-second outer timeout bounds target parsing, env sourcing,
+Python import, connection, query, and teardown. An unavailable, empty, multiply matched, mismatched,
+or timed-out snapshot returns nonzero and emits only one fixed-code error line; the workflow emits a
+fixed warning while preserving the original spine verdict. Such a run is not usable evidence.
+Worker/provider records are fixed-field INFO lines, not poll-loop output. Journal capture keeps its
+existing time and line bounds. No diagnostic prints raw payloads, authorizing records, DSNs,
+environment values, dynamic exception text, paths, domain XML, console text, or secrets.
 
-The state deadline remains 600 seconds during diagnosis. It is not increased speculatively. If the
-hosted row is claimed and measured provider work is still progressing at 600 seconds, a revised
-ADR/spec must name the measured stage duration and choose a bounded deadline from that hosted
-measurement before code changes. Otherwise the diagnosed source defect is corrected without a
-deadline change.
+The state deadline remains 600 seconds during diagnosis. It is not increased speculatively. A
+deadline change requires at least two completed hosted **end-to-end provision intervals**, each
+measured from the immutable worker journal's initial dequeue `claim_at` through the System's
+`ready` timestamp. The exact target row must match the claim record's job, lane, worker, and attempt;
+its later heartbeat can corroborate liveness but is never relabeled as the initial claim. Per-stage
+start/completion pairs diagnose where the end-to-end total is spent but never size the enclosing
+deadline. The proposed deadline is the larger completed end-to-end
+interval plus 50 percent, capped at 900 seconds, and the ADR/spec must record both runs and
+arithmetic before code changes. If either interval lacks `ready`, or the margin would exceed the
+cap, the measurements authorize no increase; diagnose/optimize the source or park instead.
+Otherwise the source defect is corrected without a deadline change.
 
 ## Security model
 
@@ -90,17 +117,21 @@ permissions.
 
 ### Actors and trust
 
-The local CI job and repository checkout are trusted operators for this ephemeral proof. Job
-payloads and guest output are treated as potentially untrusted and are not emitted. GitHub log
-readers are authorized repository collaborators but are not entitled to runtime credentials.
+The local CI job and repository checkout are trusted operators for this ephemeral proof.
+`payload.system_id` is generated by the server's typed `SystemPayload` enqueue path, not copied from
+the caller's provisioning profile; the diagnostic still fails closed if it cannot join that id to
+exactly one System. Caller-controlled profile fields and guest output remain potentially untrusted
+and are not emitted. GitHub log readers are authorized repository collaborators but are not
+entitled to runtime credentials.
 
 ### Controls
 
 The SQL is a literal statement with no interpolated input, runs in a read-only transaction, has
-connect/statement timeouts and a row cap, and selects only ids, enums, counters, and timestamps.
-The workflow retains the stop-commands shield so log text cannot inject workflow commands. Worker
-and provider log templates contain only bounded identifiers, enum-like stage names, and timestamps.
-Existing secret redaction remains the final logging control.
+connect/statement and outer wall-clock bounds, and selects only ids, enums, counters, and
+timestamps. Target publication is atomic, no-replace, and mode 0600. The workflow retains the
+stop-commands shield so output cannot inject workflow commands. Worker/provider log templates
+contain only bounded identifiers, fixed stage/event names, and timestamps. Existing secret
+redaction remains the final logging control.
 
 ### Out of scope
 
@@ -110,13 +141,18 @@ needed to diagnose this hosted proof.
 
 ## Verification
 
-Focused tests prove the diagnostic script uses the server DSN, a literal bounded read-only query,
-explicit fields, and no secret-bearing columns. Workflow-shape tests prove the queue snapshot is
-inside the stop-commands shield, runs before cleanup, is observational, and the hosted snapshot runs
-on both success and failure. Existing worker and local-libvirt tests remain green around claim and
-provision behavior. The final behavior proof is a hosted Ubuntu 26.04 `live_vm_tcg (hosted)` job in
-which `test_ppc64le_guest_is_ssh_reachable_over_the_wire` passes and the zero-proof gate observes at
-least one passed proof.
+Focused tests prove target publication is atomic no-replace, collision-clean, concurrent-one-winner,
+mode 0600, and records the exact response pair. Script tests reject malformed, mismatched, zero,
+and multiple targets; assert literal bounded read-only SQL; and enforce one sanitized fixed-code
+error line. Workflow-shape tests bind the same target path, outer 12-second timeout,
+stop-commands shield, and pre-cleanup order. Worker tests assert every claim field, immutable initial
+dequeue timestamp, and non-negative delay despite later heartbeat renewal. Provider tests assert
+paired records around each exact call, missing completion on a raised call, order, and redaction.
+The final behavior proof runs only after review/simplification and guardrails: a hosted Ubuntu 26.04
+`live_vm_tcg (hosted)` job whose `headSha` equals final PR `headRefOid`, whose committed ppc64le
+image identity is reported, whose exact target report and immutable claim record agree, and in which
+`test_ppc64le_guest_is_ssh_reachable_over_the_wire` passes with a nonzero passed-proof summary.
+Any later commit invalidates the hosted proof.
 
 The repository guardrails are `just lint`, `just type`, `just test`, `prek run`, and `just ci`.
 Host architecture is x86_64; declared targets are x86_64 and ppc64le; the host is included.
