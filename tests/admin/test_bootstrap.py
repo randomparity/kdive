@@ -229,6 +229,48 @@ def test_redact_database_url_blanket_redacts_conninfo_with_password() -> None:
         assert "redacted" in redacted.lower()
 
 
+def test_redact_database_url_blanket_redacts_url_with_credential_query() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    userinfo = "s3cr3t"  # noqa: S105 # pragma: allowlist secret - test literal
+    # libpq reads connection keywords from the URI query and percent-decodes them, and a query
+    # `password` wins over the userinfo one — so masking only the userinfo would print the
+    # credential that is actually in force. The whole conninfo is redacted instead, matching
+    # the keyword/value form above. The fragment is not a libpq credential, but the userinfo
+    # mask does not reach it either, so it is held to the same rule. Each case pairs a
+    # conninfo with the credential planted outside its userinfo.
+    cases = (
+        (f"postgresql://kdive:{userinfo}@db.example/kdive?password=QUERY-PW", "QUERY-PW"),
+        (
+            f"postgresql://kdive:{userinfo}@db.example:5432/kdive"
+            "?sslmode=verify-full&sslpassword=KEY-PHRASE",
+            "KEY-PHRASE",
+        ),
+        (f"postgresql://kdive:{userinfo}@db.example/kdive?pass%77ord=ENCODED-PW", "ENCODED-PW"),
+        (f"postgresql://kdive:{userinfo}@db.example/kdive#password=FRAGMENT-PW", "FRAGMENT-PW"),
+        ("postgresql://kdive@db.example/kdive?password=ONLY-PW", "ONLY-PW"),
+    )
+    for conninfo, planted in cases:  # pragma: allowlist secret - test literals
+        redacted = redact_database_url(conninfo)
+        assert planted not in redacted
+        assert userinfo not in redacted
+        assert "redacted" in redacted.lower()
+
+
+def test_redact_database_url_keeps_credential_free_query() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    secret = "p4ss-w0rd"  # noqa: S105 # pragma: allowlist secret - test literal
+    # Only a query naming a credential costs the caller the host/db; ordinary parameters keep
+    # the diagnostic value of the printed target.
+    redacted = redact_database_url(
+        f"postgresql://kdive:{secret}@db.example:5432/kdive?sslmode=verify-full"
+    )
+
+    assert secret not in redacted
+    assert redacted == "postgresql://kdive:***@db.example:5432/kdive?sslmode=verify-full"
+
+
 def test_redact_database_url_passwordless_conninfo_unchanged() -> None:
     from kdive.admin.projects import redact_database_url
 
