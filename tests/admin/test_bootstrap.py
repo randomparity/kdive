@@ -460,6 +460,58 @@ def test_verify_project_command_exits_zero_when_seeded(
     assert exc.value.code == 0
 
 
+def test_verify_project_handler_prints_masked_url_not_the_credential(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hold `_handle_verify_project`'s `redact_database_url` call in place (#2075).
+
+    `test_verify_project_command_exits_zero_when_seeded` above cannot do this: its URL is the
+    `migrated_url` fixture, a testcontainer value whose password the test does not choose, so
+    there is no literal to assert absent — and it captures no stdout at all. Deleting the
+    redaction call would print the database password to an operator's terminal on every
+    `verify-project` run with that assertion still green.
+
+    `verify_project` is patched out, so this needs no live database — only a resolvable
+    `KDIVE_DATABASE_URL`, which the handler reads for the redacted target before printing. The
+    URL carries a password on purpose: `redact_database_url` returns a passwordless conninfo
+    unchanged, so the report would read identically whether or not the handler called it.
+
+    Both halves are asserted. Absence alone passes when nothing was printed, so the masked form
+    and the funded message are asserted present too, each as a whole literal rather than a slice
+    of one — an anchor that degrades to "appears anywhere" is how this assertion goes vacuous.
+    """
+    from kdive import __main__ as main_mod
+    from kdive.admin.projects import ProjectFundingStatus
+    from kdive.security.secrets.secret_registry import SecretRegistry
+
+    async def _fake_verify_project(*, project: str) -> ProjectFundingStatus:
+        assert project == "demo"
+        return ProjectFundingStatus(
+            budget_present=True,
+            quota_present=True,
+            limit_kcu=Decimal("1000000"),
+            spent_kcu=Decimal("0"),
+            max_concurrent_allocations=4,
+            occupancy=0,
+        )
+
+    monkeypatch.setenv(
+        "KDIVE_DATABASE_URL",
+        "postgresql://kdive:not-a-real-password@localhost/kdive",  # pragma: allowlist secret
+    )
+    monkeypatch.setattr("kdive.admin.projects.verify_project", _fake_verify_project)
+    args = main_mod.build_parser().parse_args(["verify-project", "--project", "demo"])
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod._COMMAND_BY_NAME["verify-project"].handler(args, SecretRegistry(), None)
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "not-a-real-password" not in out
+    assert "postgresql://kdive:***@localhost/kdive" in out
+    assert "verified project 'demo' is funded in" in out
+
+
 def test_format_verify_result_missing_row_returns_nonzero() -> None:
     from kdive.admin.projects import ProjectFundingStatus, format_verify_result
 
