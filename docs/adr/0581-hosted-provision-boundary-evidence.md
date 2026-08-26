@@ -49,9 +49,11 @@ The hosted proof records the queue and execution boundaries before changing timi
    logging paths, profile data, domain XML, guest output, or credentials.
 4. One usable hosted run selects the source correction from the first boundary lacking its expected
    successor. One unchanged redispatch is allowed only when the diagnostic infrastructure itself
-   was unavailable; a second inconclusive run parks without a source or deadline guess. The final
-   hosted run occurs after review/simplification/guardrails, must have the same SHA as the PR head,
-   report its provision lane and immutable claim timestamp, reach `ready`, and pass
+   was unavailable; a second inconclusive run parks without a source or deadline guess. The TCG
+   lifecycle journal capture runs on every outcome before cleanup, so the final hosted run can
+   report the immutable claim record even when the spine succeeds. That run occurs after
+   review/simplification/guardrails, must have the same SHA as the PR head, report its provision
+   lane and immutable claim timestamp, reach `ready`, and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
 5. The 600-second state deadline stays unchanged unless at least two hosted runs record completed
    end-to-end intervals from immutable provision-job `claim_at` through System `ready`. A proposed

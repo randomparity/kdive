@@ -452,8 +452,11 @@ def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:
     assert steps[evidence_index]["name"] == "Capture persisted provision boundary"
 
 
-@pytest.mark.parametrize("job", ("tcg", "native"))
-def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str) -> None:
+@pytest.mark.parametrize(
+    ("job", "condition"),
+    (("tcg", "always()"), ("native", "failure() || cancelled()")),
+)
+def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str, condition: str) -> None:
     """Diagnostics are observational and must run before destructive teardown (#1939).
 
     The diagnostics step never fails the job (`exit 0`), neutralizes workflow-command
@@ -464,7 +467,7 @@ def test_live_job_captures_lifecycle_diagnostics_before_cleanup(job: str) -> Non
     diagnostic_index, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
     cleanup_index, cleanup = _named_step(job, "Clean up live stack")
 
-    assert diagnostic["if"] == "failure() || cancelled()"
+    assert diagnostic["if"] == condition
     assert "scripts/live-stack/worker-lifecycle.sh diagnostics" in diagnostic["run"]
     assert "|| diagnostic_status=$?" in diagnostic["run"]
     assert "::stop-commands::" in diagnostic["run"]
