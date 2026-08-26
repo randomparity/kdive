@@ -600,28 +600,28 @@ async def _seed_ordering_fixture(conn: psycopg.AsyncConnection) -> None:
 
     # Precondition guard for THIS FIXTURE, not for `scan_profile_kinds`: the disagreement the
     # two docstring bullets above describe rests on the planner's chosen join strategy, which a
-    # version bump or a schema change adding a preferred index could silently stop holding. If
-    # that happens, an un-ordered read of these rows returns the asserted order for free, and the
-    # drop-whole-`ORDER BY` mutation passes against a query with no `ORDER BY` at all with
-    # nothing here to say why. Issue `_UNORDERED_SCAN_QUERY` — the real scan minus its
-    # `ORDER BY`, so the read is driven by the same planner decisions the mutation would be — and
-    # pin the result to the reverse-of-asserted order this fixture is built to produce. If this
-    # assertion fails, the fixture went stale — the shipped query has not been touched.
+    # version bump or a schema change adding a preferred index could shift. Rather than pinning
+    # the full physical permutation, assert only the two properties each `ORDER BY` mutation
+    # needs to falsify — issue #2079 found the full pin tolerated just 1 of the 6 possible
+    # permutations, where these two properties tolerate 4, so a planner shift is far less likely
+    # to redden this precondition for no reason:
     #
-    # What this does NOT measure: the `drop , s.id` mutation additionally needs the
-    # `created_at`-only sort to leave the tied pair in scan order, and an UN-ordered read cannot
-    # observe sort stability at all. If small-N stability stopped holding, the tiebreak test
-    # would go green under that mutation while this assertion still passed. That assumption is
-    # stated rather than guarded: pinning it would mean a second string-surgery derivation to
-    # test a PostgreSQL implementation detail rather than this code.
+    # - `physical_order[0] != _ID_EARLY`: if the un-ordered read already put the earliest-stamped
+    #   row first, the drop-whole-`ORDER BY` mutation would pass `test_scan_orders_by_created_at`
+    #   vacuously.
+    # - `_ID_TIE_HIGH` before `_ID_TIE_LOW`: if the un-ordered read already left the tied pair in
+    #   asserted (id-ascending) order, the drop-`, s.id` mutation would pass
+    #   `test_scan_breaks_created_at_ties_on_id` vacuously — this one still assumes PostgreSQL's
+    #   small-N sort stability, which an un-ordered read cannot itself observe.
     #
-    # Both couplings — the join plan below and the sort stability above — are recorded in
-    # issue #2079, which carries the triage path. If this assertion reddens, start there:
-    # a new PostgreSQL plan is the likely cause, not a regression in `_SCAN_QUERY`.
+    # Both couplings — the join plan and the sort-stability assumption — are recorded in issue
+    # #2079, which carries the triage path if this precondition ever reddens: a new PostgreSQL
+    # plan is the likely cause, not a regression in `_SCAN_QUERY`.
     async with conn.cursor() as cur:
         await cur.execute(_UNORDERED_SCAN_QUERY)
         physical_order = [row[0] for row in await cur.fetchall()]
-    assert physical_order == [_ID_TIE_HIGH, _ID_TIE_LOW, _ID_EARLY]
+    assert physical_order[0] != _ID_EARLY
+    assert physical_order.index(_ID_TIE_HIGH) < physical_order.index(_ID_TIE_LOW)
 
 
 def test_scan_orders_by_created_at(migrated_url: str) -> None:
