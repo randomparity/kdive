@@ -266,6 +266,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "temp dir).",
     ),
     ExternalEnvVar(
+        "KDIVE_PROVISION_EVIDENCE_TARGET",
+        "test",
+        None,
+        "Workflow-temporary mode-0600 path where the hosted ppc64le proof writes its exact "
+        "provision job/System pair for bounded post-proof queue diagnostics; unset disables "
+        "publication.",
+    ),
+    ExternalEnvVar(
         "KDIVE_OIDC_CLIENT_ID",
         "test",
         "kdive-test",

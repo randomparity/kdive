@@ -7,6 +7,7 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -156,15 +157,44 @@ def test_provision_stage_logs_completion_only_after_success(
 
 def test_provision_logs_every_mapped_provider_stage(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.providers.local_libvirt.test_provisioning import _profile, _prov, _ProvConn
-
     system_id = UUID("22222222-2222-2222-2222-222222222222")
     job_id = UUID("11111111-1111-1111-1111-111111111111")
+    provider = SimpleNamespace(
+        rootfs=object(),
+        baseline_kernel=None,
+        debug=SimpleNamespace(gdbstub=False),
+    )
+    profile = SimpleNamespace(
+        arch="x86_64",
+        disk_gb=10,
+        provider=SimpleNamespace(local_libvirt=provider),
+    )
+    instance = cast(Any, object.__new__(provisioning.LocalLibvirtProvisioning))
+    instance._guest_egress = False
+    instance._files = SimpleNamespace(
+        prepare_overlay=lambda *_args, **_kwargs: SimpleNamespace(path="/overlay", created=False),
+        prepare_console=lambda _system_id: None,
+    )
+    instance._resolve_guest_arch = lambda _arch: ("kvm", None)
+    instance._materialize_rootfs = lambda *_args, **_kwargs: "/base"
+    instance._prepare_baseline_kernel = lambda *_args: SimpleNamespace(
+        kernel=Path("/kernel"), initrd=None
+    )
+    instance._gdb_port_for = lambda _system_id: None
+    instance._ssh_port_for = lambda _system_id: 22000
+    instance._define_and_start = lambda _xml, _system_id: None
+    instance._snapshot_pre_existing = lambda _system_id: SimpleNamespace(
+        overlay=False, baseline=False
+    )
+    instance._reclaim_materialized_on_failure = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(provisioning, "render_domain_xml", lambda *_args, **_kwargs: "<domain/>")
+
     with caplog.at_level(
         logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
     ):
-        _prov(_ProvConn()).provision(system_id, _profile(), job_id=job_id)
+        instance.provision(system_id, profile, job_id=job_id)
 
     observed = [
         (

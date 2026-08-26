@@ -261,6 +261,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_OIDC_IMAGE` | — | docker-compose oidc override: set to the published GHCR mirror digest to PULL it (ADR-0358); unset → compose builds deploy/mock-oidc locally as kdive-mock-oidc:dev. |
 | `KDIVE_PPC64LE_BUNDLE` | — | Directory holding kernel.tar.gz (the ADR-0343 combined tar: ELF boot/vmlinuz + lib/modules/<ver>/) and initrd.img for the #1146 uploaded-bundle boot proof live_stack test (epic #1139); unset → that test skips. |
 | `KDIVE_PPC64LE_VMCORE` | — | Path to the retained real #1148 ppc64le vmcore for the live_vm drgn-open proof (#1150, ADR-0348, epic #1139); unset → that test skips (a set-but-missing/mismatched path fails). |
+| `KDIVE_PROVISION_EVIDENCE_TARGET` | — | Workflow-temporary mode-0600 path where the hosted ppc64le proof writes its exact provision job/System pair for bounded post-proof queue diagnostics; unset disables publication. |
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |
 | `KDIVE_REQUIRE_DOCKER` | `0` | Set to 1 to fail (not skip) the disposable-Postgres/MinIO fixtures when Docker is absent. |
 | `KDIVE_RUN_COMPOSE_LIFECYCLE_PROOF` | — | Presence gate for the isolated executable Compose worker-lifecycle proof; the dedicated just recipe sets it to 1 and treats unavailable Docker as a failure. |
