@@ -777,6 +777,178 @@ def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
     assert result.stderr == "provision-evidence-error code=query-unavailable\n"
 
 
+def _run_provision_queue_diagnostics(
+    tmp_path: Path,
+    *,
+    target_job_id: str,
+    target_system_id: str,
+    expected_job_id: str,
+    expected_system_id: str,
+    rows: list[list[object | None]],
+) -> subprocess.CompletedProcess[str]:
+    """Run the snapshot against a process-local psycopg boundary double."""
+    (tmp_path / "psycopg.py").write_text(
+        """
+import json
+import os
+
+
+class Error(Exception):
+    pass
+
+
+class Connection:
+    def __init__(self):
+        self.rows = json.loads(os.environ["PSYCOPG_ROWS"])
+        self.setup = iter((
+            "SET TRANSACTION READ ONLY",
+            "SET LOCAL statement_timeout = '5s'",
+        ))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def transaction(self):
+        return self
+
+    def execute(self, statement, params=None):
+        if params is None:
+            assert statement == next(self.setup)
+            return self
+        assert tuple(map(str, params)) == (
+            os.environ["PSYCOPG_TARGET_JOB_ID"],
+            os.environ["PSYCOPG_TARGET_SYSTEM_ID"],
+        )
+        try:
+            next(self.setup)
+        except StopIteration:
+            pass
+        else:
+            raise AssertionError("query ran before read-only timeout setup")
+        if tuple(map(str, params)) != (
+            os.environ["PSYCOPG_EXPECTED_JOB_ID"],
+            os.environ["PSYCOPG_EXPECTED_SYSTEM_ID"],
+        ):
+            self.rows = []
+        return self
+
+    def fetchall(self):
+        return self.rows
+
+
+def connect(dsn, *, connect_timeout):
+    assert dsn == "postgresql://diagnostics.invalid/kdive"
+    assert connect_timeout == 5
+    return Connection()
+""".lstrip(),
+        encoding="utf-8",
+    )
+    target = tmp_path / "target"
+    target.write_text(f"{target_job_id}\t{target_system_id}\n", encoding="utf-8")
+    return subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "KDIVE_PYTHON": sys.executable,
+            "KDIVE_SERVER_DATABASE_URL": "postgresql://diagnostics.invalid/kdive",
+            "PSYCOPG_ROWS": json.dumps(rows),
+            "PSYCOPG_TARGET_JOB_ID": target_job_id,
+            "PSYCOPG_TARGET_SYSTEM_ID": target_system_id,
+            "PSYCOPG_EXPECTED_JOB_ID": expected_job_id,
+            "PSYCOPG_EXPECTED_SYSTEM_ID": expected_system_id,
+            "PYTHONPATH": str(tmp_path),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+
+def test_provision_queue_diagnostics_prints_exact_complete_tsv(tmp_path: Path) -> None:
+    job_id = "11111111-1111-1111-1111-111111111111"
+    system_id = "22222222-2222-2222-2222-222222222222"
+    row: list[object | None] = [
+        system_id,
+        "provisioning",
+        job_id,
+        "default",
+        "running",
+        3,
+        None,
+        "2026-08-26T12:00:00+00:00",
+        "2026-08-26T12:00:02+00:00",
+        None,
+    ]
+
+    result = _run_provision_queue_diagnostics(
+        tmp_path,
+        target_job_id=job_id,
+        target_system_id=system_id,
+        expected_job_id=job_id,
+        expected_system_id=system_id,
+        rows=[row],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "system_id\tsystem_state\tjob_id\tdispatch_lane\tjob_state\tattempt\tworker_id\t"
+        "enqueued_at\tlast_heartbeat_at\tlease_expires_at\n"
+        f"{system_id}\tprovisioning\t{job_id}\tdefault\trunning\t3\tNONE\t"
+        "2026-08-26T12:00:00+00:00\t2026-08-26T12:00:02+00:00\tNONE\n"
+    )
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("target_system_id", "expected_system_id", "rows"),
+    [
+        pytest.param(
+            "33333333-3333-3333-3333-333333333333",
+            "22222222-2222-2222-2222-222222222222",
+            [["would", "otherwise", "match"]],
+            id="mismatched-target",
+        ),
+        pytest.param(
+            "22222222-2222-2222-2222-222222222222",
+            "22222222-2222-2222-2222-222222222222",
+            [],
+            id="zero-rows",
+        ),
+        pytest.param(
+            "22222222-2222-2222-2222-222222222222",
+            "22222222-2222-2222-2222-222222222222",
+            [["first"], ["second"]],
+            id="multiple-rows",
+        ),
+    ],
+)
+def test_provision_queue_diagnostics_rejects_non_exact_results(
+    tmp_path: Path,
+    target_system_id: str,
+    expected_system_id: str,
+    rows: list[list[object | None]],
+) -> None:
+    job_id = "11111111-1111-1111-1111-111111111111"
+
+    result = _run_provision_queue_diagnostics(
+        tmp_path,
+        target_job_id=job_id,
+        target_system_id=target_system_id,
+        expected_job_id=job_id,
+        expected_system_id=expected_system_id,
+        rows=rows,
+    )
+
+    assert result.returncode == 6
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=target-mismatch\n"
+
+
 def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
     accepted = (
         "worker local-systemd:kdive-live-worker@1.service:"

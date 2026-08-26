@@ -15,7 +15,7 @@ import pytest
 
 import tests.integration.live_stack.spine as spine
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import worker as job_worker
 from kdive.mcp.responses import ToolResponse
@@ -93,6 +93,20 @@ def test_record_provision_evidence_target_refuses_existing_target(tmp_path: Path
     assert target.read_text() == "first"
 
 
+_PAYLOAD_SENTINEL = "PAYLOAD_SENTINEL"
+_AUTHORIZING_SENTINEL = "AUTHORIZING_SENTINEL"
+_PROVISION_STAGES = (
+    "resolve-arch",
+    "materialize-rootfs",
+    "prepare-baseline",
+    "prepare-overlay",
+    "render-domain",
+    "customize-overlay",
+    "prepare-console",
+    "define-start",
+)
+
+
 def _claimed_job(kind: JobKind) -> Job:
     enqueued_at = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
     return Job.model_construct(
@@ -100,34 +114,105 @@ def _claimed_job(kind: JobKind) -> Job:
         created_at=enqueued_at,
         updated_at=enqueued_at,
         kind=kind,
-        dispatch_lane="default",
+        dispatch_lane="persisted-provision-lane",
+        payload={"system_id": _PAYLOAD_SENTINEL},
         state=JobState.RUNNING,
-        attempt=1,
-        max_attempts=3,
+        attempt=3,
+        max_attempts=5,
         worker_id="fixed-worker-1",
-        heartbeat_at=enqueued_at + timedelta(seconds=2),
-        authorizing={"principal": "operator", "agent_session": None, "project": "spine-proj"},
+        heartbeat_at=enqueued_at - timedelta(seconds=2),
+        authorizing={
+            "principal": _AUTHORIZING_SENTINEL,
+            "agent_session": None,
+            "project": _AUTHORIZING_SENTINEL,
+        },
         dedup_key="provision",
     )
 
 
-def test_worker_logs_immutable_provision_claim_only(caplog: pytest.LogCaptureFixture) -> None:
-    provision = _claimed_job(JobKind.PROVISION)
-    with caplog.at_level(logging.INFO, logger="kdive.jobs.worker"):
-        job_worker._log_provision_claim("fixed-worker-1", provision)
-        job_worker._log_provision_claim("fixed-worker-1", _claimed_job(JobKind.INSTALL))
+class _WorkerConnection:
+    async def __aenter__(self) -> object:
+        return object()
 
-    records = [
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class _WorkerPool:
+    max_size = 8
+
+    def connection(self) -> _WorkerConnection:
+        return _WorkerConnection()
+
+
+def _contract_worker() -> job_worker.Worker:
+    registry = SimpleNamespace(get=lambda _kind: object())
+    return job_worker.Worker(
+        cast(Any, _WorkerPool()),
+        cast(Any, registry),
+        worker_id="fixed-worker-1",
+        incarnation_credential=cast(Any, object()),
+        secret_registry=cast(Any, object()),
+    )
+
+
+def test_worker_lanes_publish_exact_startup_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="kdive.jobs.worker"):
+        _contract_worker()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "worker fixed-worker-1 accepting dispatch lanes: default,state-fenced" in messages
+
+
+def test_worker_claim_captures_dequeue_record_before_mutation(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provision = _claimed_job(JobKind.PROVISION)
+    jobs = [provision, _claimed_job(JobKind.INSTALL)]
+    claimed_lanes: list[tuple[str, ...]] = []
+
+    async def queue_is_running(_conn: object) -> bool:
+        return False
+
+    async def dequeue(_conn: object, _worker_id: str, **kwargs: object) -> Job | None:
+        claimed_lanes.append(cast(tuple[str, ...], kwargs["accepted_lanes"]))
+        return jobs.pop(0)
+
+    async def mutate_after_capture(job: Job, _handler: object) -> None:
+        job.heartbeat_at = datetime(2026, 8, 26, 12, 30, tzinfo=UTC)
+
+    monkeypatch.setattr(job_worker.queue, "is_queue_paused", queue_is_running)
+    monkeypatch.setattr(job_worker.queue, "dequeue", dequeue)
+    worker = _contract_worker()
+    monkeypatch.setattr(worker, "_dispatch", mutate_after_capture)
+    caplog.clear()
+
+    async def run_claims() -> None:
+        await worker.run_once("claim-loop-lane")
+        await worker.run_once("claim-loop-lane")
+
+    with caplog.at_level(logging.INFO, logger="kdive.jobs.worker"):
+        asyncio.run(run_claims())
+
+    messages = [
         record.getMessage()
         for record in caplog.records
         if "claimed provision" in record.getMessage()
     ]
-    assert records == [
+    assert claimed_lanes == [("claim-loop-lane",), ("claim-loop-lane",)]
+    assert provision.heartbeat_at == datetime(2026, 8, 26, 12, 30, tzinfo=UTC)
+    assert messages == [
         "worker fixed-worker-1 claimed provision job "
-        "11111111-1111-1111-1111-111111111111 lane=default attempt=1 "
-        "enqueued_at=2026-08-26T12:00:00+00:00 claim_at=2026-08-26T12:00:02+00:00 "
-        "queue_delay_s=2.000000"
+        "11111111-1111-1111-1111-111111111111 lane=persisted-provision-lane attempt=3 "
+        "enqueued_at=2026-08-26T12:00:00+00:00 claim_at=2026-08-26T11:59:58+00:00 "
+        "queue_delay_s=0.000000"
     ]
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert _PAYLOAD_SENTINEL not in rendered
+    assert _AUTHORIZING_SENTINEL not in rendered
 
 
 def test_provision_stage_logs_completion_only_after_success(
@@ -155,66 +240,155 @@ def test_provision_stage_logs_completion_only_after_success(
     ]
 
 
-def test_provision_logs_every_mapped_provider_stage(
+def _provision_operation(failing_stage: str | None, stage: str, result: object) -> Any:
+    def operation(*_args: object, **_kwargs: object) -> object:
+        if failing_stage == stage:
+            raise CategorizedError(
+                "GUEST_OUTPUT_SENTINEL CREDENTIAL_SENTINEL",
+                category=ErrorCategory.PROVISIONING_FAILURE,
+            )
+        return result
+
+    return operation
+
+
+def _configured_provisioner(
+    monkeypatch: pytest.MonkeyPatch, failing_stage: str | None = None
+) -> tuple[Any, object, Any]:
+    provider_config = SimpleNamespace(
+        rootfs=SimpleNamespace(value="PROFILE_SENTINEL"),
+        baseline_kernel="PROFILE_SENTINEL",
+        debug=SimpleNamespace(gdbstub=True),
+    )
+    profile = SimpleNamespace(
+        arch="PROFILE_SENTINEL",
+        disk_gb=10,
+        provider=SimpleNamespace(local_libvirt=provider_config),
+    )
+    instance = cast(Any, object.__new__(provisioning.LocalLibvirtProvisioning))
+    instance._guest_egress = False
+    instance._files = SimpleNamespace(
+        prepare_overlay=_provision_operation(
+            failing_stage,
+            "prepare-overlay",
+            SimpleNamespace(path=Path("/PATH_SENTINEL/overlay"), created=True),
+        ),
+        prepare_console=_provision_operation(failing_stage, "prepare-console", None),
+    )
+    instance._resolve_guest_arch = _provision_operation(
+        failing_stage, "resolve-arch", ("kvm", "/PATH_SENTINEL/emulator")
+    )
+    instance._materialize_rootfs = _provision_operation(
+        failing_stage, "materialize-rootfs", Path("/PATH_SENTINEL/base")
+    )
+    instance._prepare_baseline_kernel = _provision_operation(
+        failing_stage,
+        "prepare-baseline",
+        SimpleNamespace(
+            kernel=Path("/PATH_SENTINEL/kernel"),
+            initrd=Path("/PATH_SENTINEL/initrd"),
+        ),
+    )
+    instance._gdb_port_for = lambda _system_id: 1234
+    instance._ssh_port_for = lambda _system_id: 22000
+    instance._define_and_start = _provision_operation(failing_stage, "define-start", None)
+    instance._snapshot_pre_existing = lambda _system_id: SimpleNamespace(
+        overlay=False, baseline=False
+    )
+    instance._reclaim_materialized_on_failure = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(
+        provisioning,
+        "render_domain_xml",
+        _provision_operation(
+            failing_stage,
+            "render-domain",
+            "<XML_SENTINEL>GUEST_OUTPUT_SENTINEL CREDENTIAL_SENTINEL</XML_SENTINEL>",
+        ),
+    )
+    customizer = _provision_operation(failing_stage, "customize-overlay", "GUEST_OUTPUT_SENTINEL")
+    return instance, profile, customizer
+
+
+def _provider_records(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        message
+        for record in caplog.records
+        if (message := record.getMessage()).startswith("local-libvirt provision ")
+    ]
+
+
+def _expected_provider_records(system_id: UUID, job_id: UUID, stages: tuple[str, ...]) -> list[str]:
+    return [
+        f"local-libvirt provision system={system_id} job={job_id} stage={stage} event={event}"
+        for stage in stages
+        for event in ("start", "complete")
+    ]
+
+
+def test_provision_logs_exact_safe_records_for_every_mapped_stage(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     system_id = UUID("22222222-2222-2222-2222-222222222222")
     job_id = UUID("11111111-1111-1111-1111-111111111111")
-    provider = SimpleNamespace(
-        rootfs=object(),
-        baseline_kernel=None,
-        debug=SimpleNamespace(gdbstub=False),
-    )
-    profile = SimpleNamespace(
-        arch="x86_64",
-        disk_gb=10,
-        provider=SimpleNamespace(local_libvirt=provider),
-    )
-    instance = cast(Any, object.__new__(provisioning.LocalLibvirtProvisioning))
-    instance._guest_egress = False
-    instance._files = SimpleNamespace(
-        prepare_overlay=lambda *_args, **_kwargs: SimpleNamespace(path="/overlay", created=False),
-        prepare_console=lambda _system_id: None,
-    )
-    instance._resolve_guest_arch = lambda _arch: ("kvm", None)
-    instance._materialize_rootfs = lambda *_args, **_kwargs: "/base"
-    instance._prepare_baseline_kernel = lambda *_args: SimpleNamespace(
-        kernel=Path("/kernel"), initrd=None
-    )
-    instance._gdb_port_for = lambda _system_id: None
-    instance._ssh_port_for = lambda _system_id: 22000
-    instance._define_and_start = lambda _xml, _system_id: None
-    instance._snapshot_pre_existing = lambda _system_id: SimpleNamespace(
-        overlay=False, baseline=False
-    )
-    instance._reclaim_materialized_on_failure = lambda *_args, **_kwargs: None
-    monkeypatch.setattr(provisioning, "render_domain_xml", lambda *_args, **_kwargs: "<domain/>")
+    instance, profile, customizer = _configured_provisioner(monkeypatch)
 
     with caplog.at_level(
         logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
     ):
-        instance.provision(system_id, profile, job_id=job_id)
-
-    observed = [
-        (
-            message.split(" stage=", 1)[1].split(" event=", 1)[0],
-            message.rsplit(" event=", 1)[1],
+        instance.provision(
+            system_id,
+            profile,
+            overlay_customizers=(customizer,),
+            bootstrap_pubkey="CREDENTIAL_SENTINEL",
+            job_id=job_id,
         )
-        for record in caplog.records
-        if (message := record.getMessage()).startswith("local-libvirt provision ")
-    ]
-    stages = (
-        "resolve-arch",
-        "materialize-rootfs",
-        "prepare-baseline",
-        "prepare-overlay",
-        "render-domain",
-        "customize-overlay",
-        "prepare-console",
-        "define-start",
+
+    records = _provider_records(caplog)
+    assert records == _expected_provider_records(system_id, job_id, _PROVISION_STAGES)
+    rendered = "\n".join(records)
+    for sentinel in (
+        "PROFILE_SENTINEL",
+        "PATH_SENTINEL",
+        "XML_SENTINEL",
+        "GUEST_OUTPUT_SENTINEL",
+        "CREDENTIAL_SENTINEL",
+    ):
+        assert sentinel not in rendered
+
+
+@pytest.mark.parametrize("failing_stage", _PROVISION_STAGES)
+def test_provision_operation_failure_leaves_exact_stage_start_unmatched(
+    failing_stage: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_id = UUID("22222222-2222-2222-2222-222222222222")
+    job_id = UUID("11111111-1111-1111-1111-111111111111")
+    instance, profile, customizer = _configured_provisioner(monkeypatch, failing_stage)
+
+    with (
+        caplog.at_level(
+            logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
+        ),
+        pytest.raises(CategorizedError),
+    ):
+        instance.provision(
+            system_id,
+            profile,
+            overlay_customizers=(customizer,),
+            bootstrap_pubkey="CREDENTIAL_SENTINEL",
+            job_id=job_id,
+        )
+
+    failed_index = _PROVISION_STAGES.index(failing_stage)
+    expected = _expected_provider_records(system_id, job_id, _PROVISION_STAGES[:failed_index])
+    expected.append(
+        f"local-libvirt provision system={system_id} job={job_id} stage={failing_stage} event=start"
     )
-    assert observed == [(stage, event) for stage in stages for event in ("start", "complete")]
+    records = _provider_records(caplog)
+    assert records == expected
+    assert records[-1].endswith(f"stage={failing_stage} event=start")
 
 
 async def _no_sleep(_seconds: float) -> None:
