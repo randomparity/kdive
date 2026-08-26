@@ -154,11 +154,14 @@ def redact_database_url(url: str) -> str:
     """Mask the password in a Postgres conninfo so it is safe to print (ADR-0256).
 
     Handles the ``postgresql://`` URL form carrying a userinfo password (password → ``***``,
-    host/port/db intact). Returns the input unchanged when it carries no password — the
-    diagnostic value is the host/db, not the secret. Any *other* string that mentions
-    ``password`` (a libpq keyword/value conninfo, where the value may be quoted or spaced and a
-    token regex would only partially mask it) is replaced wholesale with ``<redacted>``: a
-    partial mask could leak the tail of a real secret, so it is never attempted.
+    host/port/db and a credential-free query intact). Returns the input unchanged when it
+    carries no password — the diagnostic value is the host/db, not the secret. Any *other*
+    string that mentions ``password`` is replaced wholesale with ``<redacted>``: a partial
+    mask could leak the tail of a real secret, so it is never attempted. That covers both a
+    libpq keyword/value conninfo (where the value may be quoted or spaced and a token regex
+    would only partially mask it) and a URL whose *query* names a credential keyword such as
+    ``password`` or ``sslpassword``, which libpq reads there too — masking the userinfo of
+    such a URL would print the second credential intact (#2077).
 
     Args:
         url: A psycopg URL or keyword/value conninfo string.
@@ -167,7 +170,8 @@ def redact_database_url(url: str) -> str:
         A display-safe rendering with any password component masked.
     """
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme and parsed.password is not None:
+    query_names_credential = bool(re.search(r"password", parsed.query, re.IGNORECASE))
+    if parsed.scheme and parsed.password is not None and not query_names_credential:
         host = parsed.hostname or ""
         if parsed.port is not None:
             host = f"{host}:{parsed.port}"

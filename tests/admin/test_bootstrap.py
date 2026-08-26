@@ -229,6 +229,43 @@ def test_redact_database_url_blanket_redacts_conninfo_with_password() -> None:
         assert "redacted" in redacted.lower()
 
 
+def test_redact_database_url_blanket_redacts_url_with_credential_query() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    userinfo_secret = "s3cr3t"  # noqa: S105 # pragma: allowlist secret - test literal
+    query_secret = "SECOND-SECRET"  # noqa: S105 # pragma: allowlist secret - test literal
+    keyphrase = "KEY-PHRASE"  # noqa: S105 # pragma: allowlist secret - test literal
+    # libpq reads connection keywords from the URI query too, so a credential can ride there
+    # as well as in the userinfo. Masking only the userinfo would print the other one intact;
+    # the whole conninfo is redacted instead, matching the keyword/value form above. The third
+    # form has no userinfo password and is covered by the same guarantee.
+    for url in (
+        f"postgresql://kdive:{userinfo_secret}@db.example/kdive?password={query_secret}",
+        f"postgresql://kdive:{userinfo_secret}@db.example:5432/kdive"
+        f"?sslmode=verify-full&sslpassword={keyphrase}",
+        f"postgresql://kdive@db.example/kdive?password={query_secret}",
+    ):
+        redacted = redact_database_url(url)
+        assert userinfo_secret not in redacted
+        assert query_secret not in redacted
+        assert keyphrase not in redacted
+        assert "redacted" in redacted.lower()
+
+
+def test_redact_database_url_keeps_credential_free_query() -> None:
+    from kdive.admin.projects import redact_database_url
+
+    secret = "p4ss-w0rd"  # noqa: S105 # pragma: allowlist secret - test literal
+    # Only a query naming a credential costs the caller the host/db; ordinary parameters keep
+    # the diagnostic value of the printed target.
+    redacted = redact_database_url(
+        f"postgresql://kdive:{secret}@db.example:5432/kdive?sslmode=verify-full"
+    )
+
+    assert secret not in redacted
+    assert redacted == "postgresql://kdive:***@db.example:5432/kdive?sslmode=verify-full"
+
+
 def test_redact_database_url_passwordless_conninfo_unchanged() -> None:
     from kdive.admin.projects import redact_database_url
 

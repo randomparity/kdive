@@ -400,17 +400,16 @@ identities.
 3. **Control per boundary.** The single statement is a static `LiteralString` with no parameters
    and no interpolation, so injection has no vector. The target database is printed through
    `redact_database_url`, which masks a URL **userinfo** password and blanket-redacts a
-   keyword/value conninfo mentioning `password`. **It does not mask credentials carried as URI
-   query parameters**, which libpq accepts: for a conninfo holding *both* a userinfo password and
-   a query credential, the first branch fires, `urlunsplit` passes `parsed.query` through
-   verbatim, and the blanket-redaction fallback is never reached — so
-   `postgresql://kdive:<userinfo-pw>@db/kdive?password=<query-pw>` renders as
-   `postgresql://kdive:***@db/kdive?password=<query-pw>` — the second credential intact.
-   Measured against the shipped function. That
-   defect predates this command and is shared with `verify-project`, which prints through the
-   same helper; it is tracked separately rather than fixed here, because `redact_database_url`
-   sits outside this change's surface. Recorded because this design names the function as a
-   control, and a control's stated guarantee must match what it does.
+   keyword/value conninfo mentioning `password`. It also blanket-redacts a URL whose **query**
+   names a credential keyword (`password`, `sslpassword`), which libpq reads there too. When
+   this design was written it did not: for a conninfo holding *both* a userinfo password and a
+   query credential, the userinfo branch fired, `urlunsplit` passed `parsed.query` through
+   verbatim, and the blanket-redaction fallback was never reached, so
+   `postgresql://kdive:<userinfo-pw>@db/kdive?password=<query-pw>` rendered with the second
+   credential intact. That defect predated this command and was shared with `verify-project`,
+   which prints through the same helper; it was tracked and fixed separately (#2077), since
+   `redact_database_url` sits outside this change's surface. Recorded because this design names
+   the function as a control, and a control's stated guarantee must match what it does.
    What is printed is `(system id, project, state, section label, resource
    kind)` — never the profile body, which is where a caller-supplied value could live.
 
