@@ -293,6 +293,13 @@ def test_loader_list_parser_fails_closed_on_untrusted_output(output: str) -> Non
         bootstrap_elf.parse_loader_list(output)
 
 
+def test_loader_list_parser_ignores_address_only_virtual_mapping() -> None:
+    executable = Path(sys.executable).resolve()
+    output = f"(0x1234)\n{executable} (0x5678)\n"
+
+    assert bootstrap_elf.parse_loader_list(output) == {executable}
+
+
 def test_loader_list_parser_refuses_ambiguity_and_output_overflow(tmp_path: Path) -> None:
     first = tmp_path / "first.so"
     second = tmp_path / "second.so"
