@@ -1281,6 +1281,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read a conninfo with libpq's parser, not urlsplit
 - Name the mask helper for what it returns
 
+### Security
+
+- Keep the brackets on an IPv6 host when redacting a URL
+
 ### Build
 
 - Bump the github-actions group with 2 updates
