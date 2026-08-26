@@ -493,12 +493,17 @@ jobs:
           printf '::stop-commands::%s\n' "$command_token"
           # The fleet may already be phase=terminated when this step runs, and the witness
           # reports diagnostics=null for a stopped fleet (#2056) — but stopped units keep
-          # their journal entries. Read the worker units' SYSTEM journal directly (they are
-          # system units, ADR-0574; a --user read would see nothing). The window spans the
-          # job's timeout-minutes ceiling plus margin, bounded by -n 400, best-effort like
-          # every other capture here (#1939): unavailable evidence warns, never gates.
+          # their journal entries. Read the worker units' SYSTEM journal (they are system
+          # units, ADR-0574; a --user read would see nothing) through a fail-closed filter
+          # that emits only fixed-form lane, provision-claim, and provider-stage records.
+          # The window spans the job timeout plus margin and is bounded by 400 entries.
+          journal_status=0
           journalctl -u 'kdive-live-worker@*' --since '-55min' -n 400 --no-pager \
-            || echo "worker journal capture was unavailable or withheld" >&2
+            --output=cat |
+            python3 scripts/live-stack/filter-worker-journal-evidence.py || journal_status=$?
+          if ((journal_status != 0)); then
+            echo "worker journal capture was unavailable or withheld" >&2
+          fi
           diagnostic_status=0
           sg kdive-live-control -c \
             'scripts/live-stack/worker-lifecycle.sh diagnostics' || diagnostic_status=$?
@@ -656,9 +661,14 @@ jobs:
           printf '::stop-commands::%s\n' "$command_token"
           # Same terminated-fleet journal capture as the tcg step (#2056): the witness is
           # null once the fleet has stopped, so read the system units' retained entries
-          # directly. Window spans this job's 90-minute ceiling; warn-and-continue (#1939).
+          # through the fixed-record filter. The window spans this job's 90-minute ceiling.
+          journal_status=0
           journalctl -u 'kdive-live-worker@*' --since '-95min' -n 400 --no-pager \
-            || echo "worker journal capture was unavailable or withheld" >&2
+            --output=cat |
+            python3 scripts/live-stack/filter-worker-journal-evidence.py || journal_status=$?
+          if ((journal_status != 0)); then
+            echo "worker journal capture was unavailable or withheld" >&2
+          fi
           diagnostic_status=0
           scripts/live-stack/worker-lifecycle.sh diagnostics || diagnostic_status=$?
           printf '::%s::\n' "$command_token"

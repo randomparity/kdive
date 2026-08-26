@@ -182,6 +182,10 @@ execution progress. No public API or schema changes.
   journal exposes the immutable provision `claim_at` and provider stages on a successful final
   proof. The shared workflow-shape test requires this success path only for `tcg`; native capture
   keeps its existing failure/cancellation condition.
+- Both live workflows pipe retained system-journal JSON through
+  `scripts/live-stack/filter-worker-journal-evidence.py`, which full-matches only fixed lane,
+  provision-claim, and provider-stage messages and emits nothing else. A no-safe-record result is
+  nonzero and becomes the workflow's existing fixed warning without replacing the spine verdict.
 
 **Steps**
 

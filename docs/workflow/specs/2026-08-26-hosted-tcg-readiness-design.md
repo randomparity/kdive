@@ -111,9 +111,12 @@ exact one-row result. The workflow's 12-second outer timeout bounds target parsi
 Python import, connection, query, and teardown. An unavailable, empty, multiply matched, mismatched,
 or timed-out snapshot returns nonzero and emits only one fixed-code error line; the workflow emits a
 fixed warning while preserving the original spine verdict. Such a run is not usable evidence.
-Worker/provider records are fixed-field INFO lines, not poll-loop output. Journal capture keeps its
-existing time and line bounds. No diagnostic prints raw payloads, authorizing records, DSNs,
-environment values, dynamic exception text, paths, domain XML, console text, or secrets.
+Worker/provider records are fixed-field INFO lines, not poll-loop output. The direct retained-journal
+capture keeps its existing time and line bounds, parses JSON messages, and emits only exact
+full-match lane, provision-claim, and provider-stage records; every other journal line is discarded.
+The lifecycle diagnostic response retains ADR-0574's bounded secret redaction. The new fixed records
+contain no raw payloads, authorizing records, DSNs, environment values, dynamic exception text,
+paths, domain XML, console text, or secrets.
 
 The state deadline remains 600 seconds during diagnosis. It is not increased speculatively. A
 deadline change requires at least two completed hosted **end-to-end provision intervals**, each
