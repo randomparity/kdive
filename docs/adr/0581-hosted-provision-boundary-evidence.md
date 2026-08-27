@@ -1,8 +1,8 @@
-# ADR 0581: Diagnose hosted provision readiness at persisted boundaries
+# 0581 Diagnose hosted provision readiness at persisted boundaries
 
 ## Status
 
-Accepted
+Accepted (2026-08-26)
 
 ## Context
 
