@@ -28,7 +28,7 @@ def _read_cmdline(path: Path) -> bytes:
 
 def _matches_capture_bootstrap(argv: list[bytes], token: str) -> bool:
     try:
-        module = argv.index(b"kdive.capture_bootstrap")
+        module = argv.index(b"kdive.jobs.capture_operations.bootstrap_entrypoint")
         token_flag = argv.index(b"--launch-token")
     except ValueError:
         return False

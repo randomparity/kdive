@@ -121,9 +121,9 @@ def _fixture_manifest(interpreter: Path) -> dict[str, object]:
         "interpreter": str(interpreter.resolve()),
         "bootstrap_modules": [
             "kdive",
-            "kdive.capture_bootstrap",
             "kdive.jobs",
             "kdive.jobs.capture_operations",
+            "kdive.jobs.capture_operations.bootstrap_entrypoint",
             "kdive.jobs.capture_operations.sandbox",
         ],
         "files": entries,

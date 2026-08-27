@@ -47,7 +47,7 @@ def _run(command: list[str], *, source_root: Path | None = None) -> str:
 def _bootstrap_trace(interpreter: Path, source_root: Path) -> tuple[list[str], list[Path]]:
     code = (
         "import sys\n"
-        "import kdive.capture_bootstrap\n"
+        "import kdive.jobs.capture_operations.bootstrap_entrypoint\n"
         "from kdive.jobs.capture_operations import sandbox\n"
         "del sandbox\n"
         "for name in sorted(sys.modules):\n"

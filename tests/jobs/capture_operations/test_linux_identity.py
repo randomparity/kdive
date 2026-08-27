@@ -36,7 +36,8 @@ def _register_bootstrap(proc: Path, *, interpreter: Path, token: str) -> None:
     capture-bootstrap probe: same exe target, cmdline carrying the exact token."""
     proc.joinpath("exe").symlink_to(interpreter)
     proc.joinpath("cmdline").write_bytes(
-        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
+        b"python\0-S\0-m\0kdive.jobs.capture_operations.bootstrap_entrypoint\0"
+        b"--launch-token\0" + token.encode() + b"\0"
     )
 
 

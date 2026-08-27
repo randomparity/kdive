@@ -146,7 +146,7 @@ def test_real_child_is_gated_and_has_exact_process_contract(
                 os.fsencode(str(Path(sys.executable).resolve())),
                 b"-S",
                 b"-m",
-                b"kdive.capture_bootstrap",
+                b"kdive.jobs.capture_operations.bootstrap_entrypoint",
                 b"--launch-token",
                 operation.launch_token.encode(),
                 b"--gate-fd",

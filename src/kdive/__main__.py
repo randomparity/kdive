@@ -247,7 +247,7 @@ def _handle_capture_operation(
         interpreter,
         "-S",
         "-m",
-        "kdive.capture_bootstrap",
+        "kdive.jobs.capture_operations.bootstrap_entrypoint",
         "--launch-token",
         args.launch_token,
         "--gate-fd",

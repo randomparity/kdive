@@ -225,7 +225,7 @@ def _verify_manifest_modules(payload: Mapping[str, Any]) -> None:
         "kdive.jobs",
         "kdive.jobs.capture_operations",
         "kdive.jobs.capture_operations.sandbox",
-        "kdive.capture_bootstrap",
+        "kdive.jobs.capture_operations.bootstrap_entrypoint",
     }
     assert isinstance(modules, list)
     if not required.issubset(modules):
@@ -1090,7 +1090,7 @@ class GatedCaptureLauncher:
                 str(interpreter),
                 "-S",
                 "-m",
-                "kdive.capture_bootstrap",
+                "kdive.jobs.capture_operations.bootstrap_entrypoint",
                 "--launch-token",
                 operation.launch_token,
                 "--gate-fd",
