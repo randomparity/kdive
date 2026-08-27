@@ -102,7 +102,6 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     )
     ownership = "chown -R root:root /opt/kdive-live-worker-lifecycle"
     harden = "_harden_runtime_tree /opt/kdive-live-worker-lifecycle"
-    assert "if [[ -L /opt/kdive-live-worker-lifecycle ]]" in source
     assert source.index(ownership) < source.index(harden)
     assert "getent group kvm >/dev/null" in source
     assert '--groups "$libvirt_group,kvm"' in source
@@ -129,6 +128,44 @@ _prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(parent.stat().st_mode) == 0o755
     assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
+
+
+def test_installer_rejects_symlink_runtime_install_root(tmp_path: Path) -> None:
+    parent = tmp_path / "opt"
+    parent.mkdir()
+    parent.chmod(0o755)
+    external = tmp_path / "external"
+    external.mkdir()
+    external.chmod(0o777)
+    runtime_root = parent / "kdive-live-worker-lifecycle"
+    runtime_root.symlink_to(external, target_is_directory=True)
+    target_before = external.stat()
+    command = r"""
+source "$1"
+_prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(runtime_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    target_after = external.stat()
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "lifecycle runtime root must be a real directory" in result.stderr
+    assert runtime_root.is_symlink()
+    assert (
+        target_after.st_uid,
+        target_after.st_gid,
+        stat.S_IMODE(target_after.st_mode),
+    ) == (
+        target_before.st_uid,
+        target_before.st_gid,
+        stat.S_IMODE(target_before.st_mode),
+    )
 
 
 def test_installer_hardens_runtime_tree_without_following_symlinks(tmp_path: Path) -> None:
