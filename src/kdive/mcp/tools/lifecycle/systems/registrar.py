@@ -256,7 +256,9 @@ def _register_systems_get(
 
         ``data.supports_snapshots`` is whether the backing provider can checkpoint/restore this
         System (``systems.snapshot`` / ``systems.restore``); ``false`` for a provider with no
-        snapshot support.
+        snapshot support. ``data.supports_traffic_capture`` likewise reports whether the provider
+        can capture this System's traffic. Both capability fields are absent when the System's
+        provider is no longer registered.
         """
         return await _get_system(pool, current_context(), system_id, resolver=resolver)
 
