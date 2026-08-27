@@ -561,7 +561,7 @@ class CaptureOperationSupervisor:
         return data
 
 
-async def _pidfd_ready(pidfd: int) -> None:
+async def _wait_for_pidfd_ready(pidfd: int) -> None:
     loop = asyncio.get_running_loop()
     ready = loop.create_future()
 
@@ -578,7 +578,7 @@ async def _pidfd_ready(pidfd: int) -> None:
 
 async def _wait_identity(identity: LinuxIdentity, pidfd: int, seconds: float) -> bool:
     try:
-        await asyncio.wait_for(_pidfd_ready(pidfd), timeout=seconds)
+        await asyncio.wait_for(_wait_for_pidfd_ready(pidfd), timeout=seconds)
     except TimeoutError:
         return identity.is_absent(current_host_instance=identity.host_instance)
     return True

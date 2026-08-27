@@ -453,7 +453,7 @@ def _attest_process_members(
     return handles
 
 
-async def _pidfd_ready(pidfd: int) -> None:
+async def _wait_for_pidfd_ready(pidfd: int) -> None:
     loop = asyncio.get_running_loop()
     ready = loop.create_future()
 
@@ -480,7 +480,7 @@ async def _signal_and_wait_exact(
     for identity, pidfd in handles.values():
         with suppress(ProcessLookupError):
             identity.signal(pidfd, signal.SIGKILL)
-    waits = [_pidfd_ready(pidfd) for _identity, pidfd in handles.values()]
+    waits = [_wait_for_pidfd_ready(pidfd) for _identity, pidfd in handles.values()]
     waits.append(process.wait())
     try:
         await asyncio.wait_for(asyncio.gather(*waits), timeout=_SIGNAL_WAIT_SECONDS)
