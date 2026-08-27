@@ -552,23 +552,36 @@ def test_manifest_parent_walk_rejects_symlinked_intermediate(
     assert list(external.iterdir()) == []
 
 
-def test_manifest_parent_walk_rejects_replaceable_existing_intermediate(
+def test_manifest_parent_walk_hardens_replaceable_owned_intermediate(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     namespace = runpy.run_path(str(_SCRIPT))
     prepare_parent = namespace["_prepare_install_parent"]
+    script_os = prepare_parent.__globals__["os"]
     replaceable = tmp_path / "replaceable"
     replaceable.mkdir(mode=0o777)
     replaceable.chmod(0o777)
+    synced: list[tuple[int, int]] = []
+    real_fstat = os.fstat
 
-    with pytest.raises(RuntimeError, match="replaceable ancestor"):
-        prepare_parent(
-            replaceable / "nested",
-            owner_uid=os.getuid(),
-            group_gid=os.getgid(),
-        )
+    def record_fsync(descriptor: int) -> None:
+        metadata = real_fstat(descriptor)
+        synced.append((metadata.st_dev, metadata.st_ino))
 
-    assert not (replaceable / "nested").exists()
+    monkeypatch.setattr(script_os, "fsync", record_fsync)
+    descriptor, changed = prepare_parent(
+        replaceable / "nested",
+        owner_uid=os.getuid(),
+        group_gid=os.getgid(),
+    )
+    os.close(descriptor)
+
+    assert changed is True
+    assert stat.S_IMODE(replaceable.stat().st_mode) == 0o755
+    assert stat.S_IMODE((replaceable / "nested").stat().st_mode) == 0o755
+    assert (replaceable.stat().st_dev, replaceable.stat().st_ino) in synced
+    assert (tmp_path.stat().st_dev, tmp_path.stat().st_ino) in synced
 
 
 @pytest.mark.parametrize("existing_mode", (None, 0o700))
