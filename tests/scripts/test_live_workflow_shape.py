@@ -438,6 +438,9 @@ def test_tcg_installs_manifest_for_the_fixed_worker_before_starting_it() -> None
     assert (
         "capture_manifest_parent component=capture_manifest_parent uid=%s gid=%s mode=%s"
     ) in run
+    assert (
+        "capture_manifest_destination_ancestor component=usr_share uid=%u gid=%g mode=%a"
+    ) in run
     assert "capture_manifest_parent path=" not in run
     assert "fingerprint_path_not_safely_openable" in run
     assert "capture_manifest_verification status=rejected reason={reason}" in run
