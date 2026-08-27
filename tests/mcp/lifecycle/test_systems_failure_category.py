@@ -31,9 +31,11 @@ from kdive.mcp.tools.lifecycle.systems.view import (
     ABANDONED_JOB_SYSTEM_FAILURE_DETAIL,
     FAILED_SYSTEM_NEXT_ACTIONS,
     FAILED_SYSTEM_UNCITED_NEXT_ACTIONS,
+    FAILURE_JOB_NOT_FOUND,
     NO_JOB_SYSTEM_FAILURE_DETAIL,
     RECORDED_SYSTEM_FAILURE_DETAIL,
     UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
+    FailureJobFound,
     SystemsListRequest,
     get_system,
     list_systems,
@@ -116,7 +118,7 @@ def test_failed_system_reports_the_jobs_category_not_infrastructure_failure() ->
     )
     job = _failed_job(ErrorCategory.CONFIGURATION_ERROR, {"failure_message": message})
 
-    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FailureJobFound(job))
 
     assert resp.status == "error"
     assert resp.error_category == "configuration_error"
@@ -131,7 +133,7 @@ def test_failed_system_without_a_job_keeps_the_infrastructure_default() -> None:
     # predates migration 0083, or a non-CategorizedError escape that dead-lettered the job
     # without reaching `_record_system_failure`. The default is what those paths are for.
     # `repair_stalled_restoring_systems` used to be a third; ADR-0513 gave it a real verdict.
-    resp = system_envelope(_system(), failing_job=None, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FAILURE_JOB_NOT_FOUND)
 
     assert resp.error_category == "infrastructure_failure"
     assert resp.retryable is True
@@ -144,7 +146,7 @@ def test_failed_system_with_uncategorized_job_falls_back_to_the_default() -> Non
     # A job row whose `error_category` is NULL (never dead-lettered) answers nothing.
     job = _failed_job(None, {"failure_message": "half-written"})
 
-    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FailureJobFound(job))
 
     assert resp.error_category == "infrastructure_failure"
     assert resp.data["failing_job_id"] == str(job.id)
@@ -156,7 +158,7 @@ def test_failed_system_job_without_message_still_gets_a_reason() -> None:
     # #1550 exists to remove.
     job = _failed_job(ErrorCategory.PROVISIONING_FAILURE, {})
 
-    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FailureJobFound(job))
 
     assert resp.error_category == "provisioning_failure"
     assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
@@ -169,7 +171,7 @@ def test_failed_system_attributed_to_an_abandoned_job_says_so() -> None:
     # this, not "no job at all", is what a worker that died actually leaves behind.
     job = _failed_job(ErrorCategory.LEASE_EXPIRED, {}, kind=JobKind.RESTORE)
 
-    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FailureJobFound(job))
 
     assert resp.error_category == "lease_expired"
     assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
@@ -185,8 +187,7 @@ def test_recorded_category_outranks_a_lease_expired_job() -> None:
 
     resp = system_envelope(
         _system(failure_category=ErrorCategory.CONFIGURATION_ERROR),
-        failing_job=job,
-        failure_attributed=True,
+        failure_job=FailureJobFound(job),
     )
 
     assert resp.error_category == "configuration_error"
@@ -206,8 +207,7 @@ def test_recorded_category_answers_when_the_retry_ended_succeeded() -> None:
     # nothing — `failing_job=None`. The System's own record is the only thing left.
     resp = system_envelope(
         _system(failure_category=ErrorCategory.CONFIGURATION_ERROR),
-        failing_job=None,
-        failure_attributed=True,
+        failure_job=FAILURE_JOB_NOT_FOUND,
     )
 
     assert resp.error_category == "configuration_error"
@@ -224,8 +224,7 @@ def test_recorded_no_leak_category_falls_through_to_the_job() -> None:
 
     resp = system_envelope(
         _system(failure_category=ErrorCategory.NOT_FOUND),
-        failing_job=job,
-        failure_attributed=True,
+        failure_job=FailureJobFound(job),
     )
 
     assert resp.error_category == "configuration_error"
@@ -237,8 +236,7 @@ def test_recorded_no_leak_category_with_no_job_takes_the_default() -> None:
     # Nothing to fall through to: the category is dropped and the default is all that is left.
     resp = system_envelope(
         _system(failure_category=ErrorCategory.AUTHORIZATION_DENIED),
-        failing_job=None,
-        failure_attributed=True,
+        failure_job=FAILURE_JOB_NOT_FOUND,
     )
 
     assert resp.error_category == "infrastructure_failure"
@@ -254,8 +252,7 @@ def test_recorded_category_survives_dropping_a_no_leak_job() -> None:
 
     resp = system_envelope(
         _system(failure_category=ErrorCategory.PROVISIONING_FAILURE),
-        failing_job=job,
-        failure_attributed=True,
+        failure_job=FailureJobFound(job),
     )
 
     assert resp.error_category == "provisioning_failure"
@@ -281,8 +278,7 @@ def test_failed_system_offers_the_recovery_actions_not_a_dead_end() -> None:
     # with; the way forward is the one `systems.provision` already names (ADR-0149).
     resp = system_envelope(
         _system(),
-        failing_job=_failed_job(ErrorCategory.CONFIGURATION_ERROR),
-        failure_attributed=True,
+        failure_job=FailureJobFound(_failed_job(ErrorCategory.CONFIGURATION_ERROR)),
     )
 
     assert resp.suggested_next_actions == [
@@ -310,7 +306,7 @@ def test_failed_system_does_not_forward_a_no_leak_category_as_its_own_verdict() 
         {"failure_message": "secret-host-name leaked here"},
     )
 
-    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FailureJobFound(job))
 
     assert resp.error_category == "infrastructure_failure"
     # Not the "no job recorded a reason" string: a job did record one, it is simply not
@@ -325,7 +321,7 @@ def test_failed_system_does_not_forward_authorization_denied_either() -> None:
     # The other no-leak category, for the same reason.
     job = _failed_job(ErrorCategory.AUTHORIZATION_DENIED, {"failure_message": "secret-project"})
 
-    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
+    resp = system_envelope(_system(), failure_job=FailureJobFound(job))
 
     assert resp.error_category == "infrastructure_failure"
     assert resp.detail == UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL
@@ -348,7 +344,7 @@ def test_unattributed_failed_system_states_nothing_it_did_not_check() -> None:
 def test_non_failed_system_ignores_a_supplied_job() -> None:
     job = _failed_job(ErrorCategory.CONFIGURATION_ERROR, {"failure_message": "irrelevant"})
 
-    resp = system_envelope(_system(SystemState.READY), failing_job=job)
+    resp = system_envelope(_system(SystemState.READY), failure_job=FailureJobFound(job))
 
     assert resp.status == "ready"
     assert resp.error_category is None
