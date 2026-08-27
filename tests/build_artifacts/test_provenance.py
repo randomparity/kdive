@@ -15,7 +15,7 @@ import pytest
 
 from kdive.build_artifacts.provenance import (
     dirty_tracked_files,
-    has_untracked_files,
+    probe_untracked_files,
     rev_parse_head,
     staged_tree_sha,
     working_tree_dirty,
@@ -181,25 +181,25 @@ def test_dirty_tracked_files_none_on_empty_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# has_untracked_files (#938, ADR-0282)
+# probe_untracked_files (#938, ADR-0282)
 # ---------------------------------------------------------------------------
 
 
 def test_has_untracked_false_on_clean_tree(tmp_path: Path) -> None:
     _init_commit(tmp_path)
-    assert has_untracked_files(str(tmp_path)) is False
+    assert probe_untracked_files(str(tmp_path)) is False
 
 
 def test_has_untracked_false_on_tracked_edit_only(tmp_path: Path) -> None:
     _init_commit(tmp_path)
     (tmp_path / "f").write_text("edited")
-    assert has_untracked_files(str(tmp_path)) is False
+    assert probe_untracked_files(str(tmp_path)) is False
 
 
 def test_has_untracked_true_on_untracked_file(tmp_path: Path) -> None:
     _init_commit(tmp_path)
     (tmp_path / "new").write_text("z")
-    assert has_untracked_files(str(tmp_path)) is True
+    assert probe_untracked_files(str(tmp_path)) is True
 
 
 def test_has_untracked_ignores_gitignored(tmp_path: Path) -> None:
@@ -210,12 +210,12 @@ def test_has_untracked_ignores_gitignored(tmp_path: Path) -> None:
     _git(tmp_path, "add", ".gitignore")
     _git(tmp_path, "commit", "-q", "-m", "ignore")
     (tmp_path / "ignored").write_text("secret")
-    assert has_untracked_files(str(tmp_path)) is False
+    assert probe_untracked_files(str(tmp_path)) is False
 
 
 def test_has_untracked_none_on_non_git_tree(tmp_path: Path) -> None:
-    assert has_untracked_files(str(tmp_path)) is None
+    assert probe_untracked_files(str(tmp_path)) is None
 
 
 def test_has_untracked_none_on_empty_path() -> None:
-    assert has_untracked_files("") is None
+    assert probe_untracked_files("") is None
