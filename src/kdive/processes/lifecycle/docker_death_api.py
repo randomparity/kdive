@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
+from kdive.services.runs.worker_incarnations import TerminationOutcome
+
 _INSPECT_PATH = re.compile(r"/containers/[0-9a-f]{64}/json")
 _MAX_RESPONSE_BYTES = 1_048_576
 _DOCKER_SOCKET = "/var/run/docker.sock"
@@ -21,7 +23,7 @@ _CREDENTIAL = re.compile(r"[0-9a-f]{64}")
 
 type Inspect = Callable[[str], Mapping[str, object] | None]
 type Register = Callable[[str, str, bytes], Awaitable[None]]
-type Terminate = Callable[[str, dict[str, str], str], Awaitable[None]]
+type Terminate = Callable[[str, dict[str, str], TerminationOutcome], Awaitable[None]]
 type ContainerOperation = Callable[[str], Awaitable[None]]
 type Credential = Callable[[], str]
 type InjectCredential = Callable[[str, str], Awaitable[None]]
