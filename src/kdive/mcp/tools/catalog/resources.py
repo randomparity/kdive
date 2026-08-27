@@ -39,7 +39,7 @@ from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_erro
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
-from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
+from kdive.mcp.tools._resource_envelopes import resource_envelope
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.context import RequestContext
@@ -70,7 +70,7 @@ class _ResourcesListPayload(ToolPayload):
 class ResourcesListRequest:
     """Direct-handler request for ``resources.list`` filters and pagination."""
 
-    kind: str | None = None
+    kind: ResourceKind | None = None
     limit: int = DEFAULT_LIST_LIMIT
     cursor: str | None = None
 
@@ -138,13 +138,6 @@ async def list_resources(
     visibility is applied in Python (ADR-0192). The fleet table is small, so it is read
     whole per call and paged in memory.
     """
-    if request.kind is None:
-        resource_kind = None
-    else:
-        try:
-            resource_kind = ResourceKind(request.kind)
-        except ValueError:
-            return resource_config_error("resources.list")
     capped = _clamp_list_limit(request.limit)
     after = None
     if request.cursor:
@@ -155,7 +148,7 @@ async def list_resources(
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
-            rows = await _fetch_resource_rows(conn, resource_kind)
+            rows = await _fetch_resource_rows(conn, request.kind)
         visible = [row for row in rows if _row_visible(row, viewer_projects)]
         if after is not None:
             visible = [row for row in visible if (row["created_at"], row["id"]) > after]
@@ -320,11 +313,10 @@ def register(
         the image can run on it.
         """
         payload = request or _ResourcesListPayload()
-        kind = payload.kind.value if payload.kind is not None else None
         return await list_resources(
             pool,
             current_context(),
-            ResourcesListRequest(kind=kind, limit=payload.limit, cursor=payload.cursor),
+            ResourcesListRequest(kind=payload.kind, limit=payload.limit, cursor=payload.cursor),
         )
 
     @app.tool(

@@ -120,7 +120,7 @@ def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
 async def list_allocations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    request: AllocationsListRequest | None = None,
+    request: AllocationsListRequest,
 ) -> ToolResponse:
     """Return a page of the newest visible allocations (keyset-paginated, ADR-0192).
 
@@ -136,7 +136,6 @@ async def list_allocations(
     keyset seek so the cursor stays a pure boundary and following ``next_cursor`` drains
     the full filtered set.
     """
-    request = request or AllocationsListRequest()
     projects = _project_filter(ctx, request.project)
     capped = _clamp_list_limit(request.limit)
     after = None

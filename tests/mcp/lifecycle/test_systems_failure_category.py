@@ -741,7 +741,7 @@ def test_systems_list_reports_a_recorded_category_without_a_query(migrated_url: 
                 failure_category=ErrorCategory.CONFIGURATION_ERROR,
             )
             resp = await list_systems(
-                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED.value)
+                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED)
             )
         assert [item.object_id for item in resp.items] == [str(system_id)]
         assert resp.items[0].error_category == "configuration_error"
@@ -770,7 +770,7 @@ def test_systems_list_keeps_the_flattened_category(migrated_url: str) -> None:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
             resp = await list_systems(
-                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED.value)
+                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED)
             )
         assert [item.object_id for item in resp.items] == [str(system_id)]
         assert resp.items[0].error_category == "infrastructure_failure"
@@ -806,7 +806,7 @@ def test_systems_list_reports_restore_incomplete_after_the_reconciler_sweep(
                 await conn.execute("UPDATE jobs SET state = 'failed', worker_id = NULL")
                 assert await repair_stalled_restoring_systems(conn) == 1
             resp = await list_systems(
-                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED.value)
+                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED)
             )
         assert [item.object_id for item in resp.items] == [str(system_id)]
         assert resp.items[0].error_category == "restore_incomplete"

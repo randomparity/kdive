@@ -132,7 +132,7 @@ class SystemsListRequest:
     """Filter payload for ``systems.list``."""
 
     allocation_id: str | None = None
-    state: str | None = None
+    state: SystemState | None = None
     shape: str | None = None
     pcie: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
@@ -513,10 +513,9 @@ def _pcie_clause(pcie: str, params: list[object]) -> Composable | ToolResponse:
 async def list_systems(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    request: SystemsListRequest | None = None,
+    request: SystemsListRequest,
 ) -> ToolResponse:
     """List the caller's Systems, filterable by allocation, state, shape, and PCIe match."""
-    request = request or SystemsListRequest()
     viewer_projects = _viewer_projects(ctx)
     filters = _build_filters(
         viewer_projects,

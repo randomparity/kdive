@@ -119,7 +119,7 @@ class _SystemsListPayload(ToolPayload):
         """Convert the public MCP payload into the handler request record."""
         return _SystemsListRequest(
             allocation_id=self.allocation_id,
-            state=self.state.value if self.state is not None else None,
+            state=self.state,
             shape=self.shape,
             pcie=self.pcie,
             limit=self.limit,

@@ -172,14 +172,8 @@ def test_list_hides_scoped_resources_without_viewer_role(migrated_url: str) -> N
 
 
 def test_list_kind_filter_miss_is_configuration_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            await _register(pool)
-            responses = await _list_resources(pool, CTX, kind="nope")
-        assert responses.status == "error"
-        assert responses.error_category == "configuration_error"
-
-    asyncio.run(_run())
+    with pytest.raises(ValueError):
+        catalog_resources_tools._ResourcesListPayload(kind="nope")  # type: ignore[arg-type]  # noqa: SLF001
 
 
 def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
@@ -192,7 +186,7 @@ def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
             async with pool.connection() as conn:
                 await conn.execute("UPDATE resources SET capabilities = '[]'::jsonb")
             caplog.set_level(logging.WARNING, logger=catalog_resources_tools.__name__)
-            responses = await _list_resources(pool, CTX, kind="local-libvirt")
+            responses = await _list_resources(pool, CTX, kind=ResourceKind.LOCAL_LIBVIRT)
         items = responses.items
         assert len(items) == 1
         assert items[0].object_id == res_id

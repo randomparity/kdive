@@ -307,7 +307,7 @@ _JOBS_LIST_TAG = "jobs.list"
 async def list_jobs(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    request: JobsListRequest | None = None,
+    request: JobsListRequest,
 ) -> ToolResponse:
     """Return a page of the newest jobs (keyset-paginated) in one collection envelope.
 
@@ -324,7 +324,6 @@ async def list_jobs(
     ``investigation_id``/``system_id`` is an ``invalid_uuid`` configuration error. Filters
     compose with the cursor — following ``next_cursor`` drains the full filtered set.
     """
-    request = request or JobsListRequest()
     capped = _clamp_list_limit(request.limit)
     if request.kind in RETIRED_JOB_KINDS:
         return ToolResponse.failure(
