@@ -11,6 +11,7 @@ from opentelemetry.metrics import Meter
 from opentelemetry.trace import Tracer
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.mcp.assembly.tool_registration import AppAssembly, build_plane_registrars
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.exposure import gateway_enabled
@@ -24,7 +25,6 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.processes.assembly import ProcessAssembly, build_process_assembly
 from kdive.processes.lifecycle.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,

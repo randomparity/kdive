@@ -10,10 +10,10 @@ from typing import cast
 import pytest
 
 from kdive.__main__ import build_parser
+from kdive.assembly import ProcessAssembly
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.observability.facade import Telemetry
-from kdive.processes.assembly import ProcessAssembly
 from kdive.processes.runtime import (
     POOL_CLOSE_TIMEOUT_SECONDS,
     POOL_OPEN_TIMEOUT_SECONDS,
@@ -183,7 +183,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         secret_registry=expected_registry, object_store=sentinel_store
     )
     monkeypatch.setattr(
-        "kdive.processes.assembly.build_process_assembly",
+        "kdive.assembly.build_process_assembly",
         lambda _registry: ProcessAssembly(
             ObjectStoreAssembly(sentinel_store),
             cast(ProviderComposition, provider_composition),

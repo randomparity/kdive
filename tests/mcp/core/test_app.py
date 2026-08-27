@@ -18,6 +18,7 @@ from pydantic import SecretStr
 import kdive.mcp.assembly.app as app_module
 import kdive.mcp.assembly.tool_registration as tool_module
 import kdive.mcp.schema.schema_advertising as envelope_module
+from kdive.assembly import ProcessAssembly
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import assembly as handler_module
@@ -25,7 +26,6 @@ from kdive.jobs.assembly import build_handler_registry
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.assembly.app import build_app
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-from kdive.processes.assembly import ProcessAssembly
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly

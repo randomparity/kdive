@@ -14,10 +14,10 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.assembly import ProcessAssembly
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
 from kdive.mcp.tools import _docmeta
-from kdive.processes.assembly import ProcessAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly

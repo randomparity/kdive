@@ -18,9 +18,9 @@ from typing import Any, cast
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.assembly import ProcessAssembly
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
-from kdive.processes.assembly import ProcessAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly

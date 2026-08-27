@@ -47,7 +47,7 @@ import pytest
 import kdive.config as config
 import kdive.jobs.assembly as job_assembly_module
 import kdive.mcp.assembly.app as mcp_app_module
-from kdive.processes.assembly import ProcessAssembly
+from kdive.assembly import ProcessAssembly
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory

@@ -74,7 +74,7 @@ async def run_reconciler_body(
     secret_registry: SecretRegistry,
     telemetry: Telemetry,
 ) -> None:
-    from kdive.processes.assembly import build_process_assembly
+    from kdive.assembly import build_process_assembly
 
     process = build_process_assembly(secret_registry)
     upload_store = process.object_stores.store
