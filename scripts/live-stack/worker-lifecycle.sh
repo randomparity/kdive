@@ -29,8 +29,9 @@ require_exact_file() {
 
 require_compatible_lifecycle() {
   local expected installed
-  expected="$("$py" -c \
-    'from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
+  expected="$("$py" -I -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
+    "${repo_root}/src" \
     2>/dev/null)" || {
     echo "checkout lifecycle compatibility probe failed" >&2
     return 1
@@ -179,12 +180,12 @@ require_worker_path_access() {
 
 request() {
   local operation="$1" count="${2:-}" libvirt_uri=""
-  if [[ "$operation" == start ]]; then
+  if [[ "$operation" != diagnostics ]]; then
     require_compatible_lifecycle || return 1
+  fi
+  if [[ "$operation" == start ]]; then
     require_start_prerequisites || return 1
     libvirt_uri="$(load_published_libvirt_uri)" || return 1
-  elif [[ "$operation" == stop ]]; then
-    require_compatible_lifecycle || return 1
   fi
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \

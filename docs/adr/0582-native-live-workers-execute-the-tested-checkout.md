@@ -27,6 +27,10 @@ identifier even when the models remain unchanged. Any identifier or digest misma
 request and requires runner reprovisioning. This replaces ADR-0574's exact-Git-revision prerequisite;
 its other decisions remain in force.
 
+The check gates `start`, `status`, and `stop`, because status reconciliation can publish termination
+evidence. It does not gate observational `diagnostics`, which remains available to explain a
+mismatched installation.
+
 The installed half of that comparison runs through the provisioned interpreter in Python isolated
 mode. The checkout working directory and caller-controlled Python environment therefore cannot
 shadow the root-installed contract module used to compute compatibility.

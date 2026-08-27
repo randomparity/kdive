@@ -57,7 +57,8 @@ dispatch the self-hosted job because the workflow has no `pull_request` trigger.
   `PYTHONPATH`, so the checkout cannot impersonate the installed contract module through either an
   environment entry or Python's ordinary current-working-directory entry.
 - Exact protocol-identifier and digest equality rejects semantic and structural incompatibility
-  before mutation.
+  before `start`, `status`, or `stop`. `diagnostics` is deliberately exempt because ADR-0574 makes
+  it observational and it remains needed to diagnose a mismatched installation.
 - Existing absolute-path, worker-account accessibility, socket metadata, request-size, deadline,
   and response-validation checks remain in force.
 
