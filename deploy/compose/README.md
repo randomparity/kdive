@@ -77,7 +77,7 @@ deployment must supply an equivalent stop-old, migrate, provision credentials an
 start gate outside this reference workflow. Verify registered current incarnations and the server's
 recovery-tool exposure before resuming queue processing. An image rollback cannot restore old
 claiming after the protocol migration, so recover forward with a current worker image. Do not invoke
-`python -m kdive.processes.lifecycle.compose_worker_lifecycle` directly or use raw
+`python -m kdive.processes.lifecycle.compose.compose_worker_lifecycle` directly or use raw
 Docker/Compose commands;
 they bypass the public lifecycle path and retain pins.
 

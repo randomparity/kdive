@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from kdive.processes.lifecycle.systemd_worker_contract import (
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     LIFECYCLE_PROTOCOL_VERSION,
     MAX_REQUEST_BYTES,
     LifecycleRequest,
@@ -20,7 +20,7 @@ from kdive.processes.lifecycle.systemd_worker_contract import (
     client_exit_status,
     lifecycle_protocol_identity,
 )
-from tests.processes.lifecycle.systemd_worker_support import start_payload
+from tests.processes.lifecycle.systemd.systemd_worker_support import start_payload
 
 
 def test_lifecycle_protocol_identity_is_deterministic_and_versioned() -> None:

@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.processes.lifecycle.systemd_worker_contract import (
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     LifecycleRequest,
     LifecycleResponse,
     ResponseCode,
@@ -23,7 +23,7 @@ from kdive.processes.lifecycle.systemd_worker_contract import (
     SlotResult,
     WorkerSettings,
 )
-from kdive.processes.lifecycle.systemd_worker_runtime import (
+from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     BootObservation,
     CommandDeadlineExceeded,
     Deadline,
@@ -33,7 +33,7 @@ from kdive.processes.lifecycle.systemd_worker_runtime import (
     UnmanagedWorker,
     load_slot_redaction_values,
 )
-from kdive.processes.lifecycle.systemd_worker_state import (
+from kdive.processes.lifecycle.systemd.systemd_worker_state import (
     SlotState,
     StateConflict,
     TerminationOutcome,

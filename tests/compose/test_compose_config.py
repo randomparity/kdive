@@ -189,7 +189,7 @@ def test_worker_death_verifier_uses_inspect_only_private_proxy() -> None:
     assert proxy["entrypoint"] == [
         "python",
         "-m",
-        "kdive.processes.lifecycle.docker_death_api",
+        "kdive.processes.lifecycle.compose.docker_death_api",
     ]
     assert proxy["user"] == "root"
     assert proxy["networks"] == {"worker-death": None}

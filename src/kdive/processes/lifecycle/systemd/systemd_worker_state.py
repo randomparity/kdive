@@ -24,7 +24,7 @@ from pydantic import (
     model_validator,
 )
 
-from kdive.processes.lifecycle.systemd_worker_contract import (
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     SlotPhase,
     WorkerSettings,
     validate_utf8_bytes,

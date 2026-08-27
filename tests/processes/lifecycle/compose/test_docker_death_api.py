@@ -7,7 +7,10 @@ from typing import cast
 
 import pytest
 
-from kdive.processes.lifecycle.docker_death_api import WorkerLifecycleGate, permitted_inspect_path
+from kdive.processes.lifecycle.compose.docker_death_api import (
+    WorkerLifecycleGate,
+    permitted_inspect_path,
+)
 
 _CREDENTIAL = "c" * 64  # pragma: allowlist secret
 

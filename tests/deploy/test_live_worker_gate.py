@@ -266,7 +266,7 @@ def test_root_lifecycle_wrapper_execs_only_the_installed_witness() -> None:
 
     assert source.startswith("#!/bin/bash\nset -euo pipefail\n")
     assert "exec /opt/kdive-live-worker-lifecycle/.venv/bin/python" in source
-    assert "-m kdive.processes.lifecycle.systemd_worker_control serve" in source
+    assert "-m kdive.processes.lifecycle.systemd.systemd_worker_control serve" in source
     assert LIFECYCLE_WRAPPER.stat().st_mode & 0o111
 
 

@@ -7,8 +7,11 @@ import os
 import stat
 from pathlib import Path
 
-from kdive.processes.lifecycle.kubernetes_credential_broker import BrokerReply, BrokerRequest
-from kdive.processes.lifecycle.kubernetes_credential_init import (
+from kdive.processes.lifecycle.kubernetes.kubernetes_credential_broker import (
+    BrokerReply,
+    BrokerRequest,
+)
+from kdive.processes.lifecycle.kubernetes.kubernetes_credential_init import (
     KubernetesCredentialInit,
     write_credential,
 )
@@ -18,11 +21,11 @@ def test_init_writes_mode_0400_with_fsync_and_atomic_rename(tmp_path: Path, monk
     credential_path = tmp_path / "worker-incarnation-credential"
     calls: list[tuple[str, Path]] = []
     monkeypatch.setattr(
-        "kdive.processes.lifecycle.kubernetes_credential_init.os.fsync",
+        "kdive.processes.lifecycle.kubernetes.kubernetes_credential_init.os.fsync",
         lambda fd: calls.append(("fsync", credential_path)),
     )
     monkeypatch.setattr(
-        "kdive.processes.lifecycle.kubernetes_credential_init.os.replace",
+        "kdive.processes.lifecycle.kubernetes.kubernetes_credential_init.os.replace",
         lambda source, target: (calls.append(("replace", Path(target))), os.rename(source, target)),
     )
 

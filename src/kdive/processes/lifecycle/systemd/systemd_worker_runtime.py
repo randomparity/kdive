@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Literal, Protocol
 
-from kdive.processes.lifecycle.systemd_worker_state import _SLOTS_MODE
+from kdive.processes.lifecycle.systemd.systemd_worker_state import _SLOTS_MODE
 
 type CgroupMembership = Literal["populated", "empty", "unknown"]
 

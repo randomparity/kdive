@@ -6,11 +6,11 @@ from kdive.processes.lifecycle.lifecycle_witness import run_lifecycle_witness_bo
 from kdive.processes.lifecycle.worker_incarnation import worker_incarnation_id
 
 _LIFECYCLE_MODULES = (
-    "compose_worker_lifecycle",
-    "docker_death_api",
-    "kubernetes_credential_broker",
-    "kubernetes_credential_init",
-    "kubernetes_termination_witness",
+    "compose.compose_worker_lifecycle",
+    "compose.docker_death_api",
+    "kubernetes.kubernetes_credential_broker",
+    "kubernetes.kubernetes_credential_init",
+    "kubernetes.kubernetes_termination_witness",
     "lifecycle_witness",
     "worker_incarnation",
 )

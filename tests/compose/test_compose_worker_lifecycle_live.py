@@ -18,9 +18,9 @@ import psycopg
 import pytest
 
 from kdive.db.migrate import apply_migrations, discover_migrations
-from kdive.processes.lifecycle import compose_worker_lifecycle as lifecycle_module
-from kdive.processes.lifecycle.compose_worker_lifecycle import ComposeWorkerLifecycle
-from kdive.processes.lifecycle.docker_death_api import WorkerLifecycleGate
+from kdive.processes.lifecycle.compose import compose_worker_lifecycle as lifecycle_module
+from kdive.processes.lifecycle.compose.compose_worker_lifecycle import ComposeWorkerLifecycle
+from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     TerminationOutcome,

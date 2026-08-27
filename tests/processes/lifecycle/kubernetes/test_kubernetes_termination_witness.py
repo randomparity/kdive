@@ -10,10 +10,12 @@ from typing import cast
 import pytest
 from psycopg import AsyncConnection, sql
 
-import kdive.processes.lifecycle.kubernetes_credential_broker as credential_broker
+import kdive.processes.lifecycle.kubernetes.kubernetes_credential_broker as credential_broker
 import kdive.processes.lifecycle.lifecycle_witness as lifecycle_witness
-from kdive.processes.lifecycle.kubernetes_credential_broker import KubernetesCredentialBroker
-from kdive.processes.lifecycle.kubernetes_termination_witness import (
+from kdive.processes.lifecycle.kubernetes.kubernetes_credential_broker import (
+    KubernetesCredentialBroker,
+)
+from kdive.processes.lifecycle.kubernetes.kubernetes_termination_witness import (
     KubernetesTerminationWitness,
     run_witness,
 )

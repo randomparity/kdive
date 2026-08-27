@@ -507,7 +507,7 @@ def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
     assert init["command"] == [
         "python",
         "-m",
-        "kdive.processes.lifecycle.kubernetes_credential_init",
+        "kdive.processes.lifecycle.kubernetes.kubernetes_credential_init",
     ]
     assert any(
         volume["emptyDir"].get("medium") == "Memory"

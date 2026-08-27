@@ -15,7 +15,7 @@ import psycopg
 import pytest
 
 from kdive.db.migrate import discover_migrations
-from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse, SlotPhase
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse, SlotPhase
 from tests.live_vm import systemd_worker_lifecycle_support as support
 
 pytestmark = pytest.mark.live_vm

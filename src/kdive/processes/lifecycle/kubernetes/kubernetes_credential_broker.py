@@ -17,7 +17,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol
 
-from kdive.processes.lifecycle.kubernetes_termination_witness import FINALIZER
+from kdive.processes.lifecycle.kubernetes.kubernetes_termination_witness import FINALIZER
 
 BROKER_AUDIENCE = "kdive-worker-credential-broker"
 MAX_REQUEST_BYTES = 16 * 1024

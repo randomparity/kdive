@@ -20,24 +20,24 @@ from typing import Protocol, cast
 from pydantic import ValidationError
 
 from kdive.db.pool import create_pool
-from kdive.processes.lifecycle.systemd_worker_contract import (
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
     LifecycleRequest,
     LifecycleResponse,
     client_exit_status,
 )
-from kdive.processes.lifecycle.systemd_worker_lifecycle import (
+from kdive.processes.lifecycle.systemd.systemd_worker_lifecycle import (
     PostgresAuthority,
     SystemdWorkerLifecycle,
 )
-from kdive.processes.lifecycle.systemd_worker_runtime import (
+from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     Deadline,
     MonotonicDeadline,
     SubprocessCommandRunner,
     SystemdRuntime,
 )
-from kdive.processes.lifecycle.systemd_worker_state import SlotStore
+from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotStore
 
 _REQUEST_SECONDS = 120.0
 _RESPONSE_RESERVE_SECONDS = 1.0

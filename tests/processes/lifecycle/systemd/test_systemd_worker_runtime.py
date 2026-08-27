@@ -13,7 +13,7 @@ from typing import Literal, cast
 
 import pytest
 
-from kdive.processes.lifecycle.systemd_worker_runtime import (
+from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
     BootObservation,
     CommandCleanupDeadlineExceeded,
     CommandDeadlineExceeded,

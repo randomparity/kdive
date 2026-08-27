@@ -18,14 +18,14 @@ from types import SimpleNamespace
 
 import pytest
 
-import kdive.processes.lifecycle.systemd_worker_control as worker_control
-from kdive.processes.lifecycle.systemd_worker_contract import (
+import kdive.processes.lifecycle.systemd.systemd_worker_control as worker_control
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
     LifecycleRequest,
     LifecycleResponse,
 )
-from kdive.processes.lifecycle.systemd_worker_control import (
+from kdive.processes.lifecycle.systemd.systemd_worker_control import (
     PeerCredentials,
     PeerRejected,
     ProtocolRejected,
@@ -33,8 +33,8 @@ from kdive.processes.lifecycle.systemd_worker_control import (
     serve_one,
     service_configuration,
 )
-from kdive.processes.lifecycle.systemd_worker_runtime import Deadline
-from tests.processes.lifecycle.systemd_worker_support import start_payload
+from kdive.processes.lifecycle.systemd.systemd_worker_runtime import Deadline
+from tests.processes.lifecycle.systemd.systemd_worker_support import start_payload
 
 
 class FakeClock:
@@ -556,7 +556,7 @@ def test_start_cli_rejects_unsafe_stdin_without_echo_or_traceback(
         [
             sys.executable,
             "-m",
-            "kdive.processes.lifecycle.systemd_worker_control",
+            "kdive.processes.lifecycle.systemd.systemd_worker_control",
             "request",
             "start",
         ],
