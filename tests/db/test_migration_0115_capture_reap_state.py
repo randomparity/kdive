@@ -17,9 +17,9 @@ def test_latest_migrations_are_discovered_in_order() -> None:
     migrations = migrate.discover_migrations()
 
     assert [(item.version, item.filename) for item in migrations[-3:]] == [
-        ("0113", "0113_capture_publication_fence.sql"),
         ("0114", "0114_host_dump_volume_leases.sql"),
         ("0115", "0115_capture_reap_state.sql"),
+        ("0116", "0116_capture_claimable_queue_depth.sql"),
     ]
 
 

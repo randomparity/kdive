@@ -275,19 +275,8 @@ async def count_claimable(
         return 0
     async with conn.cursor() as cur:
         await cur.execute(
-            "SELECT count(*) FROM jobs "
-            "WHERE (state = %s OR (state = %s AND lease_expires_at < now())) "
-            "  AND attempt < max_attempts "
-            "  AND dispatch_lane = ANY(%s::text[]) "
-            "  AND (kind <> 'capture_traffic' OR NOT EXISTS ("
-            "      SELECT 1 FROM capture_operations "
-            "      WHERE job_id = jobs.id "
-            "        AND (state <> 'exited' OR NOT process_absent "
-            "             OR provider_quiescence = '{}'::jsonb "
-            "             OR publication_state NOT IN ('published', 'discarded') "
-            "             OR spool_disposed_at IS NULL)"
-            "  ))",
-            (JobState.QUEUED.value, JobState.RUNNING.value, list(accepted_lanes)),
+            "SELECT public.count_claimable_worker_jobs(%s::text[])",
+            (list(accepted_lanes),),
         )
         row = await cur.fetchone()
     return int(row[0]) if row is not None else 0
