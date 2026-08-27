@@ -59,7 +59,9 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
-type _ConsoleHostingFactory = Callable[[], Awaitable["ConsoleHosting | None"]]
+type _ConsoleHostingBuilder = Callable[
+    [ConsoleTelemetry | None], Awaitable["ConsoleHosting | None"]
+]
 
 
 def build_capture_executor(
@@ -103,6 +105,11 @@ class _RuntimeDescriptor:
     enabled: Callable[[], bool]
     runtime_factory: Callable[[], ProviderRuntime]
     discovery_registration_factory: Callable[[], ProviderDiscoveryRegistration]
+    infra_reaper_factory: Callable[[], InfraReaper] | None = None
+    transport_resetter_factory: Callable[[], TransportResetter] | None = None
+    dump_volume_reaper_factory: Callable[[], DumpVolumeReaper] | None = None
+    capture_reaper_factory: Callable[[], CaptureReaper] | None = None
+    console_hosting_factory: _ConsoleHostingBuilder | None = None
 
     def build_runtime(self) -> ProviderRuntime:
         return _with_discovery_registration(
@@ -295,6 +302,7 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        local_reaper: InfraReaper | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return (
             _RuntimeDescriptor(
@@ -304,6 +312,8 @@ class ProviderComposition:
                     secret_registry=self._secret_registry, store=self._object_store
                 ),
                 discovery_registration_factory=local_composition.discovery_registration,
+                infra_reaper_factory=lambda: local_reaper or local_composition.build_reaper(),
+                capture_reaper_factory=local_composition.build_capture_reaper,
             ),
             _RuntimeDescriptor(
                 kind=ResourceKind.FAULT_INJECT,
@@ -312,6 +322,9 @@ class ProviderComposition:
                     inventory=self._fault_inject_inventory, store=self._object_store
                 ),
                 discovery_registration_factory=fault_inject_composition.discovery_registration,
+                infra_reaper_factory=lambda: fault_inject_composition.build_reaper(
+                    self._fault_inject_inventory
+                ),
             ),
             _RuntimeDescriptor(
                 kind=ResourceKind.REMOTE_LIBVIRT,
@@ -322,6 +335,24 @@ class ProviderComposition:
                 discovery_registration_factory=lambda: remote_composition.discovery_registration(
                     secret_registry=self._secret_registry
                 ),
+                infra_reaper_factory=lambda: remote_composition.build_infra_reaper(
+                    secret_registry=self._secret_registry
+                ),
+                transport_resetter_factory=lambda: remote_composition.build_transport_resetter(
+                    secret_registry=self._secret_registry
+                ),
+                dump_volume_reaper_factory=lambda: remote_composition.build_dump_volume_reaper(
+                    secret_registry=self._secret_registry
+                ),
+                capture_reaper_factory=lambda: remote_composition.build_capture_reaper(
+                    secret_registry=self._secret_registry
+                ),
+                console_hosting_factory=lambda telemetry: remote_composition.build_console_hosting(
+                    secret_registry=self._secret_registry,
+                    store=self._object_store,
+                    running_systems_factory=DbRunningRemoteSystems,
+                    console_telemetry=telemetry,
+                ),
             ),
         )
 
@@ -331,6 +362,7 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        local_reaper: InfraReaper | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return tuple(
             descriptor
@@ -338,68 +370,9 @@ class ProviderComposition:
                 enable_fault_inject=enable_fault_inject,
                 enable_remote_libvirt=enable_remote_libvirt,
                 enable_local_libvirt=enable_local_libvirt,
+                local_reaper=local_reaper,
             )
             if descriptor.enabled()
-        )
-
-    def _reconciler_reaper_factories(
-        self,
-        *,
-        enable_fault_inject: bool | None,
-        enable_local_libvirt: bool | None,
-        enable_remote_libvirt: bool | None,
-        libvirt_reaper: InfraReaper | None,
-    ) -> tuple[Callable[[], InfraReaper], ...]:
-        factories: list[Callable[[], InfraReaper]] = []
-        if _local_libvirt_enabled(enable_local_libvirt):
-            factories.append(lambda: libvirt_reaper or local_composition.build_reaper())
-        if _remote_libvirt_enabled(enable_remote_libvirt):
-            factories.append(
-                lambda: remote_composition.build_infra_reaper(secret_registry=self._secret_registry)
-            )
-        if _fault_inject_enabled(enable_fault_inject):
-            factories.append(
-                lambda: fault_inject_composition.build_reaper(self._fault_inject_inventory)
-            )
-        return tuple(factories)
-
-    def _transport_resetter_factories(
-        self, *, enable_remote_libvirt: bool | None
-    ) -> tuple[Callable[[], TransportResetter], ...]:
-        if not _remote_libvirt_enabled(enable_remote_libvirt):
-            return ()
-        return (
-            lambda: remote_composition.build_transport_resetter(
-                secret_registry=self._secret_registry
-            ),
-        )
-
-    def _dump_volume_reaper_factories(
-        self, *, enable_remote_libvirt: bool | None
-    ) -> tuple[Callable[[], DumpVolumeReaper], ...]:
-        if not _remote_libvirt_enabled(enable_remote_libvirt):
-            return ()
-        return (
-            lambda: remote_composition.build_dump_volume_reaper(
-                secret_registry=self._secret_registry
-            ),
-        )
-
-    def _console_hosting_factories(
-        self,
-        *,
-        enable_remote_libvirt: bool | None,
-        console_telemetry: ConsoleTelemetry | None = None,
-    ) -> tuple[_ConsoleHostingFactory, ...]:
-        if not _remote_libvirt_enabled(enable_remote_libvirt):
-            return ()
-        return (
-            lambda: remote_composition.build_console_hosting(
-                secret_registry=self._secret_registry,
-                store=self._object_store,
-                running_systems_factory=DbRunningRemoteSystems,
-                console_telemetry=console_telemetry,
-            ),
         )
 
     def build_provider_resolver(
@@ -448,13 +421,14 @@ class ProviderComposition:
         connection on ``list_owned``); production passes ``None``.
         """
         reapers = [
-            factory()
-            for factory in self._reconciler_reaper_factories(
+            descriptor.infra_reaper_factory()
+            for descriptor in self._enabled_runtime_descriptors(
                 enable_fault_inject=enable_fault_inject,
                 enable_local_libvirt=enable_local_libvirt,
                 enable_remote_libvirt=enable_remote_libvirt,
-                libvirt_reaper=libvirt_reaper,
+                local_reaper=libvirt_reaper,
             )
+            if descriptor.infra_reaper_factory is not None
         ]
         if not reapers:
             return NullReaper()
@@ -466,20 +440,22 @@ class ProviderComposition:
         self, *, enable_remote_libvirt: bool | None = None
     ) -> TransportResetter:
         """Assemble the reconciler's dead-session transport resetter (ADR-0086)."""
-        for factory in self._transport_resetter_factories(
-            enable_remote_libvirt=enable_remote_libvirt
+        for descriptor in self._enabled_runtime_descriptors(
+            enable_remote_libvirt=enable_remote_libvirt,
         ):
-            return factory()
+            if descriptor.transport_resetter_factory is not None:
+                return descriptor.transport_resetter_factory()
         return NullResetter()
 
     def build_reconciler_dump_volume_reaper(
         self, *, enable_remote_libvirt: bool | None = None
     ) -> DumpVolumeReaper:
         """Assemble the reconciler's host_dump orphaned-volume reaper (ADR-0094)."""
-        for factory in self._dump_volume_reaper_factories(
-            enable_remote_libvirt=enable_remote_libvirt
+        for descriptor in self._enabled_runtime_descriptors(
+            enable_remote_libvirt=enable_remote_libvirt,
         ):
-            return factory()
+            if descriptor.dump_volume_reaper_factory is not None:
+                return descriptor.dump_volume_reaper_factory()
         return NullDumpVolumeReaper()
 
     def build_reconciler_capture_reapers(
@@ -502,21 +478,15 @@ class ProviderComposition:
         kind left on ``NullCaptureReaper`` is excluded from selection entirely so it can
         neither be dispatched nor marked complete.
         """
-        builders: dict[ResourceKind, Callable[[], CaptureReaper]] = {
-            ResourceKind.LOCAL_LIBVIRT: local_composition.build_capture_reaper,
-            ResourceKind.REMOTE_LIBVIRT: lambda: remote_composition.build_capture_reaper(
-                secret_registry=self._secret_registry
-            ),
-        }
         return MappingProxyType(
             {
-                descriptor.kind.value: builders[descriptor.kind]()
+                descriptor.kind.value: descriptor.capture_reaper_factory()
                 for descriptor in self._enabled_runtime_descriptors(
                     enable_fault_inject=enable_fault_inject,
                     enable_remote_libvirt=enable_remote_libvirt,
                     enable_local_libvirt=enable_local_libvirt,
                 )
-                if descriptor.kind in builders
+                if descriptor.capture_reaper_factory is not None
             }
         )
 
@@ -527,11 +497,11 @@ class ProviderComposition:
         console_telemetry: ConsoleTelemetry | None = None,
     ) -> ConsoleHosting | None:
         """Assemble provider-owned console hosting for the reconciler."""
-        for factory in self._console_hosting_factories(
+        for descriptor in self._enabled_runtime_descriptors(
             enable_remote_libvirt=enable_remote_libvirt,
-            console_telemetry=console_telemetry,
         ):
-            return await factory()
+            if descriptor.console_hosting_factory is not None:
+                return await descriptor.console_hosting_factory(console_telemetry)
         return None
 
 
