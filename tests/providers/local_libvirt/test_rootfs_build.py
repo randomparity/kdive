@@ -50,7 +50,9 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import Basel
 from kdive.providers.local_libvirt.rootfs_build import (
     _EXT4_INCOMPATIBLE_FEATURE,
     LocalLibvirtRootfsBuildPlane,
-    RootfsBuildTools,
+    RootfsAcquisition,
+    RootfsCustomization,
+    RootfsProvenanceInspection,
     _feature_strip_needed,
     _parse_os_release,
     family_for,
@@ -209,7 +211,7 @@ def _no_kernel_config(_qcow2: Path, _version: str) -> bytes | None:
     return None
 
 
-def _tools(
+def _dependencies(
     rec: _Recorder,
     inspect_versions: VersionInspectSeam = _no_versions,
     probe_makedumpfile: MakedumpfileProbeSeam = _no_makedumpfile,
@@ -218,20 +220,25 @@ def _tools(
     probe_os_release: OsReleaseProbeSeam = _no_os_release,
     probe_kernel_config: KernelConfigProbeSeam = _no_kernel_config,
     probe_drgn: DrgnProbeSeam = _no_drgn,
-) -> RootfsBuildTools:
-    return RootfsBuildTools(
+) -> tuple[RootfsAcquisition, RootfsCustomization, RootfsProvenanceInspection]:
+    acquisition = RootfsAcquisition(
         acquire_base=rec.acquire_base,
+        family_for=rec.family_for,
+    )
+    customization = RootfsCustomization(
         customize=rec.customize,
         repack_whole_disk_ext4=rec.repack_whole_disk_ext4,
-        family_for=rec.family_for,
+        verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
+    )
+    provenance = RootfsProvenanceInspection(
         inspect_versions=inspect_versions,
         probe_makedumpfile=probe_makedumpfile,
         probe_drgn=probe_drgn,
         probe_boot_entries=probe_boot_entries,
         probe_os_release=probe_os_release,
         probe_kernel_config=probe_kernel_config,
-        verify_cloud_init=verify_cloud_init or rec.verify_cloud_init,  # ty: ignore[invalid-argument-type]
     )
+    return acquisition, customization, provenance
 
 
 def _plane(
@@ -244,17 +251,20 @@ def _plane(
     probe_kernel_config: KernelConfigProbeSeam = _no_kernel_config,
     probe_drgn: DrgnProbeSeam = _no_drgn,
 ) -> LocalLibvirtRootfsBuildPlane:
+    acquisition, customization, provenance = _dependencies(
+        rec,
+        inspect_versions,
+        probe_makedumpfile,
+        probe_boot_entries=probe_boot_entries,
+        probe_os_release=probe_os_release,
+        probe_kernel_config=probe_kernel_config,
+        probe_drgn=probe_drgn,
+    )
     return LocalLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
-        tools=_tools(
-            rec,
-            inspect_versions,
-            probe_makedumpfile,
-            probe_boot_entries=probe_boot_entries,
-            probe_os_release=probe_os_release,
-            probe_kernel_config=probe_kernel_config,
-            probe_drgn=probe_drgn,
-        ),
+        acquisition=acquisition,
+        customization=customization,
+        provenance=provenance,
     )
 
 
@@ -311,9 +321,12 @@ def test_build_fails_when_cloud_init_self_check_rejects(tmp_path: Path) -> None:
             category=ErrorCategory.PROVISIONING_FAILURE,
         )
 
+    acquisition, customization, provenance = _dependencies(rec, verify_cloud_init=_reject)
     plane = LocalLibvirtRootfsBuildPlane(
         workspace=tmp_path / "work",
-        tools=_tools(rec, verify_cloud_init=_reject),
+        acquisition=acquisition,
+        customization=customization,
+        provenance=provenance,
     )
     with pytest.raises(CategorizedError) as err:
         plane.build(_spec())
@@ -918,18 +931,24 @@ class _RecordingBootTools:
         self.probed_path = qcow2
         return {}
 
-    def as_tools(self) -> RootfsBuildTools:
-        return RootfsBuildTools(
+    def as_dependencies(
+        self,
+    ) -> tuple[RootfsAcquisition, RootfsCustomization, RootfsProvenanceInspection]:
+        acquisition = RootfsAcquisition(
             acquire_base=self.acquire_base,
+            family_for=self.family_for,
+        )
+        customization = RootfsCustomization(
             customize=self.customize,
             repack_whole_disk_ext4=self.repack_whole_disk_ext4,
-            family_for=self.family_for,
             inject_offline=self.inject_offline,
             extract_baseline_kernel=self.extract_baseline_kernel,
             resolve_accel=self.resolve_accel,
             run_customization_boot=self.run_customization_boot,
             seal_customized_image=self.seal_customized_image,
             verify_cloud_init=self.verify_cloud_init,
+        )
+        provenance = RootfsProvenanceInspection(
             inspect_versions=self.inspect_versions,
             probe_makedumpfile=_no_makedumpfile,
             probe_drgn=_no_drgn,
@@ -937,11 +956,22 @@ class _RecordingBootTools:
             probe_os_release=_no_os_release,
             probe_kernel_config=_no_kernel_config,
         )
+        return acquisition, customization, provenance
+
+
+def _boot_plane(tmp_path: Path, calls: _RecordingBootTools) -> LocalLibvirtRootfsBuildPlane:
+    acquisition, customization, provenance = calls.as_dependencies()
+    return LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        acquisition=acquisition,
+        customization=customization,
+        provenance=provenance,
+    )
 
 
 def test_rhel_build_uses_customization_boot(tmp_path: Path) -> None:
     calls = _RecordingBootTools(accel=("kvm", None))
-    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane = _boot_plane(tmp_path, calls)
     plane.build(_spec(name="fedora-kdive-ready-44", arch="x86_64"))
     assert calls.customization_boot_ran
     assert not calls.virt_customize_ran, "the boot path never runs virt-customize"
@@ -963,7 +993,7 @@ def test_rhel_build_uses_customization_boot(tmp_path: Path) -> None:
 
 def test_ppc64le_build_boots_under_tcg(tmp_path: Path) -> None:
     calls = _RecordingBootTools(accel=("tcg", "/usr/bin/qemu-system-ppc64"))
-    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane = _boot_plane(tmp_path, calls)
     plane.build(_spec(name="fedora-kdive-ready-44-ppc64le", arch="ppc64le"))
     assert calls.boot_accel == "tcg", "the TCG branch is unit-covered"
     assert calls.customization_boot_ran
@@ -971,7 +1001,7 @@ def test_ppc64le_build_boots_under_tcg(tmp_path: Path) -> None:
 
 def test_debian_build_stays_on_virt_customize(tmp_path: Path) -> None:
     calls = _RecordingBootTools()
-    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane = _boot_plane(tmp_path, calls)
     plane.build(_spec(name="debian-kdive-ready-13", arch="x86_64", distro="debian"))
     assert calls.virt_customize_ran
     assert not calls.customization_boot_ran, "debian is unchanged (virt-customize path)"
@@ -982,7 +1012,7 @@ def test_boot_failure_aborts_publish(tmp_path: Path) -> None:
     calls = _RecordingBootTools(
         boot_raises=CategorizedError("dnf failed", category=ErrorCategory.PROVISIONING_FAILURE)
     )
-    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane = _boot_plane(tmp_path, calls)
     with pytest.raises(CategorizedError) as err:
         plane.build(_spec(name="fedora-kdive-ready-44"))
     assert err.value.category is ErrorCategory.PROVISIONING_FAILURE
