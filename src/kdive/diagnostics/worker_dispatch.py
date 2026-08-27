@@ -6,10 +6,7 @@ a ``diagnostics_worker_check`` job and bounded-waits within ``WORKER_DISPATCH_BU
 inline result, keeping ``doctor``'s single coherent verdict (ADR-0091 §1). A job the worker never
 picks up in time surfaces as ``WORKER_UNAVAILABLE`` (ADR-0139), never a hang.
 
-``WORKER_UNAVAILABLE_DETAIL`` has one home — :mod:`kdive.diagnostics.service` — which this module
-imports. The reverse dependency is broken at the source: ``service`` references the
-:class:`WorkerCheckDispatcher` Protocol only under ``TYPE_CHECKING`` and imports
-:class:`JobWorkerCheckDispatcher` function-locally, so importing ``service`` pulls in nothing here.
+Shared result wording lives in the dependency-neutral diagnostics contracts module.
 """
 
 from __future__ import annotations
@@ -24,8 +21,8 @@ from typing import Protocol
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.checks import CheckResult, CheckStatus
+from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL
 from kdive.diagnostics.result_codec import ResultCodecError, deserialize_results
-from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind

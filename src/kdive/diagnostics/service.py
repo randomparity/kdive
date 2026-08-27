@@ -31,26 +31,19 @@ from kdive.diagnostics.checks import (
     Vantage,
     run_check,
 )
+from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL
 from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
 )
 from kdive.diagnostics.secret_ref import SecretRefCheck
+from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher, WorkerCheckDispatcher
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
 
 if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
-
-    # Runtime-import only inside default_service_factory to avoid a cycle: worker_dispatch imports
-    # WORKER_UNAVAILABLE_DETAIL from this module (ADR-0164).
-    from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
-
-WORKER_UNAVAILABLE_DETAIL = (
-    "worker did not pick up the diagnostic job in time; check that the worker is up "
-    "(/livez, /readyz) and not saturated"
-)
 FEATURE_NOT_ENABLED_DETAIL = (
     "worker-vantage diagnostic checks (provider_tls, gdbstub_acl) are not enabled "
     "in this deployment"
@@ -378,10 +371,6 @@ def _worker_vantage_dispatch_mode(
     contributions: Sequence[_EnabledDiagnosticContribution],
     pool: AsyncConnectionPool,
 ) -> WorkerVantageDispatchMode:
-    # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this module,
-    # so a top-level import here would be a cycle (ADR-0164).
-    from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
-
     dispatchers = [
         JobWorkerCheckDispatcher(
             pool,

@@ -576,7 +576,7 @@ def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
 ) -> None:
     from typing import cast
 
-    import kdive.diagnostics.worker_dispatch as worker_dispatch
+    import kdive.diagnostics.service as diagnostics_service
 
     _set_env(monkeypatch, tmp_path)
     created: list[tuple[str, tuple[str, ...]]] = []
@@ -605,7 +605,9 @@ def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
                 for check_id in self.worker_check_ids
             ]
 
-    monkeypatch.setattr(worker_dispatch, "JobWorkerCheckDispatcher", RecordingWorkerCheckDispatcher)
+    monkeypatch.setattr(
+        diagnostics_service, "JobWorkerCheckDispatcher", RecordingWorkerCheckDispatcher
+    )
     service = default_service_factory(
         None,
         pool=cast(AsyncConnectionPool, object()),
