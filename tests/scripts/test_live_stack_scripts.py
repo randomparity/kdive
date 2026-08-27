@@ -19,6 +19,101 @@ from kdive.config.external_env import EXTERNAL_ENV_VARS
 ROOT = Path(__file__).resolve().parents[2]
 LIFECYCLE = ROOT / "scripts" / "live-stack" / "worker-lifecycle.sh"
 LIBVIRT_URI = ROOT / "scripts" / "live-stack" / "libvirt-uri.sh"
+WORKER_FROM_CHECKOUT = ROOT / "scripts" / "live-stack" / "worker-from-checkout"
+
+
+def test_worker_from_checkout_uses_provisioned_python_and_checkout_source(tmp_path: Path) -> None:
+    fake_python = tmp_path / "python"
+    argv = tmp_path / "argv"
+    environment = tmp_path / "environment"
+    fake_python.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv}\nprintf '%s' \"$PYTHONPATH\" > {environment}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    launcher = tmp_path / "worker-from-checkout"
+    launcher.write_text(
+        WORKER_FROM_CHECKOUT.read_text()
+        .replace("/opt/kdive-live-worker-lifecycle/.venv/bin/python", str(fake_python))
+        .replace(
+            'repo_root="$(cd -- "${here}/../.." && pwd)"',
+            f'repo_root="{ROOT}"',
+        ),
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+
+    result = subprocess.run(
+        [str(launcher), "-m", "kdive", "worker"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": "/ambient"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv.read_text().splitlines() == ["-m", "kdive", "worker"]
+    assert environment.read_text().split(":", 1) == [str(ROOT / "src"), "/ambient"]
+
+
+def test_lifecycle_compatibility_probe_is_isolated_and_precedes_request() -> None:
+    lifecycle = LIFECYCLE.read_text()
+
+    assert '"$WORKER_PYTHON" -I' in lifecycle
+    assert lifecycle.index("require_compatible_lifecycle") < lifecycle.index("request_path")
+    assert "LIFECYCLE_REVISION" not in lifecycle
+    assert 'WORKER_EXECUTABLE="${here}/worker-from-checkout"' in lifecycle
+
+
+def test_lifecycle_protocol_mismatch_fails_before_start_prerequisites(tmp_path: Path) -> None:
+    script_dir = tmp_path / "scripts/live-stack"
+    script_dir.mkdir(parents=True)
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+        (script_dir / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
+    probe_args = tmp_path / "probe-args"
+    installed_python = tmp_path / "installed-python"
+    installed_python.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {probe_args}\nprintf '0:incompatible\\n'\n",
+        encoding="utf-8",
+    )
+    installed_python.chmod(0o755)
+    lifecycle = script_dir / "worker-lifecycle.sh"
+    lifecycle.write_text(
+        LIFECYCLE.read_text().replace(
+            "/opt/kdive-live-worker-lifecycle/.venv/bin/python", str(installed_python)
+        ),
+        encoding="utf-8",
+    )
+    marker = tmp_path / "start-prerequisites"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "$1"\nrequire_start_prerequisites() {{ touch "{marker}"; }}\nrequest start 1',
+            "bash",
+            str(lifecycle),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "KDIVE_PYTHON": sys.executable,
+            "PYTHONPATH": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stderr == (
+        "installed lifecycle protocol does not match this checkout; reprovision the runner\n"
+    )
+    assert not marker.exists(), "a mismatch must stop before any start prerequisite or request"
+    assert probe_args.read_text().splitlines()[0] == "-I"
 
 
 def _lifecycle_status(
@@ -2098,6 +2193,7 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
             "-c",
             'source "$1"\n'
             'uri="$2"\n'
+            "require_compatible_lifecycle() { :; }\n"
             "require_start_prerequisites() { :; }\n"
             'load_published_libvirt_uri() { printf %s "$uri"; }\n'
             "request start 1",

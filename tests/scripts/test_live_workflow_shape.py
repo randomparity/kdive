@@ -299,32 +299,13 @@ def test_hosted_job_installs_fixed_lifecycle_contract_after_uv_sync() -> None:
     assert "--witness-dsn" not in command
 
 
-def test_native_job_installs_fixed_lifecycle_contract_before_stack_up() -> None:
-    """#2050: the persistent native box carries a stale installed witness revision unless the
-
-    native arm re-installs the contract from its OWN checkout before stack-up — the same gap the
-    tcg job closed with its identically named step (run 32585991555 died at host-process start
-    with "installed lifecycle witness revision does not match this checkout").
-    """
+def test_native_job_never_installs_privileged_lifecycle_contract() -> None:
+    """ADR-0582: a workflow-selected checkout must never gain root installation authority."""
     steps = _load(_LIVE)["jobs"]["native"]["steps"]
-    install = next(
-        i
-        for i, step in enumerate(steps)
-        if "install-live-worker-lifecycle.sh" in step.get("run", "")
-    )
-    spine = next(i for i, step in enumerate(steps) if step.get("name", "").startswith("Run both"))
-    assert install < spine, "the native install must precede the single shell that runs up.sh"
-    command = steps[install]["run"]
-    # Same installer invocation as the tcg step: DSN over stdin only, operator + source pinned.
-    assert '--operator "$(id -un)" --source "$GITHUB_WORKSPACE"' in command
-    assert "printf" in command and "| sudo" in command
-    assert "kdive-witness-member" in command and "kdive-witness-local" in command
-    assert "KDIVE_DATABASE_URL" not in command
-    assert "--witness-dsn" not in command
+    joined = "\n".join(step.get("run", "") for step in steps)
 
-
-def test_native_install_step_is_named_like_the_tcg_one() -> None:
-    _, _ = _named_step("native", "Install the fixed live-worker lifecycle host contract")
+    assert "install-live-worker-lifecycle.sh" not in joined
+    assert "sudo" not in joined
 
 
 def test_hosted_spine_enters_refreshed_control_group_and_probes_socket() -> None:

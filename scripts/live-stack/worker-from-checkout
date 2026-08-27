@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Execute worker application code from this checkout with the provisioned dependency environment.
+set -euo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${here}/../.." && pwd)"
+readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
+
+export PYTHONPATH="${repo_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
+exec "$WORKER_PYTHON" "$@"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
@@ -18,6 +19,7 @@ from pydantic import (
 )
 
 Operation = Literal["start", "status", "stop", "diagnostics"]
+LIFECYCLE_PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 32 * 1024
 MAX_RESPONSE_BYTES = 1_114_112
 MAX_STRING_BYTES = 4096
@@ -40,6 +42,19 @@ RetryAction = Literal[
     "restore_database",
     "operator_recovery",
 ]
+
+
+def _protocol_identity(
+    version: int, request_schema: dict[str, Any], response_schema: dict[str, Any]
+) -> str:
+    """Bind semantic protocol version and structural wire schemas into one identity."""
+    canonical = json.dumps(
+        {"request": request_schema, "response": response_schema},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return f"{version}:{hashlib.sha256(canonical).hexdigest()}"
 
 
 def validate_utf8_bytes(value: str, maximum: int) -> str:
@@ -258,6 +273,15 @@ class LifecycleResponse(BaseModel):
         if len(frame) > MAX_RESPONSE_BYTES:
             raise ValueError("lifecycle response exceeds 1,114,112 bytes")
         return frame
+
+
+def lifecycle_protocol_identity() -> str:
+    """Return the semantic and structural identity of the local lifecycle protocol."""
+    return _protocol_identity(
+        LIFECYCLE_PROTOCOL_VERSION,
+        LifecycleRequest.model_json_schema(),
+        LifecycleResponse.model_json_schema(),
+    )
 
 
 def client_exit_status(response: LifecycleResponse) -> int:

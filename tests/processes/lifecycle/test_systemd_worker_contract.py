@@ -9,15 +9,36 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.processes.lifecycle.systemd_worker_contract import (
+    LIFECYCLE_PROTOCOL_VERSION,
     MAX_REQUEST_BYTES,
     LifecycleRequest,
     LifecycleResponse,
     ResponseCode,
     SlotPhase,
     SlotResult,
+    _protocol_identity,
     client_exit_status,
+    lifecycle_protocol_identity,
 )
 from tests.processes.lifecycle.systemd_worker_support import start_payload
+
+
+def test_lifecycle_protocol_identity_is_deterministic_and_versioned() -> None:
+    identity = lifecycle_protocol_identity()
+
+    assert identity == lifecycle_protocol_identity()
+    assert identity.startswith(f"{LIFECYCLE_PROTOCOL_VERSION}:")
+    assert len(identity.removeprefix(f"{LIFECYCLE_PROTOCOL_VERSION}:")) == 64
+
+
+def test_lifecycle_protocol_identity_changes_for_semantics_or_schema() -> None:
+    request_schema = LifecycleRequest.model_json_schema()
+    response_schema = LifecycleResponse.model_json_schema()
+
+    baseline = _protocol_identity(1, request_schema, response_schema)
+
+    assert _protocol_identity(2, request_schema, response_schema) != baseline
+    assert _protocol_identity(1, {**request_schema, "changed": True}, response_schema) != baseline
 
 
 def test_non_start_request_rejects_settings() -> None:

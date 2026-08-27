@@ -20,8 +20,8 @@ identifier even when the request and response models do not change.
 The lifecycle request already accepts an absolute worker executable. For native runs, the client
 passes a checkout-owned launcher that prepends the checkout's `src/` directory to `PYTHONPATH` and
 then executes the provisioned Python interpreter. Systemd still runs that launcher as the fixed
-`kdive-worker-N` account. Hosted TCG keeps using the installed interpreter directly because its
-contract was installed from the same checkout earlier in the job.
+`kdive-worker-N` account. Hosted TCG uses the same launcher; its privileged setup remains unchanged
+and installs the dependency environment and lifecycle witness from the checkout earlier in the job.
 
 This design is recorded by [ADR-0582](../../adr/0582-native-live-workers-execute-the-tested-checkout.md),
 which supersedes only ADR-0574's exact-revision prerequisite.
