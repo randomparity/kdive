@@ -48,26 +48,7 @@ def _reject_unknown_destructive_ops(profile: ProvisioningProfile) -> None:
 
 
 def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | None:
-    """Validate ``arch`` against a resource's guest arches and resolve its accelerator (ADR-0339).
-
-    A thin wrapper over :func:`resolve_accel_emulator` (the one branch definition shared with the
-    local-libvirt provisioner, ADR-0340) that keeps admission's accel-only ``str | None``
-    contract: the emulator is dropped here and only the provisioner's renderer consumes it.
-
-    ``guest_arches`` is what :meth:`ResourceCapabilities.guest_arches` returns for the bound
-    Resource — ``{arch: {"accel", "emulator"}}`` filtered to the kdive-provisionable set (ADR-0338).
-
-    Returns:
-        The advertised accelerator name (``kvm``/``tcg``) for ``arch``, or ``None`` when the
-        resource advertises **no** guest arches — remote-libvirt, fault-inject, or a host not
-        re-discovered since ADR-0338. That fail-open case skips the check and records no accel,
-        preserving pre-ADR-0339 behavior.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when ``guest_arches`` is non-empty and does not
-            advertise ``arch``. The message names the supported set — the same fail-fast rule as
-            ``arch_traits()``, never a silent x86 fallback.
-    """
+    """Resolve the advertised accelerator while preserving admission's accel-only contract."""
     resolved = resolve_accel_emulator(guest_arches, arch)
     return resolved[0] if resolved is not None else None
 

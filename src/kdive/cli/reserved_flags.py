@@ -30,16 +30,5 @@ RESERVED_CLI_FLAGS: frozenset[str] = frozenset(
 
 
 def derive_cli_flag(param_name: str) -> str:
-    """Return the ``kdivectl`` flag a tool parameter derives to (ADR-0421 decision 2).
-
-    Underscores become dashes and the name is prefixed with ``--``, mirroring the verb rule
-    that turns ``<op_with_underscores>`` into a dashed subcommand. For example
-    ``idempotency_key`` -> ``--idempotency-key`` and ``force`` -> ``--force``.
-
-    Args:
-        param_name: A tool input-schema parameter name.
-
-    Returns:
-        The derived long-form CLI flag.
-    """
+    """Derive a ``kdivectl`` long option from a tool parameter (ADR-0421)."""
     return "--" + param_name.replace("_", "-")

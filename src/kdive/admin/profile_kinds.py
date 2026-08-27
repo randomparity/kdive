@@ -181,31 +181,7 @@ async def verify_profile_kinds() -> list[ProfileKindMismatch]:
 
 
 def _project_token(project: str) -> str:
-    """Render ``project`` as a single whitespace-free token for the report line.
-
-    ``repr`` alone is not enough. It escapes every non-printable character and delimits the
-    value, but it *selects* its quote character rather than escaping quotes, and it leaves
-    ASCII space untouched because a space is printable. The report line is a whitespace-
-    delimited ``key=value`` sequence, so a stored project name carrying spaces contributes
-    extra ``key=value`` tokens — positioned ahead of the real fields, since ``project`` is the
-    second key on the line. A name of the form ``x' state=torn_down ... junk='y`` makes
-    ``state=torn_down`` the first ``state=`` token on that row. Whitespace-splitting or grepping
-    the report — the ordinary way to work one listing many rows — then reads the forged value as
-    the row's ``state``, whichever state the operator is selecting on, and the row is triaged as
-    something it is not.
-
-    ``systems.project`` is remotely plantable (an IdP ``projects`` claim, validated only as a
-    non-empty ``str``), so this is reachable without database access.
-
-    Both ``\\x20`` and ``=`` are escaped, and escaping only the space is not enough. That alone
-    fixes whitespace tokenization — the line splits into one ``state=`` token again — but leaves
-    the *substring* ``state=torn_down`` sitting in the line, so a plain
-    ``grep 'state=torn_down'`` still matches and still drops the live System. Escaping ``=`` as
-    well means the rendered token can hold no ``key=value`` lookalike at all, which is the
-    property the report actually needs. U+0020 is the only whitespace ``repr`` leaves intact —
-    every other separator is non-printable to ``str.isprintable`` and is already escaped — so
-    these two substitutions are complete, reversible, and keep ``repr``'s charset bound.
-    """
+    """Prevent an untrusted project name from forging whitespace-delimited report fields."""
     return repr(project).replace(" ", "\\x20").replace("=", "\\x3d")
 
 
