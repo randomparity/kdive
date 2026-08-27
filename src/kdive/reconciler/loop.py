@@ -490,7 +490,11 @@ def _remote_system_object_versions_repair(
 
 
 _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
-    _RepairCatalogEntry("expired_allocations", lambda _r, _c, _g: _sweep_expired_allocations),
+    _RepairCatalogEntry(
+        "expired_allocations",
+        lambda _r, _c, _g: _sweep_expired_allocations,
+        report_field="expired_allocations",
+    ),
     _RepairCatalogEntry(
         "reaped_active_allocations",
         lambda _r, c, _g: (
@@ -498,17 +502,28 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
                 conn, crashed_idle_grace=c.crashed_idle_grace
             )
         ),
+        report_field="reaped_active_allocations",
     ),
     _RepairCatalogEntry(
         "promoted_allocations",
         lambda _r, c, _g: lambda conn: _promote_pending(conn, c.admission_metrics),
+        report_field="promoted_allocations",
     ),
     _RepairCatalogEntry(
         "queue_timeouts",
         lambda _r, c, _g: _reap_queue_timeouts_for(c.queue_max_wait, c.admission_metrics),
+        report_field="queue_timeouts",
     ),
-    _RepairCatalogEntry("orphaned_systems", lambda _r, _c, _g: _repair_orphaned_systems),
-    _RepairCatalogEntry("abandoned_jobs", lambda _r, _c, _g: _repair_abandoned_jobs),
+    _RepairCatalogEntry(
+        "orphaned_systems",
+        lambda _r, _c, _g: _repair_orphaned_systems,
+        report_field="orphaned_systems",
+    ),
+    _RepairCatalogEntry(
+        "abandoned_jobs",
+        lambda _r, _c, _g: _repair_abandoned_jobs,
+        report_field="abandoned_jobs",
+    ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted force_crash job.
     _RepairCatalogEntry(
         "stalled_crashing_systems", lambda _r, _c, _g: _repair_stalled_crashing_systems
@@ -525,6 +540,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry(
         "reaped_runtime_resources",
         lambda _r, c, _g: lambda conn: _reap_expired_runtime_resources(conn, c.resource_probe),
+        report_field="reaped_runtime_resources",
     ),
     _RepairCatalogEntry(
         "dead_sessions",
@@ -536,16 +552,22 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
                 c.debug_session_telemetry,
             )
         ),
+        report_field="dead_sessions",
     ),
     _RepairCatalogEntry(
-        "leaked_domains", lambda r, _c, _g: lambda conn: _repair_leaked_domains(conn, r)
+        "leaked_domains",
+        lambda r, _c, _g: lambda conn: _repair_leaked_domains(conn, r),
+        report_field="leaked_domains",
     ),
     _RepairCatalogEntry(
-        "leaked_probe_guests", lambda r, _c, _g: lambda conn: _repair_leaked_probe_guests(conn, r)
+        "leaked_probe_guests",
+        lambda r, _c, _g: lambda conn: _repair_leaked_probe_guests(conn, r),
+        report_field="leaked_probe_guests",
     ),
     _RepairCatalogEntry(
         "idempotency_keys_gc_count",
         lambda _r, c, _g: lambda conn: _gc_idempotency_keys(conn, c.idempotency_retention),
+        report_field="idempotency_keys_gc_count",
     ),
     _RepairCatalogEntry(
         "reaped_dump_volumes",
@@ -554,6 +576,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
                 conn, c.dump_volume_reaper, c.dump_volume_grace, budget=c.lane_budget
             )
         ),
+        report_field="reaped_dump_volumes",
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted capture job and is
     # therefore what puts a stranded capture into the terminal state this sweep selects on. Placed
@@ -572,6 +595,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
                 budget=c.lane_budget,
             )
         ),
+        report_field="reaped_captures",
     ),
     # Collects for table growth, not for exposure (ADR-0502): the orphan sweep's classify honours a
     # lease only while its holder is live, so a lease this pass has not yet reached already fences
@@ -579,20 +603,33 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # is guaranteed rather than exceptional, because capture_handler's `except` releases no lease.
     # Placed ahead of the sweep for readability only; the two are independent by that same argument.
     _RepairCatalogEntry("stale_write_leases", lambda _r, _c, _g: _reap_stale_write_leases),
-    _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
+    _RepairCatalogEntry(
+        "abandoned_uploads", _abandoned_uploads_repair, report_field="abandoned_uploads"
+    ),
     # Runs after the reaper so a window reaped this pass is already row-less. It is the reclaim
     # threshold (orphan grace *plus* the upload TTL), not the ordering, that keeps a
     # just-reaped window's bytes out of this same pass (ADR-0455 §2).
     _RepairCatalogEntry("leaked_upload_objects", _leaked_upload_objects_repair),
     _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
-    _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
-    _RepairCatalogEntry("expired_build_artifacts_gc_count", _expired_build_artifacts_gc_repair),
     _RepairCatalogEntry(
-        "investigation_rootfs_reclaims_enqueued", _investigation_rootfs_reclaim_repair
+        "investigation_artifacts_gc_count",
+        _investigation_artifacts_gc_repair,
+        report_field="investigation_artifacts_gc_count",
+    ),
+    _RepairCatalogEntry(
+        "expired_build_artifacts_gc_count",
+        _expired_build_artifacts_gc_repair,
+        report_field="expired_build_artifacts_gc_count",
+    ),
+    _RepairCatalogEntry(
+        "investigation_rootfs_reclaims_enqueued",
+        _investigation_rootfs_reclaim_repair,
+        report_field="investigation_rootfs_reclaims_enqueued",
     ),
     _RepairCatalogEntry(
         "expired_investigation_rootfs_reclaims_enqueued",
         _expired_investigation_rootfs_reclaim_repair,
+        report_field="expired_investigation_rootfs_reclaims_enqueued",
     ),
     # Runs after both row-keyed lanes so an investigation either of them just enqueued for holds the
     # shared per-investigation slot and this one skips it. Ordering is a courtesy, not the
@@ -601,19 +638,36 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry(
         "unowned_investigation_rootfs_staging_drains_enqueued",
         _unowned_investigation_rootfs_staging_repair,
+        report_field="unowned_investigation_rootfs_staging_drains_enqueued",
     ),
-    _RepairCatalogEntry("console_collectors_reaped", _console_collectors_repair),
+    _RepairCatalogEntry(
+        "console_collectors_reaped",
+        _console_collectors_repair,
+        report_field="console_collectors_reaped",
+    ),
     _RepairCatalogEntry("system_artifact_rows_gc_count", _system_artifact_rows_gc_repair),
     _RepairCatalogEntry(
-        "local_system_object_versions_deleted", _local_system_object_versions_repair
+        "local_system_object_versions_deleted",
+        _local_system_object_versions_repair,
+        report_field="local_system_object_versions_deleted",
     ),
     _RepairCatalogEntry(
-        "remote_system_object_versions_deleted", _remote_system_object_versions_repair
+        "remote_system_object_versions_deleted",
+        _remote_system_object_versions_repair,
+        report_field="remote_system_object_versions_deleted",
     ),
-    _RepairCatalogEntry("reconcile_inventory", _reconcile_inventory_repair, "reconciled_inventory"),
-    _RepairCatalogEntry("leaked_images", _leaked_images_repair),
-    _RepairCatalogEntry("dangling_images", _dangling_images_repair),
-    _RepairCatalogEntry("expired_private_images", _expired_private_images_repair),
+    _RepairCatalogEntry(
+        "reconcile_inventory",
+        _reconcile_inventory_repair,
+        report_field="reconciled_inventory",
+    ),
+    _RepairCatalogEntry("leaked_images", _leaked_images_repair, report_field="leaked_images"),
+    _RepairCatalogEntry("dangling_images", _dangling_images_repair, report_field="dangling_images"),
+    _RepairCatalogEntry(
+        "expired_private_images",
+        _expired_private_images_repair,
+        report_field="expired_private_images",
+    ),
 )
 
 
@@ -638,36 +692,8 @@ def _repair_plan(
 ALL_REPAIR_KINDS: tuple[str, ...] = tuple(entry.name for entry in _REPAIR_CATALOG)
 
 _REPORT_FIELD_TO_REPAIR_KIND = {
-    entry.report_field or entry.name: entry.name for entry in _REPAIR_CATALOG
+    entry.report_field: entry.name for entry in _REPAIR_CATALOG if entry.report_field is not None
 }
-_REPORT_FIELDS: tuple[str, ...] = (
-    "expired_allocations",
-    "orphaned_systems",
-    "abandoned_jobs",
-    "dead_sessions",
-    "leaked_domains",
-    "idempotency_keys_gc_count",
-    "abandoned_uploads",
-    "reconciled_inventory",
-    "reaped_active_allocations",
-    "promoted_allocations",
-    "queue_timeouts",
-    "leaked_probe_guests",
-    "leaked_images",
-    "dangling_images",
-    "expired_private_images",
-    "console_collectors_reaped",
-    "local_system_object_versions_deleted",
-    "remote_system_object_versions_deleted",
-    "reaped_dump_volumes",
-    "reaped_captures",
-    "reaped_runtime_resources",
-    "investigation_artifacts_gc_count",
-    "expired_build_artifacts_gc_count",
-    "investigation_rootfs_reclaims_enqueued",
-    "expired_investigation_rootfs_reclaims_enqueued",
-    "unowned_investigation_rootfs_staging_drains_enqueued",
-)
 
 
 def _repair_count_defaults(counts: Mapping[str, int]) -> dict[str, int]:
@@ -679,7 +705,9 @@ def _report_count(counts: Mapping[str, int], report_field: str) -> int:
 
 
 def _report_field_counts(counts: Mapping[str, int]) -> dict[str, int]:
-    return {field_name: _report_count(counts, field_name) for field_name in _REPORT_FIELDS}
+    return {
+        field_name: _report_count(counts, field_name) for field_name in _REPORT_FIELD_TO_REPAIR_KIND
+    }
 
 
 async def reconcile_once(

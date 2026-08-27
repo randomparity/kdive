@@ -38,7 +38,7 @@ def test_the_capture_sweep_is_a_named_catalog_repair_with_a_report_field() -> No
     assert "reaped_captures" in loop.ALL_REPAIR_KINDS
     assert "reaped_captures" in names
     assert "reaped_captures" in {field.name for field in fields(ReconcileReport)}
-    assert "reaped_captures" in loop._REPORT_FIELDS
+    assert "reaped_captures" in {entry.report_field for entry in loop._REPAIR_CATALOG}
 
 
 def test_the_capture_sweep_runs_after_the_abandoned_job_repair() -> None:

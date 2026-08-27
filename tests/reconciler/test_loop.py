@@ -105,8 +105,11 @@ def test_reconcile_report_fields_are_catalog_backed() -> None:
             "dump_volumes_budget_unattempted",
         }
     }
-    assert set(loop._REPORT_FIELDS) == scalar_fields
-    assert set(loop._REPORT_FIELDS) <= set(loop._REPORT_FIELD_TO_REPAIR_KIND)
+    catalog_fields = {
+        entry.report_field for entry in loop._REPAIR_CATALOG if entry.report_field is not None
+    }
+    assert catalog_fields == scalar_fields
+    assert catalog_fields == set(loop._REPORT_FIELD_TO_REPAIR_KIND)
 
 
 def test_the_report_carries_the_lanes_budget_unattempted_counts() -> None:
