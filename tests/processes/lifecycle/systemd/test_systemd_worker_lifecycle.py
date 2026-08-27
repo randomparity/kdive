@@ -626,6 +626,22 @@ def test_partial_start_rolls_back_only_slots_activated_by_this_request() -> None
     assert [result.slot for result in response.slots] == [1, 2]
 
 
+def test_partial_start_logs_bounded_rollback_failure(caplog: pytest.LogCaptureFixture) -> None:
+    stores, runtime, authority, clock, _ = _fleet()
+    runtime.start_failures["kdive-live-worker@2.service"] = SystemdUnavailable(
+        "system manager unavailable"
+    )
+    authority.reject_termination = True
+
+    response = _run(
+        _coordinator(stores, runtime, authority, clock).start(_request(2), _deadline(clock))
+    )
+
+    assert response.code == "dependency_unavailable"
+    assert "cause=EvidenceRejected cleaned_slots=[]" in caplog.text
+    assert "database rejected exact evidence" not in caplog.text
+
+
 def test_stop_discards_proven_inactive_prepared_generation() -> None:
     prepared = _state(1, SlotPhase.PREPARED)
     stores, runtime, authority, clock, events = _fleet(states={1: prepared})

@@ -543,7 +543,12 @@ class SystemdWorkerLifecycle:
             for (store, _), state in zip(activated, terminated, strict=True):
                 self._post_evidence_cleanup(store, state, stop_deadline)
                 cleaned.append(state)
-        except Exception:
+        except Exception as exc:
+            _log.error(
+                "systemd activation rollback failed cause=%s cleaned_slots=%s",
+                type(exc).__name__,
+                [state.slot for state in cleaned],
+            )
             return tuple(cleaned)
         return tuple(cleaned)
 
