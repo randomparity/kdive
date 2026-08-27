@@ -211,6 +211,101 @@ async def _reclaim_generation(
     return len(keys)
 
 
+async def _direct_generation_candidates(
+    conn: AsyncConnection, investigation_id: UUID, limit: int
+) -> list[tuple[UUID, UUID]]:
+    rows = await (
+        await conn.execute(
+            "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
+            "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
+            "AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now()) "
+            "ORDER BY ib.generation LIMIT %s",
+            (investigation_id, limit),
+        )
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
+async def _background_generation_candidates(
+    conn: AsyncConnection,
+    *,
+    lane: str,
+    expired: bool,
+    closed_grace: timedelta | None,
+    limit: int,
+    scan_limit: int,
+) -> tuple[list[tuple[UUID, UUID]], tuple[UUID, UUID] | None]:
+    cursor = await (
+        await conn.execute(
+            "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
+            "WHERE lane = %s FOR UPDATE",
+            (lane,),
+        )
+    ).fetchone()
+    after = cursor if cursor is not None and cursor[0] is not None else None
+    if after is None:
+        scanned = await (
+            await conn.execute(
+                "SELECT investigation_id, generation FROM investigation_builds "
+                "ORDER BY investigation_id, generation LIMIT %s",
+                (scan_limit,),
+            )
+        ).fetchall()
+    else:
+        scanned = await (
+            await conn.execute(
+                "SELECT investigation_id, generation FROM investigation_builds "
+                "WHERE (investigation_id, generation) > (%s, %s) "
+                "ORDER BY investigation_id, generation LIMIT %s",
+                (*after, scan_limit),
+            )
+        ).fetchall()
+        remaining = scan_limit - len(scanned)
+        if remaining:
+            scanned += await (
+                await conn.execute(
+                    "SELECT investigation_id, generation FROM investigation_builds "
+                    "WHERE (investigation_id, generation) <= (%s, %s) "
+                    "ORDER BY investigation_id, generation LIMIT %s",
+                    (*after, remaining),
+                )
+            ).fetchall()
+    if not scanned:
+        return [], None
+    eligibility = (
+        "(ib.state = 'reclaiming' OR ib.expires_at <= now())"
+        if expired
+        else "(ib.state = 'reclaiming' OR (i.cleanup_pending_at IS NOT NULL "
+        "AND i.cleanup_pending_at < now() - %s))"
+    )
+    join = "" if expired else " JOIN investigations i ON i.id = ib.investigation_id"
+    eligibility_params: tuple[object, ...] = () if expired else (closed_grace,)
+    rows = await (
+        await conn.execute(
+            "WITH scanned AS (SELECT * FROM unnest(%s::uuid[], %s::uuid[]) "
+            "AS s(investigation_id, generation)), eligible AS ("
+            "SELECT ib.investigation_id, ib.generation, row_number() OVER "
+            "(PARTITION BY ib.investigation_id ORDER BY ib.generation) AS tenant_rank "
+            "FROM scanned s JOIN investigation_builds ib USING (investigation_id, generation)"
+            + join
+            + " WHERE "
+            + eligibility
+            + " AND "
+            + _UNPINNED_GENERATION_SQL
+            + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())) "
+            "SELECT investigation_id, generation FROM eligible "
+            "ORDER BY tenant_rank, investigation_id, generation LIMIT %s",
+            (
+                [row[0] for row in scanned],
+                [row[1] for row in scanned],
+                *eligibility_params,
+                limit,
+            ),
+        )
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows], (scanned[-1][0], scanned[-1][1])
+
+
 async def _generation_candidates(
     conn: AsyncConnection,
     *,
@@ -224,93 +319,24 @@ async def _generation_candidates(
     capped_scan_limit = min(_BUILD_GENERATION_SCAN_PER_PASS, _MAX_BUILD_GENERATION_PASS_ROWS)
     async with conn.transaction():
         if investigation_id is not None:
-            rows = await (
-                await conn.execute(
-                    "SELECT ib.investigation_id, ib.generation FROM investigation_builds ib "
-                    "WHERE ib.investigation_id = %s AND " + _UNPINNED_GENERATION_SQL + " "
-                    "AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now()) "
-                    "ORDER BY ib.generation LIMIT %s",
-                    (investigation_id, capped_limit),
-                )
-            ).fetchall()
+            return await _direct_generation_candidates(conn, investigation_id, capped_limit)
         elif expired or closed_grace is not None:
             lane = "expired" if expired else "closed"
-            eligibility = (
-                "(ib.state = 'reclaiming' OR ib.expires_at <= now())"
-                if expired
-                else "(ib.state = 'reclaiming' OR (i.cleanup_pending_at IS NOT NULL "
-                "AND i.cleanup_pending_at < now() - %s))"
+            rows, last_scanned = await _background_generation_candidates(
+                conn,
+                lane=lane,
+                expired=expired,
+                closed_grace=closed_grace,
+                limit=capped_limit,
+                scan_limit=capped_scan_limit,
             )
-            join = "" if expired else " JOIN investigations i ON i.id = ib.investigation_id"
-            cursor = await (
-                await conn.execute(
-                    "SELECT investigation_id, generation FROM investigation_build_gc_cursor "
-                    "WHERE lane = %s FOR UPDATE",
-                    (lane,),
-                )
-            ).fetchone()
-            after = cursor if cursor is not None and cursor[0] is not None else None
-            if after is None:
-                scanned = await (
-                    await conn.execute(
-                        "SELECT investigation_id, generation FROM investigation_builds "
-                        "ORDER BY investigation_id, generation LIMIT %s",
-                        (capped_scan_limit,),
-                    )
-                ).fetchall()
-            else:
-                scanned = await (
-                    await conn.execute(
-                        "SELECT investigation_id, generation FROM investigation_builds "
-                        "WHERE (investigation_id, generation) > (%s, %s) "
-                        "ORDER BY investigation_id, generation LIMIT %s",
-                        (*after, capped_scan_limit),
-                    )
-                ).fetchall()
-                remaining = capped_scan_limit - len(scanned)
-                if remaining:
-                    scanned += await (
-                        await conn.execute(
-                            "SELECT investigation_id, generation FROM investigation_builds "
-                            "WHERE (investigation_id, generation) <= (%s, %s) "
-                            "ORDER BY investigation_id, generation LIMIT %s",
-                            (*after, remaining),
-                        )
-                    ).fetchall()
-            if scanned:
-                eligibility_params: tuple[object, ...] = () if expired else (closed_grace,)
-                rows = await (
-                    await conn.execute(
-                        "WITH scanned AS (SELECT * FROM unnest(%s::uuid[], %s::uuid[]) "
-                        "AS s(investigation_id, generation)), eligible AS ("
-                        "SELECT ib.investigation_id, ib.generation, row_number() OVER "
-                        "(PARTITION BY ib.investigation_id ORDER BY ib.generation) AS tenant_rank "
-                        "FROM scanned s JOIN investigation_builds ib USING "
-                        "(investigation_id, generation)"
-                        + join
-                        + " WHERE "
-                        + eligibility
-                        + " AND "
-                        + _UNPINNED_GENERATION_SQL
-                        + " AND (ib.reclaim_retry_at IS NULL OR ib.reclaim_retry_at <= now())) "
-                        "SELECT investigation_id, generation FROM eligible "
-                        "ORDER BY tenant_rank, investigation_id, generation LIMIT %s",
-                        (
-                            [row[0] for row in scanned],
-                            [row[1] for row in scanned],
-                            *eligibility_params,
-                            capped_limit,
-                        ),
-                    )
-                ).fetchall()
+            if last_scanned is not None:
                 await conn.execute(
                     "UPDATE investigation_build_gc_cursor SET investigation_id = %s, "
                     "generation = %s "
                     "WHERE lane = %s",
-                    (*scanned[-1], lane),
+                    (*last_scanned, lane),
                 )
-            else:
-                rows = []
         else:
             rows = await (
                 await conn.execute(
