@@ -24,13 +24,13 @@ from pydantic import (
     model_validator,
 )
 
+from kdive.processes.lifecycle.contracts import TerminationOutcome
 from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     SlotPhase,
     WorkerSettings,
     validate_utf8_bytes,
 )
 
-type TerminationOutcome = Literal["succeeded", "failed", "killed"]
 _HEX_32 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 _HEX_64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _STATE_MODE = 0o600

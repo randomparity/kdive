@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.processes.lifecycle.contracts import TerminationOutcome
 from kdive.processes.lifecycle.systemd.systemd_diagnostics import (
     _AGGREGATE_TRUNCATION_MARKER,
     _PROPERTY_ACQUISITION_BYTES,
@@ -50,7 +51,6 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
 from kdive.processes.lifecycle.systemd.systemd_worker_state import (
     SlotState,
     StateConflict,
-    TerminationOutcome,
 )
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
