@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
@@ -19,8 +20,10 @@ from psycopg.conninfo import make_conninfo
 from psycopg.sql import SQL, Identifier, Literal
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import SecretStr
 
 from kdive.db import migrate
+from kdive.jobs import queue
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import build_uses
 from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
@@ -386,6 +389,7 @@ def residual_privilege_role_dsn(pg_conn: psycopg.Connection) -> Iterator[RoleDsn
             "0111_restrict_pinned_job_deletion.sql",
             "0112_capture_operation_supervision.sql",
             "0113_capture_publication_fence.sql",
+            "0116_capture_claimable_queue_depth.sql",
         ):
             role_sql = (migrate.SCHEMA_DIR / filename).read_bytes()
             for canonical, isolated in roles.items():
@@ -1477,6 +1481,103 @@ def test_worker_heartbeat_lease_clock_starts_after_incarnation_and_job_lock_cont
     ).fetchone() == (True, True, True, True)
 
 
+def test_worker_claimable_depth_preserves_outer_transaction_claim(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Worker telemetry counts through guarded aggregate access without rolling back its claim."""
+    holder = "docker:claimable-depth"
+    credential = SecretStr("claimable-depth-credential")
+    credential_hash = hashlib.sha256(credential.get_secret_value().encode()).digest()
+    _register(role_dsn, holder, credential_hash)
+    job_id = _seed_queued_job(pg_conn)
+
+    worker_login = role_dsn.logins["kdive_worker"]
+    assert pg_conn.execute(
+        "SELECT has_table_privilege(%s, 'public.capture_operations', 'SELECT')",
+        (worker_login,),
+    ).fetchone() == (False,)
+    with (
+        psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        worker.execute("SELECT count(*) FROM public.capture_operations")
+
+    async def exercise() -> None:
+        pool = AsyncConnectionPool(role_dsn("kdive_worker"), min_size=1, max_size=1, open=False)
+        await pool.open()
+        try:
+            async with pool.connection() as conn:
+                assert await queue.is_queue_paused(conn) is False
+                claimed = await queue.dequeue(
+                    conn,
+                    holder,
+                    incarnation_credential=credential,
+                    accepted_lanes=("default",),
+                )
+                assert claimed is not None
+                assert claimed.id == job_id
+                assert await queue.count_claimable(conn, accepted_lanes=("default",)) == 0
+        finally:
+            await pool.close()
+
+    asyncio.run(exercise())
+    assert pg_conn.execute(
+        "SELECT state, attempt, worker_id FROM public.jobs WHERE id = %s", (job_id,)
+    ).fetchone() == ("running", 1, holder)
+
+
+def test_worker_claimable_depth_function_authority_is_exact(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """Only workers execute the aggregate, and its runtime guard survives an accidental grant."""
+    signature = "count_claimable_worker_jobs(text[])"
+    attributes = pg_conn.execute(
+        "SELECT prosecdef, proconfig FROM pg_proc WHERE oid = %s::regprocedure",
+        (signature,),
+    ).fetchone()
+    assert attributes == (True, ['search_path=""'])
+    for role, login in role_dsn.logins.items():
+        privilege = pg_conn.execute(
+            "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+            (login, signature),
+        ).fetchone()
+        assert privilege == (role == "kdive_worker",), role
+
+    with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+        for invalid_lanes in ([], [""], [None]):
+            with pytest.raises(
+                psycopg.errors.InvalidParameterValue,
+                match="claimable-depth lanes are invalid",
+            ):
+                worker.execute(
+                    "SELECT public.count_claimable_worker_jobs(%s::text[])",
+                    (invalid_lanes,),
+                )
+
+    server_login = role_dsn.logins["kdive_server"]
+    grant = SQL(
+        "GRANT EXECUTE ON FUNCTION public.count_claimable_worker_jobs(text[]) TO {}"
+    ).format(Identifier(server_login))
+    revoke = SQL(
+        "REVOKE EXECUTE ON FUNCTION public.count_claimable_worker_jobs(text[]) FROM {}"
+    ).format(Identifier(server_login))
+    pg_conn.execute(grant)
+    try:
+        with (
+            psycopg.connect(role_dsn("kdive_server"), autocommit=True) as server,
+            pytest.raises(
+                psycopg.errors.InsufficientPrivilege,
+                match="worker authority is required",
+            ),
+        ):
+            server.execute(
+                "SELECT public.count_claimable_worker_jobs(%s::text[])",
+                (["default"],),
+            )
+    finally:
+        pg_conn.execute(revoke)
+
+
 def test_worker_job_function_execute_authority_is_exact(
     pg_conn: psycopg.Connection, role_dsn: RoleDsns
 ) -> None:
@@ -1562,6 +1663,7 @@ def test_migration_upgrade_resets_guarded_function_matrix(
             "kdive_reconciler",
         },
         "claim_worker_job(text,bytea,interval,text[])": {"kdive_worker"},
+        "count_claimable_worker_jobs(text[])": {"kdive_worker"},
         "register_kubernetes_worker_incarnation(text,jsonb,bytea,bytea,integer)": {
             "kdive_lifecycle_witness"
         },
