@@ -238,6 +238,40 @@ def test_libguestfs_reader_close_failure_preserves_open_failure(
     assert exc.value.__cause__ is guest.launch_error
 
 
+def test_libguestfs_reader_mount_failure_closes_handle_and_is_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Guest:
+        mount_error = RuntimeError("mount failed")
+        closed = False
+
+        def add_drive_opts(self, _filename: str, *, readonly: bool) -> None:
+            assert readonly is True
+
+        def launch(self) -> None:
+            pass
+
+        def inspect_os(self) -> list[str]:
+            return ["/dev/root"]
+
+        def mount_ro(self, _root: str, _mountpoint: str) -> None:
+            raise self.mount_error
+
+        def close(self) -> None:
+            self.closed = True
+
+    guest = _Guest()
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kwargs: guest))
+
+    with pytest.raises(CategorizedError) as exc:
+        _LibguestfsCoreReader("overlay.qcow2")
+
+    assert guest.closed is True
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"overlay": "overlay.qcow2", "error": "RuntimeError"}
+    assert exc.value.__cause__ is guest.mount_error
+
+
 def test_capture_verifies_stored_checksum(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"RAWCORE")
 

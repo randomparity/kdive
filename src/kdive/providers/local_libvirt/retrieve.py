@@ -423,6 +423,8 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
             guest.add_drive_opts(overlay, readonly=True)
             guest.launch()
             roots = guest.inspect_os()
+            if roots:
+                guest.mount_ro(roots[0], "/")
         except Exception as exc:
             _close_guestfs_handle(guest, "after failed read-only overlay open")
             raise CategorizedError(
@@ -437,7 +439,6 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"overlay": overlay},
             )
-        guest.mount_ro(roots[0], "/")
         return guest
 
 

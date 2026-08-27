@@ -971,6 +971,41 @@ def test_kernel_writer_mount_close_failure_preserves_open_failure(
     assert caught.value.__cause__ is guest.launch_error
 
 
+def test_kernel_writer_mount_failure_closes_handle_and_is_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Guest:
+        mount_error = RuntimeError("mount failed")
+        closed = False
+
+        def add_drive_opts(self, _filename: str, *, format: str, readonly: bool) -> None:
+            assert format == "qcow2"
+            assert readonly is False
+
+        def launch(self) -> None:
+            pass
+
+        def inspect_os(self) -> list[str]:
+            return ["/dev/root"]
+
+        def mount(self, _root: str, _mountpoint: str) -> None:
+            raise self.mount_error
+
+        def close(self) -> None:
+            self.closed = True
+
+    guest = _Guest()
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kwargs: guest))
+
+    with pytest.raises(CategorizedError) as caught:
+        _RealGuestKernelWriter._mount_rw("overlay.qcow2")
+
+    assert guest.closed is True
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"overlay": "overlay.qcow2", "error": "RuntimeError"}
+    assert caught.value.__cause__ is guest.mount_error
+
+
 def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path) -> None:
     # extract_kernel_bundle writes members as ``lib/modules/<ver>/...``; _read_release must
     # recover ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A

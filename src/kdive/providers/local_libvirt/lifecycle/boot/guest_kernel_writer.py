@@ -300,6 +300,8 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
             guest.add_drive_opts(overlay, format="qcow2", readonly=False)
             guest.launch()
             roots = guest.inspect_os()
+            if roots:
+                guest.mount(roots[0], "/")
         except Exception as exc:
             _close_guestfs_handle(guest, "after failed kernel-staging overlay open")
             raise _RealGuestKernelWriter._io_failure(
@@ -312,7 +314,6 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"overlay": overlay},
             )
-        guest.mount(roots[0], "/")
         return guest
 
     @staticmethod
