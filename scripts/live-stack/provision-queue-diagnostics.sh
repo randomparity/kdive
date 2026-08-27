@@ -3,53 +3,99 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
+
+sanitize_failure() {
+  local status="$1"
+  local code
+  case "$status" in
+  2) code="target-argument" ;;
+  3) code="python-unavailable" ;;
+  4) code="target-malformed" ;;
+  5) code="query-unavailable" ;;
+  6) code="target-mismatch" ;;
+  7) code="result-malformed" ;;
+  *)
+    status=8
+    code="diagnostic-failed"
+    ;;
+  esac
+  printf 'provision-evidence-error code=%s\n' "$code" >&2
+  exit "$status"
+}
+
+# The sourced environment and interpreter are diagnostic dependencies too. Suppress their
+# uncontrolled output and route every failure through the same fixed-line boundary.
 # shellcheck source=scripts/live-stack/env.sh
-source "${script_dir}/env.sh"
+if source "${script_dir}/env.sh" >/dev/null 2>&1; then
+  :
+else
+  sanitize_failure "$?"
+fi
 
 if [[ $# -ne 1 ]]; then
-  echo "provision-evidence-error code=target-argument" >&2
-  exit 2
+  sanitize_failure 2
 fi
 export KDIVE_PROVISION_EVIDENCE_TARGET="$1"
 readonly python="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
 if [[ ! -x "$python" ]]; then
-  echo "provision-evidence-error code=python-unavailable" >&2
-  exit 3
+  sanitize_failure 3
 fi
 
-exec "$python" - <<'PY'
+if "$python" - 3>&1 1>/dev/null 2>/dev/null <<'PY'; then
 from __future__ import annotations
 
 import os
 import re
+import stat
 from datetime import datetime
-import sys
-from pathlib import Path
 from uuid import UUID
 
 
-def fail(code: str, status: int) -> None:
-    print(f"provision-evidence-error code={code}", file=sys.stderr)
+def fail(status: int) -> None:
     raise SystemExit(status)
+
+
+_UUID_TEXT = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_TARGET_RECORD = re.compile(_UUID_TEXT + rb"\t" + _UUID_TEXT + rb"\n")
+_TARGET_RECORD_BYTES = 74
+
+
+def read_target(path: str) -> bytes:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError
+        chunks: list[bytes] = []
+        remaining = _TARGET_RECORD_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+try:
+    raw = read_target(os.environ["KDIVE_PROVISION_EVIDENCE_TARGET"])
+    if len(raw) != _TARGET_RECORD_BYTES or _TARGET_RECORD.fullmatch(raw) is None:
+        raise ValueError
+    job_text, system_text = raw[:-1].split(b"\t")
+    job_id = UUID(job_text.decode("ascii"))
+    system_id = UUID(system_text.decode("ascii"))
+except (KeyError, OSError, UnicodeError, ValueError):
+    fail(4)
 
 
 try:
     import psycopg
-except (ImportError, OSError):
-    fail("query-unavailable", 5)
-
-
-try:
-    raw = Path(os.environ["KDIVE_PROVISION_EVIDENCE_TARGET"]).read_text(encoding="utf-8")
-    if not raw.endswith("\n"):
-        raise ValueError
-    record = raw.removesuffix("\n")
-    fields = record.split("\t")
-    if len(fields) != 2 or "\n" in record:
-        raise ValueError
-    job_id, system_id = (UUID(value) for value in fields)
-except (KeyError, OSError, UnicodeError, ValueError):
-    fail("target-malformed", 4)
+except Exception:
+    fail(5)
 
 query = """
 SELECT s.id::text, s.state::text, j.id::text, j.dispatch_lane, j.state::text,
@@ -67,10 +113,10 @@ try:
             conn.execute("SET LOCAL statement_timeout = '5s'")
             rows = conn.execute(query, (job_id, system_id)).fetchall()
 except (KeyError, psycopg.Error):
-    fail("query-unavailable", 5)
+    fail(5)
 
 if len(rows) != 1:
-    fail("target-mismatch", 6)
+    fail(6)
 
 _SYSTEM_STATES = frozenset(
     {
@@ -148,7 +194,13 @@ try:
     if len(output.encode("ascii")) > _MAX_OUTPUT_BYTES:
         raise ValueError
 except (TypeError, UnicodeError, ValueError):
-    fail("result-malformed", 7)
+    fail(7)
 
-sys.stdout.write(output)
+output_bytes = output.encode("ascii")
+if os.write(3, output_bytes) != len(output_bytes):
+    fail(8)
 PY
+  exit 0
+else
+  sanitize_failure "$?"
+fi

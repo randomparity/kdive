@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import resource
 import shutil
 import socket
 import subprocess
@@ -772,13 +773,100 @@ def test_provision_queue_diagnostics_rejects_target_without_final_lf(
     assert result.stderr == "provision-evidence-error code=target-malformed\n"
 
 
-def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
+def _limit_provision_diagnostic_address_space() -> None:
+    limit = 256 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
+def test_provision_queue_diagnostics_rejects_oversized_target_without_reading_it(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "psycopg.py").write_text(
-        'raise ImportError("driver missing at /sensitive/path")\n',
-        encoding="utf-8",
+    target = tmp_path / "target"
+    with target.open("wb") as output:
+        output.seek(1024 * 1024 * 1024)
+        output.write(b"\n")
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+        preexec_fn=_limit_provision_diagnostic_address_space,
     )
+
+    assert result.returncode == 4
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=target-malformed\n"
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+        "{11111111-1111-1111-1111-111111111111}",
+        "11111111111111111111111111111111",
+    ],
+)
+def test_provision_queue_diagnostics_rejects_noncanonical_target(
+    tmp_path: Path, job_id: str
+) -> None:
+    target = tmp_path / "target"
+    target.write_text(
+        f"{job_id}\t22222222-2222-2222-2222-222222222222\n",
+        encoding="ascii",
+    )
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 4
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=target-malformed\n"
+
+
+def test_provision_queue_diagnostics_rejects_symlink_target(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.write_text(
+        "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222\n",
+        encoding="ascii",
+    )
+    target = tmp_path / "target"
+    target.symlink_to(source)
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 4
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=target-malformed\n"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        'raise ImportError("driver missing at /sensitive/path")\n',
+        'print("sensitive import output"); '
+        'raise RuntimeError("driver broken at /sensitive/path")\n',
+    ],
+)
+def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
+    tmp_path: Path, failure: str
+) -> None:
+    (tmp_path / "psycopg.py").write_text(failure, encoding="utf-8")
     target = tmp_path / "target"
     target.write_text(
         "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222\n",
@@ -798,6 +886,59 @@ def test_provision_queue_diagnostics_sanitizes_database_driver_import_failure(
     assert result.returncode == 5
     assert result.stdout == ""
     assert result.stderr == "provision-evidence-error code=query-unavailable\n"
+
+
+def test_provision_queue_diagnostics_sanitizes_environment_source_failure(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "provision-queue-diagnostics.sh"
+    shutil.copy2(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh", script)
+    (tmp_path / "env.sh").write_text(
+        'printf "sensitive source output /private/path\\n"\n'
+        'printf "sensitive source error /private/path\\n" >&2\n'
+        "return 97\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script), str(tmp_path / "target")],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 8
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=diagnostic-failed\n"
+
+
+def test_provision_queue_diagnostics_sanitizes_interpreter_launch_failure(
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "python"
+    python.write_text("#!/missing/interpreter\n", encoding="utf-8")
+    python.chmod(0o755)
+    target = tmp_path / "target"
+    target.write_text(
+        "11111111-1111-1111-1111-111111111111\t22222222-2222-2222-2222-222222222222\n",
+        encoding="ascii",
+    )
+
+    result = subprocess.run(
+        [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
+        cwd=ROOT,
+        env={**os.environ, "KDIVE_PYTHON": str(python)},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 8
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=diagnostic-failed\n"
 
 
 def _run_provision_queue_diagnostics(

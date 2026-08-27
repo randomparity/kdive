@@ -11,7 +11,7 @@ The architecture keeps evidence at the persisted queue, worker claim, and provid
 The live-stack workflow reads bounded metadata before cleanup; the worker/provider journal names
 execution progress. No public API or schema changes.
 
-**Tech stack:** Bash, GitHub Actions YAML, Python 3.13/3.14, psycopg 3, pytest.
+**Tech stack:** Bash, GitHub Actions YAML, Python 3.14, psycopg 3, pytest.
 
 ## Global constraints
 
