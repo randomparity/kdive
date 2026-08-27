@@ -30,6 +30,7 @@ _QEMU_IMG_TIMEOUT_S = 5 * 60
 _QEMU_IMG = "qemu-img"
 _QEMU_IMG_ERROR_TAIL_CHARS = 2000
 _BYTES_PER_GB = 1024**3
+_SHARED_LIBVIRT_FILE_MODE = 0o664
 
 
 def baseline_dir(system_id: UUID | str) -> str:
@@ -52,7 +53,7 @@ def _real_remove_baseline(baseline: str) -> None:
 
 
 def _real_make_overlay(base: str, overlay: str) -> None:
-    """Create the per-System qcow2 overlay backed by ``base`` with ``qemu-img``."""
+    """Create a qcow2 overlay and make it writable by the shared session-libvirt group."""
     qemu_img = shutil.which(_QEMU_IMG)
     if qemu_img is None:
         raise CategorizedError(
@@ -100,6 +101,16 @@ def _real_make_overlay(base: str, overlay: str) -> None:
                 "stderr": result.stderr[-_QEMU_IMG_ERROR_TAIL_CHARS:],
             },
         )
+    try:
+        os.chmod(overlay, _SHARED_LIBVIRT_FILE_MODE)
+    except OSError as exc:
+        details = _overlay_error_details("chmod_overlay", overlay)
+        details["error"] = type(exc).__name__
+        raise CategorizedError(
+            "failed to grant shared-libvirt write access to the per-System rootfs overlay",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details=details,
+        ) from exc
 
 
 def _run_qemu_img(
@@ -274,7 +285,7 @@ def _prepare_console_log(path: Path) -> None:
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, _SHARED_LIBVIRT_FILE_MODE)
     except OSError as open_err:
         raise _console_identity_failure(path, _open_failure_reason(open_err)) from open_err
     try:
@@ -286,7 +297,7 @@ def _prepare_console_log(path: Path) -> None:
             raise _console_identity_failure(path, f"owned by uid {st.st_uid}, not {euid}")
         if st.st_nlink != 1:
             raise _console_identity_failure(path, f"carries {st.st_nlink} links")
-        os.fchmod(fd, 0o664)
+        os.fchmod(fd, _SHARED_LIBVIRT_FILE_MODE)
         os.ftruncate(fd, 0)
     except OSError as io_err:
         raise _console_identity_failure(path, type(io_err).__name__) from io_err
