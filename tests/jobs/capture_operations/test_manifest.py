@@ -452,10 +452,18 @@ def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
     monkeypatch.setattr(Path, "stat", root_owned_destination)
     previous_umask = os.umask(0)
     try:
+
+        def legacy_prepare(path: Path, **_kwargs: object) -> tuple[int, bool]:
+            path.mkdir(parents=True, exist_ok=True)
+            return (
+                os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC),
+                False,
+            )
+
         monkeypatch.setitem(
             install.__globals__,
             "_prepare_install_parent",
-            lambda *_args, **_kwargs: None,
+            legacy_prepare,
         )
         install(SimpleNamespace(staged=staged, destination=legacy_destination))
         monkeypatch.setitem(install.__globals__, "_prepare_install_parent", prepare_parent)
@@ -481,7 +489,30 @@ def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
         )
 
     assert stat.S_IMODE(real_stat(destination.parent).st_mode) == 0o755
+    assert stat.S_IMODE(real_stat(destination.parent.parent).st_mode) == 0o755
     verify_capture_bootstrap_manifest(destination, Path(sys.executable), expected_uid=os.getuid())
+
+
+def test_manifest_parent_walk_rejects_symlinked_intermediate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    prepare_parent = namespace["_prepare_install_parent"]
+    script_os = prepare_parent.__globals__["os"]
+    external = tmp_path / "external"
+    external.mkdir()
+    intermediate = tmp_path / "SENSITIVE_INTERMEDIATE_SENTINEL"
+    intermediate.symlink_to(external, target_is_directory=True)
+    monkeypatch.setattr(script_os, "fchown", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="real directory"):
+        prepare_parent(
+            intermediate / "nested",
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
+
+    assert list(external.iterdir()) == []
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="unprivileged refusal requires a non-root test uid")
