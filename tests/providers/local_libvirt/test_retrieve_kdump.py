@@ -29,11 +29,7 @@ import pytest
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.retrieve import (
-    KDUMP_CORE_INCOMPLETE_REMEDIATION,
-    LocalLibvirtRetrieve,
-)
-from kdive.providers.local_libvirt.retrieve_kdump import (
+from kdive.providers.local_libvirt.retrieve.kdump import (
     GuestCoreReader,
     HarvestOutcome,
     VmcoreEntry,
@@ -43,6 +39,10 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
     read_via_tempfile,
     redact_dmesg,
     select_newest,
+)
+from kdive.providers.local_libvirt.retrieve.provider import (
+    KDUMP_CORE_INCOMPLETE_REMEDIATION,
+    LocalLibvirtRetrieve,
 )
 from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE, MAX_CORE_BYTES
 from kdive.security.secrets.secret_registry import SecretRegistry

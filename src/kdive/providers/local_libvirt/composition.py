@@ -52,7 +52,7 @@ from kdive.providers.local_libvirt.reaping import (
     LibvirtInfraReaper,
     LocalLibvirtCaptureReaper,
 )
-from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
+from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts

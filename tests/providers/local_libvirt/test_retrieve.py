@@ -22,8 +22,9 @@ from kdive.artifacts.storage import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve, _LibguestfsCoreReader
-from kdive.providers.local_libvirt.retrieve_kdump import HarvestOutcome
+from kdive.providers.local_libvirt.retrieve.guestfs import _LibguestfsCoreReader
+from kdive.providers.local_libvirt.retrieve.kdump import HarvestOutcome
+from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.ports.retrieve import (
     CaptureOutput,
     CrashOutput,

@@ -1,4 +1,4 @@
-"""Local-libvirt kdump capture: host-side overlay harvest (ADR-0203).
+"""Local-libvirt kdump capture helpers: host-side overlay harvest (ADR-0203).
 
 A local QEMU domain runs on the worker host, so its guest-written
 ``/var/crash/<ts>/vmcore`` lands on the per-System qcow2 overlay this host owns. The pure
