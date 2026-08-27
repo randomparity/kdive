@@ -2,10 +2,12 @@
 
 ## Scope and authority
 
-This design implements issue #2056 under scope token `q2056-b6e4a669` on branch
-`feat/hosted-tcg-readiness-2056`, based on `main`. The operator requires the Ubuntu 26.04 hosted
-ppc64le TCG proof to reach `ready` and pass `test_ppc64le_guest_is_ssh_reachable_over_the_wire`.
-The proof must expose the provision job's persisted lane and fixed-worker claim timing, and its
+This design implements issue #2056 under scope token `q2056-a87c3e91` on branch
+`feat/hosted-tcg-readiness-2056`, based on `main`. The operator requires claim publication only
+after a durable dequeue commit and hosted diagnostics that replace raw paths with fixed component
+identifiers, allowlisted reasons, and numeric evidence. The final Ubuntu 26.04 hosted ppc64le TCG
+proof must reach `ready` and pass `test_ppc64le_guest_is_ssh_reachable_over_the_wire`. It must
+expose the provision job's persisted lane and durable fixed-worker claim timing, and its
 state/journal evidence must identify the first broken boundary. A deadline change is permitted only
 when hosted measurements justify it; the separate post-ready 900-second SSH budget is not evidence
 for provision timing.
@@ -27,7 +29,8 @@ The permitted implementation surface is:
 - `tests/deploy/test_live_worker_provisioning.py`,
   `tests/integration/live_stack/spine.py`, `tests/integration/live_stack/test_spine.py`,
   `tests/integration/test_live_stack.py`, `tests/jobs/capture_operations/test_manifest.py`,
-  `tests/scripts/test_live_stack_scripts.py`, and `tests/scripts/test_live_workflow_shape.py`.
+  `tests/jobs/test_worker.py`, `tests/scripts/test_live_stack_scripts.py`, and
+  `tests/scripts/test_live_workflow_shape.py`.
 
 Issues #2069, #2072, #2087, and #2089 and their files are excluded. There is no migration and no
 merge authorization.
