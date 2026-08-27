@@ -12,7 +12,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -424,20 +423,24 @@ def _atomic_write_at(
         dir_fd=parent_fd,
     )
     try:
-        os.fchmod(temporary_fd, mode)
-        os.fchown(temporary_fd, owner_uid, group_gid)
-        view = memoryview(data)
-        while view:
-            view = view[os.write(temporary_fd, view) :]
-        os.fsync(temporary_fd)
-    finally:
-        os.close(temporary_fd)
-    try:
+        try:
+            os.fchmod(temporary_fd, mode)
+            os.fchown(temporary_fd, owner_uid, group_gid)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(temporary_fd, view) :]
+            os.fsync(temporary_fd)
+        finally:
+            os.close(temporary_fd)
         os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         os.fsync(parent_fd)
     finally:
-        with suppress(FileNotFoundError):
+        try:
             os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        else:
+            os.fsync(parent_fd)
     return True
 
 
