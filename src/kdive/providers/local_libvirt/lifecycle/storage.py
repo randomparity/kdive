@@ -254,13 +254,15 @@ def _open_failure_reason(exc: OSError) -> str:
 def _prepare_console_log(path: Path) -> None:
     """Ensure ``path`` is a worker-owned regular file holding only the next boot's bytes.
 
-    Creates it mode ``0644`` when absent, opens with ``O_NOFOLLOW``, verifies the opened
+    Creates it mode ``0664`` when absent, opens with ``O_NOFOLLOW``, verifies the opened
     inode's identity — a regular file owned by this worker with exactly one link — restores
-    ``0644``, then truncates to zero. This worker-side per-start truncate replaces virtlogd's
-    ``append="off"`` truncation (superseded by ADR-0576, #1940): rendered ``append="on"``
-    (``xml.py``), the daemon appends to this surviving worker-owned inode instead of unlinking
-    and recreating the log as ``root:0600``, so fixed non-root workers keep reading their own
-    boot and readiness evidence under the shared session endpoint.
+    ``0664``, then truncates to zero. The group write bit lets the operator-owned session
+    daemon append through the shared ``kdive-live-libvirt`` group inherited from the setgid
+    console directory. This worker-side per-start truncate replaces virtlogd's ``append="off"``
+    truncation (superseded by ADR-0576, #1940): rendered ``append="on"`` (``xml.py``), the
+    daemon appends to this surviving worker-owned inode instead of unlinking and recreating
+    the log as ``root:0600``, so fixed non-root workers keep reading their own boot and
+    readiness evidence under the shared session endpoint.
 
     An unsafe identity fails the start instead of booting against evidence the worker cannot
     read or trust: a symlinked path, a foreign-owned replacement (the daemon-recreated log
@@ -272,7 +274,7 @@ def _prepare_console_log(path: Path) -> None:
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o664)
     except OSError as open_err:
         raise _console_identity_failure(path, _open_failure_reason(open_err)) from open_err
     try:
@@ -284,7 +286,7 @@ def _prepare_console_log(path: Path) -> None:
             raise _console_identity_failure(path, f"owned by uid {st.st_uid}, not {euid}")
         if st.st_nlink != 1:
             raise _console_identity_failure(path, f"carries {st.st_nlink} links")
-        os.fchmod(fd, 0o644)
+        os.fchmod(fd, 0o664)
         os.ftruncate(fd, 0)
     except OSError as io_err:
         raise _console_identity_failure(path, type(io_err).__name__) from io_err
