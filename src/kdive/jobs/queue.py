@@ -410,7 +410,11 @@ async def set_queue_paused(conn: AsyncConnection, paused: bool) -> None:
 
 
 async def all_recent_jobs(
-    conn: AsyncConnection, limit: int, *, states: Sequence[JobState] | None = None
+    conn: AsyncConnection,
+    limit: int,
+    *,
+    states: Sequence[JobState] | None = None,
+    before: tuple[datetime, UUID] | None = None,
 ) -> list[Job]:
     """Return the most recent jobs across **every** project, newest first, capped.
 
@@ -418,21 +422,26 @@ async def all_recent_jobs(
     **not** project-scoped — it spans all tenants for an operator's cross-project queue
     inspection, so its only caller must already hold ``platform_operator``. ``states``,
     when given, filters to those job states (e.g. ``[JobState.QUEUED]``); an empty
-    sequence yields no rows. The ``id`` tiebreaker totals the order on a shared
-    ``created_at`` so the cap never drops an arbitrary one of a tied pair.
+    sequence yields no rows. ``before`` is an exclusive ``(created_at, id)`` keyset
+    boundary. The ``id`` tiebreaker totals the order on a shared ``created_at`` so pages
+    neither skip nor repeat a tied row.
     """
+    predicates: list[sql.Composable] = []
+    params: dict[str, object] = {"limit": limit}
+    if states is not None:
+        predicates.append(sql.SQL("state = ANY(%(states)s::text[])"))
+        params["states"] = [state.value for state in states]
+    if before is not None:
+        predicates.append(sql.SQL("(created_at, id) < (%(before_ts)s, %(before_id)s)"))
+        params["before_ts"], params["before_id"] = before
+    where = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(predicates) if predicates else sql.SQL("")
+    query = (
+        sql.SQL("SELECT * FROM jobs")
+        + where
+        + sql.SQL(" ORDER BY created_at DESC, id DESC LIMIT %(limit)s")
+    )
     async with conn.cursor(row_factory=dict_row) as cur:
-        if states is None:
-            await cur.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT %(limit)s",
-                {"limit": limit},
-            )
-        else:
-            await cur.execute(
-                "SELECT * FROM jobs WHERE state = ANY(%(states)s::text[]) "
-                "ORDER BY created_at DESC, id DESC LIMIT %(limit)s",
-                {"limit": limit, "states": [state.value for state in states]},
-            )
+        await cur.execute(query, params)
         rows = await cur.fetchall()
     return [Job.model_validate(row) for row in rows]
 

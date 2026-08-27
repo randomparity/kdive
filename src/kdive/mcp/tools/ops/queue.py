@@ -29,8 +29,12 @@ from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platf
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
@@ -53,6 +57,12 @@ class _OpsJobsListPayload(ToolPayload):
     limit: int = Field(
         default=DEFAULT_LIST_LIMIT,
         description=f"Maximum per-job rows returned (capped at {MAX_LIST_LIMIT}).",
+    )
+    cursor: str | None = Field(
+        default=None,
+        description=(
+            "Opaque continuation cursor from data.next_cursor; omit to start with the newest jobs."
+        ),
     )
 
 
@@ -106,6 +116,7 @@ async def jobs_list(
     *,
     states: list[str] | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> ToolResponse:
     """Cross-project queue depth + per-job state; ``platform_operator``, read-audited.
 
@@ -133,9 +144,17 @@ async def jobs_list(
                 suggested_next_actions=[_JOBS_LIST_TOOL],
             )
         capped = _clamp_list_limit(limit)
+        before = None
+        if cursor is not None:
+            try:
+                before = _decode_ts_uuid_cursor(_JOBS_LIST_TOOL, cursor)
+            except InvalidCursor:
+                return _invalid_cursor_error(_JOBS_OBJECT_ID)
         async with pool.connection() as conn:
             depth = await queue.queue_depth(conn)
-            jobs = await queue.all_recent_jobs(conn, capped, states=parsed_states)
+            fetched = await queue.all_recent_jobs(
+                conn, capped + 1, states=parsed_states, before=before
+            )
             async with conn.transaction():
                 await audit.record_platform(
                     conn,
@@ -154,7 +173,8 @@ async def jobs_list(
                         actor=actor_for(ctx),
                     ),
                 )
-        return _jobs_response(depth, jobs)
+        jobs, truncated = _paginate(fetched, capped)
+        return _jobs_response(depth, jobs, limit=capped, truncated=truncated)
 
 
 def _parse_states(states: list[str] | None) -> list[JobState] | None:
@@ -181,14 +201,26 @@ def _parse_states(states: list[str] | None) -> list[JobState] | None:
     return parsed
 
 
-def _jobs_response(depth: dict[str, int], jobs: list[Job]) -> ToolResponse:
+def _jobs_response(
+    depth: dict[str, int], jobs: list[Job], *, limit: int, truncated: bool
+) -> ToolResponse:
     items = [_job_item(job) for job in jobs]
+    next_cursor = (
+        _encode_ts_uuid_cursor(_JOBS_LIST_TOOL, jobs[-1].created_at, jobs[-1].id)
+        if truncated and jobs
+        else None
+    )
     return ToolResponse.collection(
         _JOBS_OBJECT_ID,
         "ok",
         items,
         suggested_next_actions=[_SET_PAUSED_TOOL],
-        data={f"depth_{state}": count for state, count in sorted(depth.items())},
+        data={
+            **{f"depth_{state}": count for state, count in sorted(depth.items())},
+            "limit": limit,
+            "truncated": truncated,
+            "next_cursor": next_cursor,
+        },
     )
 
 
@@ -267,6 +299,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Operator job-list filters request; omit for all jobs."),
         ] = None,
     ) -> ToolResponse:
-        """Cross-project queue depth and per-job state. Requires platform operator."""
+        """Cross-project queue depth and a bounded newest-first job page. Requires operator.
+
+        `data.limit` is the applied per-page cap. When `data.truncated` is true, pass the
+        opaque `data.next_cursor` back as `request.cursor` to read the next page. A terminal
+        page returns `data.truncated=false` and `data.next_cursor=null`. The depth fields
+        always summarize the whole queue, independent of the page and state filters.
+        """
         payload = request or _OpsJobsListPayload()
-        return await jobs_list(pool, current_context(), states=payload.states, limit=payload.limit)
+        return await jobs_list(
+            pool,
+            current_context(),
+            states=payload.states,
+            limit=payload.limit,
+            cursor=payload.cursor,
+        )
