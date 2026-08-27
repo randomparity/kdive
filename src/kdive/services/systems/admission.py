@@ -682,7 +682,7 @@ async def _enqueue_provision_job(
     return ProvisionJobAdmitted(job=job, system_id=system_id)
 
 
-async def _new_system_allowed(
+async def _new_system_admission_failure(
     conn: AsyncConnection,
     alloc: Allocation,
     profile: ProvisioningProfile,
@@ -794,7 +794,9 @@ async def _insert_provisioning_system(
         )
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
-    blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
+    blocked = await _new_system_admission_failure(
+        conn, alloc, profile, profile_policy, rootfs_validator
+    )
     if blocked is not None:
         return blocked
     timeout.reschedule(None)  # mutation boundary: the insert+enqueue runs unbounded (ADR-0126)
