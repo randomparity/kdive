@@ -299,23 +299,28 @@ attestation regressions reject a path-bearing output.
    provider, and live-stack tests. Require the real rollback regression to leave the provision job
    queued and emit no journal claim, and require the diagnostic/attestation tests to expose only
    fixed component/reason/numeric fields. Expected: pass.
-2. Run adversarial branch review, security review, scope audit, and simplification. If a review or
-   simplification changes behavior, run the required confirming review before proceeding.
-3. Run repository guardrails only when the campaign orchestrator sequences the shared database test
+2. Run a fresh scope audit against the current ADR/spec/plan. Expected: approve with the issue's
+   complete candidate surface.
+3. Generate the immutable whole-branch package for the full merge-base-to-HEAD range and obtain the
+   required Forge review with zero findings. Retain its non-empty regular mode-0600 report for PR
+   publication. Any later commit invalidates that range and requires a new package and approval.
+4. Run adversarial branch review, security review, and simplification. If any phase changes
+   behavior or design, return to steps 1-3 before proceeding.
+5. Run repository guardrails only when the campaign orchestrator sequences the shared database test
    environment: `prek run --all-files`, `just ci`. Expected: exit 0 each.
-4. Push the final reviewed commit and dispatch the hosted workflow from that exact SHA. Require the
+6. Push the final reviewed commit and dispatch the hosted workflow from that exact SHA. Require the
    run metadata to report Ubuntu 26.04, the committed ppc64le image identity, and `headSha` equal to
    `git rev-parse HEAD`. Require the exact queue target to agree with the immutable fixed-worker
    claim, and require provider records for that job/System to pair each mapped stage's
    start/completion in order through `define-start`; missing or inconsistent evidence rejects the
    proof. Require every readiness component true, transition to `ready`, the named SSH test pass,
    and a nonzero passed-proof summary.
-5. Create/update the PR with `Closes #2056` only, wait for green CI, and require mergeability to be
+7. Create/update the PR with `Closes #2056` only, wait for green CI, and require mergeability to be
    CLEAN/MERGEABLE with `headRefOid` equal to the hosted-proved SHA. Make no source/doc commit after
    the hosted proof; any change invalidates it and returns to step 1 before publication.
-6. Publish one verified `WORK:REVIEW` annotation for that exact PR head after the applicable
+8. Publish one verified `WORK:REVIEW` annotation for that exact PR head after the applicable
    reviews and checks, then re-read the PR and require the same green, CLEAN/MERGEABLE head.
-7. Set and confirm `status:awaiting-merge`, re-read the same exact green/CLEAN/MERGEABLE PR head,
+9. Set and confirm `status:awaiting-merge`, re-read the same exact green/CLEAN/MERGEABLE PR head,
    then post and verify a successful `WORK:TRAJECTORY` recording that awaiting-merge handoff. Stop
    without merging.
 
