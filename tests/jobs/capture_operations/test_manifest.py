@@ -651,6 +651,65 @@ finally:
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize("failure_step", ("fchmod", "fchown", "write", "fsync", "replace"))
+def test_manifest_atomic_install_cleans_temporary_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_step: str,
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    atomic_write_at = namespace["_atomic_write_at"]
+    script_os = atomic_write_at.__globals__["os"]
+    destination = tmp_path / "manifest.json"
+    destination.write_bytes(b"authoritative")
+    destination.chmod(0o644)
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    real_fsync = os.fsync
+    real_write = os.write
+    write_calls = 0
+    parent_syncs = 0
+
+    def injected_failure(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"injected {failure_step}")
+
+    def partial_then_failed_write(descriptor: int, data: bytes | memoryview) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            return real_write(descriptor, data[:1])
+        raise OSError("injected write")
+
+    def tracked_fsync(descriptor: int) -> None:
+        nonlocal parent_syncs
+        if failure_step == "fsync" and descriptor != parent_fd:
+            raise OSError("injected fsync")
+        if descriptor == parent_fd:
+            parent_syncs += 1
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(script_os, "fsync", tracked_fsync)
+    if failure_step == "write":
+        monkeypatch.setattr(script_os, "write", partial_then_failed_write)
+    elif failure_step != "fsync":
+        monkeypatch.setattr(script_os, failure_step, injected_failure)
+    try:
+        with pytest.raises(OSError, match=f"injected {failure_step}"):
+            atomic_write_at(
+                parent_fd,
+                destination.name,
+                b"replacement",
+                0o644,
+                owner_uid=os.getuid(),
+                group_gid=os.getgid(),
+            )
+    finally:
+        os.close(parent_fd)
+
+    assert destination.read_bytes() == b"authoritative"
+    assert {path.name for path in tmp_path.iterdir()} == {destination.name}
+    assert parent_syncs == 1
+
+
 @pytest.mark.parametrize(
     "staged_kind",
     ("fifo", "symlink", "oversized", "malformed", "wrong_mode"),
