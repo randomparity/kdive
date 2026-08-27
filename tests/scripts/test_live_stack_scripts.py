@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import venv
 from collections.abc import Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -19,12 +20,177 @@ from kdive.config.external_env import EXTERNAL_ENV_VARS
 ROOT = Path(__file__).resolve().parents[2]
 LIFECYCLE = ROOT / "scripts" / "live-stack" / "worker-lifecycle.sh"
 LIBVIRT_URI = ROOT / "scripts" / "live-stack" / "libvirt-uri.sh"
+WORKER_FROM_CHECKOUT = ROOT / "scripts" / "live-stack" / "worker-from-checkout"
+
+
+def test_worker_from_checkout_uses_provisioned_python_and_checkout_source(tmp_path: Path) -> None:
+    fake_python = tmp_path / "python"
+    argv = tmp_path / "argv"
+    environment = tmp_path / "environment"
+    fake_python.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {argv}\nprintf '%s' \"$PYTHONPATH\" > {environment}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    launcher = tmp_path / "worker-from-checkout"
+    launcher.write_text(
+        WORKER_FROM_CHECKOUT.read_text()
+        .replace("/opt/kdive-live-worker-lifecycle/.venv/bin/python", str(fake_python))
+        .replace(
+            'repo_root="$(cd -- "${here}/../.." && pwd)"',
+            f'repo_root="{ROOT}"',
+        ),
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+
+    result = subprocess.run(
+        [str(launcher), "-m", "kdive", "worker"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": "/ambient"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv.read_text().splitlines() == ["-m", "kdive", "worker"]
+    assert environment.read_text().split(":", 1) == [str(ROOT / "src"), "/ambient"]
+
+
+def test_lifecycle_compatibility_probe_is_isolated_and_precedes_request() -> None:
+    lifecycle = LIFECYCLE.read_text()
+
+    assert '"$py" -I' in lifecycle
+    assert '"$WORKER_PYTHON" -I' in lifecycle
+    assert lifecycle.index("require_compatible_lifecycle") < lifecycle.index("request_path")
+    assert "LIFECYCLE_REVISION" not in lifecycle
+    assert 'WORKER_EXECUTABLE="${here}/worker-from-checkout"' in lifecycle
+
+
+def _installed_protocol_python(tmp_path: Path, identity: str) -> Path:
+    environment = tmp_path / "installed"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site_packages = environment / "lib" / version / "site-packages"
+    (site_packages / "dependencies.pth").write_text(
+        f"{Path(pytest.__file__).parent.parent}\n", encoding="utf-8"
+    )
+    contract = site_packages / "kdive/processes/lifecycle/systemd_worker_contract.py"
+    contract.parent.mkdir(parents=True)
+    for package in (contract.parents[2], contract.parent.parent, contract.parent):
+        (package / "__init__.py").touch()
+    contract.write_text(
+        f"def lifecycle_protocol_identity():\n    return {identity!r}\n", encoding="utf-8"
+    )
+    return environment / "bin/python"
+
+
+def _copied_lifecycle(tmp_path: Path, installed_python: Path) -> Path:
+    script_dir = tmp_path / "scripts/live-stack"
+    script_dir.mkdir(parents=True)
+    for name in ("lib.sh", "env.sh", "libvirt-uri.sh"):
+        (script_dir / name).write_text(
+            (ROOT / "scripts/live-stack" / name).read_text(), encoding="utf-8"
+        )
+    lifecycle = script_dir / "worker-lifecycle.sh"
+    lifecycle.write_text(
+        LIFECYCLE.read_text()
+        .replace("/opt/kdive-live-worker-lifecycle/.venv/bin/python", str(installed_python))
+        .replace(
+            'source "${here}/env.sh"',
+            f'source "${{here}}/env.sh"\nrepo_root="{ROOT}"\npy="{sys.executable}"',
+        ),
+        encoding="utf-8",
+    )
+    return lifecycle
+
+
+@pytest.mark.parametrize("operation", ("start 1", "status", "stop"))
+def test_lifecycle_protocol_mismatch_fails_before_mutation(tmp_path: Path, operation: str) -> None:
+    installed_python = _installed_protocol_python(tmp_path, "0:incompatible")
+    lifecycle = _copied_lifecycle(tmp_path, installed_python)
+    marker = tmp_path / "start-prerequisites"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "$1"\n'
+            f'require_start_prerequisites() {{ touch "{marker}"; }}\n'
+            f"request {operation}",
+            "bash",
+            str(lifecycle),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "KDIVE_PYTHON": sys.executable,
+            "PYTHONPATH": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert result.stderr == (
+        "installed lifecycle protocol does not match this checkout; reprovision the runner\n"
+    )
+    assert not marker.exists(), "a mismatch must stop before any mutation prerequisite or request"
+
+
+def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_path: Path) -> None:
+    from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity
+
+    installed_python = _installed_protocol_python(tmp_path, lifecycle_protocol_identity())
+    lifecycle = _copied_lifecycle(tmp_path, installed_python)
+    shadow = tmp_path / "shadow/kdive/processes/lifecycle/systemd_worker_contract.py"
+    shadow.parent.mkdir(parents=True)
+    for package in (shadow.parents[2], shadow.parent.parent, shadow.parent):
+        (package / "__init__.py").touch()
+    shadow.write_text(
+        "def lifecycle_protocol_identity():\n    return '0:shadow'\n", encoding="utf-8"
+    )
+    request_probe = tmp_path / "request-probe"
+    (tmp_path / "shadow/sitecustomize.py").write_text(
+        "import os, sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'src')!r})\n"
+        "from kdive.processes.lifecycle import systemd_worker_control as control\n"
+        "from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse\n"
+        "def request_path(path, request):\n"
+        "    open(os.environ['LIFECYCLE_REQUEST_PROBE'], 'w').write(request.operation)\n"
+        "    return LifecycleResponse(ok=True, code='ok', message='ok', retry_action='none')\n"
+        "control.request_path = request_path\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(lifecycle), "status"],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "KDIVE_PYTHON": sys.executable,
+            "LIFECYCLE_REQUEST_PROBE": str(request_probe),
+            "PYTHONPATH": str(tmp_path / "shadow"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert request_probe.read_text() == "status"
 
 
 def _lifecycle_status(
     tmp_path: Path, response: str, *, expected_slots: str = ""
 ) -> subprocess.CompletedProcess[str]:
     """Run the real wrapper against a Python import-time lifecycle response stub."""
+    from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity
+
+    installed_python = _installed_protocol_python(tmp_path, lifecycle_protocol_identity())
+    lifecycle = _copied_lifecycle(tmp_path, installed_python)
     (tmp_path / "sitecustomize.py").write_text(
         "import os\n"
         "from kdive.processes.lifecycle import systemd_worker_control as control\n"
@@ -42,7 +208,7 @@ def _lifecycle_status(
     )
     probe = tmp_path / "environment"
     return subprocess.run(
-        ["bash", str(LIFECYCLE), "status"],
+        ["bash", str(lifecycle), "status"],
         capture_output=True,
         text=True,
         check=False,
@@ -2098,6 +2264,7 @@ def test_lifecycle_request_construction_hides_oversized_secret_canaries(tmp_path
             "-c",
             'source "$1"\n'
             'uri="$2"\n'
+            "require_compatible_lifecycle() { :; }\n"
             "require_start_prerequisites() { :; }\n"
             'load_published_libvirt_uri() { printf %s "$uri"; }\n'
             "request start 1",

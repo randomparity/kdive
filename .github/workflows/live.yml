@@ -666,23 +666,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # #2050: this box is persistent, so /opt/kdive-live-worker-lifecycle carries whatever
-      # revision installed it last. Without installing from THIS checkout, the worker-lifecycle
-      # client's prerequisite validation (#1938 witness revision metadata) refuses host-process
-      # start with "installed lifecycle witness revision does not match this checkout" — exactly
-      # how run 32585991555 died. Same installer invocation as the tcg job's identically named
-      # step: the witness DSN travels over stdin only (never a command-line argument); --operator
-      # and --source pin the account owner and the checkout whose revision gets recorded.
-      - name: Install the fixed live-worker lifecycle host contract
-        run: |
-          set -euo pipefail
-          # This local-only member is created by the post-migration runtime-role bootstrap.
-          witness_password="kdive-witness-local" # pragma: allowlist secret
-          witness_dsn="postgresql://kdive-witness-member:${witness_password}@localhost:5432/kdive"
-          printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
-            deploy/systemd/install-live-worker-lifecycle.sh \
-              --operator "$(id -un)" --source "$GITHUB_WORKSPACE"
-
       - name: Run both native families (reaper -> stack -> mint -> preflight -> test, one shell)
         # ONE run: block. Reuse /opt/kdive's libguestfs venv as the interpreter and overlay the
         # tested sources via PYTHONPATH — never mutate /opt/kdive, never uv sync in the workspace.

@@ -4,6 +4,10 @@
 
 Accepted (2026-08-21)
 
+> **Partially superseded by [0582](0582-native-live-workers-execute-the-tested-checkout.md)**
+> (2026-08-27): the native client checks protocol compatibility and runs checkout code as the fixed
+> worker account instead of requiring an exact installed Git revision.
+
 ## Context
 
 ADR-0533 requires an authority to register each worker incarnation before startup, deliver its

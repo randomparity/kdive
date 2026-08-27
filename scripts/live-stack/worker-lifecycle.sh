@@ -11,8 +11,8 @@ source "${here}/env.sh"
 source "${here}/libvirt-uri.sh"
 
 readonly LIFECYCLE_SOCKET=/run/kdive/live-worker-lifecycle.sock
-readonly LIFECYCLE_REVISION=/opt/kdive-live-worker-lifecycle/revision
 readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
+readonly WORKER_EXECUTABLE="${here}/worker-from-checkout"
 
 usage() {
   echo "usage: scripts/live-stack/worker-lifecycle.sh start COUNT|status|stop|diagnostics" >&2
@@ -27,8 +27,29 @@ require_exact_file() {
   }
 }
 
+require_compatible_lifecycle() {
+  local expected installed
+  expected="$("$py" -I -c \
+    'import sys; sys.path.insert(0, sys.argv[1]); from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
+    "${repo_root}/src" \
+    2>/dev/null)" || {
+    echo "checkout lifecycle compatibility probe failed" >&2
+    return 1
+  }
+  installed="$(env -u PYTHONPATH "$WORKER_PYTHON" -I -c \
+    'from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
+    2>/dev/null)" || {
+    echo "installed lifecycle protocol is unavailable; reprovision the runner" >&2
+    return 1
+  }
+  [[ "$installed" == "$expected" ]] || {
+    echo "installed lifecycle protocol does not match this checkout; reprovision the runner" >&2
+    return 1
+  }
+}
+
 require_start_prerequisites() {
-  local slot component_root expected_revision actual_revision control_group
+  local slot component_root control_group
   local component_roots=()
   [[ "$WORKER_PYTHON" == /* && -f "$WORKER_PYTHON" ]] || {
     echo "installed worker Python is missing: ${WORKER_PYTHON}" >&2
@@ -54,13 +75,6 @@ require_start_prerequisites() {
     echo "lifecycle socket is missing or has untrusted metadata: ${LIFECYCLE_SOCKET}" >&2
     return 1
   }
-  require_exact_file "$LIFECYCLE_REVISION" 444 || return 1
-  expected_revision="$(git -C "$repo_root" rev-parse HEAD)"
-  actual_revision="$(<"$LIFECYCLE_REVISION")"
-  [[ "$actual_revision" == "$expected_revision" ]] || {
-    echo "installed lifecycle witness revision does not match this checkout" >&2
-    return 1
-  }
   for component_root in "$KDIVE_ROOTFS_DIR" "$KDIVE_BUILD_WORKSPACE" "$KDIVE_INSTALL_STAGING" \
     "$KDIVE_FIXTURE_CATALOG_PATH"; do
     [[ "$component_root" == /* && -d "$component_root" ]] || {
@@ -76,6 +90,8 @@ require_start_prerequisites() {
     }
   done
   require_worker_path_access "$WORKER_PYTHON" rx "installed worker Python" || return 1
+  require_worker_path_access "$WORKER_EXECUTABLE" rx "checkout worker launcher" || return 1
+  require_worker_path_access "${repo_root}/src" rx "checkout worker source" || return 1
   require_worker_path_access "${KDIVE_KERNEL_SRC}" rx "worker kernel source" || return 1
   require_worker_path_access "$KDIVE_ROOTFS_DIR" rwx "worker rootfs directory" || return 1
   require_worker_path_access "$KDIVE_BUILD_WORKSPACE" rwx "worker build workspace" || return 1
@@ -164,6 +180,9 @@ require_worker_path_access() {
 
 request() {
   local operation="$1" count="${2:-}" libvirt_uri=""
+  if [[ "$operation" != diagnostics ]]; then
+    require_compatible_lifecycle || return 1
+  fi
   if [[ "$operation" == start ]]; then
     require_start_prerequisites || return 1
     libvirt_uri="$(load_published_libvirt_uri)" || return 1
@@ -171,7 +190,7 @@ request() {
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \
     KDIVE_LIFECYCLE_COUNT="$count" \
-    KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_WORKER_PYTHON="$WORKER_PYTHON" \
+    KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_WORKER_PYTHON="$WORKER_EXECUTABLE" \
     KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" \
     KDIVE_EXPECTED_SLOTS="${KDIVE_LIFECYCLE_EXPECTED_SLOTS:-}" "$py" - <<'PY'
 import os
