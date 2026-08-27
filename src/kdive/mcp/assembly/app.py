@@ -25,8 +25,8 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.processes.lifecycle.worker_incarnation import WorkerDeathVerifier
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 
 _log = logging.getLogger(__name__)
 

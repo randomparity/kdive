@@ -13,7 +13,7 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import SecretStr
 
@@ -27,6 +27,7 @@ from kdive.config.core_settings import (
     WORKER_INCARNATION_ID,
     WORKER_INCARNATION_KIND,
 )
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _PROC_ROOT = Path("/proc")
@@ -34,12 +35,6 @@ _INCARNATION_CREDENTIAL = Path("/run/kdive/worker-incarnation-credential")
 _CONTAINER_ID = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{52})?")
 _KUBE_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
 _LOCAL_SYSTEMD_ID = re.compile(r"local-systemd:kdive-live-worker@[1-8]\.service:[0-9a-f]{32}")
-
-
-class WorkerDeathVerifier(Protocol):
-    """Deployment authority capable of proving an immutable worker incarnation dead."""
-
-    def verify_dead(self, worker_incarnation: str) -> str | None: ...
 
 
 def _start_ticks(stat: str) -> str:

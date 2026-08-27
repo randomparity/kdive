@@ -28,12 +28,12 @@ from kdive.config.core_settings import (
     WORKER_DATABASE_URL,
 )
 from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
-from kdive.processes.lifecycle.contracts import TerminationOutcome
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 type Command = Callable[[tuple[str, ...], dict[str, str] | None], str]
 type PrepareCredential = Callable[[], None]

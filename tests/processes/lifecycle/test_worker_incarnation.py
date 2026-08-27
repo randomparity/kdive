@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 import kdive.config as config
-import kdive.processes.lifecycle.worker_incarnation as worker_incarnations
-from kdive.processes.lifecycle.worker_incarnation import (
+import kdive.worker_lifecycle.worker_incarnation as worker_incarnations
+from kdive.worker_lifecycle.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,
     LocalWorkerDeathVerifier,
@@ -21,7 +21,7 @@ def test_worker_incarnation_id_includes_boot_and_process_start(tmp_path: Path, m
     (tmp_path / "boot_id").write_text("boot-123\n")
     (tmp_path / "stat").write_text("1 (python worker) S " + "0 " * 18 + "987 0\n")
     monkeypatch.setattr(
-        "kdive.processes.lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
+        "kdive.worker_lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
     )
 
     identity = worker_incarnation_id(
@@ -62,7 +62,7 @@ def test_verifier_proves_exact_incarnation_dead_when_pid_start_changed(
     (proc / "42").mkdir(parents=True)
     (proc / "42" / "stat").write_text("42 (new worker) S " + "0 " * 18 + "999 0\n")
     monkeypatch.setattr(
-        "kdive.processes.lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
+        "kdive.worker_lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
     )
     verifier = LocalWorkerDeathVerifier(boot_id_path=tmp_path / "boot_id", proc_root=proc)
 
@@ -77,7 +77,7 @@ def test_verifier_refuses_live_or_foreign_incarnation(tmp_path: Path, monkeypatc
     (proc / "42").mkdir(parents=True)
     (proc / "42" / "stat").write_text("42 (python worker) S " + "0 " * 18 + "987 0\n")
     monkeypatch.setattr(
-        "kdive.processes.lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
+        "kdive.worker_lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
     )
     verifier = LocalWorkerDeathVerifier(boot_id_path=tmp_path / "boot_id", proc_root=proc)
 
@@ -109,7 +109,7 @@ def test_local_verifier_refuses_unreadable_proc_stat(tmp_path: Path, monkeypatch
     stat_path.parent.mkdir(parents=True)
     stat_path.write_text("42 (worker) S " + "0 " * 18 + "987 0\n")
     monkeypatch.setattr(
-        "kdive.processes.lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
+        "kdive.worker_lifecycle.worker_incarnation.socket.gethostname", lambda: "host-a"
     )
     original = Path.read_text
 

@@ -11,7 +11,6 @@ from typing import Any, Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.processes.lifecycle.contracts import TerminationOutcome
 from kdive.processes.lifecycle.systemd.systemd_diagnostics import (
     _AGGREGATE_TRUNCATION_MARKER,
     _PROPERTY_ACQUISITION_BYTES,
@@ -58,6 +57,7 @@ from kdive.services.runs.worker_incarnations import (
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _REQUEST_SECONDS = 120.0
 _STOP_SECONDS = 45.0

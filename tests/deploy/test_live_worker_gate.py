@@ -15,7 +15,7 @@ from typing import cast
 
 import pytest
 
-from kdive.processes.lifecycle.worker_incarnation import worker_incarnation_credential
+from kdive.worker_lifecycle.worker_incarnation import worker_incarnation_credential
 
 GATE = Path(__file__).resolve().parents[2] / "deploy" / "systemd" / "bin" / "kdive-live-worker-gate"
 LIFECYCLE_WRAPPER = GATE.with_name("kdive-live-worker-lifecycle")

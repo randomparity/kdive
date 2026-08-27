@@ -16,7 +16,6 @@ from pydantic import SecretStr
 import kdive.processes.lifecycle.systemd.systemd_diagnostics as diagnostics_module
 import kdive.processes.lifecycle.systemd.systemd_worker_runtime as runtime_module
 import kdive.processes.lifecycle.systemd.systemd_worker_state as state_module
-from kdive.processes.lifecycle.contracts import TerminationOutcome
 from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     LifecycleRequest,
     LifecycleResponse,
@@ -42,6 +41,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_runtime import (
 )
 from kdive.processes.lifecycle.systemd.systemd_worker_state import SlotState, SlotStore
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _BOOT_ID = "01234567-89ab-cdef-0123-456789abcdef"
 _NEXT_BOOT_ID = "fedcba98-7654-3210-fedc-ba9876543210"

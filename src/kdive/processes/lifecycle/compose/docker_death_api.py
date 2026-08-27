@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
-from kdive.processes.lifecycle.contracts import TerminationOutcome
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _INSPECT_PATH = re.compile(r"/containers/[0-9a-f]{64}/json")
 _MAX_RESPONSE_BYTES = 1_048_576

@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.db.locks import require_top_level_transaction
-from kdive.processes.lifecycle.contracts import TerminationOutcome
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 type AuthorityKind = Literal["local", "docker", "kubernetes"]
 

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.assembly import build_process_assembly
 from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
@@ -74,8 +75,6 @@ async def run_reconciler_body(
     secret_registry: SecretRegistry,
     telemetry: Telemetry,
 ) -> None:
-    from kdive.assembly import build_process_assembly
-
     process = build_process_assembly(secret_registry)
     upload_store = process.object_stores.store
     provider_composition = process.providers

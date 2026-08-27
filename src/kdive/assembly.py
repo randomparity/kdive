@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from kdive.processes.lifecycle.worker_incarnation import (
-    DockerWorkerDeathVerifier,
-    KubernetesWorkerDeathVerifier,
-    WorkerDeathVerifier,
-    worker_death_verifier_from_env,
-)
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
+from kdive.worker_lifecycle.worker_incarnation import (
+    DockerWorkerDeathVerifier,
+    KubernetesWorkerDeathVerifier,
+    worker_death_verifier_from_env,
+)
 
 
 @dataclass(frozen=True, slots=True)

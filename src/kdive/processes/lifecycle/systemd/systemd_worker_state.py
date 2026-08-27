@@ -24,12 +24,12 @@ from pydantic import (
     model_validator,
 )
 
-from kdive.processes.lifecycle.contracts import TerminationOutcome
 from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     SlotPhase,
     WorkerSettings,
     validate_utf8_bytes,
 )
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _HEX_32 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 _HEX_64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]

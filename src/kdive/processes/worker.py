@@ -12,10 +12,6 @@ import kdive.config as config
 from kdive.config.core_settings import WORKER_ACCEPTED_LANES
 from kdive.db.pool import create_pool
 from kdive.jobs.worker import worker_pool_floor
-from kdive.processes.lifecycle.worker_incarnation import (
-    worker_incarnation_credential,
-    worker_incarnation_id,
-)
 from kdive.processes.runtime import (
     HEARTBEAT_STALE_SECONDS,
     install_stop,
@@ -26,6 +22,10 @@ from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     WorkerIncarnation,
     authenticate_worker_incarnation,
+)
+from kdive.worker_lifecycle.worker_incarnation import (
+    worker_incarnation_credential,
+    worker_incarnation_id,
 )
 
 # The historic pool ceiling. Kept as a floor of its own so a single-lane worker keeps the same

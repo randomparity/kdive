@@ -31,10 +31,10 @@ from kdive.jobs.assembly import (
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.assembly.app import build_app, build_app_from_assembly
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-from kdive.processes.lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
+from kdive.worker_lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 _WORKER_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
