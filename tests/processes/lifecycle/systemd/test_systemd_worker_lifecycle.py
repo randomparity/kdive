@@ -1102,7 +1102,9 @@ def test_failed_journal_aggregate_marker_respects_known_forbidden_values() -> No
     assert len(runtime.journal_calls) == 4
 
 
-def test_diagnostics_withholds_unsafe_source_without_reading_its_journal() -> None:
+def test_diagnostics_withholds_unsafe_source_without_reading_its_journal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     state = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: state})
 
@@ -1127,9 +1129,13 @@ def test_diagnostics_withholds_unsafe_source_without_reading_its_journal() -> No
     assert runtime.journal_calls == []
     assert events == []
     assert stores[0].state == state
+    assert "slot=1 cause=PermissionError" in caplog.text
+    assert "sensitive source path" not in caplog.text
 
 
-def test_diagnostics_withholds_unsafe_state_without_exposing_error_detail() -> None:
+def test_diagnostics_withholds_unsafe_state_without_exposing_error_detail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     state = _state(1, SlotPhase.STARTED)
     stores, runtime, authority, clock, events = _fleet(states={1: state})
     stores[0].load_failure = ValueError("state path and credential detail")
@@ -1143,6 +1149,8 @@ def test_diagnostics_withholds_unsafe_state_without_exposing_error_detail() -> N
     assert "credential detail" not in response.model_dump_json()
     assert runtime.journal_calls == []
     assert events == []
+    assert "slot=1 cause=ValueError" in caplog.text
+    assert "credential detail" not in caplog.text
 
 
 def test_diagnostics_withholds_oversized_redaction_value() -> None:

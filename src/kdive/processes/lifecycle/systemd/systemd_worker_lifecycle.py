@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
@@ -63,6 +64,7 @@ _STOP_SECONDS = 45.0
 _DIAGNOSTIC_SECONDS = 30.0
 _POLL_SECONDS = 0.1
 type _DiagnosticEntry = tuple[SlotStorage, SlotState | None, bool]
+_log = logging.getLogger(__name__)
 
 
 class EvidenceRejected(RuntimeError):
@@ -345,7 +347,12 @@ class SystemdWorkerLifecycle:
             capture.append("")
             capture.aggregate_truncated = exc.aggregate_truncated
             return _result(state, code="diagnostics_withheld")
-        except Exception:
+        except Exception as exc:
+            _log.error(
+                "unexpected systemd diagnostic capture failure slot=%s cause=%s",
+                store.slot,
+                type(exc).__name__,
+            )
             capture.acquired -= reservation
             capture.withheld_slots.add(store.slot)
             capture.append(_WITHHELD_TEMPLATE.format(slot=store.slot))
@@ -365,7 +372,19 @@ class SystemdWorkerLifecycle:
     ) -> tuple[SlotState | None, bool]:
         try:
             return self._store_call(deadline, store.load), False
-        except Exception:
+        except (LifecycleDeadlineExceeded, StateConflict, OSError) as exc:
+            _log.warning(
+                "systemd diagnostic state unavailable slot=%s cause=%s",
+                store.slot,
+                type(exc).__name__,
+            )
+            return None, True
+        except Exception as exc:
+            _log.error(
+                "unexpected systemd diagnostic state failure slot=%s cause=%s",
+                store.slot,
+                type(exc).__name__,
+            )
             return None, True
 
     def _diagnose_slot(
@@ -394,7 +413,19 @@ class SystemdWorkerLifecycle:
             )
         except _UnsafeDiagnosticText:
             raise
+        except (LifecycleDeadlineExceeded, CommandDeadlineExceeded, StateConflict, OSError) as exc:
+            _log.warning(
+                "systemd diagnostic acquisition failed slot=%s cause=%s",
+                state.slot,
+                type(exc).__name__,
+            )
+            raise _UnsafeDiagnosticText(secret_values) from exc
         except Exception as exc:
+            _log.error(
+                "unexpected systemd diagnostic acquisition failure slot=%s cause=%s",
+                state.slot,
+                type(exc).__name__,
+            )
             raise _UnsafeDiagnosticText(secret_values) from exc
 
     def _diagnose_trusted_slot(
