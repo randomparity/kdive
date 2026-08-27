@@ -151,14 +151,14 @@ class CustomizationBootSeams:
         whole boot: closing it triggers ``VIR_DOMAIN_START_AUTODESTROY`` cleanup, so an
         opened/closed-per-poll connection would reap the domain mid-customization.
         ``prepare_console`` creates the console-log directory, verifies the worker-owned
-        identity, and truncates the worker-owned ``0644`` file *before* the domain starts
-        (``storage._prepare_console_log``, ADR-0576), guaranteeing ``/var/lib/kdive/console``
-        exists on a never-provisioned build host. The serial ``<log>`` is rendered
-        ``append="on"``, so the daemon appends to that surviving inode instead of recreating it
-        as ``root:0600`` (the libvirt 12 behavior that locked non-root readers out — #1147
-        proof record) and the completion handshake reads a byte-exact current-boot window even
-        for a fixed **non-root** worker. The settled probe is the crashed-aware domstate probe
-        (shut off *or* crashed).
+        identity, and truncates the worker-owned, shared-group-writable ``0664`` file *before*
+        the domain starts (``storage._prepare_console_log``, ADR-0576), guaranteeing
+        ``/var/lib/kdive/console`` exists on a never-provisioned build host. The serial ``<log>``
+        is rendered ``append="on"``, so the operator-owned session daemon can append through the
+        shared group instead of recreating the inode as ``root:0600`` (the libvirt 12 behavior
+        that locked non-root readers out — #1147 proof record), and the completion handshake
+        reads a byte-exact current-boot window even for a fixed **non-root** worker. The settled
+        probe is the crashed-aware domstate probe (shut off *or* crashed).
         """
         uri = config.require(LIBVIRT_URI)
         return cls(

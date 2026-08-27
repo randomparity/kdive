@@ -1742,9 +1742,9 @@ def test_prepare_console_log_oserror_is_provisioning_failure(
 
 def test_prepare_console_log_truncates_in_place_and_keeps_worker_identity(tmp_path: Path) -> None:
     # ADR-0576: the worker owns one console inode across boots. The prepare truncates the
-    # prior boot's bytes away (the current-boot window starts empty), keeps the same inode
-    # (the daemon appends to it under append='on' instead of recreating it root:0600), and
-    # leaves it mode 0644 so a fixed non-root worker can read its own evidence back.
+    # prior boot's bytes away (the current-boot window starts empty), keeps the same inode,
+    # and leaves it mode 0664 so the fixed worker can read it while the shared session daemon
+    # can append through the setgid directory's kdive-live-libvirt group.
     path = tmp_path / f"{_SYS}.log"
     path.write_bytes(b"prior boot bytes")
     inode_before = path.stat().st_ino
@@ -1754,7 +1754,7 @@ def test_prepare_console_log_truncates_in_place_and_keeps_worker_identity(tmp_pa
     st = path.stat()
     assert path.read_bytes() == b""
     assert st.st_ino == inode_before
-    assert st.st_mode & 0o777 == 0o644
+    assert st.st_mode & 0o777 == 0o664
 
 
 def test_prepare_console_log_creates_missing_parents_and_file(tmp_path: Path) -> None:

@@ -4,10 +4,11 @@
 bootable qcow2. The proof boots a throwaway domain whose serial ``<log>`` points at a file the
 worker prepared through ``storage._prepare_console_log`` with ``console_append=True`` — the
 production shape (ADR-0576) — and asserts the daemon did **not** replace the inode: after the
-boot the file is still the worker's inode, worker-owned, mode ``0644``, and holds the boot's
-bytes. A second boot over the same log seeds a stale marker first and asserts it is gone, proving
-the per-start truncate yields a byte-exact current-boot window on a real host. Skips cleanly
-without the env or libvirt.
+boot the file is still the worker's inode, worker-owned, mode ``0664``, and holds the boot's
+bytes. The group write bit is the operator-owned session daemon's append authority through
+the shared group. A second boot over the same log seeds a stale marker first and asserts it is
+gone, proving the per-start truncate yields a byte-exact current-boot window on a real host.
+Skips cleanly without the env or libvirt.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
         # — the #1940 failure this ADR closes.
         assert st.st_ino == inode_before
         assert st.st_uid == os.geteuid()
-        assert st.st_mode & 0o777 == 0o644
+        assert st.st_mode & 0o777 == 0o664
         assert st.st_size > 0  # this boot's bytes are readable by the worker
 
     # A second start over the same log: seed prior-boot bytes, prepare (truncate), boot, and

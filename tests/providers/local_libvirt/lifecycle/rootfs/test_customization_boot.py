@@ -148,8 +148,8 @@ def test_success_seals_and_holds_conn_open_until_end():
     )
     run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
     assert conn.closed_after_force_off is True  # conn not closed before force-off
-    # ADR-0223: the console log is prepared (worker-owned 0644) BEFORE the domain is created,
-    # so virtlogd truncates the existing readable file in place and a non-root worker can read it.
+    # ADR-0223: the console log is prepared (worker-owned, group-writable 0664) BEFORE create,
+    # so the shared daemon appends in place and the fixed non-root worker can read it.
     assert events.index("prepare") < events.index("create")
 
 
