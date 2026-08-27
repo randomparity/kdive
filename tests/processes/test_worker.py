@@ -94,16 +94,10 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: store_instance)
     monkeypatch.setattr(
         "kdive.jobs.assembly.build_handler_registry",
-        lambda **kw: (
-            handler_registry
-            if kw["secret_registry"] is secret_registry
-            and kw["incarnation_credential"] is incarnation_credential
-            and kw["assembly"] is handler_assembly
-            else None
-        ),
+        lambda assembly: handler_registry if assembly is handler_assembly else None,
     )
     monkeypatch.setattr(
-        "kdive.jobs.assembly.build_worker_handler_assembly",
+        "kdive.jobs.assembly.build_production_worker_handler_assembly",
         lambda **kw: handler_assembly,
     )
 

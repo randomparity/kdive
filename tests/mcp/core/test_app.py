@@ -23,9 +23,13 @@ from kdive.assembly import ProcessAssembly
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import assembly as handler_module
-from kdive.jobs.assembly import build_handler_registry
+from kdive.jobs.assembly import (
+    build_handler_registry,
+    build_production_handler_registry,
+    build_worker_handler_assembly,
+)
 from kdive.jobs.models import HandlerRegistry
-from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.app import build_app, build_app_from_assembly
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.processes.lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
 from kdive.providers.assembly import composition
@@ -163,11 +167,10 @@ def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -
     process = process_assembly_module.build_process_assembly(SecretRegistry())
     assert isinstance(process.worker_death_verifier, KubernetesWorkerDeathVerifier)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(
+    app = build_app_from_assembly(
         pool,
         verifier=_verifier(),
         process_assembly=process,
-        secret_registry=SecretRegistry(),
     )
 
     names = {tool.name for tool in asyncio.run(app.list_tools())}
@@ -247,15 +250,13 @@ def test_build_app_uses_injected_composition_secret_registry(
     monkeypatch.setattr(app_module, "build_plane_registrars", _build_registrars)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     composition_registry = SecretRegistry()
-    caller_registry = SecretRegistry()
     provider_composition = composition.ProviderComposition(secret_registry=composition_registry)
     process = ProcessAssembly(ObjectStoreAssembly(cast(Any, object())), provider_composition)
 
-    build_app(
+    build_app_from_assembly(
         pool,
         verifier=_verifier(),
         process_assembly=process,
-        secret_registry=caller_registry,
     )
 
     assert captured[0].secret_registry is composition_registry
@@ -437,7 +438,7 @@ def test_worker_registry_default_propagates_object_store_assembly_error(
     )
 
     with pytest.raises(CategorizedError) as caught:
-        build_handler_registry(
+        build_production_handler_registry(
             secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
         )
 
@@ -448,7 +449,7 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the install + boot plane (#19)
     # registers install/boot, and the retrieve plane (#24) registers capture_vmcore — each
     # building its provider lazily from env (no libvirt/S3 connection at registration).
-    registry = build_handler_registry(
+    registry = build_production_handler_registry(
         secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
     )
     assert isinstance(registry, HandlerRegistry)
@@ -489,13 +490,13 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     monkeypatch.setattr(handler_module, "register_all_handlers", _register)
 
-    build_handler_registry(
-        secret_registry=caller_registry,
+    assembly = build_worker_handler_assembly(
         incarnation_credential=_WORKER_CREDENTIAL,
         process_assembly=ProcessAssembly(
             ObjectStoreAssembly(cast(Any, object())), cast(Any, _FakeComposition())
         ),
     )
+    build_handler_registry(assembly)
 
     assert captured["resolver"] is resolver
     assert captured["secret_registry"] is caller_registry

@@ -39,15 +39,13 @@ class WorkerHandlerAssembly:
 
 def build_worker_handler_assembly(
     *,
-    secret_registry: SecretRegistry,
+    process_assembly: ProcessAssembly,
     incarnation_credential: SecretStr,
-    process_assembly: ProcessAssembly | None = None,
     pool: AsyncConnectionPool | None = None,
 ) -> WorkerHandlerAssembly:
-    """Assemble provider/store/supervision dependencies once for startup and handlers."""
-    process = process_assembly or build_process_assembly(secret_registry)
-    stores = process.object_stores
-    composition = process.providers
+    """Derive worker handler ports from one completed process assembly."""
+    stores = process_assembly.object_stores
+    composition = process_assembly.providers
     resolver = composition.build_provider_resolver()
     supervisor = CaptureOperationSupervisor(
         launcher=GatedCaptureLauncher(
@@ -65,24 +63,41 @@ def build_worker_handler_assembly(
     )
 
 
-def build_handler_registry(
+def build_production_worker_handler_assembly(
     *,
     secret_registry: SecretRegistry,
     incarnation_credential: SecretStr,
-    process_assembly: ProcessAssembly | None = None,
     pool: AsyncConnectionPool | None = None,
-    assembly: WorkerHandlerAssembly | None = None,
-) -> HandlerRegistry:
-    """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
-    registry = HandlerRegistry()
-    resolved = assembly or build_worker_handler_assembly(
-        secret_registry=secret_registry,
+) -> WorkerHandlerAssembly:
+    """Build the production process graph and derive worker handler ports from it."""
+    return build_worker_handler_assembly(
+        process_assembly=build_process_assembly(secret_registry),
         incarnation_credential=incarnation_credential,
-        process_assembly=process_assembly,
         pool=pool,
     )
-    register_all_handlers(registry, resolved)
+
+
+def build_handler_registry(assembly: WorkerHandlerAssembly) -> HandlerRegistry:
+    """Build the worker's registry from one completed handler assembly."""
+    registry = HandlerRegistry()
+    register_all_handlers(registry, assembly)
     return registry
+
+
+def build_production_handler_registry(
+    *,
+    secret_registry: SecretRegistry,
+    incarnation_credential: SecretStr,
+    pool: AsyncConnectionPool | None = None,
+) -> HandlerRegistry:
+    """Build the production handler assembly and register it."""
+    return build_handler_registry(
+        build_production_worker_handler_assembly(
+            secret_registry=secret_registry,
+            incarnation_credential=incarnation_credential,
+            pool=pool,
+        )
+    )
 
 
 def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAssembly) -> None:

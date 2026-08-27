@@ -31,12 +31,11 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 _log = logging.getLogger(__name__)
 
 
-def build_app(
+def build_app_from_assembly(
     pool: AsyncConnectionPool,
     *,
+    process_assembly: ProcessAssembly,
     verifier: JWTVerifier | None = None,
-    process_assembly: ProcessAssembly | None = None,
-    secret_registry: SecretRegistry,
     tracer: Tracer | None = None,
     meter: Meter | None = None,
     worker_death_verifier: WorkerDeathVerifier | None = None,
@@ -46,8 +45,7 @@ def build_app(
     Args:
         pool: The Postgres pool the recording middlewares and tool handlers write through.
         verifier: Token verifier; defaults to the configured one.
-        process_assembly: Shared provider/object-store wiring; defaults to production assembly.
-        secret_registry: The app-owned registry redaction and providers read through.
+        process_assembly: Completed provider/object-store/lifecycle wiring.
         tracer: Span emitter for ``TelemetryMiddleware``; defaults to the process-global
             tracer. Injectable per ADR-0487 so telemetry can be observed for one app.
         meter: RED-metric emitter for ``TelemetryMiddleware``; defaults to the
@@ -74,7 +72,7 @@ def build_app(
             meter=meter or metrics.get_meter("kdive.mcp"),
         )
     )
-    process = process_assembly or build_process_assembly(secret_registry)
+    process = process_assembly
     stores = process.object_stores
     composition = process.providers
     resolver = composition.build_provider_resolver()
@@ -101,3 +99,23 @@ def build_app(
         register(app, pool)
     advertise_envelope_output_schema(app)
     return app
+
+
+def build_app(
+    pool: AsyncConnectionPool,
+    *,
+    verifier: JWTVerifier | None = None,
+    secret_registry: SecretRegistry,
+    tracer: Tracer | None = None,
+    meter: Meter | None = None,
+    worker_death_verifier: WorkerDeathVerifier | None = None,
+) -> FastMCP:
+    """Construct the production FastMCP app from environment-backed process assembly."""
+    return build_app_from_assembly(
+        pool,
+        process_assembly=build_process_assembly(secret_registry),
+        verifier=verifier,
+        tracer=tracer,
+        meter=meter,
+        worker_death_verifier=worker_death_verifier,
+    )

@@ -15,7 +15,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.assembly import ProcessAssembly
-from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.app import build_app_from_assembly
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
 from kdive.mcp.tools import _docmeta
 from kdive.providers.assembly.composition import ProviderComposition
@@ -52,11 +52,10 @@ def _build_tools() -> list[FunctionTool]:
         object_stores,
         ProviderComposition(secret_registry=registry, object_store=object_stores.store),
     )
-    app = build_app(
+    app = build_app_from_assembly(
         pool,
         verifier=verifier,
         process_assembly=process,
-        secret_registry=registry,
     )
     return cast(list[FunctionTool], asyncio.run(app.list_tools()))
 

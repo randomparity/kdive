@@ -68,7 +68,10 @@ def _capture_host_identity(incarnation: WorkerIncarnation) -> str:
 async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
-    from kdive.jobs.assembly import build_handler_registry, build_worker_handler_assembly
+    from kdive.jobs.assembly import (
+        build_handler_registry,
+        build_production_worker_handler_assembly,
+    )
     from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
     from kdive.jobs.capture_operations.recovery import recover_capture_operations
     from kdive.jobs.worker import Worker, WorkerConfig
@@ -105,7 +108,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
             incarnation, configured_worker_id=configured_worker_id
         )
         await asyncio.to_thread(object_store_from_env().validate_conditional_create)
-        handler_assembly = build_worker_handler_assembly(
+        handler_assembly = build_production_worker_handler_assembly(
             secret_registry=secret_registry,
             incarnation_credential=incarnation_credential,
             pool=pool,
@@ -125,12 +128,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         capture_recovery_complete = True
         worker = Worker(
             pool,
-            build_handler_registry(
-                secret_registry=secret_registry,
-                incarnation_credential=incarnation_credential,
-                assembly=handler_assembly,
-                pool=pool,
-            ),
+            build_handler_registry(handler_assembly),
             worker_id=worker_id,
             incarnation_credential=incarnation_credential,
             secret_registry=secret_registry,

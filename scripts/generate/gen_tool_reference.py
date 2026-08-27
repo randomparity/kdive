@@ -19,7 +19,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.assembly import ProcessAssembly
-from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.app import build_app_from_assembly
 from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -413,11 +413,10 @@ def _registry_tools() -> list[Any]:
         object_stores,
         ProviderComposition(secret_registry=registry, object_store=object_stores.store),
     )
-    app = build_app(
+    app = build_app_from_assembly(
         pool,
         verifier=verifier,
         process_assembly=process,
-        secret_registry=registry,
         worker_death_verifier=CatalogWorkerDeathVerifier(),
     )
     # The erased `list` cast is intentional: the generator only reads duck-typed
