@@ -130,6 +130,32 @@ _prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
     assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
 
 
+def test_installer_clears_trusted_runtime_before_python_can_use_it(tmp_path: Path) -> None:
+    parent = tmp_path / "opt"
+    runtime_root = parent / "kdive-live-worker-lifecycle"
+    planted = runtime_root / ".venv/lib/python3.14/sitecustomize.py"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("raise RuntimeError('SENSITIVE_PREPLANT_SENTINEL')\n", encoding="utf-8")
+    parent.chmod(0o755)
+    runtime_root.chmod(0o755)
+    command = r"""
+source "$1"
+_prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(runtime_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list(runtime_root.iterdir()) == []
+    assert "SENSITIVE_PREPLANT_SENTINEL" not in result.stdout
+    assert "SENSITIVE_PREPLANT_SENTINEL" not in result.stderr
+
+
 def test_installer_rejects_symlink_runtime_install_parent_without_path_output(
     tmp_path: Path,
 ) -> None:

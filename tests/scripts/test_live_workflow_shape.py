@@ -497,6 +497,31 @@ def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:
     assert steps[evidence_index]["name"] == "Capture persisted provision boundary"
 
 
+def test_tcg_readiness_capture_discards_pipeline_stderr(tmp_path: pathlib.Path) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        '#!/bin/sh\nprintf "curl failed at /sensitive/readiness/path\\n" >&2\nexit 9\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    _, readiness = _named_step("tcg", "Capture worker readiness components")
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", readiness["run"]],
+        cwd=_ROOT,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert "/sensitive/readiness/path" not in result.stdout
+    assert "/sensitive/readiness/path" not in result.stderr
+    assert result.stderr == "worker readiness evidence unavailable\n"
+
+
 def test_tcg_job_captures_bounded_worker_readiness_components() -> None:
     spine_index, _ = _named_step(
         "tcg", "Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)"

@@ -7,10 +7,12 @@ import argparse
 import json
 import os
 import platform
+import secrets
 import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -173,24 +175,92 @@ def _build(args: argparse.Namespace) -> None:
     print("changed" if changed else "unchanged")
 
 
-def _prepare_install_parent(path: Path, *, owner_uid: int, group_gid: int) -> bool:
-    path.mkdir(parents=True, exist_ok=True)
+def _prepare_install_parent(path: Path, *, owner_uid: int, group_gid: int) -> tuple[int, bool]:
+    if not path.is_absolute():
+        raise RuntimeError("manifest destination parent must be absolute")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    changed = False
     try:
-        directory_fd = os.open(path, flags)
-    except OSError as error:
-        raise RuntimeError("manifest destination parent must be a real directory") from error
-    try:
-        metadata = os.fstat(directory_fd)
+        for component in path.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                os.mkdir(component, 0o755, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.fchown(child, owner_uid, group_gid)
+                os.fchmod(child, 0o755)
+                changed = True
+            except OSError as error:
+                raise RuntimeError(
+                    "manifest destination parent must be a real directory"
+                ) from error
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
         ownership_changed = metadata.st_uid != owner_uid or metadata.st_gid != group_gid
         mode_changed = stat.S_IMODE(metadata.st_mode) != 0o755
         if ownership_changed:
-            os.fchown(directory_fd, owner_uid, group_gid)
+            os.fchown(descriptor, owner_uid, group_gid)
         if mode_changed:
-            os.fchmod(directory_fd, 0o755)
-        return ownership_changed or mode_changed
+            os.fchmod(descriptor, 0o755)
+        return descriptor, changed or ownership_changed or mode_changed
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _atomic_write_at(
+    parent_fd: int,
+    name: str,
+    data: bytes,
+    mode: int,
+    *,
+    owner_uid: int,
+    group_gid: int,
+) -> bool:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        existing_fd = os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            metadata = os.fstat(existing_fd)
+            existing = os.read(existing_fd, len(data) + 1)
+            if (
+                stat.S_ISREG(metadata.st_mode)
+                and stat.S_IMODE(metadata.st_mode) == mode
+                and metadata.st_uid == owner_uid
+                and metadata.st_gid == group_gid
+                and existing == data
+            ):
+                return False
+        finally:
+            os.close(existing_fd)
+    temporary = f".{name}.{secrets.token_hex(8)}"
+    temporary_fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        mode,
+        dir_fd=parent_fd,
+    )
+    try:
+        os.fchmod(temporary_fd, mode)
+        os.fchown(temporary_fd, owner_uid, group_gid)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(temporary_fd, view) :]
+        os.fsync(temporary_fd)
     finally:
-        os.close(directory_fd)
+        os.close(temporary_fd)
+    try:
+        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=parent_fd)
+    return True
 
 
 def _install(args: argparse.Namespace) -> None:
@@ -198,8 +268,21 @@ def _install(args: argparse.Namespace) -> None:
         raise PermissionError("capture bootstrap manifest installation requires root")
     staged = args.staged.resolve(strict=True)
     data = staged.read_bytes()
-    changed = _prepare_install_parent(args.destination.parent, owner_uid=0, group_gid=0)
-    changed = _atomic_write(args.destination, data, 0o644) or changed
+    parent_fd, changed = _prepare_install_parent(args.destination.parent, owner_uid=0, group_gid=0)
+    try:
+        changed = (
+            _atomic_write_at(
+                parent_fd,
+                args.destination.name,
+                data,
+                0o644,
+                owner_uid=0,
+                group_gid=0,
+            )
+            or changed
+        )
+    finally:
+        os.close(parent_fd)
     installed = args.destination.stat()
     if installed.st_uid != 0 or installed.st_gid != 0:
         os.chown(args.destination, 0, 0)

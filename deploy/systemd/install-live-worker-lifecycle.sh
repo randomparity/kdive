@@ -440,7 +440,8 @@ _select_libvirt_tuple() {
 }
 
 _prepare_attested_runtime_root() {
-  local runtime_root="$1" owner="$2" group="$3" parent
+  local runtime_root="$1" owner="$2" group="$3" parent owner_uid group_gid
+  local current_uid current_gid current_mode
   parent="$(dirname -- "$runtime_root")"
   if [[ ! -d $parent || -L $parent ]]; then
     echo "lifecycle-runtime-error component=lifecycle_runtime_parent reason=not_real_directory" >&2
@@ -451,7 +452,18 @@ _prepare_attested_runtime_root() {
     echo "lifecycle-runtime-error component=lifecycle_runtime_root reason=not_real_directory" >&2
     return 1
   fi
+  owner_uid="$(id -u "$owner" 2>/dev/null || printf '%s' "$owner")"
+  group_gid="$(getent group "$group" 2>/dev/null | cut -d: -f3 || printf '%s' "$group")"
+  if [[ -d $runtime_root ]]; then
+    read -r current_uid current_gid current_mode < <(stat -Lc '%u %g %a' "$runtime_root")
+    if [[ $current_uid != "$owner_uid" || $current_gid != "$group_gid" ||
+      $current_mode != 755 ]]; then
+      echo "lifecycle-runtime-error component=lifecycle_runtime_root reason=untrusted_existing" >&2
+      return 1
+    fi
+  fi
   install -d -o "$owner" -g "$group" -m 0755 -- "$runtime_root"
+  find -P "$runtime_root" -xdev -mindepth 1 -delete
 }
 
 _harden_runtime_tree() {
