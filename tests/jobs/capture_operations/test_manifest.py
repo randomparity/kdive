@@ -429,6 +429,7 @@ def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
     namespace = runpy.run_path(str(_SCRIPT))
     install = namespace["_install"]
     prepare_parent = namespace["_prepare_install_parent"]
+    assert_parent_selected = namespace["_assert_install_parent_selected"]
     script_os = install.__globals__["os"]
     legacy_destination = tmp_path / "legacy" / "kdive" / "capture-bootstrap-manifest.json"
     destination = tmp_path / "fixed" / "kdive" / "capture-bootstrap-manifest.json"
@@ -460,13 +461,49 @@ def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
                 False,
             )
 
+        def skip_legacy_parent_retarget_check(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        def current_user_prepare(path: Path, **_kwargs: object) -> tuple[int, bool]:
+            return prepare_parent(
+                path,
+                owner_uid=os.getuid(),
+                group_gid=os.getgid(),
+            )
+
+        def current_user_parent_check(
+            path: Path,
+            descriptor: int,
+            **_kwargs: object,
+        ) -> None:
+            assert_parent_selected(
+                path,
+                descriptor,
+                owner_uid=os.getuid(),
+                group_gid=os.getgid(),
+            )
+
         monkeypatch.setitem(
             install.__globals__,
             "_prepare_install_parent",
             legacy_prepare,
         )
+        monkeypatch.setitem(
+            install.__globals__,
+            "_assert_install_parent_selected",
+            skip_legacy_parent_retarget_check,
+        )
         install(SimpleNamespace(staged=staged, destination=legacy_destination))
-        monkeypatch.setitem(install.__globals__, "_prepare_install_parent", prepare_parent)
+        monkeypatch.setitem(
+            install.__globals__,
+            "_prepare_install_parent",
+            current_user_prepare,
+        )
+        monkeypatch.setitem(
+            install.__globals__,
+            "_assert_install_parent_selected",
+            current_user_parent_check,
+        )
         install(SimpleNamespace(staged=staged, destination=destination))
     finally:
         os.umask(previous_umask)
@@ -513,6 +550,58 @@ def test_manifest_parent_walk_rejects_symlinked_intermediate(
         )
 
     assert list(external.iterdir()) == []
+
+
+def test_manifest_parent_walk_rejects_replaceable_existing_intermediate(
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    prepare_parent = namespace["_prepare_install_parent"]
+    replaceable = tmp_path / "replaceable"
+    replaceable.mkdir(mode=0o777)
+    replaceable.chmod(0o777)
+
+    with pytest.raises(RuntimeError, match="replaceable ancestor"):
+        prepare_parent(
+            replaceable / "nested",
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
+
+    assert not (replaceable / "nested").exists()
+
+
+@pytest.mark.parametrize("existing_mode", (None, 0o700))
+def test_manifest_parent_walk_fsyncs_created_or_hardened_directory_and_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_mode: int | None,
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    prepare_parent = namespace["_prepare_install_parent"]
+    script_os = prepare_parent.__globals__["os"]
+    destination_parent = tmp_path / "install-parent"
+    if existing_mode is not None:
+        destination_parent.mkdir(mode=existing_mode)
+        destination_parent.chmod(existing_mode)
+    synced: list[tuple[int, int]] = []
+    real_fstat = os.fstat
+
+    def record_fsync(descriptor: int) -> None:
+        metadata = real_fstat(descriptor)
+        synced.append((metadata.st_dev, metadata.st_ino))
+
+    monkeypatch.setattr(script_os, "fsync", record_fsync)
+    descriptor, changed = prepare_parent(
+        destination_parent,
+        owner_uid=os.getuid(),
+        group_gid=os.getgid(),
+    )
+    os.close(descriptor)
+
+    assert changed is True
+    assert (destination_parent.stat().st_dev, destination_parent.stat().st_ino) in synced
+    assert (tmp_path.stat().st_dev, tmp_path.stat().st_ino) in synced
 
 
 @pytest.mark.parametrize("leaf_kind", ("fifo", "symlink"))
@@ -562,7 +651,10 @@ finally:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("staged_kind", ("fifo", "symlink", "oversized", "malformed"))
+@pytest.mark.parametrize(
+    "staged_kind",
+    ("fifo", "symlink", "oversized", "malformed", "wrong_mode"),
+)
 def test_manifest_install_rejects_untrusted_staged_leaf(tmp_path: Path, staged_kind: str) -> None:
     namespace = runpy.run_path(str(_SCRIPT))
     read_staged = namespace["_read_staged_manifest"]
@@ -578,11 +670,64 @@ def test_manifest_install_rejects_untrusted_staged_leaf(tmp_path: Path, staged_k
         with staged.open("wb") as output:
             output.seek(maximum)
             output.write(b"\n")
+    elif staged_kind == "wrong_mode":
+        staged.write_text('{"schema_version":1}\n', encoding="utf-8")
+        staged.chmod(0o600)
     else:
         staged.write_text("{", encoding="utf-8")
+    if staged_kind != "wrong_mode":
+        staged.chmod(0o644)
 
     with pytest.raises(RuntimeError):
         read_staged(staged)
+
+
+def test_manifest_install_rejects_symlinked_staged_intermediate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    install = namespace["_install"]
+    script_os = install.__globals__["os"]
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "manifest.json").write_text('{"schema_version":1}\n', encoding="utf-8")
+    (external / "manifest.json").chmod(0o644)
+    staged_intermediate = tmp_path / "staged"
+    staged_intermediate.symlink_to(external, target_is_directory=True)
+    destination = tmp_path / "destination" / "manifest.json"
+    monkeypatch.setattr(script_os, "geteuid", lambda: 0)
+
+    with pytest.raises(RuntimeError, match="staged manifest path is not safely openable"):
+        install(
+            SimpleNamespace(
+                staged=staged_intermediate / "manifest.json",
+                destination=destination,
+            )
+        )
+
+    assert not destination.parent.exists()
+
+
+@pytest.mark.parametrize("sudo_uid", ("-1", "not-a-uid", "4294967296"))
+def test_manifest_install_rejects_invalid_sudo_uid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sudo_uid: str,
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    install = namespace["_install"]
+    script_os = install.__globals__["os"]
+    staged = tmp_path / "staged.json"
+    staged.write_text('{"schema_version":1}\n', encoding="utf-8")
+    staged.chmod(0o644)
+    destination = tmp_path / "destination" / "manifest.json"
+    monkeypatch.setattr(script_os, "geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_UID", sudo_uid)
+
+    with pytest.raises(RuntimeError, match="SUDO_UID"):
+        install(SimpleNamespace(staged=staged, destination=destination))
+
+    assert not destination.parent.exists()
 
 
 def test_manifest_install_keeps_parent_descriptor_across_path_retarget(tmp_path: Path) -> None:
@@ -615,6 +760,72 @@ def test_manifest_install_keeps_parent_descriptor_across_path_retarget(tmp_path:
 
     assert (retained / "manifest.json").is_file()
     assert list(external.iterdir()) == []
+
+
+def test_manifest_install_rejects_destination_parent_retarget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    install = namespace["_install"]
+    script_os = install.__globals__["os"]
+    real_atomic_write_at = namespace["_atomic_write_at"]
+    prepare_parent = namespace["_prepare_install_parent"]
+    assert_parent_selected = namespace["_assert_install_parent_selected"]
+    read_regular_at = namespace["_read_regular_at"]
+    staged = tmp_path / "staged.json"
+    staged.write_text('{"schema_version":1}\n', encoding="utf-8")
+    staged.chmod(0o644)
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    retained = tmp_path / "retained"
+    destination = visible / "manifest.json"
+
+    def current_user_prepare(path: Path, **_kwargs: object) -> tuple[int, bool]:
+        return prepare_parent(
+            path,
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
+
+    def current_user_parent_check(
+        path: Path,
+        descriptor: int,
+        **_kwargs: object,
+    ) -> None:
+        assert_parent_selected(
+            path,
+            descriptor,
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
+
+    def current_user_owned_read(parent_fd: int, name: str, **kwargs: object) -> bytes:
+        kwargs["owner_uid"] = os.getuid()
+        kwargs["group_gid"] = os.getgid()
+        return read_regular_at(parent_fd, name, **kwargs)
+
+    def retarget_after_write(*args: object, **kwargs: object) -> bool:
+        changed = real_atomic_write_at(*args, **kwargs)
+        visible.rename(retained)
+        visible.mkdir()
+        return changed
+
+    monkeypatch.setattr(script_os, "geteuid", lambda: 0)
+    monkeypatch.setattr(script_os, "fchown", lambda *_args: None)
+    monkeypatch.setitem(install.__globals__, "_prepare_install_parent", current_user_prepare)
+    monkeypatch.setitem(
+        install.__globals__,
+        "_assert_install_parent_selected",
+        current_user_parent_check,
+    )
+    monkeypatch.setitem(install.__globals__, "_read_regular_at", current_user_owned_read)
+    monkeypatch.setitem(install.__globals__, "_atomic_write_at", retarget_after_write)
+
+    with pytest.raises(RuntimeError, match="destination parent changed during installation"):
+        install(SimpleNamespace(staged=staged, destination=destination))
+
+    assert list(visible.iterdir()) == []
+    assert (retained / "manifest.json").read_bytes() == staged.read_bytes()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="unprivileged refusal requires a non-root test uid")

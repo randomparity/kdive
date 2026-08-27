@@ -16,7 +16,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint
+from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint, read_manifest
 from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 
 SCHEMA_VERSION = 1
@@ -176,39 +176,213 @@ def _build(args: argparse.Namespace) -> None:
     print("changed" if changed else "unchanged")
 
 
-def _prepare_install_parent(path: Path, *, owner_uid: int, group_gid: int) -> tuple[int, bool]:
+def _absolute_components(path: Path, *, label: str, allow_root: bool) -> tuple[str, ...]:
     if not path.is_absolute():
-        raise RuntimeError("manifest destination parent must be absolute")
+        raise RuntimeError(f"{label} must be absolute")
+    components = path.parts[1:]
+    if (not allow_root and not components) or any(
+        component in {"", ".", ".."} for component in components
+    ):
+        raise RuntimeError(f"{label} contains an invalid path component")
+    return components
+
+
+def _approved_owner(metadata: os.stat_result, expected_uid: int) -> bool:
+    return metadata.st_uid in {0, expected_uid}
+
+
+def _verify_ancestor(
+    metadata: os.stat_result,
+    child: os.stat_result,
+    *,
+    expected_uid: int,
+    label: str,
+) -> None:
+    if not stat.S_ISDIR(metadata.st_mode) or not _approved_owner(metadata, expected_uid):
+        raise RuntimeError(f"{label} has an unapproved ancestor")
+    writable_by_others = bool(metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    sticky_protected = bool(metadata.st_mode & stat.S_ISVTX) and _approved_owner(
+        child, expected_uid
+    )
+    if writable_by_others and not sticky_protected:
+        raise RuntimeError(f"{label} has a replaceable ancestor")
+
+
+def _verify_creation_parent(
+    metadata: os.stat_result,
+    *,
+    expected_uid: int,
+    label: str,
+) -> None:
+    if not stat.S_ISDIR(metadata.st_mode) or not _approved_owner(metadata, expected_uid):
+        raise RuntimeError(f"{label} has an unapproved ancestor")
+    writable_by_others = bool(metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+    if writable_by_others and not metadata.st_mode & stat.S_ISVTX:
+        raise RuntimeError(f"{label} has a replaceable ancestor")
+
+
+def _normalize_install_directory(
+    descriptor: int,
+    *,
+    owner_uid: int,
+    group_gid: int,
+) -> bool:
+    metadata = os.fstat(descriptor)
+    ownership_changed = metadata.st_uid != owner_uid or metadata.st_gid != group_gid
+    mode_changed = stat.S_IMODE(metadata.st_mode) != 0o755
+    if ownership_changed:
+        os.fchown(descriptor, owner_uid, group_gid)
+    if mode_changed:
+        os.fchmod(descriptor, 0o755)
+    return ownership_changed or mode_changed
+
+
+def _prepare_install_parent(path: Path, *, owner_uid: int, group_gid: int) -> tuple[int, bool]:
+    components = _absolute_components(
+        path,
+        label="manifest destination parent",
+        allow_root=True,
+    )
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
     descriptor = os.open("/", flags)
+    metadata = os.fstat(descriptor)
     changed = False
     try:
-        for component in path.parts[1:]:
+        if not components:
+            if (
+                metadata.st_uid != owner_uid
+                or metadata.st_gid != group_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o755
+            ):
+                raise RuntimeError("manifest destination root has unexpected metadata")
+            os.fsync(descriptor)
+            return descriptor, False
+        for index, component in enumerate(components):
+            created = False
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
             except FileNotFoundError:
+                _verify_creation_parent(
+                    metadata,
+                    expected_uid=owner_uid,
+                    label="manifest destination path",
+                )
                 os.mkdir(component, 0o755, dir_fd=descriptor)
                 child = os.open(component, flags, dir_fd=descriptor)
-                os.fchown(child, owner_uid, group_gid)
-                os.fchmod(child, 0o755)
-                changed = True
+                created = True
             except OSError as error:
                 raise RuntimeError(
                     "manifest destination parent must be a real directory"
                 ) from error
+            try:
+                child_metadata = os.fstat(child)
+                _verify_ancestor(
+                    metadata,
+                    child_metadata,
+                    expected_uid=owner_uid,
+                    label="manifest destination path",
+                )
+                final_component = index == len(components) - 1
+                normalized = (
+                    _normalize_install_directory(
+                        child,
+                        owner_uid=owner_uid,
+                        group_gid=group_gid,
+                    )
+                    if created or final_component
+                    else False
+                )
+                if created or normalized or final_component:
+                    os.fsync(child)
+                    os.fsync(descriptor)
+                changed = changed or created or normalized
+                child_metadata = os.fstat(child)
+                if (created or final_component) and (
+                    child_metadata.st_uid != owner_uid
+                    or child_metadata.st_gid != group_gid
+                    or stat.S_IMODE(child_metadata.st_mode) != 0o755
+                ):
+                    raise RuntimeError("manifest destination directory could not be hardened")
+            except BaseException:
+                os.close(child)
+                raise
             os.close(descriptor)
             descriptor = child
-        metadata = os.fstat(descriptor)
-        ownership_changed = metadata.st_uid != owner_uid or metadata.st_gid != group_gid
-        mode_changed = stat.S_IMODE(metadata.st_mode) != 0o755
-        if ownership_changed:
-            os.fchown(descriptor, owner_uid, group_gid)
-        if mode_changed:
-            os.fchmod(descriptor, 0o755)
-        return descriptor, changed or ownership_changed or mode_changed
+            metadata = child_metadata
+        return descriptor, changed
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def _open_install_parent(
+    path: Path,
+    *,
+    owner_uid: int,
+    group_gid: int,
+) -> int:
+    components = _absolute_components(
+        path,
+        label="manifest destination parent",
+        allow_root=True,
+    )
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    metadata = os.fstat(descriptor)
+    try:
+        for component in components:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as error:
+                raise RuntimeError("manifest destination parent is not safely openable") from error
+            try:
+                child_metadata = os.fstat(child)
+                _verify_ancestor(
+                    metadata,
+                    child_metadata,
+                    expected_uid=owner_uid,
+                    label="manifest destination path",
+                )
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+            metadata = child_metadata
+        if (
+            metadata.st_uid != owner_uid
+            or metadata.st_gid != group_gid
+            or stat.S_IMODE(metadata.st_mode) != 0o755
+        ):
+            raise RuntimeError("manifest destination parent has unexpected metadata")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _assert_install_parent_selected(
+    path: Path,
+    selected_fd: int,
+    *,
+    owner_uid: int,
+    group_gid: int,
+) -> None:
+    try:
+        verification_fd = _open_install_parent(
+            path,
+            owner_uid=owner_uid,
+            group_gid=group_gid,
+        )
+    except RuntimeError as error:
+        raise RuntimeError("destination parent changed during installation") from error
+    try:
+        selected = os.fstat(selected_fd)
+        verification = os.fstat(verification_fd)
+        if (selected.st_dev, selected.st_ino) != (verification.st_dev, verification.st_ino):
+            raise RuntimeError("destination parent changed during installation")
+    finally:
+        os.close(verification_fd)
 
 
 def _atomic_write_at(
@@ -304,26 +478,29 @@ def _read_regular_at(
         os.close(descriptor)
 
 
-def _read_staged_manifest(path: Path) -> bytes:
-    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+def _invoking_uid() -> int:
+    raw_uid = os.environ.get("SUDO_UID")
+    if raw_uid is None:
+        return os.getuid()
+    if not raw_uid.isascii() or not raw_uid.isdecimal() or len(raw_uid) > 10:
+        raise RuntimeError("SUDO_UID must be a decimal user id")
+    uid = int(raw_uid)
+    if uid > 4_294_967_295:
+        raise RuntimeError("SUDO_UID is outside the supported user-id range")
+    return uid
+
+
+def _read_staged_manifest(path: Path, *, expected_uid: int | None = None) -> bytes:
+    selected_path = path if path.is_absolute() else Path.cwd() / path
+    selected_uid = os.getuid() if expected_uid is None else expected_uid
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise RuntimeError("staged manifest must be a regular file") from error
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_MANIFEST_BYTES:
-            raise RuntimeError("staged manifest must be a bounded regular file")
-        chunks: list[bytes] = []
-        remaining = _MAX_MANIFEST_BYTES + 1
-        while remaining and (chunk := os.read(descriptor, remaining)):
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        data = b"".join(chunks)
-    finally:
-        os.close(descriptor)
-    if len(data) > _MAX_MANIFEST_BYTES:
-        raise RuntimeError("staged manifest exceeds the size bound")
+        data = read_manifest(
+            selected_path,
+            expected_uid=selected_uid,
+            maximum_size=_MAX_MANIFEST_BYTES,
+        )
+    except PermissionError as error:
+        raise RuntimeError("staged manifest path is not safely openable") from error
     try:
         payload = json.loads(data)
     except (UnicodeError, json.JSONDecodeError) as error:
@@ -336,7 +513,13 @@ def _read_staged_manifest(path: Path) -> bytes:
 def _install(args: argparse.Namespace) -> None:
     if os.geteuid() != 0:
         raise PermissionError("capture bootstrap manifest installation requires root")
-    data = _read_staged_manifest(args.staged)
+    if (
+        not args.destination.is_absolute()
+        or not args.destination.name
+        or args.destination.name in {".", ".."}
+    ):
+        raise RuntimeError("manifest destination must be an absolute file path")
+    data = _read_staged_manifest(args.staged, expected_uid=_invoking_uid())
     parent_fd, changed = _prepare_install_parent(args.destination.parent, owner_uid=0, group_gid=0)
     try:
         changed = (
@@ -357,6 +540,12 @@ def _install(args: argparse.Namespace) -> None:
             owner_uid=0,
             group_gid=0,
             mode=0o644,
+        )
+        _assert_install_parent_selected(
+            args.destination.parent,
+            parent_fd,
+            owner_uid=0,
+            group_gid=0,
         )
     finally:
         os.close(parent_fd)

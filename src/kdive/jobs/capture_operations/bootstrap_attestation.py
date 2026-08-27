@@ -7,7 +7,7 @@ import os
 import stat
 from pathlib import Path
 
-_READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+_READ_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
 _DIRECTORY_FLAGS = _READ_FLAGS | os.O_DIRECTORY
 
 
