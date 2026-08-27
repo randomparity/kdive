@@ -252,6 +252,13 @@ jobs:
             "$worker_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
           )"
           staged=/var/tmp/kdive-live-capture-bootstrap-manifest.json
+          sudo stat -Lc \
+            'capture_manifest_destination_ancestor component=root uid=%u gid=%g mode=%a' /
+          sudo stat -Lc \
+            'capture_manifest_destination_ancestor component=usr uid=%u gid=%g mode=%a' /usr
+          sudo stat -Lc \
+            'capture_manifest_destination_ancestor component=usr_share uid=%u gid=%g mode=%a' \
+            /usr/share
           sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py build \
             --interpreter "$worker_python" --source-root "$source_root" --output "$staged"
           sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py install \
