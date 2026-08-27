@@ -26,6 +26,7 @@ _STAGE = (
     r"(?:resolve-arch|snapshot-pre-existing|materialize-rootfs|prepare-baseline|"
     r"prepare-overlay|render-domain|customize-overlay|prepare-console|define-start)"
 )
+_CLAIM_LOOP_REASON = r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"
 _PATTERNS: tuple[Pattern[str], ...] = (
     re.compile(rf"worker {_WORKER} accepting dispatch lanes: {_LANE}"),
     re.compile(
@@ -36,6 +37,10 @@ _PATTERNS: tuple[Pattern[str], ...] = (
     re.compile(
         rf"local-libvirt provision system={_UUID} job=(?:{_UUID}|NONE) "
         rf"stage={_STAGE} event=(?:start|complete)"
+    ),
+    re.compile(
+        rf"worker {_WORKER} claim loop failure lane=[a-z][a-z0-9-]{{0,62}} "
+        rf"reason={_CLAIM_LOOP_REASON}"
     ),
 )
 

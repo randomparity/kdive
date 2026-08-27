@@ -605,6 +605,35 @@ def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> No
     assert "worker journal capture was unavailable or withheld" in run
 
 
+def test_tcg_journal_producer_preselects_only_fixed_evidence_families() -> None:
+    _, diagnostic = _named_step("tcg", "Capture worker lifecycle diagnostics")
+    run = diagnostic["run"]
+    match = re.search(r"--grep='([^']+)'", run)
+    assert match is not None
+    producer_filter = re.compile(match.group(1))
+    worker = "local-systemd:kdive-live-worker@1.service:" + "0" * 32
+    safe_messages = (
+        f'{{"msg": "worker {worker} accepting dispatch lanes: default"}}',
+        (
+            f'{{"msg": "worker {worker} claimed provision job '
+            '11111111-1111-1111-1111-111111111111"}'
+        ),
+        ('{"msg": "local-libvirt provision system=22222222-2222-2222-2222-222222222222"}'),
+        (f'{{"msg": "worker {worker} claim loop failure lane=default reason=timeout"}}'),
+    )
+    raw_messages = (
+        '{"msg": "run_once failed on lane default; continuing after 1.0s", '
+        '"exc": "Traceback: /private/path"}',
+        '{"msg": "unrelated", "exc": "worker claim loop failure lane=default"}',
+        (f'{{"msg": "worker {worker} CLAIM LOOP FAILURE lane=default reason=timeout"}}'),
+    )
+
+    assert "--case-sensitive=yes" in run
+    assert all(producer_filter.search(message) for message in safe_messages)
+    assert not any(producer_filter.search(message) for message in raw_messages)
+    assert run.index("--grep=") < run.index("filter-worker-journal-evidence.py")
+
+
 def test_tcg_journal_capture_discards_untrusted_upstream_stderr(tmp_path: pathlib.Path) -> None:
     journalctl = tmp_path / "journalctl"
     journalctl.write_text(

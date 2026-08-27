@@ -27,8 +27,9 @@ from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -49,6 +50,27 @@ _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
 _RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
 _RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
+_CLAIM_LOOP_FAILURE_REASON = re.compile(
+    r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"
+)
+
+
+def _claim_loop_failure_reason(exc: Exception) -> str:
+    """Map a claim-loop exception to a bounded, non-secret reason."""
+    if isinstance(exc, PoolTimeout):
+        reason = "pool-timeout"
+    elif isinstance(exc, TimeoutError):
+        reason = "timeout"
+    elif isinstance(exc, PsycopgError):
+        sqlstate = exc.sqlstate
+        reason = (
+            f"postgres-{sqlstate}"
+            if isinstance(sqlstate, str) and re.fullmatch(r"[A-Z0-9]{5}", sqlstate)
+            else "postgres-unknown"
+        )
+    else:
+        reason = "unexpected"
+    return reason if _CLAIM_LOOP_FAILURE_REASON.fullmatch(reason) else "unexpected"
 
 
 async def _sleep_until_stop(stop: asyncio.Event, timeout: float) -> None:
@@ -392,7 +414,14 @@ class Worker:
         while not stop.is_set():
             try:
                 job = await self.run_once(lane)
-            except Exception:  # noqa: BLE001 - a durable worker survives a transient per-iteration error
+            except Exception as exc:  # noqa: BLE001 - durable workers survive transient errors
+                reason = _claim_loop_failure_reason(exc)
+                _log.warning(
+                    "worker %s claim loop failure lane=%s reason=%s",
+                    self._worker_id,
+                    lane,
+                    reason,
+                )
                 _log.exception("run_once failed on lane %s; continuing after %ss", lane, poll)
                 await _sleep_until_stop(stop, poll)
                 continue
