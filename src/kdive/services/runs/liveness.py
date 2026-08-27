@@ -17,7 +17,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.console.console_evidence import redacted_console_tail
+from kdive.providers.shared.console_evidence import redacted_console_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 

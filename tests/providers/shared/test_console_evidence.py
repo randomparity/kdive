@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.jobs.handlers.console import console_evidence
-from kdive.jobs.handlers.console.console_evidence import (
+from kdive.providers.shared import console_evidence
+from kdive.providers.shared.console_evidence import (
     _CONSOLE_TAIL_MAX_CHARS,
     read_redacted_console,
     redacted_console_tail,

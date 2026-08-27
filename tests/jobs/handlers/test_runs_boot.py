@@ -19,7 +19,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import BootStepResult
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
@@ -30,6 +29,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.lifecycle import Booter, Connector
+from kdive.providers.shared import console_evidence
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,

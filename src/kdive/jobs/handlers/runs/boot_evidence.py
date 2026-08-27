@@ -27,12 +27,12 @@ from kdive.domain.lifecycle.run_steps import (
     BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
     BootStepResult,
 )
-from kdive.jobs.handlers.console.console_evidence import read_redacted_console
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import Connector
+from kdive.providers.shared.console_evidence import read_redacted_console
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text

@@ -1,10 +1,8 @@
-"""Reusable redacted console reads for job handlers (ADR-0235, ADR-0306).
+"""Shared redacted console reads for services and job handlers (ADR-0235, ADR-0306).
 
-``read_redacted_console`` is the single console read + ``Redactor`` path the boot handler
-(``runs/boot_evidence``) and the SSH handlers (``ssh_authorize``/``ssh_reachable``) share:
-the local serial ``<log>`` is worker-local (ADR-0258) and every consumer redacts it the same way,
-so it lives here rather than being forked. ``redacted_console_tail`` slices a bounded tail of that
-read for a failure envelope (ADR-0306) — a best-effort read that never masks the primary failure.
+``read_redacted_console`` is the single console read and redaction path used by boot evidence,
+SSH diagnostics, and run liveness. ``redacted_console_tail`` exposes a bounded best-effort tail
+that never masks a consumer's primary failure.
 """
 
 from __future__ import annotations
@@ -21,8 +19,7 @@ _log = logging.getLogger(__name__)
 
 # Bound the console tail attached to an SSH failure envelope. Larger than the host-side 512-char
 # `stderr_tail` (a console line is noisier and the sshd-status signal may sit a few lines back), but
-# kept under the worker's 1000-char `_CONTEXT_VALUE_MAX` so the *recent* tail survives — the worker
-# head-slices `[:1000]`, so a longer tail would keep the oldest, wrong end (ADR-0306).
+# kept under the worker's 1000-char `_CONTEXT_VALUE_MAX` so the recent tail survives (ADR-0306).
 _CONSOLE_TAIL_MAX_CHARS = 800
 
 
@@ -47,12 +44,10 @@ async def redacted_console_tail(
     *,
     max_chars: int = _CONSOLE_TAIL_MAX_CHARS,
 ) -> str | None:
-    """Return the last ``max_chars`` characters of the System's redacted console, or ``None``.
+    """Return the last ``max_chars`` characters of the redacted console, or ``None``.
 
-    Reuses :func:`read_redacted_console` — the tail is already redacted by the same ``Redactor``
-    path, so no second redaction mechanism exists. Best-effort: an empty, absent, or
-    worker-unreadable console (and any other read error) returns ``None`` and never raises, so a
-    failed transport op still surfaces its primary error even when no console evidence is available.
+    Empty, absent, worker-unreadable, and failed reads all return ``None`` so console evidence
+    cannot mask the consumer's primary operation or failure.
     """
     try:
         redacted = await read_redacted_console(system_id, secret_registry)

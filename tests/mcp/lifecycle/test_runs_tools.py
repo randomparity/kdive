@@ -31,7 +31,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import BootOutcome
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.mcp.auth import RequestContext
@@ -55,6 +54,7 @@ from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
+from kdive.providers.shared import console_evidence
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
