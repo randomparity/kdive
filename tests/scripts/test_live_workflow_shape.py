@@ -430,7 +430,12 @@ def test_tcg_installs_manifest_for_the_fixed_worker_before_starting_it() -> None
     assert "--user=kdive-worker-1 --group=kdive-worker-1" in run
     assert "verify_capture_bootstrap_manifest" in run
     assert "sudo stat -Lc '%u %g %a' /usr/share/kdive" in run
-    assert "capture_manifest_parent path=/usr/share/kdive uid=%s gid=%s mode=%s" in run
+    assert "*[!0-9:]*" in run
+    assert "${#parent_uid} > 10 || ${#parent_gid} > 10" in run
+    assert (
+        "capture_manifest_parent component=capture_manifest_parent uid=%s gid=%s mode=%s"
+    ) in run
+    assert "capture_manifest_parent path=" not in run
     assert "fingerprint_path_not_safely_openable" in run
     assert "capture_manifest_verification status=rejected reason={reason}" in run
     assert "capture_manifest_verification status=accepted reason=none" in run

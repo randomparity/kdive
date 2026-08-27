@@ -105,7 +105,8 @@ execution progress. No public API or schema changes.
 - Worker startup log: `worker <id> accepting dispatch lanes: <comma-separated lanes>`.
 - The authoritative claim timestamp is the `heartbeat_at` value returned by `dequeue` in the same
   database function call that changes the row from queued to running. The worker copies that value
-  into an immutable journal record before any heartbeat renewal can mutate the row.
+  and the other immutable claim fields immediately, but emits the journal record only after the
+  pooled connection context exits successfully and commits.
 - Provision-claim log only:
   `worker <id> claimed provision job <id> lane=<persisted lane> attempt=<n> enqueued_at=<timestamp> claim_at=<initial-dequeue-heartbeat timestamp> queue_delay_s=<seconds>`.
 - Provider stage log:
@@ -127,14 +128,19 @@ execution progress. No public API or schema changes.
 1. Add failing tests for the worker startup and provision-claim records. Construct a provision
    `Job` with distinct persisted lane, enqueue timestamp, initial dequeue `heartbeat_at`, and
    attempt; assert every field appears, payload/authorizing values do not, and a negative clock
-   anomaly displays `queue_delay_s=0` without changing either timestamp. Assert a later heartbeat
-   mutation cannot alter the captured record, and an unrelated job kind emits no new claim INFO.
-   Run:
-   `uv run pytest tests/integration/live_stack/test_spine.py -k 'worker_claim or worker_lanes' -q`.
-   Expected: fail because the records do not exist.
-2. Add the startup INFO line after validation and before claim loops. Immediately after `dequeue`
-   returns, log only when `job.kind is JobKind.PROVISION`, using persisted lane, `created_at`, and
-   the initial returned `heartbeat_at` as `claim_at`. Re-run; expected: pass.
+   anomaly displays `queue_delay_s=0` without changing either timestamp. Assert a later
+   connection-exit mutation cannot alter the captured fields, publication follows successful
+   connection-context exit, an unrelated job kind emits no claim INFO, and a queue-depth telemetry
+   failure emits no claim. Add a real pooled-Postgres regression proving the failed transaction
+   leaves the job queued and the journal claim absent. Run:
+   `uv run pytest tests/integration/live_stack/test_spine.py -k 'worker_claim or worker_lanes' -q`
+   and
+   `uv run pytest tests/jobs/test_worker.py::test_claim_journal_is_absent_when_real_dequeue_transaction_rolls_back -q`.
+   Expected before the fix: ordering/no-claim assertions fail; expected after the fix: pass.
+2. Immediately after `dequeue`, copy the provision claim's immutable fields into a frozen value.
+   Emit it only after successful pooled connection-context exit. Leave the queue-depth query inside
+   the same transaction so any telemetry exception rolls back the dequeue and reaches no journal
+   publication. Re-run; expected: pass.
 3. Add a failing provider-stage test around the existing injected provision seams. Assert paired
    `event=start`/`event=complete` records in exact stage order, a missing completion when a stage
    raises, and that records omit profile data, paths, XML, guest output, and credentials. Run:
@@ -241,10 +247,16 @@ execution progress. No public API or schema changes.
 
 **Files**
 
+- `src/kdive/jobs/worker.py`
+- `src/kdive/jobs/capture_operations/bootstrap_attestation.py`
 - `src/kdive/jobs/capture_operations/bootstrap_elf.py`
+- `.github/workflows/live.yml`
 - `deploy/systemd/install-live-worker-lifecycle.sh`
+- `tests/integration/live_stack/test_spine.py`
+- `tests/jobs/test_worker.py`
 - `tests/deploy/test_live_worker_provisioning.py`
 - `tests/jobs/capture_operations/test_manifest.py`
+- `tests/scripts/test_live_workflow_shape.py`
 
 Exact-head hosted run
 [32998642219](https://github.com/randomparity/kdive/actions/runs/32998642219/job/98274351467)
@@ -256,10 +268,11 @@ without weakening file-backed mapping checks. The focused parser selection must 
 Run [33003146430](https://github.com/randomparity/kdive/actions/runs/33003146430/job/98289891730)
 exposed a replaceable ancestor after the installer normalized recursive ownership. Run
 [33004795604](https://github.com/randomparity/kdive/actions/runs/33004795604/job/98295552657)
-repeated the generic rejection after descendant write-bit hardening. A path-, uid/gid-, and
-mode-bearing diagnostic then made run
+repeated the generic rejection after descendant write-bit hardening. A temporary diagnostic then
+made run
 [33005759211](https://github.com/randomparity/kdive/actions/runs/33005759211/job/98298954459)
-identify `/opt`, owned by uid/gid `0:0` with mode `0777`, as the rejected ancestor.
+identify the rejected ancestor's numeric ownership/mode. The retained diagnostic replaces that raw
+path with a fixed component identifier.
 
 The falsifiable hypothesis is that Ubuntu 26.04's hosted image makes `/opt` world-writable, while
 the lifecycle installer creates `/opt/kdive-live-worker-lifecycle` and hardens only that child.
@@ -272,16 +285,20 @@ mode 0755 before creating the runtime root, without weakening fingerprint attest
 Run [33013068295](https://github.com/randomparity/kdive/actions/runs/33013068295/job/98324100356)
 then isolated `capture_bootstrap_manifest=false` while every other readiness component was true.
 Run [33017429217](https://github.com/randomparity/kdive/actions/runs/33017429217/job/98339160715)
-proved the destination-parent cause by reporting `/usr/share/kdive` as `0:0:0777` and the exact
-reason `fingerprint_ancestor_replaceable`. The real-install regression failed with the
-normalization call removed because the corrected arm remained mode `0777`, then passed with
-no-follow root:root mode-0755 normalization restored. The workflow-shape regression requires the
-fixed parent/reason output and exact verifier identity.
+proved the destination-parent cause from numeric `0:0:0777` evidence and the exact reason
+`fingerprint_ancestor_replaceable`. The real-install regression failed with the normalization call
+removed because the corrected arm remained mode `0777`, then passed with no-follow root:root
+mode-0755 normalization restored. The hosted diagnostic and attestation exceptions now retain only
+the fixed `capture_manifest_parent`/`capture_manifest_fingerprint_ancestor` component identifiers,
+allowlisted reason, and numeric uid/gid/mode; raw paths remain internal. Workflow-shape and
+attestation regressions reject a path-bearing output.
 
 **Steps**
 
-1. Run the focused readiness-filter, manifest installer, workflow-shape, worker, provider, and
-   live-stack tests. Expected: pass.
+1. Run the focused readiness-filter, manifest installer, workflow-shape, worker transaction,
+   provider, and live-stack tests. Require the real rollback regression to leave the provision job
+   queued and emit no journal claim, and require the diagnostic/attestation tests to expose only
+   fixed component/reason/numeric fields. Expected: pass.
 2. Run adversarial branch review, security review, scope audit, and simplification. If a review or
    simplification changes behavior, run the required confirming review before proceeding.
 3. Run repository guardrails only when the campaign orchestrator sequences the shared database test

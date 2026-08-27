@@ -209,11 +209,14 @@ def test_runtime_verifier_rejects_replace_capable_ancestor(tmp_path: Path) -> No
     with pytest.raises(PermissionError) as error:
         verify_capture_bootstrap_manifest(manifest, executable, expected_uid=os.getuid())
 
-    assert str(error.value) == (
-        "capture bootstrap fingerprint ancestor is replaceable: "
-        f"path={str(selected.parent)!r} uid={metadata.st_uid} "
-        f"gid={metadata.st_gid} mode=0777"
+    message = str(error.value)
+    assert message == (
+        "capture bootstrap fingerprint ancestor rejected: "
+        "reason=fingerprint_ancestor_replaceable "
+        "component=capture_manifest_fingerprint_ancestor "
+        f"uid={metadata.st_uid} gid={metadata.st_gid} mode=0777"
     )
+    assert str(selected.parent) not in message
 
 
 def test_fingerprint_refuses_symlink(tmp_path: Path) -> None:
@@ -472,7 +475,7 @@ def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
         str(_ROOT / "src"),
     )
     assert producer_verify.returncode == 0, producer_verify.stderr
-    with pytest.raises(PermissionError, match="ancestor is replaceable"):
+    with pytest.raises(PermissionError, match="reason=fingerprint_ancestor_replaceable"):
         verify_capture_bootstrap_manifest(
             legacy_destination, Path(sys.executable), expected_uid=os.getuid()
         )

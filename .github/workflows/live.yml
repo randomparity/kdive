@@ -265,15 +265,25 @@ jobs:
           read -r parent_uid parent_gid parent_mode < <(
             sudo stat -Lc '%u %g %a' /usr/share/kdive
           )
+          case "$parent_uid:$parent_gid" in
+            :*|*:|*[!0-9:]*)
+              echo "capture manifest parent ownership is not numeric" >&2
+              exit 1
+              ;;
+          esac
+          if (( ${#parent_uid} > 10 || ${#parent_gid} > 10 )); then
+            echo "capture manifest parent ownership is out of range" >&2
+            exit 1
+          fi
           case "$parent_mode" in
             [0-7][0-7][0-7]) parent_mode="0${parent_mode}" ;;
             [0-7][0-7][0-7][0-7]) ;;
             *) echo "capture manifest parent mode is not octal" >&2; exit 1 ;;
           esac
-          printf 'capture_manifest_parent path=/usr/share/kdive uid=%s gid=%s mode=%s\n' \
+          printf 'capture_manifest_parent component=capture_manifest_parent uid=%s gid=%s mode=%s\n' \
             "$parent_uid" "$parent_gid" "$parent_mode"
           # Invoke the exact readiness verifier as the fixed worker, but emit only an allowlisted
-          # reason code. The raw exception may carry attested paths and is never printed.
+          # reason code. The bounded internal exception is never printed.
           sudo --user=kdive-worker-1 --group=kdive-worker-1 \
             "$worker_python" - <<'PY'
           from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
@@ -308,11 +318,13 @@ jobs:
           }
           prefix_reasons = (
               (
-                  "capture bootstrap fingerprint ancestor has an unapproved owner:",
+                  "capture bootstrap fingerprint ancestor rejected: "
+                  "reason=fingerprint_ancestor_unapproved_owner ",
                   "fingerprint_ancestor_unapproved_owner",
               ),
               (
-                  "capture bootstrap fingerprint ancestor is replaceable:",
+                  "capture bootstrap fingerprint ancestor rejected: "
+                  "reason=fingerprint_ancestor_replaceable ",
                   "fingerprint_ancestor_replaceable",
               ),
               ("capture bootstrap fingerprint drift:", "fingerprint_drift"),

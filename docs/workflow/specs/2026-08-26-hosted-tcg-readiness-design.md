@@ -48,9 +48,12 @@ immediately after `systems.provision` succeeds. Before cleanup, a bounded read-o
 queries exactly that pair regardless of current System state and reports persisted lane, job state,
 attempt, worker id, enqueue timestamp, **last** heartbeat timestamp, and lease expiry. The initial
 claim timestamp is not that mutable row value: it is the `heartbeat_at` returned by `dequeue` in the
-same database call that changes queued to running, copied immediately into an immutable worker
-journal record before renewals. The report excludes payload, authorizing data, credentials, and
-failure context. Local-libvirt logs start and completion for each synchronous provision stage.
+same database call that changes queued to running. The worker copies the immutable fields
+immediately, but publishes the journal record only after the pooled connection context exits
+successfully and commits. A later heartbeat cannot alter the captured fields, and any dequeue
+rollback—including a subsequent queue-depth telemetry failure—emits no claim record. The report
+excludes payload, authorizing data, credentials, and failure context. Local-libvirt logs start and
+completion for each synchronous provision stage.
 Together the last emitted boundary is decisive:
 
 - queued row with no worker and no matching claim record: worker claim/readiness boundary;
@@ -151,9 +154,11 @@ root:root mode `0755` and verifier success.
    output is either the fixed header plus one row or one sanitized fixed-code error line of at most
    100 bytes. The existing 55-minute/400-line journal bound retains immutable claim timing and
    provider stages on both green and red proofs.
-4. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes, then one
-   immutable line only for a successful `JobKind.PROVISION` claim, naming job id, persisted lane,
-   attempt, enqueue time, initial dequeue `claim_at`, and non-negative queue delay.
+4. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes. For
+   `JobKind.PROVISION`, it copies job id, persisted lane, attempt, enqueue time, initial dequeue
+   `claim_at`, and non-negative queue delay immediately after `dequeue`, then emits the immutable
+   line only after the dequeue transaction commits. A rollback or telemetry failure before
+   connection-context exit emits no claim line.
 5. `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` emits start and completion around
    guest-architecture resolution, rootfs materialization, baseline preparation, overlay preparation,
    the `render-domain` interval covering gdb/SSH port reuse and `render_domain_xml`, the whole
@@ -164,17 +169,19 @@ root:root mode `0755` and verifier success.
    entry as an unnamed kernel vDSO. The entry contributes no file to the attested closure; malformed
    addresses, unresolved dependencies, non-absolute file mappings, and other off-grammar output
    still fail closed.
-7. `src/kdive/jobs/capture_operations/bootstrap_attestation.py` names only the rejected ancestor
-   path, uid/gid, and permission bits when ownership or replaceability checks fail.
+7. `src/kdive/jobs/capture_operations/bootstrap_attestation.py` keeps each raw ancestor path
+   internal. Ownership or replaceability failures expose only a fixed component identifier, an
+   allowlisted reason, and numeric uid/gid/permission bits.
 8. `deploy/systemd/install-live-worker-lifecycle.sh` normalizes the selected runtime installation
    parent and runtime root to root:root mode 0755, then removes group/world write bits recursively
    after populating the runtime. Every ancestor is therefore non-replaceable regardless of the
    hosted image's `/opt` mode or the invoking umask.
 9. `scripts/build-capture-bootstrap-manifest.py` normalizes the installed manifest's destination
    parent through an `O_DIRECTORY|O_NOFOLLOW` descriptor to root:root mode 0755 before its atomic
-   leaf write. The hosted workflow emits the fixed parent path/uid/gid/mode and an allowlisted
-   verifier reason while running `verify_capture_bootstrap_manifest` under `kdive-worker-1`, so an
-   accepted result proves the same identity and consumer as readiness.
+   leaf write. The hosted workflow emits a fixed `capture_manifest_parent` component identifier
+   with numeric uid/gid/mode and an allowlisted verifier reason while running
+   `verify_capture_bootstrap_manifest` under `kdive-worker-1`, so an accepted result proves the same
+   identity and consumer as readiness without disclosing the raw path.
 10. `scripts/live-stack/filter-worker-readiness-evidence.py` accepts at most 4096 bytes and exactly
    the expected `/readyz` shape, then emits only `ready` plus the Postgres, MinIO,
    capture-manifest, and capture-recovery booleans. The workflow bounds its loopback request at
@@ -198,10 +205,11 @@ full-match lane, provision-claim, and provider-stage records; every other journa
 The lifecycle diagnostic response retains ADR-0574's bounded secret redaction. Those journal records
 contain no raw payloads, authorizing records, DSNs, environment values, dynamic exception text,
 paths, domain XML, console text, or secrets.
-The manifest diagnostic emits only its fixed `/usr/share/kdive` parent, numeric uid/gid/mode, and an
-allowlisted reason code; it never prints the caught exception. The readiness request is loopback-only,
-bounded to eight seconds and 4096 response bytes, and passes through an exact-shape filter. It emits
-no version object, dynamic exception, environment, or credential.
+The manifest diagnostic emits only the fixed `capture_manifest_parent` component identifier,
+numeric uid/gid/mode, and an allowlisted reason code; it never prints the raw path or caught
+exception. The readiness request is loopback-only, bounded to eight seconds and 4096 response
+bytes, and passes through an exact-shape filter. It emits no version object, dynamic exception,
+environment, or credential.
 
 The state deadline remains 600 seconds during diagnosis. It is not increased speculatively. A
 deadline change requires at least two completed hosted **end-to-end provision intervals**, each
@@ -271,10 +279,13 @@ Script tests reject malformed, mismatched, zero, and multiple targets; assert li
 read-only SQL; and enforce one sanitized fixed-code error line. Workflow-shape tests bind the same
 target path, outer 12-second timeout, stop-commands shield, and pre-cleanup order. Worker tests
 assert the provision claim fields, immutable initial dequeue timestamp, non-negative delay despite
-later renewal, and no new claim record for an unrelated job kind. Provider tests assert paired
-records around each exact call, missing completion on a raised call, order, and redaction. Loader
-parser tests prove named and unnamed virtual mappings contribute no file while malformed output
-still fails closed.
+later mutation, publication only after successful connection-context exit, no claim record for a
+real rolled-back dequeue or an unrelated job kind, and no false claim when queue-depth telemetry
+fails. Attestation and workflow-shape tests require a fixed component/reason/numeric diagnostic and
+prove an arbitrary ancestor path cannot enter the exception or hosted diagnostic. Provider tests
+assert paired records around each exact call, missing completion on a raised call, order, and
+redaction. Loader parser tests prove named and unnamed virtual mappings contribute no file while
+malformed output still fails closed.
 
 The final behavior proof runs only after review/simplification and guardrails: a hosted Ubuntu 26.04
 `live_vm_tcg (hosted)` job whose `headSha` equals final PR `headRefOid`, whose committed ppc64le

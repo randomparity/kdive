@@ -29,6 +29,7 @@ from kdive.jobs.payloads import (
     Authorizing,
     InstallPayload,
     RunPayload,
+    SystemPayload,
     load_payload,
 )
 from kdive.jobs.worker import Worker, WorkerConfig
@@ -181,6 +182,42 @@ def test_run_once_happy_path(migrated_url: str) -> None:
             assert final.result_ref == "s3://out"
 
             assert await worker.run_once(DEFAULT_JOB_DISPATCH_LANE) is None  # queue now empty
+
+    asyncio.run(_run())
+
+
+def test_claim_journal_is_absent_when_real_dequeue_transaction_rolls_back(
+    migrated_url: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+            worker, _reader = await _telemetry_worker(pool, HandlerRegistry())
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.PROVISION,
+                    SystemPayload(system_id=str(uuid4())),
+                    _AUTHORIZING,
+                    "dk-provision-rollback",
+                )
+
+            async def fail_queue_depth(_conn: psycopg.AsyncConnection, **_kwargs: object) -> int:
+                raise RuntimeError("telemetry depth query failed")
+
+            monkeypatch.setattr(queue, "count_claimable", fail_queue_depth)
+            with (
+                caplog.at_level(logging.INFO, logger="kdive.jobs.worker"),
+                pytest.raises(RuntimeError, match="telemetry depth query failed"),
+            ):
+                await worker.run_once(DEFAULT_JOB_DISPATCH_LANE)
+
+            final = await _final_state(migrated_url, job.id)
+            assert final.state is JobState.QUEUED
+            assert not [
+                record for record in caplog.records if "claimed provision" in record.getMessage()
+            ]
 
     asyncio.run(_run())
 
