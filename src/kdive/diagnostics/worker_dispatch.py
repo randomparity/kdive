@@ -16,7 +16,6 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -38,12 +37,6 @@ _log = logging.getLogger(__name__)
 
 EnqueueFn = Callable[[str, DiagnosticsWorkerCheckPayload, Authorizing], Awaitable[Job]]
 GetFn = Callable[[str], Awaitable[Job | None]]
-
-
-class WorkerCheckDispatcher(Protocol):
-    """Runs the worker-vantage checks and returns their three-state results (or substitutions)."""
-
-    async def run_worker_checks(self) -> list[CheckResult]: ...
 
 
 def _unavailable(

@@ -31,13 +31,13 @@ from kdive.diagnostics.checks import (
     Vantage,
     run_check,
 )
-from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL
+from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL, WorkerCheckDispatcher
 from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
 )
 from kdive.diagnostics.secret_ref import SecretRefCheck
-from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher, WorkerCheckDispatcher
+from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file

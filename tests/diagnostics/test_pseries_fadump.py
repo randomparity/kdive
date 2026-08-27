@@ -11,9 +11,11 @@ import asyncio
 import threading
 
 from kdive.diagnostics.checks import CheckStatus, run_check
-from kdive.diagnostics.multiarch_gdb import diagnostic_contribution as local_diagnostics
+from kdive.diagnostics.contributions.multiarch_gdb import (
+    diagnostic_contribution as local_diagnostics,
+)
+from kdive.diagnostics.contributions.pseries_fadump import default_pseries_fadump_probe
 from kdive.diagnostics.provider_checks import PseriesFadumpCheck, PseriesFadumpOutcome
-from kdive.diagnostics.pseries_fadump import default_pseries_fadump_probe
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
 

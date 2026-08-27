@@ -18,9 +18,13 @@ import shutil
 from collections.abc import Awaitable, Callable
 
 from kdive.diagnostics.checks import MULTIARCH_GDB_ID, Check
-from kdive.diagnostics.guest_arch_accel import (
+from kdive.diagnostics.contributions.guest_arch_accel import (
     guest_arch_accel_worker_check,
     guest_arch_accel_worker_descriptor,
+)
+from kdive.diagnostics.contributions.pseries_fadump import (
+    pseries_fadump_worker_check,
+    pseries_fadump_worker_descriptor,
 )
 from kdive.diagnostics.provider_checks import (
     MultiarchGdbCheck,
@@ -31,10 +35,6 @@ from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
     no_checks,
-)
-from kdive.diagnostics.pseries_fadump import (
-    pseries_fadump_worker_check,
-    pseries_fadump_worker_descriptor,
 )
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.providers.shared.debug_common.gdbmi.policy.arch import (

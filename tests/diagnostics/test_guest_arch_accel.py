@@ -14,7 +14,7 @@ import os
 
 from kdive import config
 from kdive.diagnostics.checks import CheckStatus
-from kdive.diagnostics.guest_arch_accel import (
+from kdive.diagnostics.contributions.guest_arch_accel import (
     _QEMU_SYSTEM_BINARY,
     default_guest_arch_accel_probe,
     kvm_probe_for_uri,
@@ -22,7 +22,9 @@ from kdive.diagnostics.guest_arch_accel import (
     resolved_libvirt_uri,
     uri_is_local,
 )
-from kdive.diagnostics.multiarch_gdb import diagnostic_contribution as local_diagnostics
+from kdive.diagnostics.contributions.multiarch_gdb import (
+    diagnostic_contribution as local_diagnostics,
+)
 from kdive.diagnostics.provider_checks import GuestArchAccelCheck
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
@@ -135,7 +137,7 @@ def test_uri_is_local_distinguishes_transport_uris() -> None:
 def test_uri_constants_mirror_the_provider_setting() -> None:
     # The env name + default are duplicated (to respect the provider import boundary); a test —
     # not boundary-gated — pins them to the source of truth so a provider default change is caught.
-    from kdive.diagnostics.guest_arch_accel import _DEFAULT_URI, _LIBVIRT_URI_ENV
+    from kdive.diagnostics.contributions.guest_arch_accel import _DEFAULT_URI, _LIBVIRT_URI_ENV
     from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 
     assert LIBVIRT_URI.name == _LIBVIRT_URI_ENV
