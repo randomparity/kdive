@@ -45,6 +45,7 @@ from kdive.providers.infra.console_hosting import (
     ConsoleHostingLoop,
     RunningSystems,
 )
+from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
 from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
@@ -271,6 +272,7 @@ async def build_console_hosting(
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     running_systems_factory: RunningSystemsFactory,
     console_telemetry: ConsoleTelemetry | None = None,
+    event_loop_start: Callable[[], None] = ensure_libvirt_event_loop,
 ) -> ConsoleHosting | None:
     """Build the single-leader remote console hosting loop, or ``None`` when unconfigured.
 
@@ -281,6 +283,9 @@ async def build_console_hosting(
     if not is_remote_libvirt_configured():
         return None
 
+    # Register before constructing an owner whose collectors can open stream-capable
+    # connections; libvirt does not service connections opened before registration (ADR-0182).
+    event_loop_start()
     conninfo = database_url()
     secret_backend = secret_backend_from_env(registry=secret_registry)
 

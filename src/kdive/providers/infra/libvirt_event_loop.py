@@ -1,10 +1,9 @@
-"""Process-wide libvirt event loop for the reconciler (ADR-0182).
+"""Process-wide libvirt event loop owned by remote-libvirt composition (ADR-0182).
 
 A libvirt non-blocking stream's incoming buffer is filled by libvirt's event loop. The remote
-console collector polls such a stream, so the reconciler must register the default event-loop
-implementation and run it for the process lifetime, or every console capture would-blocks forever
-and persists 0 bytes. Registration is idempotent; the run-thread is durable (a transient error is
-logged and retried, not fatal) and observable.
+console collector polls such a stream, so remote-libvirt composition registers the default
+event-loop implementation before it can construct console hosting. Registration is idempotent;
+the run-thread is durable (a transient error is logged and retried, not fatal) and observable.
 """
 
 from __future__ import annotations
@@ -81,3 +80,10 @@ def ensure_libvirt_event_loop(
         spawn(lambda: _run_loop_body(run, sleep=time.sleep))
         _STATE.started = True
     _log.info("libvirt event loop registered and running")
+
+
+def reset_libvirt_event_loop_for_tests() -> None:
+    """Reset registration bookkeeping for isolated tests before any real thread is started."""
+    with _LOCK:
+        _STATE.registered = False
+        _STATE.started = False

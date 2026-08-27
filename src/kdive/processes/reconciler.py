@@ -41,10 +41,8 @@ _log = logging.getLogger(__name__)
 async def run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
-    from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
     from kdive.store.objectstore import object_store_from_env
 
-    ensure_libvirt_event_loop()
     stop = install_stop()
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:

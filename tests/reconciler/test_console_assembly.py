@@ -450,6 +450,7 @@ def test_build_console_hosting_returns_none_when_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _run() -> None:
+        starts: list[None] = []
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
         # No declared remote instance → bootstrap degrades to None (no console hosting).
         monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: False)
@@ -458,8 +459,10 @@ def test_build_console_hosting_returns_none_when_not_configured(
             secret_registry=SecretRegistry(),
             store=cast(Any, object()),
             running_systems_factory=lambda _pool: _FakeRunningSystems(),
+            event_loop_start=lambda: starts.append(None),
         )
         assert hosting is None
+        assert starts == []
 
     asyncio.run(_run())
 
@@ -486,6 +489,7 @@ def test_build_console_hosting_preserves_object_store_config_error(
                 secret_registry=SecretRegistry(),
                 store=cast(Any, object()),
                 running_systems_factory=lambda _pool: _FakeRunningSystems(),
+                event_loop_start=lambda: None,
             )
 
         assert caught.value is error
@@ -499,6 +503,7 @@ def test_build_console_hosting_opens_host_pool_and_returns_registry(
     async def _run() -> None:
         leader_conn = _FakeLeaderConn()
         host_pool = _FakePool()
+        events: list[str] = []
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
         monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: True)
         monkeypatch.setattr(remote_composition, "secret_backend_from_env", lambda **_: object())
@@ -517,11 +522,13 @@ def test_build_console_hosting_opens_host_pool_and_returns_registry(
             secret_registry=SecretRegistry(),
             store=cast(Any, object()),
             running_systems_factory=lambda _pool: _FakeRunningSystems(),
+            event_loop_start=lambda: events.append("event-loop"),
         )
 
         assert hosting is not None
         assert hosting.registry is not None
         assert host_pool.opened is True
+        assert events == ["event-loop"]
 
     asyncio.run(_run())
 
