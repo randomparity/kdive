@@ -26,8 +26,13 @@ from kdive.db import migrate
 from kdive.jobs import queue
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import build_uses
+from kdive.prereqs.system_bootstrap_key import (
+    delete_system_bootstrap_key,
+    ensure_system_bootstrap_key,
+)
 from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
 from kdive.security.authz.rbac import PlatformRole, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.db import conftest as db_conftest
 from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
@@ -162,6 +167,7 @@ _WORKER_MUTATIONS = {
         "rootfs_fetch_leases",
         "run_steps",
         "snapshots",
+        "system_bootstrap_keys",
         "upload_manifests",
     },
     "UPDATE": {
@@ -1152,6 +1158,65 @@ def test_runtime_roles_receive_data_access_without_crossing_fence_authority(
                 (login, f"public.{sequence}", ["SELECT", "UPDATE", "USAGE"]),
             ).fetchall()
             assert privileges == [(False,)] * 3, (role, sequence)
+
+
+def test_worker_bootstrap_key_path_has_exact_role_authority(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The worker creates, reads, and deletes its key; unrelated runtimes cannot create one."""
+    resource_id, allocation_id, system_id = uuid4(), uuid4(), uuid4()
+    pg_conn.execute(
+        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+        "VALUES (%s, 'local-libvirt', 'default', 'standard', 'available', 'qemu:///system')",
+        (resource_id,),
+    )
+    pg_conn.execute(
+        "INSERT INTO allocations (id, resource_id, state, principal, project) "
+        "VALUES (%s, %s, 'granted', 'principal', 'project')",
+        (allocation_id, resource_id),
+    )
+    pg_conn.execute(
+        "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, project) "
+        "VALUES (%s, %s, 'ready', '{}'::jsonb, 'principal', 'project')",
+        (system_id, allocation_id),
+    )
+
+    for role in ("kdive_reconciler", "kdive_lifecycle_witness", "unprivileged"):
+        with (
+            psycopg.connect(role_dsn(role), autocommit=True) as runtime,
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
+        ):
+            runtime.execute(
+                "INSERT INTO system_bootstrap_keys (system_id, private_key, public_key) "
+                "VALUES (%s, 'private', 'ssh-ed25519 denied')",
+                (system_id,),
+            )
+
+    async def exercise_worker_path() -> None:
+        async with await psycopg.AsyncConnection.connect(
+            role_dsn("kdive_worker"), autocommit=True
+        ) as worker:
+            public_key = await ensure_system_bootstrap_key(
+                worker, system_id, secret_registry=SecretRegistry()
+            )
+            stored = await (
+                await worker.execute(
+                    "SELECT public_key FROM system_bootstrap_keys WHERE system_id = %s",
+                    (system_id,),
+                )
+            ).fetchone()
+            assert stored == (public_key,)
+
+            await delete_system_bootstrap_key(worker, system_id)
+            remaining = await (
+                await worker.execute(
+                    "SELECT count(*) FROM system_bootstrap_keys WHERE system_id = %s",
+                    (system_id,),
+                )
+            ).fetchone()
+            assert remaining == (0,)
+
+    asyncio.run(exercise_worker_path())
 
 
 @pytest.mark.parametrize(
