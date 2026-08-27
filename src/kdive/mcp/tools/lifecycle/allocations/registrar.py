@@ -296,7 +296,7 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List allocations visible to the caller, newest first, filterable by project and state.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page. The ``state`` filter composes with the cursor.
+        ``request.cursor`` for the next page. The ``state`` filter composes with the cursor.
         """
         request = request or _AllocationsListPayload()
         return await _list_allocations(

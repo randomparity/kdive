@@ -1249,6 +1249,25 @@ def _iter_agent_facing_descriptions() -> list[tuple[Path, str, str]]:
     return found
 
 
+def test_nested_list_cursor_docs_name_the_request_path() -> None:
+    """A wrapper whose schema nests pagination under request must document request.cursor."""
+    offenders: list[str] = []
+    for path in sorted(_TOOLS_PKG.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) or not _is_app_tool(
+                node
+            ):
+                continue
+            if "request" not in {arg.arg for arg in node.args.args}:
+                continue
+            doc = ast.get_docstring(node) or ""
+            if "data.next_cursor" in doc and "request.cursor" not in doc:
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}:{node.name}")
+    message = "nested cursor continuation docs name a nonexistent cursor: " + ", ".join(offenders)
+    assert offenders == [], message
+
+
 def test_agent_facing_numeric_bounds_are_interpolated_not_hardcoded() -> None:
     # A hand-typed bound (e.g. "capped at 300", "at most 24576 bytes") in a Field description or
     # `@app.tool` docstring is the wrapper-vs-source drift this guard exists to prevent: the number

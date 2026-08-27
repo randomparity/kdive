@@ -292,7 +292,7 @@ def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> No
         """List the Investigations you can view, newest-first, for reporting.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        ``request.cursor`` for the next page.
         """
         payload = request or _InvestigationsListPayload()
         return await list_investigations(

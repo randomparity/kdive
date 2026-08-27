@@ -459,8 +459,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List the caller's jobs newest first, filterable by status/kind/investigation/system_id.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` to read the next page. Filters compose with the cursor. The ``kind`` filter
-        accepts active job kinds only; historical retired build jobs remain readable by id.
+        ``request.cursor`` to read the next page. Filters compose with the cursor. The ``kind``
+        filter accepts active job kinds only; historical retired build jobs remain readable by id.
         The ``system_id`` filter reaches the system-scoped jobs (authorize_ssh_key,
         check_ssh_reachable) that ``investigation_id`` excludes (they carry no run_id).
         """

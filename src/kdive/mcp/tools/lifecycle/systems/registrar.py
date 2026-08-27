@@ -370,7 +370,7 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        ``request.cursor`` for the next page.
         """
         return await _list_systems(
             pool,

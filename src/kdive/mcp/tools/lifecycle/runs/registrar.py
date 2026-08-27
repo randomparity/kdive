@@ -207,7 +207,7 @@ def _register_runs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List the caller's Runs, filterable by system/investigation/state. Requires viewer.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        ``request.cursor`` for the next page.
         """
         return await _list_runs(
             pool,
