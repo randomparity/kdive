@@ -515,6 +515,53 @@ def test_manifest_parent_walk_rejects_symlinked_intermediate(
     assert list(external.iterdir()) == []
 
 
+@pytest.mark.parametrize("leaf_kind", ("fifo", "symlink"))
+def test_manifest_atomic_install_rejects_non_regular_leaf_without_blocking(
+    tmp_path: Path, leaf_kind: str
+) -> None:
+    destination = tmp_path / "manifest.json"
+    if leaf_kind == "fifo":
+        os.mkfifo(destination)
+    else:
+        external = tmp_path / "external"
+        external.write_text("external", encoding="utf-8")
+        destination.symlink_to(external)
+    code = """
+import os
+import runpy
+import sys
+namespace = runpy.run_path(sys.argv[1])
+parent_fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    namespace["_atomic_write_at"](
+        parent_fd,
+        "manifest.json",
+        b"replacement",
+        0o644,
+        owner_uid=os.getuid(),
+        group_gid=os.getgid(),
+    )
+except RuntimeError as error:
+    print(error)
+    raise SystemExit(7)
+finally:
+    os.close(parent_fd)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(_SCRIPT), str(tmp_path)],
+        cwd=_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=2,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "manifest destination must be a regular file\n"
+    assert result.stderr == ""
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="unprivileged refusal requires a non-root test uid")
 def test_install_refuses_unprivileged_user(tmp_path: Path) -> None:
     staged = tmp_path / "staged.json"
