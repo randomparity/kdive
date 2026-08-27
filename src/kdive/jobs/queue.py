@@ -57,65 +57,13 @@ async def enqueue(
     recycle_terminal: bool = False,
     recycle_canceled: bool = False,
 ) -> Job:
-    """Admit a job, returning the existing one on a ``dedup_key`` conflict.
+    """Admit a job idempotently, returning the row for ``dedup_key``.
 
-    Upsert-then-fetch: ``INSERT … ON CONFLICT (dedup_key) DO NOTHING`` then
-    ``SELECT … WHERE dedup_key = …`` in one transaction, so a re-issue returns the
-    **same** job (in whatever state it has since reached) and never enqueues a
-    duplicate. ``DO NOTHING RETURNING`` is avoided — it returns no row on conflict.
-
-    When ``recycle_terminal`` is set, a **terminal** (``failed`` or ``succeeded``) job for
-    ``dedup_key`` is reset in place to a fresh ``queued`` attempt before the fetch:
-    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, ``created_at`` re-dated
-    to the recycle, **and the payload overwritten with the newly-supplied one**. Re-dating
-    ``created_at`` is what keeps the recycle fair (ADR-0447): :func:`dequeue` orders by it and the
-    reset ``attempt`` makes the row eligible again, so a job left at its original creation would
-    win every claim and head-of-line-block its lane. Re-dated, it queues at the back — the recycle
-    becomes equivalent to the delete-and-re-insert a caller would otherwise hand-roll (ADR-0442
-    §6). So ``jobs.created_at`` means *when this attempt was queued*, not when the row was first
-    inserted; ``updated_at`` is no substitute (its trigger stamps ``now()``, so a recycled row can
-    read ``created_at > updated_at``) — the caller's audit entry and the log line below are.
-
-    **Both statements stamp ``clock_timestamp()``, not ``now()``.** ``now()`` is
-    ``transaction_timestamp()``, and no production caller reaches here in a transaction of its own:
-    the re-stage and snapshot tools open ``conn.transaction()`` and then *block* on an
-    ``advisory_xact_lock`` first, and ``control.watch_for_crash`` runs on a pooled connection whose
-    implicit transaction opened several reads earlier. Stamping the transaction's start would date
-    the job to before that wait, leaving it ahead of everything another connection enqueued during
-    it — the very preemption this prevents, back again under the contention that makes it matter.
-    That holds for a first enqueue as much as a recycle, hence the explicit stamp on the ``INSERT``
-    rather than the column's ``DEFAULT now()``. Being always at or after the transaction's clock,
-    it also keeps a row's ``created_at`` moving only forward, so ``jobs.list``'s ``(created_at,
-    id)`` keyset cursor can only *skip* a re-dated row, never return it twice.
-
-    ``authorizing``, ``max_attempts`` and ``kind`` are deliberately **not** reset: they describe the
-    job's slot, not the attempt. ``authorizing`` in particular stays with the principal who first
-    enqueued it, so a re-dated ``created_at`` must not be read as the recycling principal's action
-    time.
-
-    ``dispatch_lane`` **is** reset, to the same kind-derived value the ``INSERT`` uses (ADR-0550
-    amending ADR-0447). It has to be: ``systems.restore`` and ``systems.snapshot`` recycle under a
-    durable ``dedup_key``, so a row first inserted before the state-fenced lane existed would keep
-    its original lane for **every future attempt** — the routing would silently never reach a
-    System that had already used the feature, which is the opposite of the availability fix it
-    exists for. Re-deriving here means a row's lane converges on its kind's lane at the first
-    recycle, and a kind can never end up split across two lanes.
-
-    Overwriting the payload matters for a re-stage
-    (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
-    the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
-    case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
-    row is what selects ``recycle_terminal``). ``recycle_canceled`` additionally admits a
-    ``canceled`` row into that reset (only alongside ``recycle_terminal``): a caller whose dedup
-    key is a stable per-resource slot re-issued after an explicit cancel
-    (``control.watch_for_crash``, ADR-0367) wants a fresh run, not the dead canceled job wedged in
-    the slot forever. It stays **off** by default, so the install/boot re-stage keeps
-    ``no-resurrection-of-canceled``. The ``state IN ('failed','succeeded')`` fence leaves an
-    in-flight ``queued``/``running`` job and (unless ``recycle_canceled``) a ``canceled`` job
-    untouched, so in-flight dedup and
-    no-resurrection-of-canceled hold. It is opt-in: the default off keeps a failed ``provision`` job
-    ``failed`` so admission can surface its original reason (ADR-0149), and never resurrects a
-    succeeded job.
+    Recycling resets eligible terminal rows to a fresh queued attempt with the new payload and
+    kind-derived dispatch lane. It preserves slot metadata (kind, authorizing principal, and
+    ``max_attempts``), never replaces an in-flight row, and does not resurrect canceled work unless
+    explicitly requested. ``created_at`` uses the wall clock so recycled jobs return to the back of
+    the queue even when the caller's transaction waited on a lock (ADR-0447, ADR-0550).
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
@@ -172,10 +120,7 @@ async def enqueue(
                 recycled_id = recycled["id"]
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
-    # The reset leaves a recycled row indistinguishable from a first enqueue, so this line is the
-    # only record that a dedup_key is churning. It is an upper bound, not proof: for a production
-    # caller the block above is a SAVEPOINT in the caller's transaction, so releasing it is not a
-    # commit and the caller can still roll back. Read it as "a recycle was attempted".
+    # This records an attempted recycle; an outer transaction may still roll it back.
     if recycled_id is not None:
         _log.info(
             "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",

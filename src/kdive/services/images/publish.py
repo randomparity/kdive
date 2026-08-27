@@ -711,36 +711,9 @@ async def publish_image(
 ) -> ImageCatalogEntry:
     """Row-first two-write publish: pending row → object → HEAD-gate → ``registered``.
 
-    Adopts the identity's existing ``defined``/``pending`` row (or inserts a ``pending`` row from
-    ``request``), sets its ``object_key``, writes the object at ``source`` to the image prefix,
-    HEAD-gates, then flips the row to ``registered`` and returns it. Public pending identity is
-    ``(provider, name, arch)``. Private pending identity is ``(owner, provider, name)`` without
-    arch, matching registered-name uniqueness; a cross-arch retry supersedes the earlier pending
-    attempt and refreshes all request-owned fields. A public pending retry and a seeded ``defined``
-    baseline preserve their configuration-owned metadata while refreshing attempted-object fields.
-    The defined baseline remains arch-scoped. Public and private rows, and private rows for
-    different owners, intentionally do not adopt each other.
-
-    Each reservation mints attempt-specific object keys. If overlapping reservations target the
-    same pending identity, only the newest reservation can finish; an older attempt raises an
-    actionless ``CONFLICT`` after its isolated object write rather than registering stale metadata.
-
-    When ``request.kernel_config`` is present its attempt-specific config key is set on the
-    ``pending`` row before any object is written (so the leaked-sweep protects it the instant the
-    row exists, ADR-0317), and the config object is written **best-effort** after the qcow2
-    HEAD-gate: a config write/HEAD failure degrades to a registered image with ``kernel_config_key``
-    cleared (no config offered), never failing the publish. Only the qcow2 write/HEAD is fatal.
-
-    Args:
-        conn: An async Postgres connection (autocommit; the adopt step opens its own
-            transaction).
-        store: The image object store.
-        request: The image identity, layout, digest, and scope.
-        source: The local path to the built qcow2 to publish.
-        principal: Required to reserve a private image; persisted only while the row is pending.
-
-    Returns:
-        The persisted ``registered`` :class:`ImageCatalogEntry`.
+    Reservation identity fences overlapping attempts; only the newest may register. The qcow2
+    write and HEAD check are fatal, while an optional kernel-config write is best-effort and is
+    omitted from the registered row on failure (ADR-0317, ADR-0526).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if ``source`` bytes do not hash to
