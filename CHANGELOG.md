@@ -797,6 +797,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Order exact-head review handoff
 - Bind review gates to current scope
 - Fix ADR 0581 record format
+- Define native worker checkout execution
 
 ### Fixed
 
@@ -1331,6 +1332,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Let session daemon append console logs
 - Let session daemon write overlays
 - Allow worker audit inserts
+- Run native workers from checkout
+- Gate mutating lifecycle requests
 
 ### Security
 
