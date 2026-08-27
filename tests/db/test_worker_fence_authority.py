@@ -31,6 +31,7 @@ from kdive.prereqs.system_bootstrap_key import (
     ensure_system_bootstrap_key,
 )
 from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
+from kdive.security import audit
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
@@ -158,6 +159,7 @@ _WORKER_SELECT = {
 }
 _WORKER_MUTATIONS = {
     "INSERT": {
+        "audit_log",
         "artifacts",
         "component_uploads",
         "egress_probe_guests",
@@ -1158,6 +1160,90 @@ def test_runtime_roles_receive_data_access_without_crossing_fence_authority(
                 (login, f"public.{sequence}", ["SELECT", "UPDATE", "USAGE"]),
             ).fetchall()
             assert privileges == [(False,)] * 3, (role, sequence)
+
+
+def test_worker_audit_record_path_has_exact_role_authority(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    """The worker can append through audit.record without broader audit-log authority."""
+    worker_login = role_dsn.logins["kdive_worker"]
+    columns = {
+        str(row[0])
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'audit_log'"
+        ).fetchall()
+    }
+    readable_columns = {
+        column
+        for column in columns
+        if pg_conn.execute(
+            "SELECT has_column_privilege(%s, 'public.audit_log', %s, 'SELECT')",
+            (worker_login, column),
+        ).fetchone()
+        == (True,)
+    }
+    assert readable_columns == {"id"}
+
+    event = audit.AuditEvent(
+        tool="systems.provision",
+        object_kind="systems",
+        object_id=uuid4(),
+        transition="provisioning->ready",
+        args={"provider": "tcg"},
+        project="project-a",
+    )
+
+    async def exercise_worker_path() -> UUID:
+        async with await psycopg.AsyncConnection.connect(
+            role_dsn("kdive_worker"), autocommit=True
+        ) as worker:
+            audit_id = await audit.record(worker, _operator_context(), event)
+            row = await (
+                await worker.execute(
+                    "SELECT id FROM public.audit_log WHERE id = %s",
+                    (audit_id,),
+                )
+            ).fetchone()
+            assert row == (audit_id,)
+
+            denied_operations: tuple[LiteralString, ...] = (
+                "SELECT principal FROM public.audit_log WHERE id = %s",
+                "UPDATE public.audit_log SET transition = 'changed' WHERE id = %s",
+                "DELETE FROM public.audit_log WHERE id = %s",
+            )
+            for operation in denied_operations:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    await worker.execute(operation, (audit_id,))
+            return audit_id
+
+    audit_id = asyncio.run(exercise_worker_path())
+    stored = pg_conn.execute(
+        "SELECT principal, project, tool, object_kind, object_id, transition "
+        "FROM public.audit_log WHERE id = %s",
+        (audit_id,),
+    ).fetchone()
+    assert stored == (
+        "operator-1",
+        event.project,
+        event.tool,
+        event.object_kind,
+        event.object_id,
+        event.transition,
+    )
+
+    for role in ("kdive_reconciler", "kdive_lifecycle_witness", "unprivileged"):
+        with (
+            psycopg.connect(role_dsn(role), autocommit=True) as runtime,
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
+        ):
+            runtime.execute(
+                "INSERT INTO public.audit_log "
+                "(principal, project, tool, object_kind, object_id, transition, args_digest) "
+                "VALUES ('denied', 'project-a', 'systems.provision', 'systems', %s, "
+                "'provisioning->ready', 'd')",
+                (uuid4(),),
+            )
 
 
 def test_worker_bootstrap_key_path_has_exact_role_authority(
