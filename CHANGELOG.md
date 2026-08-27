@@ -152,6 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add profile-kind residue sweep pure surface
 - Scan stored Systems for profile-kind mismatches
 - Add verify-profile-kinds CLI command (#1907)
+- Expose provision execution boundaries
 
 ### Changed
 
@@ -784,6 +785,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Specify what the report must say, not the bytes it prints
 - Name what the latch buys, not just how much residual is left
 - Name the real marker and the uncovered conninfo shape
+- Design hosted provision diagnosis
+- Harden provision evidence design
+- Approve provision evidence scope
+- Record manifest readiness diagnosis
+- Close provision evidence edge cases
+- Align final scope authority
+- Bind final provider proof
+- Record rejected runtime ancestor
+- Record capture manifest cause
+- Order exact-head review handoff
+- Bind review gates to current scope
+- Fix ADR 0581 record format
 
 ### Fixed
 
@@ -1282,6 +1295,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the mask helper for what it returns
 - Preserve IPv6 brackets in reports
 - Keep pytest node IDs inside code spans
+- Source diagnostic environment safely
+- Install fixed-worker readiness manifest
+- Sanitize diagnostic import failures
+- Retain claim evidence on green runs
+- Filter retained worker journal evidence
+- Cover provider domain rendering stage
+- Satisfy evidence guard dependencies
+- Preserve provision evidence boundaries
+- Accept unnamed kernel vdso mappings
+- Keep diagnostics within hosted scope
+- Harden installed worker runtime modes
+- Reject symlinked worker runtime roots
+- Identify unsafe fingerprint ancestors
+- Harden capture runtime parent
+- Normalize capture manifest parent
+- Normalize provision evidence mode
+- Publish only durable bounded diagnostics
+- Bound retained provider evidence
+- Bound queue diagnostic failures
+- Close retained evidence gaps
+- Sanitize terminal evidence failures
+- Secure privileged install boundaries
+- Reject blocking manifest leaves
+- Hold manifest install descriptors
+- Harden privileged manifest installation
+- Clean failed manifest writes durably
+- Accept root-built manifest staging
+- Harden owned manifest ancestors
+- Read hosted worker journals as root
+- Query the hosted worker unit exactly
+- Expose bounded claim-loop failures
+- Preserve worker claims during queue telemetry
+- Grant workers bootstrap key inserts
+- Let session daemon append console logs
+- Let session daemon write overlays
+- Allow worker audit inserts
 
 ### Security
 
@@ -1296,6 +1345,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the ppc64le uv wheel to 0.11.31
 - Update cryptography to 50.0.0
 - Bump astral-sh/setup-uv in the github-actions group
+
+### Diagnostic
+
+- Expose capture manifest readiness cause
 
 ### Security
 
