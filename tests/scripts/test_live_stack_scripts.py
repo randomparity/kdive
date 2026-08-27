@@ -159,7 +159,7 @@ def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_pat
         "from kdive.processes.lifecycle import systemd_worker_control as control\n"
         "from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse\n"
         "def request_path(path, request):\n"
-        "    open(os.environ['KDIVE_REQUEST_PROBE'], 'w').write(request.operation)\n"
+        "    open(os.environ['LIFECYCLE_REQUEST_PROBE'], 'w').write(request.operation)\n"
         "    return LifecycleResponse(ok=True, code='ok', message='ok', retry_action='none')\n"
         "control.request_path = request_path\n",
         encoding="utf-8",
@@ -171,7 +171,7 @@ def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_pat
         env={
             **os.environ,
             "KDIVE_PYTHON": sys.executable,
-            "KDIVE_REQUEST_PROBE": str(request_probe),
+            "LIFECYCLE_REQUEST_PROBE": str(request_probe),
             "PYTHONPATH": str(tmp_path / "shadow"),
         },
         capture_output=True,
