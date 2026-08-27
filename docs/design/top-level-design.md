@@ -235,11 +235,12 @@ In M0/M1 the production seam is
 `ProviderRuntime`: startup builds typed ports for each configured provider
 (`Provisioner`, `Builder`, `Installer`, `Controller`, `Retriever`, debug and
 introspection ports) and passes those ports to MCP tool registrars and worker
-handlers. Production defaults to the local-libvirt runtime; fault-inject is also a
-concrete provider, enabled only by explicit profiles for test and failure-path coverage.
-Runtime selection flows through `ProviderResolver`, so tools and handlers resolve the
-provider attached to the Allocation or System instead of assuming local-libvirt. Future
-providers still extend this typed runtime seam. Composition is centralized in
+handlers. Production defaults to the local-libvirt runtime. Remote-libvirt is an implemented,
+operator-configured production provider that drives guests on separate libvirt hosts; fault-inject
+is another concrete provider, enabled only by explicit profiles for test and failure-path coverage.
+Runtime selection flows through `ProviderResolver`, so tools and handlers resolve the provider
+attached to the Allocation or System instead of assuming local-libvirt. Cloud, bare-metal, and
+PowerVM providers remain future work on this typed runtime seam. Composition is centralized in
 `src/kdive/providers/assembly/composition.py`.
 
 The capability registry from ADR-0009/ADR-0022 is historical design context, not an
@@ -250,17 +251,17 @@ serves requests.
 
 ## Lifecycle planes
 
-| Plane | Responsibility | Local-libvirt (slice 1) | Later providers |
+| Plane | Responsibility | Implemented providers | Future providers |
 |---|---|---|---|
-| Discovery | register resources, advertise capabilities, report health | enumerate local libvirt host | cloud regions, lab inventory, HMC frames |
-| Allocation | claim/lease/release; feeds admission control + accounting | always-yes lease (capacity-checked) | cloud reserve API, lab reservation, LPAR activate |
-| Provisioning | apply a provisioning profile → a ready System | libvirt XML + rootfs image | ISO+kickstart, golden/QCOW2 images, ansible, NIM/PXE |
-| Build | produce a kernel from source + profile | local `make` | remote build host, GitHub Actions workflow |
-| Install | deploy a built kernel onto a System | copy + direct-kernel boot | SSH push, image bake, netboot |
-| Connect | establish a debug/console transport | QEMU gdbstub, SSH/serial | SoL, KGDB-over-serial, BMC console |
-| Debug | constrained debug ops over a transport | gdb-MI + drgn | crash, KDB |
-| Control | power/reset/force-crash | virsh destroy/reset/`sysrq-c` | IPMI/Redfish power, HMC, NMI |
-| Retrieve | pull debug artifacts | vmcore via kdump path | remote vmcore fetch, BMC SOL capture |
+| Discovery | register resources, advertise capabilities, report health | local host enumeration; configured remote-libvirt hosts | cloud regions, lab inventory, HMC frames |
+| Allocation | claim/lease/release; feeds admission control + accounting | core capacity-checked allocation for local and remote resources | cloud reserve API, lab reservation, LPAR activate |
+| Provisioning | apply a provisioning profile → a ready System | local and remote libvirt domain + rootfs provisioning | ISO+kickstart, image bake, NIM/PXE |
+| Build | produce a kernel from source + profile | local build; remote-libvirt in-guest build helper | cloud builders, hosted CI workflows |
+| Install | deploy a built kernel onto a System | local direct-kernel install; remote-libvirt guest helper | image bake, netboot |
+| Connect | establish a debug/console transport | local and remote libvirt gdbstub, SSH, and console paths | SoL, KGDB-over-serial, BMC console |
+| Debug | constrained debug ops over a transport | gdb-MI and drgn for local and remote-libvirt Systems | crash, KDB |
+| Control | power/reset/force-crash | local and remote libvirt control paths | IPMI/Redfish power, HMC, NMI |
+| Retrieve | pull debug artifacts | local and remote-libvirt vmcore retrieval | BMC SOL capture, cloud-native artifact retrieval |
 
 **Ported from the PoC behind these interfaces:** redaction, path safety,
 constrained-debug allowlist, gdb-MI tier, drgn introspect/vmcore, crash
