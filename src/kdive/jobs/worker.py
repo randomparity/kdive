@@ -101,17 +101,17 @@ def _capture_provision_claim(job: Job) -> _ProvisionClaim | None:
         return None
     claim_at = job.heartbeat_at
     enqueued_at = job.created_at
-    delay_s = (
-        max(0.0, (claim_at - enqueued_at).total_seconds())
-        if claim_at is not None and enqueued_at is not None
-        else 0.0
-    )
+    if enqueued_at is None or enqueued_at.tzinfo is None or enqueued_at.utcoffset() is None:
+        raise ValueError("provision claim created_at must be timezone-aware")
+    if claim_at is None or claim_at.tzinfo is None or claim_at.utcoffset() is None:
+        raise ValueError("provision claim heartbeat_at must be timezone-aware")
+    delay_s = max(0.0, (claim_at - enqueued_at).total_seconds())
     return _ProvisionClaim(
         job_id=job.id,
         lane=job.dispatch_lane,
         attempt=job.attempt,
-        enqueued_at=enqueued_at.isoformat() if enqueued_at is not None else "NONE",
-        claim_at=claim_at.isoformat() if claim_at is not None else "NONE",
+        enqueued_at=enqueued_at.isoformat(),
+        claim_at=claim_at.isoformat(),
         queue_delay_s=delay_s,
     )
 
