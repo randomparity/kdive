@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from kdive.jobs.capture_operations.linux_identity import LinuxIdentity
-from kdive.jobs.capture_operations.linux_pidfd import require_pidfd_support
-from kdive.jobs.capture_operations.manifest_attestation import (
+from kdive.jobs.capture_operations.bootstrap.manifest_attestation import (
     verify_capture_bootstrap_manifest,
 )
-from kdive.jobs.capture_operations.process_fence import (
+from kdive.jobs.capture_operations.process.linux_identity import LinuxIdentity
+from kdive.jobs.capture_operations.process.linux_pidfd import require_pidfd_support
+from kdive.jobs.capture_operations.process.process_fence import (
     _acquire_recovery_handles,
     _attest_observed_members,
     _close_process_handles,
@@ -30,8 +30,8 @@ from kdive.jobs.capture_operations.process_fence import (
     _task_members,
 )
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
-from kdive.jobs.capture_operations.repository import CaptureOperation
-from kdive.jobs.capture_operations.spool import (
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.spool import (
     _dispose_operation_spool,
     _read_capture,
     _read_result,
@@ -355,7 +355,7 @@ class GatedCaptureLauncher:
                 str(interpreter),
                 "-S",
                 "-m",
-                "kdive.jobs.capture_operations.bootstrap_entrypoint",
+                "kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
                 "--launch-token",
                 operation.launch_token,
                 "--gate-fd",

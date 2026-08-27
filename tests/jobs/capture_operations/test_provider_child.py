@@ -20,7 +20,7 @@ from kdive.jobs.capture_operations import child
 from kdive.jobs.capture_operations import launcher as launcher_module
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 from kdive.providers.ports.traffic import (
     CaptureExecutionResult,
     LocalCaptureConfiguration,

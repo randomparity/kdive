@@ -20,7 +20,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
 from kdive.jobs.capture_operations.recovery import RecoverySummary, recover_capture_operations
-from kdive.jobs.capture_operations.repository import CaptureOperation, CaptureOperationState
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation, CaptureOperationState
 from kdive.jobs.capture_operations.supervisor import (
     LOCK_PROBE_INTERVAL_SECONDS,
     LOCK_PROBE_TIMEOUT_SECONDS,
@@ -877,7 +877,7 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
     launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import recovery as recovery_module
-    from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
+    from kdive.jobs.capture_operations.storage.repository import CaptureRecoveryCandidate
 
     operation_id = uuid4()
     resource_id = uuid4()
@@ -984,7 +984,7 @@ def test_startup_recovery_sends_exited_operation_directly_to_publication(
     launch_token: str,
 ) -> None:
     from kdive.jobs.capture_operations import recovery as recovery_module
-    from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
+    from kdive.jobs.capture_operations.storage.repository import CaptureRecoveryCandidate
 
     operation_id = uuid4()
     candidate = CaptureRecoveryCandidate(

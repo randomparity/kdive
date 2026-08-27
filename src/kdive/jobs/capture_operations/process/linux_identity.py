@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from kdive.jobs.capture_operations import linux_pidfd
+from kdive.jobs.capture_operations.process import linux_pidfd
 
 _PROC_ROOT = Path("/proc")
 
@@ -28,7 +28,7 @@ def _read_cmdline(path: Path) -> bytes:
 
 def _matches_capture_bootstrap(argv: list[bytes], token: str) -> bool:
     try:
-        module = argv.index(b"kdive.jobs.capture_operations.bootstrap_entrypoint")
+        module = argv.index(b"kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint")
         token_flag = argv.index(b"--launch-token")
     except ValueError:
         return False

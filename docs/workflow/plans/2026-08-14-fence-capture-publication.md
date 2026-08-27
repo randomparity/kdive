@@ -91,7 +91,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 - Add `src/kdive/db/schema/0113_capture_publication_fence.sql`.
 - Modify `src/kdive/services/runs/worker_incarnations.py`: protocol constant 4.
-- Modify `src/kdive/jobs/capture_operations/repository.py`: publication fields and transitions.
+- Modify `src/kdive/jobs/capture_operations/storage/repository.py`: publication fields and transitions.
 - Modify `src/kdive/jobs/queue.py`: combined closure gate before retry/current-link clearing.
 - Modify `src/kdive/processes/lifecycle/worker_incarnation.py`: remove the protocol-3
   retirement queries; a fresh protocol-4 installation has no older incarnation population.
@@ -158,7 +158,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 **Files**
 
-- Add `src/kdive/jobs/capture_operations/publication.py`: publication coordinator and metadata.
+- Add `src/kdive/jobs/capture_operations/storage/publication.py`: publication coordinator and metadata.
 - Modify `src/kdive/jobs/capture_operations/supervisor.py`: publisher callback and authority race.
 - Modify `src/kdive/jobs/handlers/control/capture_traffic.py`: remove the old post-supervision
   `_store_capture` path and inject the coordinator.
@@ -214,7 +214,7 @@ point; PostgreSQL remains authority for current attempt, metadata registration, 
 
 **Files**
 
-- Modify `src/kdive/jobs/capture_operations/publication.py`: cancellation arbitration/recovery.
+- Modify `src/kdive/jobs/capture_operations/storage/publication.py`: cancellation arbitration/recovery.
 - Modify `src/kdive/jobs/capture_operations/supervisor.py`: startup recovery and readiness summary.
 - Modify `src/kdive/jobs/capture_operations/launcher.py`: operation-derived spool recovery path.
 - Modify `tests/jobs/capture_operations/test_publication.py`.

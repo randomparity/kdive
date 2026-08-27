@@ -25,7 +25,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     begin_cancel_publication,
     begin_publication,

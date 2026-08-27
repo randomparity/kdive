@@ -6,7 +6,8 @@ import pytest
 
 import kdive.jobs.capture_operations.child as capture_child
 from kdive.__main__ import build_parser
-from kdive.jobs.capture_operations import bootstrap_entrypoint, sandbox
+from kdive.jobs.capture_operations.bootstrap import bootstrap_entrypoint
+from kdive.jobs.capture_operations.process import sandbox
 
 
 def test_filter_failure_occurs_before_handshake_or_gate_read(

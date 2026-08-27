@@ -24,7 +24,7 @@ def _arguments(argv: list[str]) -> tuple[str, int]:
 def main(argv: list[str] | None = None) -> int:
     """Install containment, acknowledge it, then block before importing request code."""
     launch_token, gate_fd = _arguments(sys.argv[1:] if argv is None else argv)
-    from kdive.jobs.capture_operations.sandbox import install_capture_filter
+    from kdive.jobs.capture_operations.process.sandbox import install_capture_filter
 
     install_capture_filter()
     os.write(sys.stdout.fileno(), b"F")

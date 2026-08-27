@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,

@@ -249,8 +249,8 @@ execution progress. No public API or schema changes.
 **Files**
 
 - `src/kdive/jobs/worker.py`
-- `src/kdive/jobs/capture_operations/bootstrap_attestation.py`
-- `src/kdive/jobs/capture_operations/bootstrap_elf.py`
+- `src/kdive/jobs/capture_operations/bootstrap/bootstrap_attestation.py`
+- `src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`
 - `.github/workflows/live.yml`
 - `deploy/systemd/install-live-worker-lifecycle.sh`
 - `tests/integration/live_stack/test_spine.py`

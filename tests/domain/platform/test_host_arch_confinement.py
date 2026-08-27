@@ -44,9 +44,9 @@ _HOST_ARCH_READ_ALLOWLIST = frozenset(
         "kdive/providers/shared/debug_common/gdbmi/core/engine.py",
         # capture-child attestation selects the worker host's approved manifest architecture;
         # this never influences guest architecture (ADR-0558).
-        "kdive/jobs/capture_operations/manifest_attestation.py",
+        "kdive/jobs/capture_operations/bootstrap/manifest_attestation.py",
         # seccomp syscall/audit-ABI policy is selected for the worker host kernel, not a guest.
-        "kdive/jobs/capture_operations/sandbox.py",
+        "kdive/jobs/capture_operations/process/sandbox.py",
     }
 )
 

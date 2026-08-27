@@ -17,12 +17,12 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
-from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
-from kdive.jobs.capture_operations.publication import (
+from kdive.jobs.capture_operations.process.linux_identity import LinuxIdentity, scan_launch_token
+from kdive.jobs.capture_operations.storage.publication import (
     CapturePublicationIdentityConflict,
     recover_publication,
 )
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     CaptureRecoveryCandidate,
     RecoveryEvidence,

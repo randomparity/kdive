@@ -9,8 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint, read_manifest
-from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
+from kdive.jobs.capture_operations.bootstrap.bootstrap_attestation import fingerprint, read_manifest
+from kdive.jobs.capture_operations.bootstrap.bootstrap_elf import runtime_elf_closure
 
 _DEFAULT_MANIFEST = Path("/usr/share/kdive/capture-bootstrap-manifest.json")
 _ARCHITECTURES = {"amd64": "x86_64", "x86_64": "x86_64", "ppc64le": "ppc64le"}
@@ -144,8 +144,8 @@ def _verify_manifest_modules(payload: Mapping[str, Any]) -> None:
         "kdive",
         "kdive.jobs",
         "kdive.jobs.capture_operations",
-        "kdive.jobs.capture_operations.sandbox",
-        "kdive.jobs.capture_operations.bootstrap_entrypoint",
+        "kdive.jobs.capture_operations.process.sandbox",
+        "kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
     }
     assert isinstance(modules, list)
     if not required.issubset(modules):

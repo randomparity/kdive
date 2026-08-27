@@ -15,8 +15,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from kdive.jobs.capture_operations.bootstrap_attestation import fingerprint, read_manifest
-from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
+from kdive.jobs.capture_operations.bootstrap.bootstrap_attestation import fingerprint, read_manifest
+from kdive.jobs.capture_operations.bootstrap.bootstrap_elf import runtime_elf_closure
 
 SCHEMA_VERSION = 1
 DEFAULT_DESTINATION = Path("/usr/share/kdive/capture-bootstrap-manifest.json")
@@ -47,8 +47,8 @@ def _run(command: list[str], *, source_root: Path | None = None) -> str:
 def _bootstrap_trace(interpreter: Path, source_root: Path) -> tuple[list[str], list[Path]]:
     code = (
         "import sys\n"
-        "import kdive.jobs.capture_operations.bootstrap_entrypoint\n"
-        "from kdive.jobs.capture_operations import sandbox\n"
+        "import kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint\n"
+        "from kdive.jobs.capture_operations.process import sandbox\n"
         "del sandbox\n"
         "for name in sorted(sys.modules):\n"
         " module = sys.modules[name]\n"

@@ -23,8 +23,8 @@ The permitted implementation surface is:
 - `scripts/live-stack/filter-worker-journal-evidence.py`,
   `scripts/live-stack/filter-worker-readiness-evidence.py`, and
   `scripts/live-stack/provision-queue-diagnostics.sh`;
-- `src/kdive/config/external_env.py`, `src/kdive/jobs/capture_operations/bootstrap_attestation.py`,
-  `src/kdive/jobs/capture_operations/bootstrap_elf.py`, `src/kdive/jobs/worker.py`, and
+- `src/kdive/config/external_env.py`, `src/kdive/jobs/capture_operations/bootstrap/bootstrap_attestation.py`,
+  `src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py`, `src/kdive/jobs/worker.py`, and
   `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`; and
 - `tests/deploy/test_live_worker_provisioning.py`,
   `tests/integration/live_stack/spine.py`, `tests/integration/live_stack/test_spine.py`,
@@ -171,11 +171,11 @@ root:root mode `0755` and verifier success.
    reuse and `render_domain_xml`, the whole overlay-customizer loop, console preparation, and domain
    definition/start. An exception deliberately leaves the stage start unmatched. No profile, XML,
    path, credential, or guest output is logged.
-6. `src/kdive/jobs/capture_operations/bootstrap_elf.py` treats a syntax-valid address-only loader
+6. `src/kdive/jobs/capture_operations/bootstrap/bootstrap_elf.py` treats a syntax-valid address-only loader
    entry as an unnamed kernel vDSO. The entry contributes no file to the attested closure; malformed
    addresses, unresolved dependencies, non-absolute file mappings, and other off-grammar output
    still fail closed.
-7. `src/kdive/jobs/capture_operations/bootstrap_attestation.py` keeps each raw ancestor path
+7. `src/kdive/jobs/capture_operations/bootstrap/bootstrap_attestation.py` keeps each raw ancestor path
    internal. Ownership or replaceability failures expose only a fixed component identifier, an
    allowlisted reason, and numeric uid/gid/permission bits.
 8. `deploy/systemd/install-live-worker-lifecycle.sh` normalizes the selected runtime installation

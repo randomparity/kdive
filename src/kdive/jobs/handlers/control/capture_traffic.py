@@ -32,8 +32,8 @@ from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.publication import CapturePublicationCoordinator
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.publication import CapturePublicationCoordinator
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 from kdive.jobs.capture_operations.supervisor import (
     CaptureOperationSupervisor,
     CaptureSnapshot,

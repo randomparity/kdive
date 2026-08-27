@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 
-from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
+from kdive.jobs.capture_operations.process.linux_identity import LinuxIdentity, scan_launch_token
 
 _SIGNAL_WAIT_SECONDS = 5.0
 

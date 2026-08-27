@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kdive.jobs.capture_operations import bootstrap_attestation, bootstrap_elf
+from kdive.jobs.capture_operations.bootstrap import bootstrap_attestation, bootstrap_elf
 from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
 
 _ROOT = Path(__file__).parents[3]
@@ -123,8 +123,8 @@ def _fixture_manifest(interpreter: Path) -> dict[str, object]:
             "kdive",
             "kdive.jobs",
             "kdive.jobs.capture_operations",
-            "kdive.jobs.capture_operations.bootstrap_entrypoint",
-            "kdive.jobs.capture_operations.sandbox",
+            "kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
+            "kdive.jobs.capture_operations.process.sandbox",
         ],
         "files": entries,
     }

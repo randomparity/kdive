@@ -16,16 +16,17 @@ from uuid import uuid4
 import pytest
 
 from kdive.jobs.capture_operations import launcher as launcher_module
-from kdive.jobs.capture_operations import linux_identity as linux_identity_module
-from kdive.jobs.capture_operations import manifest_attestation, spool
-from kdive.jobs.capture_operations import process_fence as process_fence_module
+from kdive.jobs.capture_operations.bootstrap import manifest_attestation
 from kdive.jobs.capture_operations.launcher import (
     GatedCaptureLauncher,
     LaunchAbortEvidence,
     LaunchedCapture,
 )
+from kdive.jobs.capture_operations.process import linux_identity as linux_identity_module
+from kdive.jobs.capture_operations.process import process_fence as process_fence_module
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage import spool
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 from kdive.providers.ports.traffic import LocalCaptureConfiguration
 
 _ROOT = Path(__file__).parents[3]
@@ -153,7 +154,7 @@ def test_real_child_is_gated_and_has_exact_process_contract(
                 os.fsencode(str(Path(sys.executable).resolve())),
                 b"-S",
                 b"-m",
-                b"kdive.jobs.capture_operations.bootstrap_entrypoint",
+                b"kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
                 b"--launch-token",
                 operation.launch_token.encode(),
                 b"--gate-fd",
