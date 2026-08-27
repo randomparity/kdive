@@ -813,6 +813,7 @@ def _run_provision_queue_diagnostics(
     (tmp_path / "psycopg.py").write_text(
         """
 import json
+from datetime import datetime
 import os
 
 
@@ -859,7 +860,15 @@ class Connection:
         return self
 
     def fetchall(self):
-        return self.rows
+        return [
+            [
+                datetime.fromisoformat(value["__datetime__"])
+                if isinstance(value, dict) and set(value) == {"__datetime__"}
+                else value
+                for value in row
+            ]
+            for row in self.rows
+        ]
 
 
 def connect(dsn, *, connect_timeout):
@@ -871,6 +880,13 @@ def connect(dsn, *, connect_timeout):
     )
     target = tmp_path / "target"
     target.write_text(f"{target_job_id}\t{target_system_id}\n", encoding="utf-8")
+    encoded_rows = [
+        [
+            {"__datetime__": value} if index in {7, 8, 9} and isinstance(value, str) else value
+            for index, value in enumerate(row)
+        ]
+        for row in rows
+    ]
     return subprocess.run(
         [str(ROOT / "scripts/live-stack/provision-queue-diagnostics.sh"), str(target)],
         cwd=ROOT,
@@ -878,7 +894,7 @@ def connect(dsn, *, connect_timeout):
             **os.environ,
             "KDIVE_PYTHON": sys.executable,
             "KDIVE_SERVER_DATABASE_URL": "postgresql://diagnostics.invalid/kdive",
-            "PSYCOPG_ROWS": json.dumps(rows),
+            "PSYCOPG_ROWS": json.dumps(encoded_rows),
             "PSYCOPG_TARGET_JOB_ID": target_job_id,
             "PSYCOPG_TARGET_SYSTEM_ID": target_system_id,
             "PSYCOPG_EXPECTED_JOB_ID": expected_job_id,
@@ -925,6 +941,51 @@ def test_provision_queue_diagnostics_prints_exact_complete_tsv(tmp_path: Path) -
         "2026-08-26T12:00:00+00:00\t2026-08-26T12:00:02+00:00\tNONE\n"
     )
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("field_index", "unsafe_value"),
+    [
+        pytest.param(1, "unknown-state", id="system-state"),
+        pytest.param(3, "default\t/sensitive/path", id="dispatch-lane-control"),
+        pytest.param(5, 2**31, id="attempt-range"),
+        pytest.param(6, "/sensitive/worker", id="worker-id-path"),
+        pytest.param(7, 42, id="timestamp-type"),
+    ],
+)
+def test_provision_queue_diagnostics_rejects_unbounded_or_unsafe_result_fields(
+    tmp_path: Path,
+    field_index: int,
+    unsafe_value: object,
+) -> None:
+    job_id = "11111111-1111-1111-1111-111111111111"
+    system_id = "22222222-2222-2222-2222-222222222222"
+    row: list[object | None] = [
+        system_id,
+        "provisioning",
+        job_id,
+        "default",
+        "running",
+        3,
+        None,
+        "2026-08-26T12:00:00+00:00",
+        "2026-08-26T12:00:02+00:00",
+        None,
+    ]
+    row[field_index] = unsafe_value
+
+    result = _run_provision_queue_diagnostics(
+        tmp_path,
+        target_job_id=job_id,
+        target_system_id=system_id,
+        expected_job_id=job_id,
+        expected_system_id=system_id,
+        rows=[row],
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == ""
+    assert result.stderr == "provision-evidence-error code=result-malformed\n"
 
 
 @pytest.mark.parametrize(
@@ -986,7 +1047,7 @@ def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
     )
     provider = (
         "local-libvirt provision system=22222222-2222-2222-2222-222222222222 "
-        "job=11111111-1111-1111-1111-111111111111 stage=resolve-arch event=start"
+        "job=11111111-1111-1111-1111-111111111111 stage=snapshot-pre-existing event=start"
     )
     poisoned = f"{claim} secret=/sensitive/path"
     payload = "\n".join(
@@ -1029,6 +1090,59 @@ def test_worker_journal_evidence_filter_fails_when_no_safe_record_exists() -> No
     assert result.returncode == 1
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def _run_worker_journal_filter(payload: bytes) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts/live-stack/filter-worker-journal-evidence.py")],
+        cwd=ROOT,
+        input=payload,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+
+_SAFE_WORKER_START = (
+    b'{"msg":"worker local-systemd:kdive-live-worker@1.service:'
+    b'0123456789abcdef0123456789abcdef accepting dispatch lanes: default,state-fenced"}\n'
+)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            _SAFE_WORKER_START + json.dumps({"msg": "x" * 5000}).encode() + b"\n",
+            id="per-record-bytes",
+        ),
+        pytest.param(_SAFE_WORKER_START + b"{}\n" * 400, id="record-count"),
+        pytest.param(
+            _SAFE_WORKER_START + ((b" " * 2999) + b"\n") * 100,
+            id="total-bytes",
+        ),
+    ],
+)
+def test_worker_journal_evidence_filter_rejects_input_beyond_bounds(
+    payload: bytes,
+) -> None:
+    result = _run_worker_journal_filter(payload)
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
+def test_worker_journal_evidence_filter_rejects_unbounded_accepted_field() -> None:
+    message = (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef accepting dispatch lanes: " + "a" * 2000
+    )
+    result = _run_worker_journal_filter(json.dumps({"msg": message}).encode() + b"\n")
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b""
 
 
 def test_worker_readiness_evidence_filter_emits_only_component_booleans() -> None:

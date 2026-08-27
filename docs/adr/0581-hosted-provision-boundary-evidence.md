@@ -77,25 +77,29 @@ The hosted proof records the queue and execution boundaries before changing timi
    interruption is malformed and therefore unusable evidence; no recovery protocol is required. A
    read-only queue snapshot validates that pair and reports the exact joined System state plus
    persisted lane, job state, attempt, worker id, enqueue time, **last** heartbeat time, and lease
-   expiry. It retains `ready`/`succeeded` and cannot substitute another job/System pair. Five-second
-   connect/statement timeouts sit inside a 12-second whole-step timeout; failures are a bounded
-   fixed-code line and nonzero when the target/exact join is unavailable, empty, multiply matched,
-   mismatched, or timed out.
+   expiry. It retains `ready`/`succeeded` and cannot substitute another job/System pair. Every
+   result value passes a finite type/grammar/length allowlist before a complete byte-bounded TSV is
+   written. Five-second connect/statement timeouts sit inside a 12-second whole-step timeout;
+   failures are a bounded fixed-code line and nonzero when the target/exact join or result shape is
+   unavailable, empty, multiply matched, mismatched, malformed, or timed out.
 2. A fixed worker logs its accepted lanes at startup. Only for `JobKind.PROVISION`, it copies the
    persisted lane, queue delay, and immutable initial `claim_at` immediately after `dequeue`, then
    publishes the claim record only after the pooled connection context exits successfully and
    commits. A later renewal cannot alter those copied values; a dequeue rollback, including one
    caused by the subsequent queue-depth telemetry query, emits no claim record.
-3. Local-libvirt logs start and completion around each mapped synchronous provision call without
-   logging paths, profile data, domain XML, guest output, or credentials.
+3. Local-libvirt logs start and completion around each mapped synchronous provision call,
+   including the pre-materialization `_snapshot_pre_existing` boundary, without logging paths,
+   profile data, domain XML, guest output, or credentials.
 4. One usable hosted run selects the source correction from the first boundary lacking its expected
    successor. One unchanged redispatch is allowed only when the diagnostic infrastructure itself
    was unavailable; a second inconclusive run parks without a source or deadline guess. The TCG
-   lifecycle journal capture runs on every outcome before cleanup, so the final hosted run can
-   report the immutable claim record even when the spine succeeds. That run occurs after
-   review/simplification/guardrails and must have the same SHA as the PR head. Its exact queue
-   target and immutable claim record must agree, and its retained provider records must name that
-   job and System and pair each mapped stage's start/completion in order through `define-start`.
+   lifecycle journal capture runs on every outcome before cleanup. Its filter enforces 4096 bytes
+   per record, 400 records, 256 KiB total input, bounded field grammars, and bounded atomic output,
+   so the final hosted run can report the immutable claim record even when the spine succeeds. That
+   run occurs after review/simplification/guardrails and must have the same SHA as the PR head. Its
+   exact queue target and immutable claim record must agree, and its retained provider records must
+   name that job and System and pair each mapped stage's start/completion in order through
+   `define-start`.
    Missing, inconsistent, or off-target provider evidence rejects the proof even if the spine is
    green. The System must reach `ready` and pass
    `tests/integration/test_live_stack.py::test_ppc64le_guest_is_ssh_reachable_over_the_wire`.

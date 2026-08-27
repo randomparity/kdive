@@ -101,7 +101,7 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
         "_link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python" in source
     )
     ownership = "chown -R root:root /opt/kdive-live-worker-lifecycle"
-    harden = "chmod -R -P go-w /opt/kdive-live-worker-lifecycle"
+    harden = "_harden_runtime_tree /opt/kdive-live-worker-lifecycle"
     assert "if [[ -L /opt/kdive-live-worker-lifecycle ]]" in source
     assert source.index(ownership) < source.index(harden)
     assert "getent group kvm >/dev/null" in source
@@ -129,6 +129,36 @@ _prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(parent.stat().st_mode) == 0o755
     assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
+
+
+def test_installer_hardens_runtime_tree_without_following_symlinks(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    nested = runtime_root / "nested"
+    nested.mkdir(parents=True)
+    installed = nested / "installed.py"
+    installed.write_text("installed", encoding="utf-8")
+    external = tmp_path / "external"
+    external.write_text("external", encoding="utf-8")
+    (nested / "external-link").symlink_to(external)
+    for path in (runtime_root, nested, installed, external):
+        path.chmod(0o777)
+
+    command = r"""
+source "$1"
+_harden_runtime_tree "$2"
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(runtime_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o755
+    assert stat.S_IMODE(installed.stat().st_mode) == 0o755
+    assert stat.S_IMODE(external.stat().st_mode) == 0o777
 
 
 def test_installer_reports_socket_activation_failure_context() -> None:

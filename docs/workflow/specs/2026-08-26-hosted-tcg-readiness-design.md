@@ -147,27 +147,30 @@ root:root mode `0755` and verifier success.
    timeouts, and queries exactly the named provision job whose internally generated,
    `SystemPayload`-validated `payload.system_id` equals the named System. It does not filter on
    System state, so `ready`/`succeeded` remains visible. Zero or multiple matches, a job/System
-   mismatch, malformed target data, or an unavailable query is nonzero. The one row uses a fixed
-   literal-tab-separated header and explicit `NONE` values.
+   mismatch, malformed target data, or an unavailable query is nonzero. Before output, every value
+   is checked against a finite state set, numeric range, fixed worker grammar, bounded lane grammar,
+   or timezone-aware timestamp grammar. The complete fixed header-plus-row payload is byte-bounded
+   and built before stdout; any invalid value produces one fixed error code with no partial row.
 3. `.github/workflows/live.yml` gives the hosted TCG spine a workflow-temporary target path,
    invokes the script in an `if: always()` step, then captures the bounded fixed-worker journal on
    every TCG outcome before cleanup. Both captures use `::stop-commands::` shields and exit zero, so
    evidence never replaces the spine verdict. GNU
    `timeout --signal=TERM --kill-after=2s 12s` bounds the whole queue diagnostic, not only SQL; its
    output is either the fixed header plus one row or one sanitized fixed-code error line of at most
-   100 bytes. The existing 55-minute/400-line journal bound retains immutable claim timing and
-   provider stages on both green and red proofs.
+   100 bytes. The journal filter reads binary input with a 4096-byte record ceiling, 400-record
+   ceiling, 256-KiB total ceiling, bounded field grammars, and a bounded atomic output buffer. It
+   retains immutable claim timing and provider stages on both green and red proofs.
 4. `src/kdive/jobs/worker.py` emits one startup line naming worker id and accepted lanes. For
    `JobKind.PROVISION`, it copies job id, persisted lane, attempt, enqueue time, initial dequeue
    `claim_at`, and non-negative queue delay immediately after `dequeue`, then emits the immutable
    line only after the dequeue transaction commits. A rollback or telemetry failure before
    connection-context exit emits no claim line.
 5. `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` emits start and completion around
-   guest-architecture resolution, rootfs materialization, baseline preparation, overlay preparation,
-   the `render-domain` interval covering gdb/SSH port reuse and `render_domain_xml`, the whole
-   overlay-customizer loop, console preparation, and domain definition/start. An exception
-   deliberately leaves the stage start unmatched. No profile, XML, path, credential, or guest output
-   is logged.
+   guest-architecture resolution, the pre-existing-artifact snapshot, rootfs materialization,
+   baseline preparation, overlay preparation, the `render-domain` interval covering gdb/SSH port
+   reuse and `render_domain_xml`, the whole overlay-customizer loop, console preparation, and domain
+   definition/start. An exception deliberately leaves the stage start unmatched. No profile, XML,
+   path, credential, or guest output is logged.
 6. `src/kdive/jobs/capture_operations/bootstrap_elf.py` treats a syntax-valid address-only loader
    entry as an unnamed kernel vDSO. The entry contributes no file to the attested closure; malformed
    addresses, unresolved dependencies, non-absolute file mappings, and other off-grammar output

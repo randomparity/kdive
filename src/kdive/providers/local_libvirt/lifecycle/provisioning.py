@@ -310,7 +310,8 @@ class LocalLibvirtProvisioning:
         # Snapshot which host artifacts pre-exist BEFORE materializing anything, so a failure after
         # materialization reclaims only what THIS call creates (ADR-0435): a pre-existing overlay,
         # baseline dir, or staged uploaded rootfs may back a live or recoverable prior attempt.
-        pre_existing = self._snapshot_pre_existing(system_id)
+        with _provision_stage(system_id, job_id, "snapshot-pre-existing"):
+            pre_existing = self._snapshot_pre_existing(system_id)
         # Each flag flips to "this call created it" immediately BEFORE its creating step, so a
         # failure reclaims exactly the artifacts whose creation was reached (never a step we never
         # got to, never a pre-existing artifact) — ADR-0435. The uploaded rootfs base is a shared,

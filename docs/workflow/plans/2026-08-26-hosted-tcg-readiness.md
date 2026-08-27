@@ -113,6 +113,7 @@ execution progress. No public API or schema changes.
   `local-libvirt provision system=<id> job=<id-or-NONE> stage=<stage> event=<start|complete>`.
   Exact spans and exception semantics:
   - `resolve-arch`: `_resolve_guest_arch(profile.arch)`;
+  - `snapshot-pre-existing`: `_snapshot_pre_existing(system_id)`;
   - `materialize-rootfs`: `_materialize_rootfs(...)`;
   - `prepare-baseline`: `_prepare_baseline_kernel(...)`;
   - `prepare-overlay`: `self._files.prepare_overlay(...)`;
@@ -297,8 +298,11 @@ attestation regressions reject a path-bearing output.
 
 1. Run the focused readiness-filter, manifest installer, workflow-shape, worker transaction,
    provider, and live-stack tests. Require the real rollback regression to leave the provision job
-   queued and emit no journal claim, and require the diagnostic/attestation tests to expose only
-   fixed component/reason/numeric fields. Expected: pass.
+   queued and emit no journal claim; require the queue TSV to reject every non-allowlisted value
+   before writing; require the journal filter to enforce per-record, record-count, total-input, and
+   output bounds; require GNU runtime hardening to skip symlink targets; require all nine provider
+   stages including `snapshot-pre-existing`; and require diagnostic/attestation output to expose
+   only fixed component/reason/numeric fields. Expected: pass.
 2. Run a fresh scope audit against the current ADR/spec/plan. Expected: approve with the issue's
    complete candidate surface.
 3. Generate the immutable whole-branch package for the full merge-base-to-HEAD range and obtain the

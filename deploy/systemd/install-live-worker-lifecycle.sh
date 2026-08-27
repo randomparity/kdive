@@ -454,6 +454,16 @@ _prepare_attested_runtime_root() {
   install -d -o "$owner" -g "$group" -m 0755 -- "$runtime_root"
 }
 
+_harden_runtime_tree() {
+  local runtime_root="$1"
+  if [[ ! -d $runtime_root || -L $runtime_root ]]; then
+    echo "refusing non-directory lifecycle runtime root" >&2
+    return 1
+  fi
+  find -P "$runtime_root" -xdev \( -type f -o -type d \) -exec chmod go-w -- {} +
+  chmod 0755 -- "$runtime_root"
+}
+
 _prepare_source_link() {
   local source_root="$1" install_link="$2"
   if [[ -L $install_link ]] &&
@@ -621,12 +631,7 @@ uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/k
 _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
 # The readiness attestation rejects any replaceable ancestor, independent of the invoking umask.
-if [[ -L /opt/kdive-live-worker-lifecycle ]]; then
-  echo "refusing symlinked lifecycle runtime root" >&2
-  exit 1
-fi
-chmod -R -P go-w /opt/kdive-live-worker-lifecycle
-chmod 0755 /opt/kdive-live-worker-lifecycle
+_harden_runtime_tree /opt/kdive-live-worker-lifecycle
 
 revision_temp="$(mktemp /opt/kdive-live-worker-lifecycle/.revision.XXXXXX)"
 git -C "$source_root" rev-parse HEAD >"$revision_temp"

@@ -115,6 +115,7 @@ _PAYLOAD_SENTINEL = "PAYLOAD_SENTINEL"
 _AUTHORIZING_SENTINEL = "AUTHORIZING_SENTINEL"
 _PROVISION_STAGES = (
     "resolve-arch",
+    "snapshot-pre-existing",
     "materialize-rootfs",
     "prepare-baseline",
     "prepare-overlay",
@@ -362,8 +363,10 @@ def _configured_provisioner(
     instance._gdb_port_for = lambda _system_id: 1234
     instance._ssh_port_for = lambda _system_id: 22000
     instance._define_and_start = _provision_operation(failing_stage, "define-start", None)
-    instance._snapshot_pre_existing = lambda _system_id: SimpleNamespace(
-        overlay=False, baseline=False
+    instance._snapshot_pre_existing = _provision_operation(
+        failing_stage,
+        "snapshot-pre-existing",
+        SimpleNamespace(overlay=False, baseline=False),
     )
     instance._reclaim_materialized_on_failure = lambda *_args, **_kwargs: None
     monkeypatch.setattr(
