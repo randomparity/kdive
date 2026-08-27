@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 
 from kdive.__main__ import build_parser
+from kdive.cli import rootfs_commands as command
+from kdive.cli.rootfs_commands import run_build_fs, run_stage_volume
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.images.rootfs import command
-from kdive.images.rootfs.command import run_build_fs, run_stage_volume
 
 
 def _patch_plane(
@@ -25,7 +25,7 @@ def _patch_plane(
             return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
     monkeypatch.setattr(
-        "kdive.images.rootfs.command._build_local_rootfs_plane",
+        "kdive.cli.rootfs_commands._build_local_rootfs_plane",
         lambda _workspace: _FakePlane(),
     )
 
@@ -70,7 +70,7 @@ def test_build_fs_image_derives_local_rootfs_dest(
     _patch_plane(monkeypatch, produced, [])
     seen_dest: list[Path] = []
     monkeypatch.setattr(
-        "kdive.images.rootfs.command._publish_rootfs",
+        "kdive.cli.rootfs_commands._publish_rootfs",
         lambda _output, dest: seen_dest.append(dest),
     )
     args = build_parser().parse_args(
@@ -188,7 +188,7 @@ def _patch_plane_provenance(
             )
 
     monkeypatch.setattr(
-        "kdive.images.rootfs.command._build_local_rootfs_plane",
+        "kdive.cli.rootfs_commands._build_local_rootfs_plane",
         lambda _workspace: _FakePlane(),
     )
 
@@ -241,7 +241,7 @@ def test_build_fs_sidecar_write_failure_is_advisory(
     def _boom(_qcow2: Path, *, provenance: dict[str, object]) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("kdive.images.rootfs.command.write_sidecar", _boom)
+    monkeypatch.setattr("kdive.cli.rootfs_commands.write_sidecar", _boom)
     args = build_parser().parse_args(
         [
             "build-fs",
@@ -303,7 +303,7 @@ def _patch_plane_config(
             )
 
     monkeypatch.setattr(
-        "kdive.images.rootfs.command._build_local_rootfs_plane",
+        "kdive.cli.rootfs_commands._build_local_rootfs_plane",
         lambda _workspace: _FakePlane(),
     )
 
@@ -368,7 +368,7 @@ def test_build_fs_config_sibling_write_failure_is_advisory(
     def _boom(_qcow2: Path, *, config: bytes) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("kdive.images.rootfs.command.write_config_sibling", _boom)
+    monkeypatch.setattr("kdive.cli.rootfs_commands.write_config_sibling", _boom)
     with caplog.at_level(logging.WARNING):
         run_build_fs(_build_fs_args(tmp_path, dest))  # does not raise
     assert dest.exists()
