@@ -85,10 +85,20 @@ DEFAULT_ACCEPTED_LANES: tuple[str, ...] = tuple(sorted(_routed_lanes()))
 """Every lane a job kind routes to — the safe default, since a lane with no consumer starves."""
 
 
-def _log_provision_claim(worker_id: str, job: Job) -> None:
-    """Log the immutable initial claim boundary for provision jobs only."""
+@dataclass(frozen=True)
+class _ProvisionClaim:
+    job_id: UUID
+    lane: str
+    attempt: int
+    enqueued_at: str
+    claim_at: str
+    queue_delay_s: float
+
+
+def _capture_provision_claim(job: Job) -> _ProvisionClaim | None:
+    """Copy the initial provision dequeue fields before later row mutations."""
     if job.kind is not JobKind.PROVISION:
-        return
+        return None
     claim_at = job.heartbeat_at
     enqueued_at = job.created_at
     delay_s = (
@@ -96,16 +106,28 @@ def _log_provision_claim(worker_id: str, job: Job) -> None:
         if claim_at is not None and enqueued_at is not None
         else 0.0
     )
+    return _ProvisionClaim(
+        job_id=job.id,
+        lane=job.dispatch_lane,
+        attempt=job.attempt,
+        enqueued_at=enqueued_at.isoformat() if enqueued_at is not None else "NONE",
+        claim_at=claim_at.isoformat() if claim_at is not None else "NONE",
+        queue_delay_s=delay_s,
+    )
+
+
+def _log_provision_claim(worker_id: str, claim: _ProvisionClaim) -> None:
+    """Log a provision claim only after its dequeue transaction commits."""
     _log.info(
         "worker %s claimed provision job %s lane=%s attempt=%d enqueued_at=%s "
         "claim_at=%s queue_delay_s=%.6f",
         worker_id,
-        job.id,
-        job.dispatch_lane,
-        job.attempt,
-        enqueued_at.isoformat() if enqueued_at is not None else "NONE",
-        claim_at.isoformat() if claim_at is not None else "NONE",
-        delay_s,
+        claim.job_id,
+        claim.lane,
+        claim.attempt,
+        claim.enqueued_at,
+        claim.claim_at,
+        claim.queue_delay_s,
     )
 
 
@@ -233,6 +255,7 @@ class Worker:
         """
         if not await self._is_ready():
             return None
+        provision_claim: _ProvisionClaim | None = None
         async with self._pool.connection() as conn:
             if await queue.is_queue_paused(conn):
                 return None
@@ -245,11 +268,13 @@ class Worker:
                 accepted_lanes=single_lane,
             )
             if job is not None:
-                _log_provision_claim(self._worker_id, job)
+                provision_claim = _capture_provision_claim(job)
             if self._telemetry.enabled:
                 self._telemetry.observe_queue_depth(
                     await queue.count_claimable(conn, accepted_lanes=single_lane), lane=lane
                 )
+        if provision_claim is not None:
+            _log_provision_claim(self._worker_id, provision_claim)
         if job is None:
             return None
         if self._telemetry.enabled and job.heartbeat_at is not None and job.created_at is not None:

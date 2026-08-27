@@ -81,9 +81,11 @@ The hosted proof records the queue and execution boundaries before changing timi
    connect/statement timeouts sit inside a 12-second whole-step timeout; failures are a bounded
    fixed-code line and nonzero when the target/exact join is unavailable, empty, multiply matched,
    mismatched, or timed out.
-2. A fixed worker logs its accepted lanes at startup and, only for `JobKind.PROVISION`, logs the
-   persisted lane, queue delay, and immutable initial `claim_at`: the `heartbeat_at` returned by the
-   dequeue database call before later renewals mutate the row.
+2. A fixed worker logs its accepted lanes at startup. Only for `JobKind.PROVISION`, it copies the
+   persisted lane, queue delay, and immutable initial `claim_at` immediately after `dequeue`, then
+   publishes the claim record only after the pooled connection context exits successfully and
+   commits. A later renewal cannot alter those copied values; a dequeue rollback, including one
+   caused by the subsequent queue-depth telemetry query, emits no claim record.
 3. Local-libvirt logs start and completion around each mapped synchronous provision call without
    logging paths, profile data, domain XML, guest output, or credentials.
 4. One usable hosted run selects the source correction from the first boundary lacking its expected
@@ -109,32 +111,35 @@ The hosted proof records the queue and execution boundaries before changing timi
 7. The strict runtime-loader parser admits both named Linux vDSO mappings and glibc's address-only
    form for an unnamed kernel vDSO. The address remains syntax-checked; file-backed mappings still
    require an absolute, existing regular-file path, and every other unparseable line still fails.
-8. Fingerprint ancestor failures name only the rejected path, uid/gid, and permission bits. The
-   lifecycle installer normalizes its selected runtime installation parent and runtime root to
-   root:root mode 0755 before populating the runtime, then removes group/world write bits
-   recursively. A mode-0777 `/opt` from the hosted image can no longer invalidate the otherwise
-   root-owned runtime.
+8. Fingerprint ancestor failures keep the raw rejected path internal and expose only a fixed
+   component identifier, an allowlisted reason, and numeric uid/gid/permission bits. The lifecycle
+   installer normalizes its selected runtime installation parent and runtime root to root:root mode
+   0755 before populating the runtime, then removes group/world write bits recursively. A mode-0777
+   `/opt` from the hosted image can no longer invalidate the otherwise root-owned runtime.
 9. Manifest installation normalizes its destination parent through an
    `O_DIRECTORY|O_NOFOLLOW` descriptor to root:root mode 0755 before the atomic leaf write. The
-   hosted workflow reports only the fixed destination-parent path/uid/gid/mode and an allowlisted
-   verifier reason, then invokes `verify_capture_bootstrap_manifest` under the fixed slot-1 worker
-   identity. Producer success therefore proves the same path, identity, and verifier that gates
-   dequeue. A bounded loopback `/readyz` capture emits only the four component booleans and stays
-   before cleanup on every hosted outcome.
+   hosted workflow reports only the fixed `capture_manifest_parent` component identifier, numeric
+   uid/gid/mode, and an allowlisted verifier reason, then invokes
+   `verify_capture_bootstrap_manifest` under the fixed slot-1 worker identity. Producer success
+   therefore proves the same internal path, identity, and verifier that gates dequeue without
+   disclosing that path. A bounded loopback `/readyz` capture emits only the four component
+   booleans and stays before cleanup on every hosted outcome.
 
 The diagnostics remain after the fix so a future red hosted proof with usable captures identifies
 its own boundary.
 
 ## Consequences
 
-Ordinary successful and failed hosted runs expose persisted lane and immutable claim timing. A
-running row without a matching claim record instead localizes the dequeue-to-journal publication
-boundary and is unusable for claim-timing proof. A claimed provider stall names the last entered
-mapped call. The workflow gains one bounded local database read, and normal workers gain a few INFO
-lines per provision; no MCP contract or database schema changes. The snapshot names an unavailable,
-empty, multiply matched, mismatched, or timed-out exact-target read and exits nonzero; its workflow
-wrapper warns and preserves the spine's pre-existing verdict rather than replacing it. Such a run
-is not usable diagnosis evidence.
+Ordinary successful and failed hosted runs expose persisted lane and immutable claim timing only
+after the dequeue commit is durable. A queued row without a matching claim record remains ordinary
+pre-claim evidence; a running row without one localizes the post-commit journal-publication boundary
+and is unusable for claim-timing proof. A telemetry failure that rolls back the dequeue cannot leave
+a false claim record. A claimed provider stall names the last entered mapped call. The workflow gains
+one bounded local database read, and normal workers gain a few INFO lines per provision; no MCP
+contract or database schema changes. The snapshot names an unavailable, empty, multiply matched,
+mismatched, or timed-out exact-target read and exits nonzero; its workflow wrapper warns and
+preserves the spine's pre-existing verdict rather than replacing it. Such a run is not usable
+diagnosis evidence.
 
 The manifest build now treats glibc's address-only unnamed-vDSO entry as virtual rather than as a
 missing file dependency. Its no-path shape cannot add an unattested file to the closure; malformed
@@ -142,9 +147,9 @@ addresses and all other off-grammar loader output remain errors.
 
 Manifest installation no longer inherits its destination-parent authority from an ambient umask,
 and a root-only producer check can no longer certify a manifest the fixed worker rejects. The
-retained diagnostics expose only the fixed manifest-parent path, numeric ownership/mode, an
-allowlisted verifier reason, and readiness component booleans; they omit raw exception text, build
-identity, environment, and credentials.
+retained diagnostics expose only a fixed manifest-parent component identifier, numeric
+ownership/mode, an allowlisted verifier reason, and readiness component booleans; they omit raw
+paths, exception text, build identity, environment, and credentials.
 
 ## Considered & rejected
 

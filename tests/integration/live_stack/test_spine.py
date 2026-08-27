@@ -163,10 +163,12 @@ class _WorkerPool:
         return _WorkerConnection()
 
 
-def _contract_worker(*, telemetry: object | None = None) -> job_worker.Worker:
+def _contract_worker(
+    *, telemetry: object | None = None, pool: object | None = None
+) -> job_worker.Worker:
     registry = SimpleNamespace(get=lambda _kind: object())
     return job_worker.Worker(
-        cast(Any, _WorkerPool()),
+        cast(Any, pool if pool is not None else _WorkerPool()),
         cast(Any, registry),
         worker_id="fixed-worker-1",
         incarnation_credential=cast(Any, object()),
@@ -190,6 +192,16 @@ def test_worker_claim_captures_dequeue_record_before_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provision = _claimed_job(JobKind.PROVISION)
+
+    class _CommittedConnection(_WorkerConnection):
+        async def __aexit__(self, *_args: object) -> None:
+            provision.heartbeat_at = datetime(2026, 8, 26, 12, 30, tzinfo=UTC)
+            logging.getLogger("kdive.jobs.worker").info("claim transaction committed")
+
+    class _CommittedPool(_WorkerPool):
+        def connection(self) -> _WorkerConnection:
+            return _CommittedConnection()
+
     jobs = [provision, _claimed_job(JobKind.INSTALL)]
     claimed_lanes: list[tuple[str, ...]] = []
 
@@ -200,13 +212,14 @@ def test_worker_claim_captures_dequeue_record_before_mutation(
         claimed_lanes.append(cast(tuple[str, ...], kwargs["accepted_lanes"]))
         return jobs.pop(0)
 
-    async def mutate_after_capture(job: Job, _handler: object) -> None:
-        job.heartbeat_at = datetime(2026, 8, 26, 12, 30, tzinfo=UTC)
-
     monkeypatch.setattr(job_worker.queue, "is_queue_paused", queue_is_running)
     monkeypatch.setattr(job_worker.queue, "dequeue", dequeue)
-    worker = _contract_worker()
-    monkeypatch.setattr(worker, "_dispatch", mutate_after_capture)
+
+    async def skip_dispatch(_job: Job, _handler: object) -> None:
+        return None
+
+    worker = _contract_worker(pool=_CommittedPool())
+    monkeypatch.setattr(worker, "_dispatch", skip_dispatch)
     caplog.clear()
 
     async def run_claims() -> None:
@@ -232,9 +245,13 @@ def test_worker_claim_captures_dequeue_record_before_mutation(
     rendered = "\n".join(record.getMessage() for record in caplog.records)
     assert _PAYLOAD_SENTINEL not in rendered
     assert _AUTHORIZING_SENTINEL not in rendered
+    rendered_messages = [record.getMessage() for record in caplog.records]
+    assert rendered_messages.index("claim transaction committed") < rendered_messages.index(
+        messages[0]
+    )
 
 
-def test_worker_claim_is_logged_before_queue_depth_query(
+def test_worker_claim_is_not_logged_when_queue_depth_rolls_back_transaction(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,17 +282,7 @@ def test_worker_claim_is_logged_before_queue_depth_query(
     ):
         asyncio.run(worker.run_once("claim-loop-lane"))
 
-    messages = [
-        record.getMessage()
-        for record in caplog.records
-        if "claimed provision" in record.getMessage()
-    ]
-    assert messages == [
-        "worker fixed-worker-1 claimed provision job "
-        "11111111-1111-1111-1111-111111111111 lane=persisted-provision-lane attempt=3 "
-        "enqueued_at=2026-08-26T12:00:00+00:00 claim_at=2026-08-26T11:59:58+00:00 "
-        "queue_delay_s=0.000000"
-    ]
+    assert not [record for record in caplog.records if "claimed provision" in record.getMessage()]
 
 
 def test_provision_stage_logs_completion_only_after_success(
