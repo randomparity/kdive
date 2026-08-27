@@ -275,7 +275,10 @@ These packages are related but not interchangeable:
 
 | Package | Responsibility |
 |---|---|
-| `kdive.artifacts` | Artifact DTOs, keys, sensitivity, and upload metadata. |
+| `kdive.artifacts.storage` | Cross-cutting object-store request and result contracts. |
+| `kdive.artifacts.uploads` | Upload declarations, manifests, content addressing, reassembly, encoding, and write leases. |
+| `kdive.artifacts.catalog` | Artifact-row persistence, read models, discard, and etag repair. |
+| `kdive.artifacts.formats` | Format-specific artifact parsing, currently pcap packet counting. |
 | `kdive.store` | Object-store clients and environment-backed store assembly. |
 | `kdive.build_artifacts` | Build-output result shapes and build-id validation. |
 | `kdive.kernel_config` | Uploaded kernel-config parsing, effective-config fetch, and feature requirement gates. |
