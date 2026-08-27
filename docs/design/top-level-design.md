@@ -69,9 +69,9 @@ below. Each should become an [ADR](../adr/) before implementation.
         └───────────┬──────────────┘    │  runs, reservations,         │
                     ▼                    │  accounting ledger, audit    │
         ┌──────────────────────────┐    └──────────────────────────────┘
-        │   Worker tier (pools)     │    ┌──────────────────────────────┐
+        │   Generic worker fleet    │    ┌──────────────────────────────┐
         │  run provider operations  │───▶│  Object store (S3-compatible)│
-        │  scoped per resource class│    │  vmcores, build outputs,     │
+        │  operation dispatch lanes │    │  vmcores, build outputs,     │
         └───────────┬──────────────┘    │  console/gdb transcripts     │
                     ▼                    └──────────────────────────────┘
    providers: local-libvirt │ fault-inject │ remote-libvirt │ cloud │ baremetal-bmc │ powervm …
@@ -86,9 +86,10 @@ below. Each should become an [ADR](../adr/) before implementation.
   authenticate with scoped, on-behalf-of tokens.
 - **Thin, fast core** — owns state machines, authz, admission control; dispatches
   work and never blocks on a long provision.
-- **Worker tier** — pulls jobs from a durable queue; long-running ops are jobs
-  with pollable status. Pools are scoped per resource class so a flaky BMC pool
-  cannot starve local builds. Hard per-tenant sandboxing is deferred.
+- **Worker tier** — one generic fleet pulls jobs from a durable queue; long-running ops are jobs
+  with pollable status. Dispatch lanes separate default work from state-fenced lifecycle work.
+  Resource-class pools remain a future isolation option; production does not route or deploy
+  workers by resource class. Hard per-tenant sandboxing is deferred.
 - **Lifecycle witness** — a platform-optional, Kubernetes-specific authority process, separate
   from the server, worker, and reconciler. The shipped Helm chart always deploys it as a fourth
   singleton control-plane workload; the reference Compose deployment instead uses an operator-run
