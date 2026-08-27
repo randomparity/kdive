@@ -39,7 +39,7 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import (
 )
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
@@ -196,7 +196,7 @@ def test_build_runtime_wires_each_port_to_its_remote_adapter() -> None:
     assert runtime.booter is runtime.installer
     assert isinstance(runtime.connector, RemoteLibvirtConnect)
     assert isinstance(runtime.controller, RemoteLibvirtControl)
-    assert isinstance(runtime.retriever, RemoteLibvirtRetriever)
+    assert isinstance(runtime.retriever, RemoteLibvirtRetrieve)
     assert isinstance(runtime.crash_postmortem, CrashPostmortemAdapter)
     assert runtime.crash_postmortem is not runtime.retriever
     assert isinstance(runtime.vmcore_introspector, RemoteLibvirtVmcoreIntrospect)

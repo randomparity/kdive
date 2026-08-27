@@ -43,7 +43,7 @@ from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_en
 from kdive.store.objectstore import object_store_from_env
 
 
-class RemoteLibvirtRetriever:
+class RemoteLibvirtRetrieve:
     """The realized remote `Retriever` port for kdump and host_dump capture."""
 
     def __init__(
@@ -98,7 +98,7 @@ class RemoteLibvirtRetriever:
         secret_registry: SecretRegistry,
         store: StorePort,
         config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
-    ) -> RemoteLibvirtRetriever:
+    ) -> RemoteLibvirtRetrieve:
         """Build from the shared worker env; opens no connection and mints no URL here."""
         return cls(
             secret_registry=secret_registry,
@@ -124,5 +124,5 @@ class RemoteLibvirtRetriever:
 
 
 __all__ = [
-    "RemoteLibvirtRetriever",
+    "RemoteLibvirtRetrieve",
 ]

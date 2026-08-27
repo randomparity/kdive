@@ -89,7 +89,7 @@ from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraRea
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
@@ -400,7 +400,7 @@ def build_runtime(
     installer = RemoteLibvirtInstall.from_env(
         secret_registry=secret_registry, store=store, config_factory=config_factory
     )
-    retriever = RemoteLibvirtRetriever.from_env(
+    retriever = RemoteLibvirtRetrieve.from_env(
         secret_registry=secret_registry, store=store, config_factory=config_factory
     )
     crash_postmortem = CrashPostmortemAdapter(

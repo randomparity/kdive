@@ -45,7 +45,7 @@ from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstal
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
@@ -1066,7 +1066,7 @@ def test_remote_runtime_has_real_control_and_retrieve() -> None:
 
     assert isinstance(runtime.profile_policy, RemoteLibvirtProfilePolicy)
     assert isinstance(runtime.controller, RemoteLibvirtControl)
-    assert isinstance(runtime.retriever, RemoteLibvirtRetriever)
+    assert isinstance(runtime.retriever, RemoteLibvirtRetrieve)
     assert isinstance(runtime.crash_postmortem, CrashPostmortemAdapter)
     assert runtime.crash_postmortem is not runtime.retriever
 

@@ -19,7 +19,7 @@ from kdive.providers.ports.retrieve import (
 from kdive.providers.remote_libvirt.retrieve import postmortem
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import HostDumpCapturer
 from kdive.providers.remote_libvirt.retrieve.kdump_capture import KdumpCapturer
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -46,7 +46,7 @@ def test_retriever_dispatches_supported_capture_methods() -> None:
     system_id = UUID("00000000-0000-0000-0000-00000000faca")
     kdump = _Capturer("kdump")
     host_dump = _Capturer("host")
-    retrieve = RemoteLibvirtRetriever(
+    retrieve = RemoteLibvirtRetrieve(
         secret_registry=SecretRegistry(),
         kdump_capturer=cast(KdumpCapturer, kdump),
         host_dump_capturer=cast(HostDumpCapturer, host_dump),
@@ -60,7 +60,7 @@ def test_retriever_dispatches_supported_capture_methods() -> None:
 
 
 def test_retriever_rejects_unsupported_capture_method() -> None:
-    retrieve = RemoteLibvirtRetriever(
+    retrieve = RemoteLibvirtRetrieve(
         secret_registry=SecretRegistry(),
         kdump_capturer=cast(KdumpCapturer, _Capturer("kdump")),
         host_dump_capturer=cast(HostDumpCapturer, _Capturer("host")),

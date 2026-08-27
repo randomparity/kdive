@@ -1,4 +1,4 @@
-"""RemoteLibvirtRetriever tests — injected agent/store/opener, no host or S3."""
+"""RemoteLibvirtRetrieve tests — injected agent/store/opener, no host or S3."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_READINESS_POLL_S,
     KdumpCapturer,
 )
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
+from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import STORE_MTIME
@@ -127,7 +127,7 @@ def _retrieve(
     tmp_path: Path,
     *,
     readiness_timeout_s: float = 300.0,
-) -> RemoteLibvirtRetriever:
+) -> RemoteLibvirtRetrieve:
     conn = FakeControlConn({_domain_name(): FakeDomain(_domain_name())})
     kdump = KdumpCapturer(
         secret_registry=SecretRegistry(),
@@ -144,7 +144,7 @@ def _retrieve(
         sleep=lambda _s: None,
         monotonic=lambda: 0.0,
     )
-    return RemoteLibvirtRetriever(
+    return RemoteLibvirtRetrieve(
         secret_registry=SecretRegistry(),
         config_factory=_config,
         store_factory=lambda: store,
