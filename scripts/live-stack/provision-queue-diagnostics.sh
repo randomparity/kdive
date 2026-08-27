@@ -21,6 +21,8 @@ exec "$python" - <<'PY'
 from __future__ import annotations
 
 import os
+import re
+from datetime import datetime
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -70,17 +72,83 @@ except (KeyError, psycopg.Error):
 if len(rows) != 1:
     fail("target-mismatch", 6)
 
-
-def render(value: object | None) -> str:
-    if value is None:
-        return "NONE"
-    isoformat = getattr(value, "isoformat", None)
-    return str(isoformat()) if callable(isoformat) else str(value)
-
-
-print(
+_SYSTEM_STATES = frozenset(
+    {
+        "provisioning",
+        "ready",
+        "reprovisioning",
+        "restoring",
+        "paused",
+        "crashing",
+        "crashed",
+        "torn_down",
+        "failed",
+    }
+)
+_JOB_STATES = frozenset({"queued", "running", "succeeded", "failed", "canceled"})
+_LANE = re.compile(r"[a-z][a-z0-9-]{0,62}")
+_WORKER = re.compile(
+    r"local-systemd:kdive-live-worker@[1-8]\.service:[0-9a-f]{32}"
+)
+_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{1,6})?[+-][0-9]{2}:[0-9]{2}"
+)
+_HEADER = (
     "system_id\tsystem_state\tjob_id\tdispatch_lane\tjob_state\tattempt\tworker_id\t"
     "enqueued_at\tlast_heartbeat_at\tlease_expires_at"
 )
-print("\t".join(render(value) for value in rows[0]))
+_MAX_OUTPUT_BYTES = 1024
+
+
+def exact_text(value: object, allowed: frozenset[str]) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError
+    return value
+
+
+def matched_text(value: object, pattern: re.Pattern[str]) -> str:
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise ValueError
+    return value
+
+
+def timestamp(value: object | None) -> str:
+    if value is None:
+        return "NONE"
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError
+    rendered = value.isoformat()
+    if _TIMESTAMP.fullmatch(rendered) is None:
+        raise ValueError
+    return rendered
+
+
+try:
+    row = rows[0]
+    if len(row) != 10 or row[0] != str(system_id) or row[2] != str(job_id):
+        raise ValueError
+    attempt = row[5]
+    if type(attempt) is not int or not 0 <= attempt <= 2_147_483_647:
+        raise ValueError
+    worker = "NONE" if row[6] is None else matched_text(row[6], _WORKER)
+    values = [
+        str(system_id),
+        exact_text(row[1], _SYSTEM_STATES),
+        str(job_id),
+        matched_text(row[3], _LANE),
+        exact_text(row[4], _JOB_STATES),
+        str(attempt),
+        worker,
+        timestamp(row[7]),
+        timestamp(row[8]),
+        timestamp(row[9]),
+    ]
+    output = f"{_HEADER}\n" + "\t".join(values) + "\n"
+    if len(output.encode("ascii")) > _MAX_OUTPUT_BYTES:
+        raise ValueError
+except (TypeError, UnicodeError, ValueError):
+    fail("result-malformed", 7)
+
+sys.stdout.write(output)
 PY
