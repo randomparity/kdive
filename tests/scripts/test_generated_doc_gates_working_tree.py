@@ -135,7 +135,7 @@ def test_config_docs_check_judges_the_working_tree_data(tmp_path: Path) -> None:
             "python",
             "-c",
             "from pathlib import Path;"
-            " from scripts.gen_config_reference import write_reference;"
+            " from scripts.generate.gen_config_reference import write_reference;"
             f" write_reference(Path({str(stale_render)!r}))",
         ],
         capture_output=True,

@@ -78,7 +78,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e
-          uv run python scripts/check_mcp_spec_version.py --upstream
+          uv run python scripts/guards/check_mcp_spec_version.py --upstream
           echo "exit_code=$?" >> "${GITHUB_OUTPUT}"
 
 

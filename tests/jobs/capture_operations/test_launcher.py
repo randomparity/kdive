@@ -27,7 +27,7 @@ from kdive.jobs.capture_operations.repository import CaptureOperation
 from kdive.providers.ports.traffic import LocalCaptureConfiguration
 
 _ROOT = Path(__file__).parents[3]
-_MANIFEST_BUILDER = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+_MANIFEST_BUILDER = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.py"
 
 
 def _request() -> CaptureRequest:

@@ -76,7 +76,7 @@ repos:
         # paths, so a commit that only DELETES a migration matches nothing here. The gate
         # is the lint-type-test job's step, which runs the same script against the PR's
         # base commit; that is also why this hook is SKIPped in the CI pre-commit job.
-        entry: python3 scripts/schema_immutable_guard.py
+        entry: python3 scripts/guards/schema_immutable_guard.py
         language: system
         files: ^src/kdive/db/schema/.*\.sql$
         pass_filenames: false

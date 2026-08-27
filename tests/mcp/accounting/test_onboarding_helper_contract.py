@@ -1,6 +1,6 @@
 """Contract test: the real onboarding helper against the live accounting.* tools.
 
-``scripts/kdive_set_accounting.py`` carries hard-coded tool names and parameter shapes
+``scripts/operations/kdive_set_accounting.py`` carries hard-coded tool names and parameter shapes
 (``build_calls``); every other test for it stubs the transport, so those literals are only
 ever asserted against themselves. This drives the *real* helper through the in-memory
 ``build_app`` so a rename of ``accounting.set_quota`` (or one of its params) breaks CI here
@@ -18,7 +18,7 @@ from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
-import scripts.kdive_set_accounting as acct
+import scripts.operations.kdive_set_accounting as acct
 from kdive.db.repositories import BUDGETS, QUOTAS
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.tools.accounting import admin as accounting_admin

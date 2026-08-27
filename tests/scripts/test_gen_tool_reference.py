@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import scripts.gen_tool_reference as gen_tool_reference
-from scripts.gen_tool_reference import ToolDoc, render_namespace, tool_docs
+import scripts.generate.gen_tool_reference as gen_tool_reference
+from scripts.generate.gen_tool_reference import ToolDoc, render_namespace, tool_docs
 
 
 @dataclass

@@ -20,7 +20,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
+REPO_ROOT="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 
 # fastmcp lives in the project venv, not the system python3. Prefer the repo's .venv when present
 # (in-repo dev loop needs no env var), honor a KDIVE_PYTHON override (e.g. /opt/kdive/.venv/bin/python
@@ -52,10 +52,10 @@ main() {
 
   local token="${KDIVE_TOKEN:-}"
   if [[ -z "${token}" ]]; then
-    token="$("${SCRIPT_DIR}/demo-token.sh")"
+    token="$("${REPO_ROOT}/scripts/demo-token.sh")"
   fi
 
-  (cd "${REPO_ROOT}" && KDIVE_TOKEN="${token}" "${PY}" -m scripts.kdive_set_accounting \
+  (cd "${REPO_ROOT}" && KDIVE_TOKEN="${token}" "${PY}" -m scripts.operations.kdive_set_accounting \
     --base "${KDIVE_MCP_BASE}" \
     --project "${PROJECT}" \
     --limit-kcu "${LIMIT_KCU}" \

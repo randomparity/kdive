@@ -1,5 +1,5 @@
 # tests/scripts/test_check_remote_libvirt.py
-"""Behavioral tests for scripts/check-remote-libvirt.sh.
+"""Behavioral tests for scripts/operations/check-remote-libvirt.sh.
 
 ssh / virsh are PATH-stubbed; TLS PKI and staged guest-helper checks use directory
 overrides so the pre-deploy (no provisioned guest) path runs without real infra.
@@ -12,7 +12,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-remote-libvirt.sh"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "operations" / "check-remote-libvirt.sh"
 BASH = shutil.which("bash")
 
 

@@ -31,9 +31,9 @@ from kdive.config.core_settings import MAX_UPLOAD_BYTES
 from kdive.mcp import MCP_PROTOCOL_VERSION
 from kdive.mcp.tools._common import DEFAULT_WAIT_S
 from kdive.mcp.tools.catalog.artifacts.uploads import SINGLE_PUT_MAX_BYTES
-from scripts.gen_tool_reference import _registry_tools
+from scripts.generate.gen_tool_reference import _registry_tools
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _GIB = 1024 * 1024 * 1024
 
 

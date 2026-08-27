@@ -31,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _ADR_DIR = _ROOT / "docs" / "adr"
 _SRC = _ROOT / "src"
 _TESTS = _ROOT / "tests"

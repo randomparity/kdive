@@ -29,7 +29,7 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from kdive.profiles.build import BuildProfile
 from kdive.security.secrets.secret_registry import SecretRegistry
-from scripts.gen_tool_reference import (
+from scripts.generate.gen_tool_reference import (
     _BUILD_PROFILE_EXAMPLES,
     _MAX_SCHEMA_DEPTH,
     _is_structured,

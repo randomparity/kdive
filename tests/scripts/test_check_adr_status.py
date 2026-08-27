@@ -1,4 +1,4 @@
-"""Behavioral tests for scripts/check_adr_status.py."""
+"""Behavioral tests for scripts/guards/check_adr_status.py."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-import scripts.check_adr_status as guard
+import scripts.guards.check_adr_status as guard
 
 
 def _point_guard_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:

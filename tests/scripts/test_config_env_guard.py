@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.config_env_guard import find_violations
+from scripts.guards.config_env_guard import find_violations
 
 
 def _vars(hits) -> set[str | None]:

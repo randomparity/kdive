@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from kdive.mcp.resources.registrar import DOC_RESOURCES
-from scripts import gen_doc_resources
+from scripts.generate import gen_doc_resources
 
 
 def test_write_copies_allowlisted_sources_to_content_dir(tmp_path: Path) -> None:

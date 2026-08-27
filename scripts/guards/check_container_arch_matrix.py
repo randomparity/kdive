@@ -21,8 +21,9 @@ per-handling-token obligation on every matrix row:
 Compose is parsed with ``yaml.safe_load`` (PyYAML is a hard dependency), which resolves the
 file's anchors, merge keys, and block scalars; the guard reads only the ``services`` mapping.
 The matrix is the ``<!-- arch-matrix:begin -->`` … ``<!-- arch-matrix:end -->`` block in the
-ADR, parsed as a Markdown table. Run via ``uv run python scripts/check_container_arch_matrix.py``
-(``just container-arch-check``). Exit 0 clean, 1 on any violation or a malformed matrix.
+ADR, parsed as a Markdown table. Run via
+``uv run python scripts/guards/check_container_arch_matrix.py`` (``just container-arch-check``).
+Exit 0 clean, 1 on any violation or a malformed matrix.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from pathlib import Path
 
 import yaml
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = _ROOT / "docker-compose.yml"
 ADR_PATH = _ROOT / "docs" / "adr" / "0356-cross-platform-dev-containers.md"
 

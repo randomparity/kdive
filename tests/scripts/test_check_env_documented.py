@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.check_env_documented import (
+from scripts.guards.check_env_documented import (
     _NOT_ENV,
     documented_names,
     find_undocumented,
@@ -16,7 +16,7 @@ from scripts.check_env_documented import (
 
 def test_tree_is_clean() -> None:
     """The committed tree has no undocumented KDIVE_* tokens (the gate CI enforces)."""
-    from scripts.check_env_documented import _scan_files
+    from scripts.guards.check_env_documented import _scan_files
 
     assert find_undocumented(_scan_files(), documented_names()) == []
 
@@ -80,8 +80,8 @@ def test_unreadable_scanned_file_fails_with_path_and_exception(
             raise PermissionError("denied")
         return original_read_text(path, encoding=encoding, errors=errors, newline=newline)
 
-    monkeypatch.setattr("scripts.check_env_documented._ROOT", tmp_path)
-    monkeypatch.setattr("scripts.check_env_documented._SCAN_DIRS", ("src",))
+    monkeypatch.setattr("scripts.guards.check_env_documented._ROOT", tmp_path)
+    monkeypatch.setattr("scripts.guards.check_env_documented._SCAN_DIRS", ("src",))
     monkeypatch.setattr(Path, "read_text", fail_for_probe)
 
     assert main() == 1

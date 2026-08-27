@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from kdive.config.external_env import ExternalEnvVar
 from kdive.config.registry import Setting
-from scripts.gen_config_reference import render, render_external
+from scripts.generate.gen_config_reference import render, render_external
 
 
 def _str(raw: str) -> str:

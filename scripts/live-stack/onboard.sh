@@ -50,7 +50,7 @@ MAX_SYS="${KDIVE_MAX_SYS:-4}"
 banner() { printf '\n=== %s ===\n' "$1"; }
 
 banner "preflight (advisory)"
-if ! "${repo_root}/scripts/check-local-libvirt.sh"; then
+if ! "${repo_root}/scripts/operations/check-local-libvirt.sh"; then
   echo "WARN: local-libvirt preflight reported problems; funding the project anyway." >&2
   echo "      A later 'no schedulable resource' denial is provider readiness, not funding." >&2
 fi

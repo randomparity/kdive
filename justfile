@@ -25,13 +25,13 @@ setup: check-deps sync build-capture-bootstrap-manifest install-hooks
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
 build-capture-bootstrap-manifest interpreter=".venv/bin/python" output="build/capture-bootstrap-manifest.json":
-    {{interpreter}} scripts/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
-    {{interpreter}} scripts/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
+    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
+    {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
 
 # Privileged operator action. The script requires euid 0, installs atomically as root:root mode
 # 0644, and verifies byte identity with the already-staged manifest.
 install-capture-bootstrap-manifest staged="build/capture-bootstrap-manifest.json" destination="/usr/share/kdive/capture-bootstrap-manifest.json":
-    .venv/bin/python scripts/build-capture-bootstrap-manifest.py install --staged {{staged}} --destination {{destination}}
+    .venv/bin/python scripts/generate/build-capture-bootstrap-manifest.py install --staged {{staged}} --destination {{destination}}
 
 # Report missing host packages with distro-specific install hints. Report-only in CI / when piped;
 # at an interactive terminal it offers a [y/N] install per tier (pass -y to install unattended).
@@ -40,11 +40,11 @@ check-deps:
 
 # Preflight: can this host run the local-libvirt provider? (report-only)
 check-local-libvirt:
-    ./scripts/check-local-libvirt.sh
+    ./scripts/operations/check-local-libvirt.sh
 
 # Onboard the local-libvirt demo project (preflight + seed budget/quota). See #497.
 setup-local-libvirt:
-    ./scripts/setup-local-libvirt.sh
+    ./scripts/operations/setup-local-libvirt.sh
 
 # Fund a dev-stack project + mint a token (preflight, migrate, seed, verify; KDIVE_PROJECT=demo). See #834.
 onboard:
@@ -52,11 +52,11 @@ onboard:
 
 # Preflight: can the remote-libvirt provider reach a target host? (report-only)
 check-remote-libvirt host user="root" uri="":
-    ./scripts/check-remote-libvirt.sh {{host}} {{user}} {{uri}}
+    ./scripts/operations/check-remote-libvirt.sh {{host}} {{user}} {{uri}}
 
 # Onboard the remote-libvirt demo project (preflight + token + audited budget/quota). See #497.
 setup-remote-libvirt host user="root" uri="":
-    ./scripts/setup-remote-libvirt.sh {{host}} {{user}} {{uri}}
+    ./scripts/operations/setup-remote-libvirt.sh {{host}} {{user}} {{uri}}
 
 # Create the venv and install pinned dependencies from the lockfile.
 sync:
@@ -483,7 +483,7 @@ served-doc-links:
 # drift (docs/adr/README.md ratification rule); record shape/anti-erasure is the `records`
 # workflow (ADR-0504). Stdlib-only (plain python3, no uv sync).
 adr-status-check:
-    python3 scripts/check_adr_status.py
+    python3 scripts/guards/check_adr_status.py
 
 # Audit runtime dependencies for known vulnerabilities. The script retries only a run that
 # produced no verdict (unreachable PyPI), never a run that found something — pip-audit exits 1
@@ -552,7 +552,7 @@ release VERSION:
 
 # Regenerate the agent-facing tool reference from the live registry (mutating).
 docs:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_tool_reference.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_tool_reference.py
 
 # Verify the committed tool reference matches a fresh generation (CI gate).
 docs-check:
@@ -560,7 +560,7 @@ docs-check:
     set -euo pipefail
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -c "from scripts.gen_tool_reference import write_reference; from pathlib import Path; write_reference(Path('$tmp'))"
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -c "from scripts.generate.gen_tool_reference import write_reference; from pathlib import Path; write_reference(Path('$tmp'))"
     # config.md is generated separately (just config-docs-check); exclude it from the
     # tool-reference directory diff so the two generators can share docs/guide/reference/.
     if ! diff -ru --exclude=config.md docs/guide/reference "$tmp"; then
@@ -570,7 +570,7 @@ docs-check:
 
 # Regenerate the committed config reference from the registry (mutating).
 config-docs:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_config_reference.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_config_reference.py
 
 # Verify the committed config reference matches a fresh generation (CI gate).
 config-docs-check:
@@ -578,7 +578,7 @@ config-docs-check:
     set -euo pipefail
     tmp="$(mktemp)"
     trap 'rm -f "$tmp"' EXIT
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -c "from pathlib import Path; from scripts.gen_config_reference import write_reference; write_reference(Path('$tmp'))"
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -c "from pathlib import Path; from scripts.generate.gen_config_reference import write_reference; write_reference(Path('$tmp'))"
     if ! diff -u docs/guide/reference/config.md "$tmp"; then
         echo "config reference is stale — run 'just config-docs' and commit" >&2
         exit 1
@@ -586,49 +586,49 @@ config-docs-check:
 
 # Regenerate the packaged MCP doc-resource snapshots from canonical docs/ (ADR-0151).
 resources-docs:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_doc_resources.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_doc_resources.py
 
 # Verify the committed doc-resource snapshots match canonical docs/ (CI gate, ADR-0151).
 resources-docs-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_doc_resources.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_doc_resources.py --check
 
 # Regenerate code-derived doc constants (tool count, upload ceiling) from source (ADR-0410).
 doc-constants:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.gen_doc_constants
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.generate.gen_doc_constants
 
 # Verify code-derived doc constants match their source of truth (CI gate, ADR-0410).
 doc-constants-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.gen_doc_constants --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.generate.gen_doc_constants --check
 
 # Regenerate the role->tool visibility matrix in docs/guide/safety-and-rbac.md (#347).
 rbac-matrix:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_rbac_tool_matrix.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_rbac_tool_matrix.py
 
 # Verify the committed role->tool visibility matrix is current (also gated by `just test`).
 rbac-matrix-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_rbac_tool_matrix.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_rbac_tool_matrix.py --check
 
 # Regenerate the committed kdivectl verb descriptors from the live tool schemas (mutating, #1447).
 cli-verbs:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_cli_verbs.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_cli_verbs.py
 
 # Verify the committed kdivectl verb descriptors match a fresh generation (CI gate, #1447).
 cli-verbs-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/gen_cli_verbs.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_cli_verbs.py --check
 
 # Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
 config-guard:
-    uv run python scripts/config_env_guard.py
+    uv run python scripts/guards/config_env_guard.py
 
 # Coverage guard: every KDIVE_* token is documented (registry or external_env.py). Stdlib-only.
 env-docs-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/check_env_documented.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/guards/check_env_documented.py
 
 # Fail when the pinned mcp library no longer advertises the protocol range src/kdive/mcp
 # declares (ADR-0537). Offline by design — the upstream half runs on a weekly cron
 # (mcp-spec-drift.yml), so no PR depends on github.com being reachable.
 mcp-spec-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/check_mcp_spec_version.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/guards/check_mcp_spec_version.py
 
 # Immutability guard: no modify/delete/rename of an existing src/kdive/db/schema/*.sql
 # (only new migrations may be added). Applied migrations are byte-immutable (ADR-0015);
@@ -638,7 +638,7 @@ mcp-spec-check:
 # default origin/main is the closest stand-in. Offline by design (ADR-0505): it reads a local
 # ref, so `git fetch origin main` first. Stdlib-only (git only).
 schema-guard base_ref="origin/main":
-    python3 scripts/schema_immutable_guard.py {{base_ref}}
+    python3 scripts/guards/schema_immutable_guard.py {{base_ref}}
 
 # Ordering guard: a migration this branch adds must be numbered strictly above the highest
 # version already on origin/main. Pre-assigned numbers stop filename collisions but not
@@ -646,12 +646,12 @@ schema-guard base_ref="origin/main":
 # out of order on an existing one (#1720). Offline by design (ADR-0505): it reads the local
 # origin/main, so `git fetch origin main` first. Stdlib-only (git only).
 migration-order-check:
-    python3 scripts/migration_ordering_guard.py
+    python3 scripts/guards/migration_ordering_guard.py
 
 # Drift guard: the docker-compose image set matches the ADR-0356 arch-support matrix, and each
 # handling token meets its ppc64le obligation (ADR-0356). Parses compose via yaml.safe_load.
 container-arch-check:
-    uv run python scripts/check_container_arch_matrix.py
+    uv run python scripts/guards/check_container_arch_matrix.py
 
 # Assert the Helm chart's appVersion tracks the pyproject version (spec A3). A drift
 # would let a cut release point the chart's default image tag at a tag that was never

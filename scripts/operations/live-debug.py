@@ -7,17 +7,17 @@ testing new ``debug.*`` tools into single commands. A run-local dev tool (mirror
 The stack must already be up (``scripts/live-stack/up.sh``). Examples::
 
     # one command to a stopped gdbstub session (reuses a booted Run if one exists):
-    uv run python scripts/live-debug.py stopped --reuse
+    uv run python scripts/operations/live-debug.py stopped --reuse
     # call any tool (auto-wraps the `request` arg per the tool's own schema):
-    uv run python scripts/live-debug.py call debug.backtrace '{"session_id": "..."}'
+    uv run python scripts/operations/live-debug.py call debug.backtrace '{"session_id": "..."}'
     # raw gdb/MI transcript -- ground truth when a parser disagrees with gdb:
-    uv run python scripts/live-debug.py transcript <session_id>
+    uv run python scripts/operations/live-debug.py transcript <session_id>
     # restart ONLY the server process to load a code change (keeps the booted VM):
-    uv run python scripts/live-debug.py reload
+    uv run python scripts/operations/live-debug.py reload
     # release the System + its allocation when done:
-    uv run python scripts/live-debug.py teardown <system_id>
-    uv run python scripts/live-debug.py tools [substr]
-    uv run python scripts/live-debug.py schema <tool> [...]
+    uv run python scripts/operations/live-debug.py teardown <system_id>
+    uv run python scripts/operations/live-debug.py tools [substr]
+    uv run python scripts/operations/live-debug.py schema <tool> [...]
 
 Auth: ``KDIVE_TOKEN`` if set, else an admin token is minted for ``--project`` (default
 ``demo``) via the bundled mock OIDC issuer. Base URL: ``KDIVE_STACK_BASE_URL`` or
@@ -55,7 +55,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_index import NAMESPACE_TOC
 from kdive.mcp.tools.gateway import _SEARCH_LIMIT_MAX
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_URL = os.environ.get("KDIVE_STACK_BASE_URL", "http://127.0.0.1:8000/mcp")
 DEBUG_DIR = Path(os.environ.get("KDIVE_DEBUG_DIR", "/var/lib/kdive/debug"))
 # The built kernel tree the combined upload tar is cut from (bzImage + its module tree). Defaults

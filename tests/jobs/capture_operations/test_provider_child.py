@@ -31,7 +31,7 @@ _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
 _PRIVATE_PROVIDER_VALUE = b"qemu+tls://secret-host/system"
 _PRIVATE_PROVIDER_DETAILS = b"provider-private-detail-marker"
 _ROOT = Path(__file__).parents[3]
-_MANIFEST_BUILDER = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+_MANIFEST_BUILDER = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.py"
 
 
 def _request(provider_kind: str = "local-libvirt") -> CaptureRequest:

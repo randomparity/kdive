@@ -41,7 +41,7 @@ ln -f -- "$KDIVE_LIVE_VM_ROOTFS" "$staged_rootfs" 2>/dev/null ||
   die "cannot stage the warm rootfs into the provider root ${rootfs_dir}"
 
 # 2. allocate -> provision (from the warm rootfs) -> poll systems.get until ready -> print the id.
-#    Uses the shipped kdive.mcp.dev_harness LiveStackClient (the client scripts/live-debug.py drives),
+#    Uses the shipped kdive.mcp.dev_harness LiveStackClient (the client scripts/operations/live-debug.py drives),
 #    following the spine sequence (tests/integration/live_stack/spine.py): the System id is
 #    data["system_id"] on systems.provision (object_id there is the provisioning JOB id). All progress
 #    goes to stderr; stdout is the id alone.

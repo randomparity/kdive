@@ -278,7 +278,7 @@ refresh cannot swap the artifacts out from under an in-flight domain.
 - **Idempotence:** run `playbooks/runner.yml --limit <host>` a second time on a
   converged, already-registered host — it reports **0 changed** (the host roles
   are idempotent and the `.runner` marker skips re-registration).
-- **Host contract:** `live_vm_host`'s gate runs `scripts/check-local-libvirt.sh`
+- **Host contract:** `live_vm_host`'s gate runs `scripts/operations/check-local-libvirt.sh`
   as the runner user and asserts `/boot` readability, group membership, and
   `/run/user/<uid>` (no static disk label — AppArmor's `virt-aa-helper` confines
   qemu dynamically); the play fails if the host is not ready.

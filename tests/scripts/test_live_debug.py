@@ -38,7 +38,7 @@ _TOP_RANKED_DECOY = "control.capture_traffic"
 
 def _load_live_debug() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "live_debug_script", ROOT / "scripts/live-debug.py"
+        "live_debug_script", ROOT / "scripts/operations/live-debug.py"
     )
     assert spec is not None
     assert spec.loader is not None

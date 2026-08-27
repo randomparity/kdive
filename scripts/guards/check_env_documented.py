@@ -1,6 +1,6 @@
 """Coverage guard: every ``KDIVE_*`` token in the tree is documented (config.md SoT).
 
-Companion to ``scripts/config_env_guard.py``. That guard is an *access-form* rule (no
+Companion to ``scripts/guards/config_env_guard.py``. That guard is an *access-form* rule (no
 ``os.environ`` read of a ``KDIVE_*`` key outside ``kdive.config``) and is AST-based, so it only
 sees Python. This guard is a *coverage* rule: it sweeps every file under ``src/ tests/ scripts/
 deploy/`` for ``KDIVE_[A-Z0-9_]+`` tokens — including bash, YAML, and prose an AST cannot parse —
@@ -31,7 +31,7 @@ from pathlib import Path
 from kdive.config import all_settings
 from kdive.config.external_env import external_env_names
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _SCAN_DIRS = ("src", "tests", "scripts", "deploy")
 _TOKEN = re.compile(r"KDIVE_[A-Z0-9_]+")
 

@@ -110,8 +110,8 @@ symbol-name breakpoint resolve. (Live drgn introspection â€” `introspect.run` â€
 `drgn-live` session, not a gdbstub one, so it is a separate transport; the gdbstub leg here proves
 the gdb-MI attach + symbolization.)
 
-> **Developing or testing a `debug.*` tool?** `scripts/live-debug.py` collapses this whole
-> lifecycle into one command: `uv run python scripts/live-debug.py stopped --reuse` drives a
+> **Developing or testing a `debug.*` tool?** `scripts/operations/live-debug.py` collapses this whole
+> lifecycle into one command: `uv run python scripts/operations/live-debug.py stopped --reuse` drives a
 > Run to a stopped gdbstub session and prints its `SESSION_ID` (reusing an already-booted Run
 > when present). `call <tool> '<json>'` invokes any tool, `transcript <session_id>` prints the
 > raw gdb/MI exchange (ground truth when a parser disagrees with gdb), and `reload` restarts
@@ -220,13 +220,13 @@ default. Do both once on the worker host:
      uv sync --group live
      ```
 
-4. Verify against the venv interpreter (the same probe `scripts/check-local-libvirt.sh` runs):
+4. Verify against the venv interpreter (the same probe `scripts/operations/check-local-libvirt.sh` runs):
 
    ```bash
    .venv/bin/python -c "import guestfs, drgn"
    ```
 
-   `scripts/check-local-libvirt.sh` fails with this exact fix hint when the import does not
+   `scripts/operations/check-local-libvirt.sh` fails with this exact fix hint when the import does not
    resolve. On a host-services deployment where the worker runs a venv outside the checkout, set
    `KDIVE_PYTHON=/opt/kdive/.venv/bin/python` so the preflight probes the worker's interpreter.
 
@@ -247,7 +247,7 @@ host-permission constraints a non-root worker must satisfy:
   sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install
   ```
 
-  `scripts/check-local-libvirt.sh` fails with this fix when the directory is missing or unwritable.
+  `scripts/operations/check-local-libvirt.sh` fails with this fix when the directory is missing or unwritable.
   To stage elsewhere, set `KDIVE_INSTALL_STAGING` for the worker to another world-traversable,
   worker-writable path (again, not `$HOME`).
 

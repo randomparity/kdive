@@ -259,12 +259,12 @@ jobs:
           sudo stat -Lc \
             'capture_manifest_destination_ancestor component=usr_share uid=%u gid=%g mode=%a' \
             /usr/share
-          sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py build \
+          sudo "$worker_python" scripts/generate/build-capture-bootstrap-manifest.py build \
             --interpreter "$worker_python" --source-root "$source_root" --output "$staged"
-          sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py install \
+          sudo "$worker_python" scripts/generate/build-capture-bootstrap-manifest.py install \
             --staged "$staged" \
             --destination /usr/share/kdive/capture-bootstrap-manifest.json
-          sudo "$worker_python" scripts/build-capture-bootstrap-manifest.py verify \
+          sudo "$worker_python" scripts/generate/build-capture-bootstrap-manifest.py verify \
             --interpreter "$worker_python" --source-root "$source_root" \
             --manifest /usr/share/kdive/capture-bootstrap-manifest.json
           sudo test "$(stat -Lc '%u:%g:%a' \

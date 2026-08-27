@@ -19,7 +19,7 @@ from kdive.jobs.capture_operations import bootstrap_attestation, bootstrap_elf
 from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
 
 _ROOT = Path(__file__).parents[3]
-_SCRIPT = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+_SCRIPT = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.py"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:

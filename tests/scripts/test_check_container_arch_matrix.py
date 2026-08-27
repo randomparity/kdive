@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from scripts.check_container_arch_matrix import (
+from scripts.guards.check_container_arch_matrix import (
     ADR_PATH,
     COMPOSE_PATH,
     evaluate,

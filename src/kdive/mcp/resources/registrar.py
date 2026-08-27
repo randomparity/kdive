@@ -8,7 +8,7 @@ parameterized template — so a doc named in an error string is reachable over M
 ADRs are deliberately not served (ADR-0270).
 
 The served bytes are packaged snapshots under ``_content/`` (generated from the canonical
-``docs/`` tree by ``scripts/gen_doc_resources.py`` and drift-guarded). They live inside the
+``docs/`` tree by ``scripts/generate/gen_doc_resources.py`` and drift-guarded). They live inside the
 package because the runtime image ships only ``src/``; reading the repo-root ``docs/`` tree
 at request time would return nothing in a container deploy.
 """

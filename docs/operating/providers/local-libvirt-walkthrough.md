@@ -95,7 +95,7 @@ sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console
 Check the host (report-only; it never changes anything). Point it at the venv interpreter:
 
 ```bash
-KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/check-local-libvirt.sh
+KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/operations/check-local-libvirt.sh
 ```
 
 Fix what it reports. One failure is expected to remain on most hosts and is **not** fatal for the
@@ -182,7 +182,7 @@ process and its files). Two seams require it:
 
 So a non-root worker can provision but cannot confirm a boot or capture a host_dump. This is the
 worker-privilege gap tracked in [#699](https://github.com/randomparity/kdive/issues/699);
-`scripts/check-local-libvirt.sh` now prints a non-failing advisory when it detects a non-root worker
+`scripts/operations/check-local-libvirt.sh` now prints a non-failing advisory when it detects a non-root worker
 under `qemu:///system`, so the constraint is surfaced before a run. The kdump-only note under
 [Declare your inventory](#kdump-capture-prerequisites) is one instance of this broader requirement,
 not a kdump-specific one.
@@ -203,7 +203,7 @@ A fresh database has no quota or budget, so the first `allocations.request` woul
 ```
 
 `seed-project` is the token-less bootstrap (raw inserts, no audit row). To onboard through the
-audited, role-gated admin tools instead, use `./scripts/setup-local-libvirt.sh` with
+audited, role-gated admin tools instead, use `./scripts/operations/setup-local-libvirt.sh` with
 `KDIVE_SETUP_AUDITED=1` and a project-`admin` token from a claims-asserting issuer — see
 [Project onboarding](../project-onboarding.md). (That script re-runs the Step 2 preflight and
 aborts if **any** check fails, including the kdump-only `guestfs`/`drgn` one, so prefer the direct

@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _ROOT / "src" / "kdive"
 _CONFIG_DIR = _SRC / "config"
 # Shrinking allowlist of files not yet migrated. Must reach empty before the guard gates.

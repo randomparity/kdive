@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import gen_doc_constants
+from scripts.generate import gen_doc_constants
 
 
 def test_committed_constants_in_sync(capsys: pytest.CaptureFixture[str]) -> None:

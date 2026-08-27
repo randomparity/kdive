@@ -18,7 +18,7 @@ from pathlib import Path
 
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _CONTENT_DIR = _ROOT / "src" / "kdive" / "mcp" / "resources" / "_content"
 
 
