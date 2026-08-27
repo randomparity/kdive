@@ -25,7 +25,7 @@ kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
 | Identity | implicit local user | OIDC/SSO + RBAC, with on-behalf-of agent attribution |
 | Accounting | none | metering ledger + enforced budgets/quotas (admission control) |
 | Long-running ops | inline | durable job queue + worker tier |
-| Resource scope | local x86_64 libvirt only | typed provider runtime now; multi-provider dispatch later |
+| Resource scope | local x86_64 libvirt only | typed multi-provider runtime selected by resource kind |
 
 ## Core decisions
 
@@ -43,8 +43,10 @@ below. Each should become an [ADR](../adr/) before implementation.
 7. **Metering + budgets/quotas** with an admission-control gate on allocation.
 8. **Async worker tier + durable job queue**; hard per-tenant sandboxing
    designed-for but deferred.
-9. **Typed provider runtime ports** across narrow per-plane interfaces for M0/M1; capability
-   dispatch is a future multi-provider option (ADR-0063).
+9. **Typed provider runtime ports** across narrow per-plane interfaces, with active
+   `ResourceKind`-based dispatch for local-libvirt, fault-inject, and configured remote-libvirt
+   providers; capability-registry dispatch and additional provider families remain future options
+   (ADR-0063).
 
 ## System topology
 
