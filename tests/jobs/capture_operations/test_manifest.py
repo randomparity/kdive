@@ -741,6 +741,34 @@ def test_manifest_install_rejects_untrusted_staged_leaf(tmp_path: Path, staged_k
         read_staged(staged)
 
 
+def test_manifest_install_accepts_root_built_staging_under_sudo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    read_staged = namespace["_read_staged_manifest"]
+    maximum = namespace["_MAX_MANIFEST_BYTES"]
+    payload = b'{"schema_version":1}\n'
+    expected_uids: list[int] = []
+
+    def root_owned_reader(
+        _path: Path,
+        *,
+        expected_uid: int,
+        maximum_size: int,
+    ) -> bytes:
+        assert maximum_size == maximum
+        expected_uids.append(expected_uid)
+        if expected_uid != 0:
+            raise PermissionError("capture bootstrap manifest has the wrong owner")
+        return payload
+
+    monkeypatch.setitem(read_staged.__globals__, "read_manifest", root_owned_reader)
+
+    assert read_staged(tmp_path / "staged.json", expected_uid=1234) == payload
+    assert expected_uids == [1234, 0]
+
+
 def test_manifest_install_rejects_symlinked_staged_intermediate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
