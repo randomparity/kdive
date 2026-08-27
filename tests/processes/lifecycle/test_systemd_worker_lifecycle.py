@@ -1596,6 +1596,7 @@ def test_diagnostic_loader_reads_a_real_prepared_slot_store(
 ) -> None:
     root = tmp_path / "live-workers"
     root.mkdir(mode=0o755)
+    root.chmod(0o755)
     monkeypatch.setattr(state_module.os, "geteuid", lambda: 0)
     monkeypatch.setattr(state_module.os, "fchown", lambda _fd, _uid, _gid: None)
     monkeypatch.setattr(
