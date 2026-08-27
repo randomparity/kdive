@@ -131,7 +131,7 @@ def register(
             run_id=payload.run_id,
             system_id=payload.system_id,
             project=payload.project,
-            state=payload.state.value if payload.state is not None else None,
+            state=payload.state,
             limit=payload.limit,
             cursor=payload.cursor,
         )

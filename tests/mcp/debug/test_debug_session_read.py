@@ -273,7 +273,9 @@ def test_list_sessions_returns_only_callers_sessions(migrated_url: str) -> None:
             other_sys = await _seed_system(pool, other_alloc, project="other")
             other_run = await _seed_run(pool, other_sys, project="other")
             await _seed_session(pool, other_run, DebugSessionState.LIVE, project="other")
-            resp = await sessions_read.list_sessions(pool, _ctx())
+            resp = await sessions_read.list_sessions(
+                pool, _ctx(), sessions_read.SessionsListRequest()
+            )
         ids = {item.object_id for item in resp.items}
         assert resp.data["count"] == 1
         assert ids == {mine}
@@ -285,7 +287,9 @@ def test_list_sessions_empty_membership_is_empty_collection(migrated_url: str) -
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seeded_session(pool, DebugSessionState.LIVE)
-            resp = await sessions_read.list_sessions(pool, _ctx(role=None))
+            resp = await sessions_read.list_sessions(
+                pool, _ctx(role=None), sessions_read.SessionsListRequest()
+            )
         assert resp.status == "ok" and resp.data["count"] == 0
 
     asyncio.run(_run())
@@ -335,7 +339,7 @@ def test_list_sessions_filters_by_state(migrated_url: str) -> None:
             live = await _seed_session(pool, run_a, DebugSessionState.LIVE)
             await _seed_session(pool, run_b, DebugSessionState.DETACHED)
             resp = await sessions_read.list_sessions(
-                pool, _ctx(), sessions_read.SessionsListRequest(state="live")
+                pool, _ctx(), sessions_read.SessionsListRequest(state=DebugSessionState.LIVE)
             )
         assert {item.object_id for item in resp.items} == {live}
 
@@ -425,17 +429,6 @@ def test_list_sessions_bad_cursor_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_sessions_bad_state_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await sessions_read.list_sessions(
-                pool, _ctx(), sessions_read.SessionsListRequest(state="bogus")
-            )
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
 # --- recovery flow + run/system surfacing --------------------------------------------------
 
 
@@ -445,7 +438,9 @@ def test_recovery_flow_list_get_then_active_ids(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id, run_id, sys_id = await _seeded_session(pool, DebugSessionState.LIVE)
-            listed = await sessions_read.list_sessions(pool, _ctx())
+            listed = await sessions_read.list_sessions(
+                pool, _ctx(), sessions_read.SessionsListRequest()
+            )
             recovered = listed.items[0].object_id
             assert recovered == session_id
             got = await sessions_read.get_session(pool, _ctx(), recovered)
