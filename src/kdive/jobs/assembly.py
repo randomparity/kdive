@@ -14,11 +14,11 @@ from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
-from kdive.jobs.handlers import image_build, systems
-from kdive.jobs.handlers.artifacts import vmcore
+from kdive.jobs.handlers import diagnostics, image_build, systems
+from kdive.jobs.handlers.artifacts import rootfs_reclaim, vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
-from kdive.jobs.handlers.control import control
+from kdive.jobs.handlers.control import capture_traffic, control, diagnostic_sysrq, watch_for_crash
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
@@ -124,8 +124,6 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
     )
     control.register_handlers(registry, resolver=assembly.resolver)
 
-    from kdive.jobs.handlers.control import diagnostic_sysrq
-
     diagnostic_sysrq.register_handlers(
         registry,
         resolver=assembly.resolver,
@@ -133,16 +131,12 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         artifact_store=assembly.object_stores.store,
     )
 
-    from kdive.jobs.handlers.control import capture_traffic
-
     capture_traffic.register_handlers(
         registry,
         resolver=assembly.resolver,
         artifact_store=assembly.object_stores.store,
         supervisor=assembly.capture_supervisor,
     )
-
-    from kdive.jobs.handlers.control import watch_for_crash
 
     watch_for_crash.register_handlers(
         registry,
@@ -161,10 +155,5 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         store=assembly.object_stores.store,
     )
 
-    from kdive.jobs.handlers.artifacts import rootfs_reclaim
-
     rootfs_reclaim.register_handlers(registry, artifact_store=assembly.object_stores.store)
-
-    from kdive.jobs.handlers import diagnostics
-
     diagnostics.register_handlers(registry)
