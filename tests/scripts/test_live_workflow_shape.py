@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -443,6 +444,35 @@ def test_tcg_installs_manifest_for_the_fixed_worker_before_starting_it() -> None
     assert "capture_manifest_verification status=accepted reason=none" in run
     assert "print(error)" not in run
     assert install_index < manifest_index < proof_index < spine_index
+
+
+def test_tcg_fixed_worker_verifier_sanitizes_import_failure(tmp_path: pathlib.Path) -> None:
+    package = tmp_path / "kdive" / "jobs" / "capture_operations"
+    package.mkdir(parents=True)
+    for parent in (package.parents[2], package.parents[1], package):
+        (parent / "__init__.py").write_text("", encoding="utf-8")
+    (package / "launcher.py").write_text(
+        'raise RuntimeError("import failed at /sensitive/import/path")\n',
+        encoding="utf-8",
+    )
+    _, manifest = _named_step("tcg", "Build and install fixed-worker capture manifest")
+    verifier = manifest["run"].split("\"$worker_python\" - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+    result = subprocess.run(
+        [sys.executable, "-c", verifier],
+        cwd=_ROOT,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ("capture_manifest_verification status=rejected reason=unclassified\n")
+    assert result.stderr == ""
+    assert "/sensitive/import/path" not in result.stdout
+    assert "/sensitive/import/path" not in result.stderr
 
 
 def test_tcg_job_captures_exact_provision_boundary_on_every_outcome() -> None:

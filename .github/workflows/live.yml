@@ -286,7 +286,6 @@ jobs:
           # reason code. The bounded internal exception is never printed.
           sudo --user=kdive-worker-1 --group=kdive-worker-1 \
             "$worker_python" - <<'PY'
-          from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
 
           exact_reasons = {
               "capture bootstrap fingerprint path must be an absolute file path": (
@@ -332,6 +331,9 @@ jobs:
           )
 
           try:
+              from kdive.jobs.capture_operations.launcher import (
+                  verify_capture_bootstrap_manifest,
+              )
               verify_capture_bootstrap_manifest()
           except Exception as error:
               message = str(error)
@@ -346,6 +348,7 @@ jobs:
                       "unclassified",
                   )
               print(f"capture_manifest_verification status=rejected reason={reason}")
+              raise SystemExit(1)
           else:
               print("capture_manifest_verification status=accepted reason=none")
           PY

@@ -77,4 +77,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        status = main()
+    except Exception:
+        status = 1
+    raise SystemExit(status)
