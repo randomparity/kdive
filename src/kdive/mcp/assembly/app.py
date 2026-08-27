@@ -24,15 +24,14 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
+from kdive.processes.assembly import ProcessAssembly, build_process_assembly
 from kdive.processes.lifecycle.worker_incarnation import (
     DockerWorkerDeathVerifier,
     KubernetesWorkerDeathVerifier,
     WorkerDeathVerifier,
     worker_death_verifier_from_env,
 )
-from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 
 _log = logging.getLogger(__name__)
 
@@ -41,8 +40,7 @@ def build_app(
     pool: AsyncConnectionPool,
     *,
     verifier: JWTVerifier | None = None,
-    provider_composition: ProviderComposition | None = None,
-    object_store_assembly: ObjectStoreAssembly | None = None,
+    process_assembly: ProcessAssembly | None = None,
     secret_registry: SecretRegistry,
     tracer: Tracer | None = None,
     meter: Meter | None = None,
@@ -53,9 +51,7 @@ def build_app(
     Args:
         pool: The Postgres pool the recording middlewares and tool handlers write through.
         verifier: Token verifier; defaults to the configured one.
-        provider_composition: Provider wiring; defaults to one built over ``secret_registry``.
-        object_store_assembly: Object-store wiring; defaults to the validated production store.
-            Offline schema consumers may inject wiring that they never invoke.
+        process_assembly: Shared provider/object-store wiring; defaults to production assembly.
         secret_registry: The app-owned registry redaction and providers read through.
         tracer: Span emitter for ``TelemetryMiddleware``; defaults to the process-global
             tracer. Injectable per ADR-0487 so telemetry can be observed for one app.
@@ -83,10 +79,9 @@ def build_app(
             meter=meter or metrics.get_meter("kdive.mcp"),
         )
     )
-    stores = object_store_assembly or build_object_store_assembly()
-    composition = provider_composition or ProviderComposition(
-        secret_registry=secret_registry, object_store=stores.store
-    )
+    process = process_assembly or build_process_assembly(secret_registry)
+    stores = process.object_stores
+    composition = process.providers
     resolver = composition.build_provider_resolver()
     app.add_middleware(UsageTrackingMiddleware(pool, secret_registry=composition.secret_registry))
     app.add_middleware(ToolExposureMiddleware(resolver))

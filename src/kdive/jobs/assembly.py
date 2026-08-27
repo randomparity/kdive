@@ -20,10 +20,10 @@ from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import control
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry
-from kdive.providers.assembly.composition import ProviderComposition
+from kdive.processes.assembly import ProcessAssembly, build_process_assembly
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
+from kdive.store.assembly import ObjectStoreAssembly
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,14 +41,13 @@ def build_worker_handler_assembly(
     *,
     secret_registry: SecretRegistry,
     incarnation_credential: SecretStr,
-    provider_composition: ProviderComposition | None = None,
+    process_assembly: ProcessAssembly | None = None,
     pool: AsyncConnectionPool | None = None,
 ) -> WorkerHandlerAssembly:
     """Assemble provider/store/supervision dependencies once for startup and handlers."""
-    stores = build_object_store_assembly()
-    composition = provider_composition or ProviderComposition(
-        secret_registry=secret_registry, object_store=stores.store
-    )
+    process = process_assembly or build_process_assembly(secret_registry)
+    stores = process.object_stores
+    composition = process.providers
     resolver = composition.build_provider_resolver()
     supervisor = CaptureOperationSupervisor(
         launcher=GatedCaptureLauncher(
@@ -70,7 +69,7 @@ def build_handler_registry(
     *,
     secret_registry: SecretRegistry,
     incarnation_credential: SecretStr,
-    provider_composition: ProviderComposition | None = None,
+    process_assembly: ProcessAssembly | None = None,
     pool: AsyncConnectionPool | None = None,
     assembly: WorkerHandlerAssembly | None = None,
 ) -> HandlerRegistry:
@@ -79,7 +78,7 @@ def build_handler_registry(
     resolved = assembly or build_worker_handler_assembly(
         secret_registry=secret_registry,
         incarnation_credential=incarnation_credential,
-        provider_composition=provider_composition,
+        process_assembly=process_assembly,
         pool=pool,
     )
     register_all_handlers(registry, resolved)

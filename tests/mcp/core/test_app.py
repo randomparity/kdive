@@ -25,6 +25,7 @@ from kdive.jobs.assembly import build_handler_registry
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.assembly.app import build_app
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.processes.assembly import ProcessAssembly
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -237,11 +238,12 @@ def test_build_app_uses_injected_composition_secret_registry(
     composition_registry = SecretRegistry()
     caller_registry = SecretRegistry()
     provider_composition = composition.ProviderComposition(secret_registry=composition_registry)
+    process = ProcessAssembly(ObjectStoreAssembly(cast(Any, object())), provider_composition)
 
     build_app(
         pool,
         verifier=_verifier(),
-        provider_composition=provider_composition,
+        process_assembly=process,
         secret_registry=caller_registry,
     )
 
@@ -392,7 +394,11 @@ def test_build_app_default_propagates_object_store_assembly_error(
         raise error
 
     monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
-    monkeypatch.setattr(app_module, "build_object_store_assembly", build_object_store_assembly)
+    monkeypatch.setattr(
+        app_module,
+        "build_process_assembly",
+        lambda _registry: ProcessAssembly(build_object_store_assembly(), cast(Any, object())),
+    )
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     with pytest.raises(CategorizedError) as caught:
@@ -413,7 +419,11 @@ def test_worker_registry_default_propagates_object_store_assembly_error(
         raise error
 
     monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
-    monkeypatch.setattr(handler_module, "build_object_store_assembly", build_object_store_assembly)
+    monkeypatch.setattr(
+        handler_module,
+        "build_process_assembly",
+        lambda _registry: ProcessAssembly(build_object_store_assembly(), cast(Any, object())),
+    )
 
     with pytest.raises(CategorizedError) as caught:
         build_handler_registry(
@@ -471,7 +481,9 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
     build_handler_registry(
         secret_registry=caller_registry,
         incarnation_credential=_WORKER_CREDENTIAL,
-        provider_composition=cast(Any, _FakeComposition()),
+        process_assembly=ProcessAssembly(
+            ObjectStoreAssembly(cast(Any, object())), cast(Any, _FakeComposition())
+        ),
     )
 
     assert captured["resolver"] is resolver

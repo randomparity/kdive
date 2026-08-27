@@ -74,14 +74,11 @@ async def run_reconciler_body(
     secret_registry: SecretRegistry,
     telemetry: Telemetry,
 ) -> None:
-    from kdive.providers.assembly.composition import ProviderComposition
-    from kdive.store.assembly import build_object_store_assembly
+    from kdive.processes.assembly import build_process_assembly
 
-    object_stores = build_object_store_assembly()
-    upload_store = object_stores.store
-    provider_composition = ProviderComposition(
-        secret_registry=secret_registry, object_store=upload_store
-    )
+    process = build_process_assembly(secret_registry)
+    upload_store = process.object_stores.store
+    provider_composition = process.providers
     provider_resolver = provider_composition.build_provider_resolver()
     discovery_task = asyncio.create_task(register_provider_resources(pool, provider_resolver))
     try:

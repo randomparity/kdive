@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -37,6 +37,7 @@ from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resources_tools
+from kdive.processes.assembly import ProcessAssembly
 from kdive.providers.assembly import composition
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
@@ -44,6 +45,8 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import ObjectStoreAssembly
+from kdive.store.objectstore import ObjectStore
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.systems_support import (
     fault_inject_profile,
@@ -375,10 +378,13 @@ def test_systems_provision_resolves_fault_inject_runtime(
             config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()
             provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
+            process = ProcessAssembly(
+                ObjectStoreAssembly(cast(ObjectStore, object())), provider_composition
+            )
             app = build_app(
                 pool,
                 verifier=_verifier(),
-                provider_composition=provider_composition,
+                process_assembly=process,
                 secret_registry=secret_registry,
             )
             async with Client(app) as client:
@@ -417,10 +423,13 @@ def test_debug_ops_resolve_fault_inject_runtime_through_fastmcp(
             config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()
             provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
+            process = ProcessAssembly(
+                ObjectStoreAssembly(cast(ObjectStore, object())), provider_composition
+            )
             app = build_app(
                 pool,
                 verifier=_verifier(),
-                provider_composition=provider_composition,
+                process_assembly=process,
                 secret_registry=secret_registry,
             )
             async with Client(app) as client:

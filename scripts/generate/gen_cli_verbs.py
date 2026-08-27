@@ -47,6 +47,8 @@ from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedLocalFlag, Gene
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS, derive_cli_flag
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
+from kdive.processes.assembly import ProcessAssembly
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from kdive.store.objectstore import ObjectStore
@@ -444,12 +446,17 @@ def _registry_tools() -> list[Any]:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = RSAKeyPair.generate()
     verifier = JWTVerifier(public_key=kp.public_key, issuer="https://gen.local", audience="kdive")
+    registry = SecretRegistry()
     object_stores = ObjectStoreAssembly(store=cast(ObjectStore, object()))
+    process = ProcessAssembly(
+        object_stores,
+        ProviderComposition(secret_registry=registry, object_store=object_stores.store),
+    )
     app = build_app(
         pool,
         verifier=verifier,
-        object_store_assembly=object_stores,
-        secret_registry=SecretRegistry(),
+        process_assembly=process,
+        secret_registry=registry,
         worker_death_verifier=CatalogWorkerDeathVerifier(),
     )
     return cast(list[Any], asyncio.run(app.list_tools()))

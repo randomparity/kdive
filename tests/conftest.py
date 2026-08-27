@@ -47,6 +47,9 @@ import pytest
 import kdive.config as config
 import kdive.jobs.assembly as job_assembly_module
 import kdive.mcp.assembly.app as mcp_app_module
+from kdive.processes.assembly import ProcessAssembly
+from kdive.providers.assembly.composition import ProviderComposition
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, ObjectStoreFactory
 from kdive.store.objectstore import ObjectStore
 from tests._addopts_scrub import pytest_collection  # noqa: F401  registered as a conftest hook
@@ -75,15 +78,19 @@ def _offline_object_store_assembly(
     return ObjectStoreAssembly(store=cast(ObjectStore, object()))
 
 
+def _offline_process_assembly(secret_registry: SecretRegistry) -> ProcessAssembly:
+    stores = _offline_object_store_assembly()
+    return ProcessAssembly(
+        object_stores=stores,
+        providers=ProviderComposition(secret_registry=secret_registry, object_store=stores.store),
+    )
+
+
 # Several MCP contract modules build the app during collection, before fixtures can patch its
 # infrastructure boundary. Keep those schema-only builds offline; tests of production store
 # assembly call ``build_object_store_assembly`` directly or replace this seam explicitly.
-mcp_app_module.build_object_store_assembly = (  # ty: ignore[invalid-assignment]
-    _offline_object_store_assembly
-)
-job_assembly_module.build_object_store_assembly = (  # ty: ignore[invalid-assignment]
-    _offline_object_store_assembly
-)
+mcp_app_module.build_process_assembly = _offline_process_assembly  # ty: ignore[invalid-assignment]
+job_assembly_module.build_process_assembly = _offline_process_assembly  # ty: ignore[invalid-assignment]
 
 
 # The operator's real inventory path, captured before any fixture runs (same reasoning as
