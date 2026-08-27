@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
+
+import pytest
 
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.security.secrets.redaction import REDACTION
@@ -142,15 +145,17 @@ def test_rotation_on_threshold_uploads_numbered_parts() -> None:
     assert store.parts[1] == b"b" * 100
 
 
-def test_reconnect_on_stream_drop() -> None:
+def test_reconnect_on_stream_drop(caplog: pytest.LogCaptureFixture) -> None:
     dropping = FakeStream([b"first\n"], drop_after=1)
     fresh = FakeStream([b"second\n"])
     opener = FakeOpenConsole([dropping, fresh])
     store = FakePartStore()
     collector = _collector(opener, store, rotation_threshold=1024)
     assert collector.pump_once() is True  # reads "first"
-    assert collector.pump_once() is False  # drop -> reconnect scheduled
+    with caplog.at_level(logging.WARNING):
+        assert collector.pump_once() is False  # drop -> reconnect scheduled
     assert dropping.closed is True
+    assert "ConnectionResetError: stream dropped" in caplog.text
     assert collector.pump_once() is True  # reads from the fresh stream
     assert opener.opens == 2
     collector.finalize()
