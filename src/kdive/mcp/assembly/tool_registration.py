@@ -238,7 +238,9 @@ def _doc_resources_registrar(resolver: ProviderResolver) -> PlaneRegistrar:
 
 
 def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> None:
-    def maturity_record(meta: Mapping[str, object] | None) -> lifecycle_prompts.ToolMaturity:
+    def tool_maturity_from_meta(
+        meta: Mapping[str, object] | None,
+    ) -> lifecycle_prompts.ToolMaturity:
         meta = meta or {}
         detail = meta.get("maturity_detail")
         reason = detail.get("reason") if isinstance(detail, Mapping) else None
@@ -247,7 +249,9 @@ def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> Non
             reason=reason if isinstance(reason, str) else None,
         )
 
-    tool_maturity = {tool.name: maturity_record(tool.meta) for tool in registered_tools(app)}
+    tool_maturity = {
+        tool.name: tool_maturity_from_meta(tool.meta) for tool in registered_tools(app)
+    }
     lifecycle_prompts.register(app, tool_maturity=tool_maturity)
 
 
