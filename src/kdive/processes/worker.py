@@ -70,7 +70,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
     from kdive.health.processes.worker import build_worker_probe
     from kdive.jobs.assembly import build_handler_registry, build_worker_handler_assembly
     from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
-    from kdive.jobs.capture_operations.supervisor import recover_capture_operations
+    from kdive.jobs.capture_operations.recovery import recover_capture_operations
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
     from kdive.store.objectstore import object_store_from_env
@@ -114,7 +114,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
             pool,
             handler_assembly.resolver,
             handler_assembly.object_stores.store,
-            handler_assembly.capture_supervisor,
+            handler_assembly.capture_supervisor.dispose_recovery_spool,
             _capture_host_identity(incarnation),
             incarnation_credential,
         )

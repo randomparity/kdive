@@ -107,7 +107,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     assembly = SimpleNamespace(
         resolver=object(),
         object_stores=SimpleNamespace(store=object()),
-        capture_supervisor=object(),
+        capture_supervisor=SimpleNamespace(dispose_recovery_spool=lambda operation_id: True),
     )
     monkeypatch.setattr(
         "kdive.jobs.assembly.build_worker_handler_assembly", lambda **kwargs: assembly
@@ -118,7 +118,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         return SimpleNamespace(pending=0)
 
     monkeypatch.setattr(
-        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", _recover
+        "kdive.jobs.capture_operations.recovery.recover_capture_operations", _recover
     )
 
     class _FakeStore:

@@ -43,10 +43,14 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
     events: list[str] = []
     secret_registry = SecretRegistry()
     handler_registry = object()
+
+    def dispose_spool(operation_id: object) -> bool:
+        return True
+
     handler_assembly = SimpleNamespace(
         resolver=object(),
         object_stores=SimpleNamespace(store=None),
-        capture_supervisor=object(),
+        capture_supervisor=SimpleNamespace(dispose_recovery_spool=dispose_spool),
     )
 
     class _ConnectionContext:
@@ -107,21 +111,21 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         recovery_pool: object,
         resolver: object,
         store: object,
-        supervisor: object,
+        recovery_dispose_spool: object,
         host_identity: str,
         credential: SecretStr,
     ) -> object:
         assert recovery_pool is pool
         assert resolver is handler_assembly.resolver
         assert store is store_instance
-        assert supervisor is handler_assembly.capture_supervisor
+        assert recovery_dispose_spool is dispose_spool
         assert host_identity == "a" * 64
         assert credential is incarnation_credential
         events.append("recover")
         return SimpleNamespace(pending=0)
 
     monkeypatch.setattr(
-        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", recover
+        "kdive.jobs.capture_operations.recovery.recover_capture_operations", recover
     )
 
     class _Worker:
@@ -238,7 +242,7 @@ def test_run_worker_store_admission_failure_prevents_recovery_and_job_claims(
 
     monkeypatch.setattr("kdive.processes.worker.authenticate_worker_incarnation", authenticate)
     monkeypatch.setattr(
-        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", recover
+        "kdive.jobs.capture_operations.recovery.recover_capture_operations", recover
     )
     monkeypatch.setattr(
         "kdive.jobs.worker.Worker", lambda *args, **kwargs: events.append("worker-init")

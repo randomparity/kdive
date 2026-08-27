@@ -19,14 +19,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
+from kdive.jobs.capture_operations.recovery import RecoverySummary, recover_capture_operations
 from kdive.jobs.capture_operations.repository import CaptureOperation, CaptureOperationState
 from kdive.jobs.capture_operations.supervisor import (
     LOCK_PROBE_INTERVAL_SECONDS,
     LOCK_PROBE_TIMEOUT_SECONDS,
     CaptureOperationSupervisor,
     CaptureSnapshot,
-    RecoverySummary,
-    recover_capture_operations,
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.traffic import QuiescenceEvidence
@@ -877,7 +876,7 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
     monkeypatch: pytest.MonkeyPatch,
     launch_token: str,
 ) -> None:
-    from kdive.jobs.capture_operations import supervisor as supervisor_module
+    from kdive.jobs.capture_operations import recovery as recovery_module
     from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
 
     operation_id = uuid4()
@@ -928,14 +927,14 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
             _job_for_candidate(candidate), _request_for_candidate(candidate), launch_token
         )
 
-    monkeypatch.setattr(supervisor_module, "list_recovery_candidates", candidates)
-    monkeypatch.setattr(supervisor_module, "LinuxIdentity", lambda **kwargs: _Identity())
+    monkeypatch.setattr(recovery_module, "list_recovery_candidates", candidates)
+    monkeypatch.setattr(recovery_module, "LinuxIdentity", lambda **kwargs: _Identity())
 
     async def recovery_quiescence(*args: object, **kwargs: object) -> _RecoveryQuiescence:
         return _RecoveryQuiescence()
 
-    monkeypatch.setattr(supervisor_module, "_recovery_quiescence", recovery_quiescence)
-    monkeypatch.setattr(supervisor_module, "recover_operation", recover)
+    monkeypatch.setattr(recovery_module, "_recovery_quiescence", recovery_quiescence)
+    monkeypatch.setattr(recovery_module, "recover_operation", recover)
 
     async def recover_publication(*args: object) -> CaptureOperation:
         events.append("publication")
@@ -945,8 +944,8 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
         events.append("record-spool")
         return cast(CaptureOperation, args[-1])
 
-    monkeypatch.setattr(supervisor_module, "recover_publication", recover_publication)
-    monkeypatch.setattr(supervisor_module, "record_spool_disposed", disposed)
+    monkeypatch.setattr(recovery_module, "recover_publication", recover_publication)
+    monkeypatch.setattr(recovery_module, "record_spool_disposed", disposed)
 
     class _Pool:
         def connection(self) -> object:
@@ -964,12 +963,7 @@ def test_startup_recovery_proves_process_then_provider_before_acknowledgment(
             cast(AsyncConnectionPool, _Pool()),
             cast(ProviderResolver, SimpleNamespace()),
             cast(Any, SimpleNamespace()),
-            cast(
-                CaptureOperationSupervisor,
-                SimpleNamespace(
-                    dispose_recovery_spool=lambda operation_id: events.append("spool") or True
-                ),
-            ),
+            lambda operation_id: events.append("spool") or True,
             "host-a",
             SecretStr("replacement"),
         )
@@ -989,7 +983,7 @@ def test_startup_recovery_sends_exited_operation_directly_to_publication(
     monkeypatch: pytest.MonkeyPatch,
     launch_token: str,
 ) -> None:
-    from kdive.jobs.capture_operations import supervisor as supervisor_module
+    from kdive.jobs.capture_operations import recovery as recovery_module
     from kdive.jobs.capture_operations.repository import CaptureRecoveryCandidate
 
     operation_id = uuid4()
@@ -1032,11 +1026,11 @@ def test_startup_recovery_sends_exited_operation_directly_to_publication(
         events.append("record-spool")
         return cast(CaptureOperation, args[-1])
 
-    monkeypatch.setattr(supervisor_module, "list_recovery_candidates", candidates)
-    monkeypatch.setattr(supervisor_module, "claim_publication_recovery", claim)
-    monkeypatch.setattr(supervisor_module, "recover_operation", reject_provider_recovery)
-    monkeypatch.setattr(supervisor_module, "recover_publication", recover_publication)
-    monkeypatch.setattr(supervisor_module, "record_spool_disposed", disposed)
+    monkeypatch.setattr(recovery_module, "list_recovery_candidates", candidates)
+    monkeypatch.setattr(recovery_module, "claim_publication_recovery", claim)
+    monkeypatch.setattr(recovery_module, "recover_operation", reject_provider_recovery)
+    monkeypatch.setattr(recovery_module, "recover_publication", recover_publication)
+    monkeypatch.setattr(recovery_module, "record_spool_disposed", disposed)
 
     class _Pool:
         def connection(self) -> object:
@@ -1054,12 +1048,7 @@ def test_startup_recovery_sends_exited_operation_directly_to_publication(
             cast(AsyncConnectionPool, _Pool()),
             cast(ProviderResolver, SimpleNamespace()),
             cast(Any, SimpleNamespace()),
-            cast(
-                CaptureOperationSupervisor,
-                SimpleNamespace(
-                    dispose_recovery_spool=lambda operation_id: events.append("spool") or True
-                ),
-            ),
+            lambda operation_id: events.append("spool") or True,
             "host-a",
             SecretStr("replacement"),
         )
