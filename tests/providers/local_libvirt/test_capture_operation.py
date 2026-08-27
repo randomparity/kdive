@@ -14,10 +14,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.providers.local_libvirt import composition
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
-    LocalCaptureExecutor,
     LocalLibvirtCaptureQuiescence,
 )
 from kdive.providers.ports.traffic import LocalCaptureConfiguration
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 
 _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
 
@@ -84,9 +84,10 @@ class _FakeCapturer:
 
 def test_local_executor_runs_synchronously_and_reclaims(tmp_path: Path) -> None:
     capturer = _FakeCapturer()
-    result = LocalCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(
-        _request(), tmp_path
+    executor = CaptureExecutor(
+        capturer=capturer, provider_label="local", sleep=lambda _seconds: None
     )
+    result = executor.execute(_request(), tmp_path)
 
     assert result.size_bytes == len(_PCAP_HEADER)
     assert result.truncated is False
@@ -111,9 +112,10 @@ def test_local_executor_surfaces_each_provider_failure_and_reclaims_when_possibl
     capturer = _FakeCapturer(fail=method)
 
     with pytest.raises(CategorizedError, match=f"{method} failed"):
-        LocalCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(
-            _request(), tmp_path
+        executor = CaptureExecutor(
+            capturer=capturer, provider_label="local", sleep=lambda _seconds: None
         )
+        executor.execute(_request(), tmp_path)
 
     if method != "prepare":
         assert "reclaim" in capturer.calls
@@ -125,9 +127,10 @@ def test_local_executor_rejects_oversized_provider_result(tmp_path: Path) -> Non
     capturer = _FakeCapturer(data=b"x" * (request.max_bytes + 1))
 
     with pytest.raises(CategorizedError) as excinfo:
-        LocalCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(
-            request, tmp_path
+        executor = CaptureExecutor(
+            capturer=capturer, provider_label="local", sleep=lambda _seconds: None
         )
+        executor.execute(request, tmp_path)
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not (tmp_path / "capture.pcap").exists()
@@ -151,7 +154,8 @@ def test_local_executor_observes_exact_bound_after_final_poll_interval(
 
     monkeypatch.setattr(capturer, "captured_size", captured_size)
 
-    result = LocalCaptureExecutor(capturer=capturer, sleep=sleep).execute(request, tmp_path)
+    executor = CaptureExecutor(capturer=capturer, provider_label="local", sleep=sleep)
+    result = executor.execute(request, tmp_path)
 
     assert result.truncated is True
     assert result.size_bytes == request.max_bytes

@@ -72,7 +72,6 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtVmcoreIntrospect,
 )
 from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
-    RemoteCaptureExecutor,
     RemoteLibvirtCaptureQuiescence,
 )
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
@@ -97,6 +96,7 @@ from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import (
@@ -152,7 +152,7 @@ def _capture_secret_backend(
 
 def build_capture_executor(
     configuration: RemoteCaptureConfiguration,
-) -> RemoteCaptureExecutor:
+) -> CaptureExecutor:
     """Reconstruct the remote executor from released exact Resource configuration."""
     registry = SecretRegistry()
     resolved = _capture_remote_config(configuration)
@@ -161,7 +161,7 @@ def build_capture_executor(
         config_factory=lambda: resolved,
         secret_backend_factory=lambda: _capture_secret_backend(configuration, registry),
     )
-    return RemoteCaptureExecutor(capturer=capturer)
+    return CaptureExecutor(capturer=capturer, provider_label="remote")
 
 
 def build_capture_quiescence(

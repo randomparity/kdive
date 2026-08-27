@@ -12,9 +12,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.providers.local_libvirt.lifecycle.capture_operation import LocalCaptureExecutor
 from kdive.providers.ports.traffic import capture_qom_id
-from kdive.providers.remote_libvirt.lifecycle.capture_operation import RemoteCaptureExecutor
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 
 _SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "kdive"
 _CONVENTION_PREFIX = "kdive-dump-"
@@ -82,7 +81,10 @@ def test_local_producer_attaches_and_detaches_the_shared_qom_id(tmp_path: Path) 
     capturer = _RecordingCapturer()
     request = _request()
 
-    LocalCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(request, tmp_path)
+    executor = CaptureExecutor(
+        capturer=capturer, provider_label="local", sleep=lambda _seconds: None
+    )
+    executor.execute(request, tmp_path)
 
     assert capturer.attached == [capture_qom_id(request.job_id)]
     assert capturer.detached == [capture_qom_id(request.job_id)]
@@ -92,7 +94,10 @@ def test_remote_producer_attaches_and_detaches_the_shared_qom_id(tmp_path: Path)
     capturer = _RecordingCapturer()
     request = _request()
 
-    RemoteCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(request, tmp_path)
+    executor = CaptureExecutor(
+        capturer=capturer, provider_label="remote", sleep=lambda _seconds: None
+    )
+    executor.execute(request, tmp_path)
 
     assert capturer.attached == [capture_qom_id(request.job_id)]
     assert capturer.detached == [capture_qom_id(request.job_id)]
