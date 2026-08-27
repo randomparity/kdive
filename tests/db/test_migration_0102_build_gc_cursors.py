@@ -24,7 +24,7 @@ def test_0102_seeds_public_build_gc_lanes(pg_conn: psycopg.Connection) -> None:
 def test_0102_precedes_worker_incarnation_migration() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(migration.version, migration.filename) for migration in migrations[-15:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-16:]] == [
         ("0102", "0102_build_artifact_gc_cursors.sql"),
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
@@ -40,4 +40,5 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0114", "0114_host_dump_volume_leases.sql"),
         ("0115", "0115_capture_reap_state.sql"),
         ("0116", "0116_capture_claimable_queue_depth.sql"),
+        ("0117", "0117_worker_bootstrap_key_insert.sql"),
     ]
