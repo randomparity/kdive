@@ -92,9 +92,12 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     UploadFetch,
     staged_rootfs_path,
 )
-from kdive.providers.shared.rootfs_fetch_leases import acquire_fetch_lease, release_fetch_lease
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
-from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
+from kdive.providers.shared.staging.rootfs_fetch_leases import (
+    acquire_fetch_lease,
+    release_fetch_lease,
+)
+from kdive.providers.shared.staging.staging_partials import unlink_partial_if_unheld
 from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)

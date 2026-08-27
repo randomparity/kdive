@@ -27,7 +27,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.shared.host_dump_volume_leases import (
+from kdive.providers.shared.staging.host_dump_volume_leases import (
     hold_host_dump_volume_lease,
     release_host_dump_volume_lease,
 )

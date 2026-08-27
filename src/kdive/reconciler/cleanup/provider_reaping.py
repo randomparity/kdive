@@ -32,11 +32,11 @@ from kdive.providers.infra.reaping import (
     OrphanedCapture,
     dispatchable_capture_kinds,
 )
-from kdive.providers.shared.host_dump_volume_leases import (
+from kdive.providers.shared.runtime_paths import system_id_from_domain_name
+from kdive.providers.shared.staging.host_dump_volume_leases import (
     has_live_host_dump_volume_lease,
     reap_stale_host_dump_volume_leases,
 )
-from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 from kdive.reconciler.repairs.allocations import has_active_capture_job
 from kdive.reconciler.repairs.systems import gone_system_state_values
 

@@ -23,8 +23,9 @@ whose holder died fences nothing from the next pass onward. That predicate is
 the reason ADR-0522 gives: one hand-written copy of "the holder is still alive" could drift from
 the one runner enforces, and it would drift silently.
 
-Placed under ``providers.shared`` beside :mod:`~kdive.providers.shared.rootfs_fetch_leases` for that
-module's reason: the writer is a job handler and the reader is the reconciler, so neither owns
+Placed under ``providers.shared`` beside
+:mod:`~kdive.providers.shared.staging.rootfs_fetch_leases` for that module's reason: the writer
+is a job handler and the reader is the reconciler, so neither owns
 it, and what it describes is provider state — a libvirt storage volume — not an artifact.
 """
 

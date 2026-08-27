@@ -20,8 +20,9 @@ pin is valid exactly while the holder's own heartbeat-renewed ``jobs.lease_expir
 no derived constant here any more, and a fetcher killed by ``SIGKILL`` stops pinning its base on the
 job-lease interval rather than on a worst-case transfer estimate.
 
-Placed under ``providers.shared`` for :mod:`~kdive.providers.shared.staging_partials`'s reason: one
-caller is a provider lifecycle path and the other is a job handler, and ``src/kdive/jobs/`` must not
+Placed under ``providers.shared`` for
+:mod:`~kdive.providers.shared.staging.staging_partials`'s reason: one caller is a provider
+lifecycle path and the other is a job handler, and ``src/kdive/jobs/`` must not
 reach into a provider's lifecycle package. The two sides also differ in connection flavour — the
 fetch holds a **sync** autocommit ``psycopg`` connection, the reclaim an **async** one — so the SQL
 lives here once rather than being written twice against two drivers and drifting.

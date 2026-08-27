@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from kdive.providers.shared.staging_partials import (
+from kdive.providers.shared.staging.staging_partials import (
     live_writer_holds_partial,
     unlink_partial_if_unheld,
 )
