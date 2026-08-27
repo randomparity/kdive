@@ -1549,7 +1549,9 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
 ) -> None:
     calls: list[list[str]] = []
     kwargs_seen: list[dict[str, object]] = []
+    chmods: list[tuple[str, int]] = []
     monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module.os, "chmod", lambda path, mode: chmods.append((path, mode)))
 
     def _record(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -1580,6 +1582,34 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
     assert kwargs_seen[0]["text"] is True
     assert kwargs_seen[0]["check"] is False
     assert kwargs_seen[0]["timeout"] == storage_module._QEMU_IMG_TIMEOUT_S
+    assert chmods == [("/overlay.qcow2", 0o664)]
+
+
+def test_real_make_overlay_chmod_oserror_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _created(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    def _chmod_denied(_path: str, _mode: int) -> None:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module.subprocess, "run", _created)
+    monkeypatch.setattr(storage_module.os, "chmod", _chmod_denied)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == (
+        "failed to grant shared-libvirt write access to the per-System rootfs overlay"
+    )
+    assert caught.value.details == {
+        "op": "chmod_overlay",
+        "overlay": "overlay.qcow2",
+        "error": "PermissionError",
+    }
 
 
 def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(
