@@ -2,9 +2,9 @@
 
 Both finalize lanes — ``runs.complete_build`` in the service layer and
 ``investigations.complete_rootfs_upload`` in the MCP tool layer — used to write their own
-comparison of a :class:`~kdive.artifacts.upload_manifest.ManifestStamp`'s two fields, spelled as
-exact logical negations of each other. ADR-0512 replaced both with
-:attr:`~kdive.artifacts.upload_manifest.ManifestStamp.expired`.
+comparison of a :class:`~kdive.artifacts.uploads.upload_manifest.ManifestStamp`'s two fields,
+spelled as exact logical negations of each other. ADR-0512 replaced both with
+:attr:`~kdive.artifacts.uploads.upload_manifest.ManifestStamp.expired`.
 
 These tests pin the predicate's semantics directly, because the two lanes now agree *by
 construction* and a lane-level test can no longer detect a change to the rule itself. The
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from kdive.artifacts.upload_manifest import UPLOAD_WINDOW_EXPIRED, ManifestStamp
+from kdive.artifacts.uploads.upload_manifest import UPLOAD_WINDOW_EXPIRED, ManifestStamp
 
 _CLOCK = datetime(2026, 7, 30, 12, 0, 0, tzinfo=UTC)
 

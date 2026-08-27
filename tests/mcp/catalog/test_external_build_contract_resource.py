@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from fastmcp import FastMCP
 
-from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
+from kdive.artifacts.catalog.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.kernel_config.gate import MISSING_DEBUGINFO_REASON

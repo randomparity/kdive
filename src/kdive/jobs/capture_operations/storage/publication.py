@@ -12,7 +12,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import SecretStr
 
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import (
     ConditionalArtifactWriteRequest,
     ConditionalCreateConflict,

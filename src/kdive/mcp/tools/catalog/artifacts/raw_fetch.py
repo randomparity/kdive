@@ -20,7 +20,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts.read_model import (
+from kdive.artifacts.catalog.read_model import (
     RunFetchContext,
     raw_pcap_key,
     raw_vmcore_key,

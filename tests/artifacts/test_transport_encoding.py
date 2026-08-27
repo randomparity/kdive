@@ -10,8 +10,8 @@ import os
 
 import pytest
 
-import kdive.artifacts.transport_encoding as transport_encoding
-from kdive.artifacts.transport_encoding import (
+import kdive.artifacts.uploads.transport_encoding as transport_encoding
+from kdive.artifacts.uploads.transport_encoding import (
     _RANGE_CHUNK_BYTES,
     GZIP_ENCODING,
     IDENTITY_ENCODING,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from kdive.artifacts.storage import HeadResult, chunk_key
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 

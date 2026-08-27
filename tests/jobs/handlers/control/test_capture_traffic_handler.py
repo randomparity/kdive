@@ -24,7 +24,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     FetchedArtifact,

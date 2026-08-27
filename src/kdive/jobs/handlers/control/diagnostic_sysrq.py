@@ -24,9 +24,9 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts.discard import discard_unregistered_objects
-from kdive.artifacts.etag_repair import reconcile_row_etag
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.discard import discard_unregistered_objects
+from kdive.artifacts.catalog.etag_repair import reconcile_row_etag
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS, ArtifactClaimConflict
@@ -278,8 +278,9 @@ async def _store_capture(
     concurrent case: two attempts of one job can both pass phase 1 and both PUT (the lease can
     lapse mid-job, ``jobs/worker.py``), and whichever PUT lands last leaves the other's row
     describing bytes the object no longer holds. When this attempt wrote and then found a peer's
-    row, :func:`~kdive.artifacts.etag_repair.reconcile_row_etag` stats the object and re-points
-    the row at what it actually holds — stats it rather than assuming this attempt's own etag,
+    row, :func:`~kdive.artifacts.catalog.etag_repair.reconcile_row_etag` stats the object
+    and re-points the row at what it actually holds — stats it rather than assuming this
+    attempt's own etag,
     because landing last in the store and last at the lock are independent orderings.
     """
     name = f"sysrq-diagnostic-{job.id}"

@@ -28,9 +28,9 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts.discard import discard_unregistered_objects
-from kdive.artifacts.etag_repair import reconcile_row_etag
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.discard import discard_unregistered_objects
+from kdive.artifacts.catalog.etag_repair import reconcile_row_etag
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, ArtifactClaimConflict

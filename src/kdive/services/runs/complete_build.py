@@ -15,11 +15,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 import kdive.config as config
-from kdive.artifacts import upload_manifest
-from kdive.artifacts.reassembly import reassemble_chunked
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import HeadResult, MultipartCompletion, StoredArtifact
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.reassembly import reassemble_chunked
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
 from kdive.config.core_settings import (

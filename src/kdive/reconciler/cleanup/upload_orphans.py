@@ -24,7 +24,7 @@ import psycopg
 from psycopg import AsyncConnection
 
 from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
-from kdive.artifacts.upload_manifest import (
+from kdive.artifacts.uploads.upload_manifest import (
     UPLOAD_OWNER_KINDS,
     UPLOAD_TENANT,
     lock_scope_for,

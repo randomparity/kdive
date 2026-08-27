@@ -10,9 +10,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from kdive.artifacts.chunks import HeadStore
 from kdive.artifacts.storage import HeadResult
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads.chunks import HeadStore
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES

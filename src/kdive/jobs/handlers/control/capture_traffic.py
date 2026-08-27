@@ -19,7 +19,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.pcap_count import count_pcap_packets
+from kdive.artifacts.formats.pcap import count_pcap_packets
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import (
     ALLOCATIONS,

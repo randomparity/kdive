@@ -26,8 +26,8 @@ from uuid import UUID
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.upload_orphans import repair_leaked_upload_objects

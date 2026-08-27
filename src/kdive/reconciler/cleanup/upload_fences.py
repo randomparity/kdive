@@ -21,8 +21,8 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.upload_manifest import UploadOwnerKind
-from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
+from kdive.artifacts.uploads.upload_manifest import UploadOwnerKind
+from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 
 #: The three reasons a key under an upload owner's prefix must not be deleted, correlated to a
 #: candidate alias ``c`` exposing ``key``, ``owner_kind`` and ``owner_id``. Every one is a committed
@@ -36,8 +36,8 @@ from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
 #:   * the owner holds a write lease whose holding job is still a live claim (ADR-0502). This is the
 #:     fence for a writer that mints no upload window at all — local-libvirt's vmcore ``put_stream``
 #:     is the reachable one. Liveness is the holding job's own
-#:     (:data:`~kdive.artifacts.write_lease.LIVE_HOLDER_SQL`), read from that module so the passes
-#:     that honour a lease and the pass that collects one cannot disagree.
+#:     (:data:`~kdive.artifacts.uploads.write_lease.LIVE_HOLDER_SQL`), read from that module so
+#:     the passes that honour a lease and the pass that collects one cannot disagree.
 #:
 #: Written as the *negation* — the conditions under which a candidate survives — because that is
 #: the form both callers need: the sweep selects the reclaimable subset of a page, and the reaper

@@ -25,8 +25,8 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import VersionBatch
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory

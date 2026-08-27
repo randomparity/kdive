@@ -19,9 +19,9 @@ totally ordered, which is what makes this a closure rather than a fourth mitigat
 The lease carries **no deadline of its own**. Its liveness is its holding job's — the lease the
 worker heartbeats — so a capture keeps its fence however long it dumps and downloads, and a lease
 whose holder died fences nothing from the next pass onward. That predicate is
-:data:`~kdive.artifacts.write_lease.LIVE_HOLDER_SQL`, imported rather than restated for the reason
-ADR-0522 gives: one hand-written copy of "the holder is still alive" could drift from the one
-runner enforces, and it would drift silently.
+:data:`~kdive.artifacts.uploads.write_lease.LIVE_HOLDER_SQL`, imported rather than restated for
+the reason ADR-0522 gives: one hand-written copy of "the holder is still alive" could drift from
+the one runner enforces, and it would drift silently.
 
 Placed under ``providers.shared`` beside :mod:`~kdive.providers.shared.rootfs_fetch_leases` for that
 module's reason: the writer is a job handler and the reader is the reconciler, so neither owns
@@ -35,7 +35,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
+from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 
 _log = logging.getLogger(__name__)

@@ -13,7 +13,7 @@ import asyncio
 import logging
 from typing import cast
 
-from kdive.artifacts.discard import discard_unregistered_objects
+from kdive.artifacts.catalog.discard import discard_unregistered_objects
 from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -166,7 +166,7 @@ def test_a_faulting_key_does_not_strand_the_rest(caplog) -> None:
     store = _RecordingStore(
         {"a/1": "etag-1", "a/2": "etag-2", "a/3": "etag-3"}, fails_on=frozenset({"a/2"})
     )
-    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.discard"):
+    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.catalog.discard"):
         _discard(
             store,
             [_written("a/1", "etag-1"), _written("a/2", "etag-2"), _written("a/3", "etag-3")],
@@ -194,7 +194,7 @@ def test_a_row_probe_fault_never_raises_into_the_caller(caplog) -> None:
     async def _faulting_probe(_key: str) -> bool:
         raise RuntimeError("artifacts lookup failed")
 
-    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.discard"):
+    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.catalog.discard"):
         asyncio.run(
             discard_unregistered_objects(
                 cast(ObjectStore, store),
@@ -213,7 +213,7 @@ def test_a_row_probe_fault_never_raises_into_the_caller(caplog) -> None:
 def test_a_head_fault_is_type_only_and_never_raises_into_the_caller(caplog) -> None:
     store = _RecordingStore({"a/1": "etag-1"}, head_fails_on=frozenset({"a/1"}))
 
-    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.discard"):
+    with caplog.at_level(logging.WARNING, logger="kdive.artifacts.catalog.discard"):
         _discard(store, [_written("a/1", "etag-1")])
 
     assert store.attempted == []

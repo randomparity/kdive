@@ -20,7 +20,7 @@ from uuid import uuid4
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
 
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,

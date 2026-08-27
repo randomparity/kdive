@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from kdive.artifacts.read_model import ArtifactReadRef
+from kdive.artifacts.catalog.read_model import ArtifactReadRef
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory

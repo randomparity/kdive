@@ -16,9 +16,9 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, MultipartCompletion, chunk_key
-from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
 from kdive.domain.capacity.state import RunState

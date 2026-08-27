@@ -15,17 +15,17 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts import upload_manifest
-from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
-from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
+from kdive.artifacts.catalog.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
-from kdive.artifacts.transport_encoding import (
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.content_address import rootfs_object_name, rootfs_object_token
+from kdive.artifacts.uploads.transport_encoding import (
     GZIP_ENCODING,
     IDENTITY_ENCODING,
     KNOWN_ENCODINGS,
     normalize_encoding,
 )
-from kdive.artifacts.uploads import (
+from kdive.artifacts.uploads.uploads import (
     MAX_PART_BYTES,
     MAX_PARTS,
     MIN_PART_BYTES,
@@ -233,8 +233,8 @@ def investigation_rootfs_object_name(entry: ManifestEntry) -> str:
     """The content-addressed object name (``rootfs-<token>``) for an investigation upload.
 
     Derives the object name from the declared checksum via the shared
-    :func:`kdive.artifacts.content_address` derivation the provider fetch also resolves against,
-    so finalize commits and a System resolves the same key.
+    :func:`kdive.artifacts.uploads.content_address` derivation the provider fetch also resolves
+    against, so finalize commits and a System resolves the same key.
     """
     return rootfs_object_name(rootfs_object_token(entry.sha256))
 

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.types.json import Jsonb
 
-from kdive.artifacts.upload_manifest import (
+from kdive.artifacts.uploads.upload_manifest import (
     UploadManifestReplaceRequest,
     delete_manifest,
     get_manifest,
@@ -17,7 +17,7 @@ from kdive.artifacts.upload_manifest import (
     refresh_deadline,
     replace_manifest,
 )
-from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.artifacts.uploads.uploads import ChunkEntry, ManifestEntry
 
 _HOUR = timedelta(hours=1)
 #: Far wider than any TTL a test refreshes with, so the cap cannot bind and the test is measuring
@@ -112,7 +112,7 @@ def test_round_trips_encoding(migrated_url: str) -> None:
 
 def test_preexisting_payload_without_encoding_defaults_to_identity() -> None:
     """A manifest payload written before ADR-0437 (no encoding keys) deserializes as identity."""
-    from kdive.artifacts.upload_manifest import _entry_from_payload
+    from kdive.artifacts.uploads.upload_manifest import _entry_from_payload
 
     entry = _entry_from_payload({"name": "rootfs", "sha256": "a", "size_bytes": 10})
     assert entry.encoding is None

@@ -183,7 +183,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         secret_registry=expected_registry, object_store=sentinel_store
     )
     monkeypatch.setattr(
-        "kdive.assembly.build_process_assembly",
+        "kdive.processes.reconciler.build_process_assembly",
         lambda _registry: ProcessAssembly(
             ObjectStoreAssembly(sentinel_store),
             cast(ProviderComposition, provider_composition),

@@ -29,7 +29,6 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import (
     HeadResult,
     ObjectListing,
@@ -37,7 +36,8 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.cleanup.images import ImageMtime

@@ -35,7 +35,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg import AsyncConnection
 
-from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
+from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 
 _log = logging.getLogger(__name__)
 
@@ -48,8 +48,8 @@ _RELEASE_SQL = "DELETE FROM rootfs_fetch_leases WHERE id = %s"
 #: The pin probe. ``EXISTS`` rather than a count: the gate needs one bit and the index makes this a
 #: range scan that stops at the first live row.
 #:
-#: The liveness half is :data:`~kdive.artifacts.write_lease.LIVE_HOLDER_SQL`, imported rather than
-#: restated (ADR-0522). It is ``jobs``' own definition of a claimed, un-lapsed job —
+#: The liveness half is :data:`~kdive.artifacts.uploads.write_lease.LIVE_HOLDER_SQL`, imported
+#: rather than restated (ADR-0522). It is ``jobs``' own definition of a claimed, un-lapsed job —
 #: ``state = 'running' AND lease_expires_at > now()``, which ``dequeue`` reclaims the complement of
 #: and ``heartbeat`` renews for as long as the handler runs — and this is its third reader, after
 #: ``object_write_leases``' own fence and the reconciler's orphan sweep. One definition of "the

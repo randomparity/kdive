@@ -32,10 +32,10 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
-from kdive.artifacts.upload_manifest import lock_scope_for as _lock_scope_for
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.upload_manifest import lock_scope_for as _lock_scope_for
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.db.locks import advisory_xact_lock
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory

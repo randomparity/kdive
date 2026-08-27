@@ -40,8 +40,8 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
-from kdive.artifacts.upload_manifest import RUN_UPLOAD_OWNER, lock_scope_for
-from kdive.artifacts.write_lease import hold_write_lease, reap_stale_write_leases
+from kdive.artifacts.uploads.upload_manifest import RUN_UPLOAD_OWNER, lock_scope_for
+from kdive.artifacts.uploads.write_lease import hold_write_lease, reap_stale_write_leases
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity

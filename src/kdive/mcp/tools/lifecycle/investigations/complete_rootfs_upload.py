@@ -22,8 +22,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, artifact_key
+from kdive.artifacts.uploads import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState
@@ -188,9 +188,10 @@ async def _reject_if_expired(
     same manifest. ``now()`` is the transaction's start, so a request that arrived inside the
     window is never rejected for time it spent waiting on the investigation lock.
 
-    The verdict itself comes from :attr:`~kdive.artifacts.upload_manifest.ManifestStamp.expired`,
-    the same predicate the runs finalize asks (ADR-0512). Only the rejection differs, and it
-    differs deliberately: the detail names the rootfs, and the recovery action is the
+    The verdict itself comes from
+    :attr:`~kdive.artifacts.uploads.upload_manifest.ManifestStamp.expired`, the same predicate
+    the runs finalize asks (ADR-0512). Only the rejection differs, and it differs deliberately:
+    the detail names the rootfs, and the recovery action is the
     investigation-scoped mint.
     """
     stamp = await upload_manifest.deadline_stamp(conn, manifest)

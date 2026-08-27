@@ -13,9 +13,9 @@ import psycopg
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import VersionBatch, VersionPage
-from kdive.artifacts.upload_manifest import UPLOAD_OWNER_KINDS, lock_scope_for
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.upload_manifest import UPLOAD_OWNER_KINDS, lock_scope_for
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.upload_fences import owner_key_is_fenced

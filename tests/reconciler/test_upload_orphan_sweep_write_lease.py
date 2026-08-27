@@ -31,7 +31,6 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import (
     HeadResult,
     ObjectListing,
@@ -39,13 +38,14 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
-from kdive.artifacts.upload_manifest import (
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.upload_manifest import (
     INVESTIGATION_UPLOAD_OWNER,
     RUN_UPLOAD_OWNER,
     UPLOAD_TENANT,
     lock_scope_for,
 )
-from kdive.artifacts.write_lease import (
+from kdive.artifacts.uploads.write_lease import (
     hold_write_lease,
     reap_stale_write_leases,
     release_write_lease,

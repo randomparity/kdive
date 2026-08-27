@@ -11,7 +11,7 @@ from typing import LiteralString
 import psycopg
 import pytest
 
-from kdive.artifacts.upload_manifest import UPLOAD_OWNER_KINDS
+from kdive.artifacts.uploads.upload_manifest import UPLOAD_OWNER_KINDS
 from kdive.components.records import ComponentUploadState
 from kdive.db import migrate
 from kdive.domain import errors

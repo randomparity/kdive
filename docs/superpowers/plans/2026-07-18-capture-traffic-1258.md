@@ -398,7 +398,7 @@ Note: the injected `monitor(domain, cmd_json, flags)` seam (default bound to `li
 
 ```python
 import struct
-from kdive.artifacts.pcap_count import count_pcap_packets
+from kdive.artifacts.formats.pcap import count_pcap_packets
 
 
 def _hdr(magic):

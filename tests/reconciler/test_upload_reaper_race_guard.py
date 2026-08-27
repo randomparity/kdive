@@ -32,7 +32,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ObjectVersion, VersionBatch, VersionPage
-from kdive.artifacts.upload_manifest import (
+from kdive.artifacts.uploads.upload_manifest import (
     INVESTIGATION_UPLOAD_OWNER,
     RUN_UPLOAD_OWNER,
     UPLOAD_TENANT,

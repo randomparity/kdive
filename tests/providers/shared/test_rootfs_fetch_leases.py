@@ -15,7 +15,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
+from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 from kdive.providers.shared import rootfs_fetch_leases
 from kdive.providers.shared.rootfs_fetch_leases import (
     acquire_fetch_lease,

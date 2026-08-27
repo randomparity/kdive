@@ -20,8 +20,8 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 import kdive.mcp.tools.debug.operations.breakpoints as debug_breakpoint_tools
-from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.assembly import ProcessAssembly
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.domain.accounting.records import Budget, Quota

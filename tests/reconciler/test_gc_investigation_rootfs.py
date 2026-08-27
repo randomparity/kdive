@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 
-from kdive.artifacts.content_address import rootfs_object_token
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile

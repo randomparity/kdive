@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.artifacts.uploads import (
+from kdive.artifacts.uploads.uploads import (
     MAX_PART_BYTES,
     MIN_PART_BYTES,
     SINGLE_PUT_MAX_BYTES,

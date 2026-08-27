@@ -28,7 +28,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts.write_lease import reap_stale_write_leases as _reap_stale_write_leases
+from kdive.artifacts.uploads.write_lease import reap_stale_write_leases as _reap_stale_write_leases
 from kdive.config.core_settings import (
     IMAGE_PUBLISH_GRACE,
     UPLOAD_ORPHAN_GRACE,

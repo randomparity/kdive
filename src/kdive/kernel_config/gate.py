@@ -20,7 +20,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.read_model import effective_config_key
+from kdive.artifacts.catalog.read_model import effective_config_key
 from kdive.kernel_config.fetch import load_effective_config
 from kdive.kernel_config.parse import KernelConfig
 from kdive.kernel_config.requirements import (

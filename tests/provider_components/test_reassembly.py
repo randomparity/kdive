@@ -7,9 +7,9 @@ from collections.abc import Sequence
 
 import pytest
 
-from kdive.artifacts.reassembly import reassemble_chunked
 from kdive.artifacts.storage import HeadResult, MultipartCompletion
-from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.artifacts.uploads.reassembly import reassemble_chunked
+from kdive.artifacts.uploads.uploads import ChunkEntry, ManifestEntry
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from tests.clock import STORE_MTIME
@@ -129,7 +129,7 @@ def test_reassemble_preserves_copy_failure_when_abort_also_fails(
 ) -> None:
     store = _FakeStore(fail_copy_at=2, fail_abort=True)
     with (
-        caplog.at_level(logging.WARNING, logger="kdive.artifacts.reassembly"),
+        caplog.at_level(logging.WARNING, logger="kdive.artifacts.uploads.reassembly"),
         pytest.raises(CategorizedError, match="boom"),
     ):
         reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())

@@ -76,8 +76,8 @@ import psycopg
 
 import kdive.config as config
 from kdive.artifacts import storage as artifact_types
-from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
-from kdive.artifacts.transport_encoding import (
+from kdive.artifacts.uploads.content_address import rootfs_object_name, rootfs_object_token
+from kdive.artifacts.uploads.transport_encoding import (
     GZIP_ENCODING,
     TRANSPORT_CHECKSUM_GATE,
     StripDecodeRequest,

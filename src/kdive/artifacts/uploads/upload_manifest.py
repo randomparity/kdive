@@ -12,7 +12,7 @@ from psycopg import AsyncConnection, Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.artifacts.uploads.uploads import ChunkEntry, ManifestEntry
 from kdive.db.locks import LockScope
 
 UploadOwnerKind = Literal["runs", "investigations"]

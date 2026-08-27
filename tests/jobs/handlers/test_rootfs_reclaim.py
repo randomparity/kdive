@@ -30,8 +30,8 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import ObjectVersion, VersionBatch
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind, JobState

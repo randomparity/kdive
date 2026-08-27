@@ -94,7 +94,7 @@ of anything. §5 states what that costs.
 ### 3. The pin predicate is `LIVE_HOLDER_SQL`, imported rather than restated
 
 `fetch_lease_pins_base` asks whether any row for this `(investigation_id, token)` is held by a job
-that is still a live claim, using `kdive.artifacts.write_lease.LIVE_HOLDER_SQL` verbatim. This is
+that is still a live claim, using `kdive.artifacts.uploads.write_lease.LIVE_HOLDER_SQL` verbatim. This is
 its third reader, after `object_write_leases`' own fence and the reconciler's orphan sweep
 (`reconciler/cleanup/upload_fences.py`).
 

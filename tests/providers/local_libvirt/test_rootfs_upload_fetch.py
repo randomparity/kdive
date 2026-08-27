@@ -26,9 +26,9 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.storage import HeadResult, StreamedArtifact
-from kdive.artifacts.transport_encoding import StripDecodeRequest, strip_gzip_to_writer
+from kdive.artifacts.uploads.content_address import rootfs_object_name, rootfs_object_token
+from kdive.artifacts.uploads.transport_encoding import StripDecodeRequest, strip_gzip_to_writer
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory

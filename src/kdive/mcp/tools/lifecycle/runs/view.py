@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.read_model import redacted_vmcore_artifact_id
+from kdive.artifacts.catalog.read_model import redacted_vmcore_artifact_id
 from kdive.db.repositories import JOBS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind

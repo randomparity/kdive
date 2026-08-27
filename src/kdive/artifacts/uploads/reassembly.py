@@ -6,9 +6,9 @@ import logging
 from collections.abc import Sequence
 from typing import Protocol
 
-from kdive.artifacts.chunks import verify_chunks
 from kdive.artifacts.storage import HeadResult, MultipartCompletion, chunk_key
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads.chunks import verify_chunks
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 

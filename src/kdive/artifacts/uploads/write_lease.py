@@ -27,7 +27,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.upload_manifest import UploadOwnerKind, lock_scope_for
+from kdive.artifacts.uploads.upload_manifest import UploadOwnerKind, lock_scope_for
 from kdive.db.locks import advisory_xact_lock, require_top_level_transaction
 
 _log = logging.getLogger(__name__)

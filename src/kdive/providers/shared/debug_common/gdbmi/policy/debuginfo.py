@@ -27,7 +27,7 @@ from uuid import UUID
 import psycopg
 
 import kdive.config as config
-from kdive.artifacts.read_model import (
+from kdive.artifacts.catalog.read_model import (
     ArtifactReadRef,
     debuginfo_ref_for_run_sync,
     kernel_ref_for_run_sync,
