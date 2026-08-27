@@ -21,7 +21,7 @@ _ROOT = Path(__file__).parents[2]
 # Every file known to build a debuginfo remediation string for a human or agent to act on.
 _FILES = (
     _ROOT / "src/kdive/providers/shared/debug_common/gdbmi/policy/debuginfo.py",
-    _ROOT / "scripts/operations/live-debug.py",
+    _ROOT / "scripts/operations/live_debug_build.py",
 )
 
 # The bare, prompt-less bool. A trailing `=y` (or word boundary) distinguishes it from the
