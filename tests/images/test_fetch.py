@@ -21,7 +21,7 @@ from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.rootfs.fetch import fetch_registered_rootfs, fetch_registered_rootfs_sync
+from kdive.images.rootfs.fetch import fetch_public_provisioning_rootfs, fetch_registered_rootfs
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _QCOW2 = b"qcow2-bytes-for-test"
@@ -298,7 +298,7 @@ def test_sync_fetch_staged_path_returns_validated_path_without_store(
     f.write_bytes(b"data")
     with psycopg.connect(migrated_url, autocommit=True) as conn:
         _insert_registered_sync(conn, path=str(f))
-        out = fetch_registered_rootfs_sync(
+        out = fetch_public_provisioning_rootfs(
             conn,
             _exploding_factory(),
             allowed_roots=[tmp_path],
@@ -318,7 +318,7 @@ def test_sync_fetch_staged_path_outside_roots_rejected(migrated_url: str, tmp_pa
     with psycopg.connect(migrated_url, autocommit=True) as conn:
         _insert_registered_sync(conn, path=str(outside))
         with pytest.raises(CategorizedError) as ei:
-            fetch_registered_rootfs_sync(
+            fetch_public_provisioning_rootfs(
                 conn,
                 _exploding_factory(),
                 allowed_roots=[roots],
@@ -333,7 +333,7 @@ def test_sync_fetch_staged_path_outside_roots_rejected(migrated_url: str, tmp_pa
 def test_sync_fetch_unknown_name_rejected(migrated_url: str, tmp_path: Path) -> None:
     with psycopg.connect(migrated_url, autocommit=True) as conn:
         with pytest.raises(CategorizedError) as ei:
-            fetch_registered_rootfs_sync(
+            fetch_public_provisioning_rootfs(
                 conn,
                 _exploding_factory(),
                 allowed_roots=[tmp_path],
@@ -351,7 +351,7 @@ def test_sync_fetch_s3_downloads_and_caches(migrated_url: str, tmp_path: Path) -
     cache = tmp_path / ".cache"
     with psycopg.connect(migrated_url, autocommit=True) as conn:
         _insert_registered_sync(conn, object_key=key, digest=_DIGEST)
-        out = fetch_registered_rootfs_sync(
+        out = fetch_public_provisioning_rootfs(
             conn,
             lambda: store,
             allowed_roots=[tmp_path],
@@ -373,7 +373,7 @@ def test_sync_fetch_s3_cache_hit_skips_store_factory(migrated_url: str, tmp_path
     cached.write_bytes(_QCOW2)
     with psycopg.connect(migrated_url, autocommit=True) as conn:
         _insert_registered_sync(conn, object_key=key, digest=_DIGEST)
-        out = fetch_registered_rootfs_sync(
+        out = fetch_public_provisioning_rootfs(
             conn,
             _exploding_factory(),
             allowed_roots=[tmp_path],
