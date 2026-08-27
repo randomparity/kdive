@@ -628,6 +628,30 @@ def test_tcg_journal_capture_discards_untrusted_upstream_stderr(tmp_path: pathli
     assert result.stderr == "worker journal capture was unavailable or withheld\n"
 
 
+def test_tcg_journal_capture_bounds_a_hanging_pipeline(tmp_path: pathlib.Path) -> None:
+    journalctl = tmp_path / "journalctl"
+    journalctl.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+    journalctl.chmod(0o755)
+    sg = tmp_path / "sg"
+    sg.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    sg.chmod(0o755)
+    _, diagnostic = _named_step("tcg", "Capture worker lifecycle diagnostics")
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", diagnostic["run"]],
+        cwd=_ROOT,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=12,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("::stop-commands::kdive-")
+    assert result.stderr == "worker journal capture was unavailable or withheld\n"
+
+
 @pytest.mark.parametrize("job", ("tcg", "native"))
 def test_live_job_keeps_test_step_authoritative_before_diagnostics(job: str) -> None:
     """The tier's own proof decides the verdict; diagnostics only observe its wreckage."""

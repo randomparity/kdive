@@ -608,11 +608,15 @@ jobs:
           # their journal entries. Read the worker units' SYSTEM journal (they are system
           # units, ADR-0574; a --user read would see nothing) through a fail-closed filter
           # that emits only fixed-form lane, provision-claim, and provider-stage records.
-          # The window spans the job timeout plus margin and is bounded by 400 entries.
+          # The window spans the job timeout plus margin; the records are capped at 400 and
+          # GNU timeout bounds the complete producer/filter pipeline so cleanup still runs.
           journal_status=0
-          journalctl -u 'kdive-live-worker@*' --since '-55min' -n 400 --no-pager \
-            --output=cat 2>/dev/null |
-            python3 scripts/live-stack/filter-worker-journal-evidence.py || journal_status=$?
+          {
+            timeout --signal=TERM --kill-after=2s 8s /bin/bash -o pipefail -c \
+              "journalctl -u 'kdive-live-worker@*' --since '-55min' -n 400 --no-pager \
+                --output=cat 2>/dev/null |
+                python3 scripts/live-stack/filter-worker-journal-evidence.py"
+          } 2>/dev/null || journal_status=$?
           if ((journal_status != 0)); then
             echo "worker journal capture was unavailable or withheld" >&2
           fi
