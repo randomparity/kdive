@@ -1190,6 +1190,11 @@ def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
         "local-libvirt provision system=22222222-2222-2222-2222-222222222222 "
         "job=11111111-1111-1111-1111-111111111111 stage=snapshot-pre-existing event=start"
     )
+    failure = (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef claim loop failure "
+        "lane=default reason=postgres-57P01"
+    )
     poisoned = f"{claim} secret=/sensitive/path"
     payload = "\n".join(
         (
@@ -1198,6 +1203,7 @@ def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
             json.dumps({"msg": claim}),
             json.dumps({"msg": poisoned}),
             json.dumps({"msg": provider}),
+            json.dumps({"msg": failure}),
             "",
         )
     )
@@ -1214,7 +1220,47 @@ def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
 
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout == f"{accepted}\n{claim}\n{provider}\n"
+    assert result.stdout == f"{accepted}\n{claim}\n{provider}\n{failure}\n"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ("pool-timeout", "timeout", "postgres-57P01", "postgres-unknown", "unexpected"),
+)
+def test_worker_journal_evidence_filter_accepts_fixed_claim_loop_reasons(reason: str) -> None:
+    message = (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef claim loop failure "
+        f"lane=default reason={reason}"
+    )
+
+    result = _run_worker_journal_filter(json.dumps({"msg": message}).encode() + b"\n")
+
+    assert result.returncode == 0
+    assert result.stdout == f"{message}\n".encode()
+    assert result.stderr == b""
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef claim loop failure "
+        "lane=default reason=pool_timeout",
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef claim loop failure "
+        "lane=default reason=postgres-57P01 secret=/private/path",
+        "run_once failed on lane default; continuing after 1.0s: /private/path",
+    ),
+)
+def test_worker_journal_evidence_filter_rejects_non_fixed_claim_loop_records(
+    message: str,
+) -> None:
+    result = _run_worker_journal_filter(json.dumps({"msg": message}).encode() + b"\n")
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b""
 
 
 @pytest.mark.parametrize(

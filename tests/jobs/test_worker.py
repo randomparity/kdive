@@ -14,7 +14,7 @@ import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg.types.json import Jsonb
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
 
 from kdive.db.repositories import JOBS
@@ -47,6 +47,10 @@ from tests.support.otel import tracer_provider
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 _INCARNATION_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
+
+
+class _UnsafeSqlstateError(psycopg.Error):
+    sqlstate = "08/06"
 
 
 class _CountingHeartbeat:
@@ -122,6 +126,33 @@ async def _registered_worker(
             ),
         )
     return _worker(pool, registry, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("exc", "reason"),
+    [
+        pytest.param(PoolTimeout("pool /private/path"), "pool-timeout", id="pool-timeout"),
+        pytest.param(TimeoutError("timer /private/path"), "timeout", id="timeout"),
+        pytest.param(
+            psycopg.errors.AdminShutdown("server /private/path"),
+            "postgres-57P01",
+            id="postgres-sqlstate",
+        ),
+        pytest.param(
+            psycopg.Error("database /private/path"),
+            "postgres-unknown",
+            id="postgres-without-sqlstate",
+        ),
+        pytest.param(
+            _UnsafeSqlstateError("database /private/path"),
+            "postgres-unknown",
+            id="postgres-with-unsafe-sqlstate",
+        ),
+        pytest.param(RuntimeError("bug /private/path"), "unexpected", id="unexpected"),
+    ],
+)
+def test_claim_loop_failure_reason_is_fixed_and_non_secret(exc: Exception, reason: str) -> None:
+    assert worker_module._claim_loop_failure_reason(exc) == reason
 
 
 def test_init_rejects_pool_too_small_for_dispatch_plus_heartbeat() -> None:
@@ -1022,14 +1053,21 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
-def test_run_survives_run_once_error(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_survives_run_once_error(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             worker = await _registered_worker(
                 pool,
                 HandlerRegistry(),
                 worker_id="w1",
-                config=WorkerConfig(poll_interval=timedelta(milliseconds=10)),
+                config=WorkerConfig(
+                    accepted_lanes=(DEFAULT_JOB_DISPATCH_LANE,),
+                    poll_interval=timedelta(milliseconds=10),
+                ),
             )
             stop = asyncio.Event()
             calls = 0
@@ -1043,8 +1081,21 @@ def test_run_survives_run_once_error(migrated_url: str, monkeypatch: pytest.Monk
                 return None
 
             monkeypatch.setattr(worker, "run_once", fake_run_once)
-            await asyncio.wait_for(worker.run(stop), timeout=2)
+            with caplog.at_level(logging.WARNING, logger=worker_module.__name__):
+                await asyncio.wait_for(worker.run(stop), timeout=2)
             assert calls >= 2  # the loop survived the first iteration's error and ran again
+            fixed = [
+                record.getMessage()
+                for record in caplog.records
+                if "claim loop failure" in record.getMessage()
+            ]
+            assert fixed == ["worker w1 claim loop failure lane=default reason=unexpected"]
+            raw = next(
+                record
+                for record in caplog.records
+                if record.getMessage().startswith("run_once failed on lane default")
+            )
+            assert raw.exc_info is not None
 
     asyncio.run(_run())
 

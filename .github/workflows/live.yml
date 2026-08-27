@@ -613,15 +613,16 @@ jobs:
           # The fleet may already be phase=terminated when this step runs, and the witness
           # reports diagnostics=null for a stopped fleet (#2056) — but stopped units keep
           # their journal entries. Read the worker units' SYSTEM journal (they are system
-          # units, ADR-0574; a --user read would see nothing) through a fail-closed filter
-          # that emits only fixed-form lane, provision-claim, and provider-stage records.
+          # units, ADR-0574; a --user read would see nothing) through a producer restricted
+          # to the four fixed evidence families, then a fail-closed exact-record filter.
           # The window spans the job timeout plus margin; the records are capped at 400 and
           # GNU timeout bounds the complete producer/filter pipeline so cleanup still runs.
           journal_status=0
           {
             timeout --signal=TERM --kill-after=2s 8s /bin/bash -o pipefail -c \
               "sudo --non-interactive journalctl -u kdive-live-worker@1.service \
-                --since '-55min' -n 400 --no-pager \
+                --since '-55min' -n 400 --no-pager --case-sensitive=yes \
+                --grep='\"msg\": \"(worker [^\" ]+ accepting dispatch lanes: |worker [^\" ]+ claimed provision job |local-libvirt provision system=|worker [^\" ]+ claim loop failure lane=)' \
                 --output=cat 2>/dev/null |
                 python3 scripts/live-stack/filter-worker-journal-evidence.py"
           } 2>/dev/null || journal_status=$?
