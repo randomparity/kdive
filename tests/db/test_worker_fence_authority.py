@@ -1187,7 +1187,7 @@ def test_worker_bootstrap_key_path_has_exact_role_authority(
             pytest.raises(psycopg.errors.InsufficientPrivilege),
         ):
             runtime.execute(
-                "INSERT INTO system_bootstrap_keys (system_id, private_key, public_key) "
+                "INSERT INTO public.system_bootstrap_keys (system_id, private_key, public_key) "
                 "VALUES (%s, 'private', 'ssh-ed25519 denied')",
                 (system_id,),
             )
