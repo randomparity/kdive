@@ -438,36 +438,7 @@ def _resolve_object(
 
 
 def _unlink_orphan_partials(dest: Path) -> None:
-    """Glob-unlink each **unheld** crash-orphaned ``<token>.*.partial`` (ADR-0446).
-
-    A killed worker's ``.partial`` is a SENSITIVE multi-GiB leak no row owns, so ADR-0441 §5 has a
-    live fetcher collect it opportunistically — bounding it by the *next fetch* of that base rather
-    than by full investigation reclaim.
-
-    What it must not collect is a partial some sibling is still writing. ADR-0441 §5 justified the
-    unconditional unlink on holding the fetch lock, "which serializes downloads so no *live* sibling
-    exists" — but that lock is a **session** ``pg_advisory_lock``, a property of a Postgres
-    connection rather than of the process that took it, and the connection sends nothing for the
-    whole multi-GiB download. An idle-connection reap or a terminated backend releases it while the
-    owner is still writing; a sibling then acquires it, swept here, and the first fetcher wrote on
-    into an unlinked inode and failed at ``os.replace`` — a failed provision, with the written
-    blocks charged to ``df`` yet invisible to every path-matching tool.
-
-    So liveness is asked of the kernel instead: a live writer holds an exclusive ``flock`` on its
-    own partial (:func:`_flocked_partial`), and a candidate this cannot lock is skipped. The gate
-    costs nothing in reach, because the kernel drops an ``flock`` when the holding descriptor is
-    closed — including on process exit, normal or ``SIGKILL`` — so a crash orphan is already
-    unlocked by the time any sibling sweeps it and needs no timeout to age out. Correctness no
-    longer depends on the fetch lock at all; do not re-derive it from the lock, and do not widen the
-    glob over the whole uploads dir.
-
-    The ``suppress`` covers the directory walk only — every per-candidate fault is handled inside
-    :func:`~kdive.providers.shared.staging_partials.unlink_partial_if_unheld`, so a single
-    unsweepable file cannot truncate the pass. Its "held" answer is discarded here: this sweep is
-    opportunistic and bounded by the next fetch, so a skip needs no follow-up. The reclaim-side
-    backstop consumes it, because there the skip decides whether the investigation's drain marker
-    clears (ADR-0452 §4).
-    """
+    """Opportunistically unlink unheld ``<token>.*.partial`` crash orphans (ADR-0446)."""
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
             unlink_partial_if_unheld(orphan, unlink_when_unlockable=False)
@@ -1235,45 +1206,7 @@ def _completion_marker_present(dest: Path, *, system_id: UUID) -> bool:
 
 
 def _sibling_already_published(dest: Path) -> bool:
-    """Whether ``dest`` already holds a good base, checked just before this fetcher would publish.
-
-    Deliberately **not** :func:`_staged_base_rejection`, despite asking the same question of the
-    same file. That one raises on an unreadable ``dest`` because a cache miss there would trigger
-    a silent, perpetual multi-GiB re-download. Here the polarity is reversed: a ``False`` costs one
-    ``os.replace`` — the behavior before this guard existed, and one that *repairs* an unreadable
-    ``dest``, since a rename needs permission on the directory rather than on the file. So every
-    ``OSError`` is answered "publish", and this can never add a failure to a download that already
-    succeeded.
-
-    Answering "publish" on an *unreadable* ``dest`` is a deliberate trade, not an oversight: the
-    alternative — skip, and hand back a base this process could not evaluate at all — is worse than
-    the orphaned inode it avoids, when a verified copy of the same content-addressed bytes is
-    already in hand. ``EACCES`` is the case the rename repairs outright. ``EMFILE`` cannot reach the
-    publish anyway, because :func:`_durable_replace` needs a descriptor of its own and fails first.
-    That leaves a transient ``EIO``, where publishing costs at most ADR-0443 §2's already-accepted
-    inode orphan; ADR-0446 §7 records it as a residue rather than claiming the gate is airtight.
-
-    **The completion marker is required here too** (ADR-0451 §4). Under the reuse gate a marker-less
-    base is one every future fetch will *reject*, so skipping the publish on one would hand the
-    investigation a base that is re-downloaded and re-rejected for as long as it lives — trading a
-    bounded orphan inode for an unbounded re-download loop, which is the wrong direction.
-
-    **That branch is not rare, and it must not be described as if it were.** Beside the
-    died-mid-publish sibling it is also the *deterministic* first re-provision of every base staged
-    before ADR-0451: such a base is present and magic-passing and has no marker, so the re-stage
-    ``os.replace``\\ s over it. ADR-0443 §2 already accepts the residue that follows — the
-    superseded inode survives with zero links while some QEMU holds it open as a backing file,
-    charged to ``df`` and matching no path — but accepted it as a rare race, and the upgrade turns
-    it into one
-    occurrence per (investigation, token) whose base a running guest holds. Bounded by that guest's
-    lifetime and recorded in ADR-0451's Consequences with the free-space cost that accompanies it;
-    do not re-derive it as a sub-millisecond window.
-
-    Adopting the marker-less base instead — writing a marker for it rather than re-staging — would
-    avoid both costs and is rejected in ADR-0451, because a marker-less base is exactly the file
-    nothing can distinguish between "staged fine by older code" and "torn by the crash #1539 is
-    about". Marking it complete would be asserting the very thing that cannot be checked.
-    """
+    """Reuse only a regular, marked, qcow2 base; an unreadable base must be republished."""
     try:
         return (
             stat.S_ISREG(dest.stat().st_mode)
@@ -1326,44 +1259,9 @@ def _fsync_path(path: Path, flags: int) -> None:
 
 
 def _durable_replace(partial: Path, dest: Path, *, system_id: UUID) -> None:
-    """Publish the verified partial onto ``dest`` and mark it complete, durably (ADR-0443/0451).
+    """Durably publish a verified partial, then its completion marker (ADR-0443/0451).
 
-    ``os.replace`` is atomic with respect to concurrent *readers*, not with respect to a host crash
-    or power loss: on a default ext4 mount the rename can become durable while the data blocks
-    behind it are not, leaving a full-length ``dest`` of zeros or stale blocks (#1526). The file
-    sync closes that window, in the flush → ``fsync`` → ``os.replace`` shape
-    ``inventory/writeback.py`` already uses for the systems TOML.
-
-    Syncing **here** rather than as each stager closes its writer is what keeps the cost on the
-    published bases only: every verification gate — each stager's checksum and the shared
-    qcow2-magic gate — has already run and raised by the time this is called, so a partial the
-    ``finally`` is about to discard never costs a full flush of a base up to the 50 GiB canonical
-    cap. It also leaves durability at the single publish point instead of once per codec.
-
-    Without the directory sync the *rename* can be lost on a crash even though the data behind it
-    survived. That alone is benign — an absent ``dest`` is re-staged — but the same directory entry
-    carries the partial's unlink, so a lost rename can resurrect the partial as an orphan. Both
-    halves are made durable together, at the cost of one metadata sync per staged base.
-
-    **The completion marker is written last and any stale one removed first** (ADR-0451 §2). The
-    ordering is the whole guarantee, so it is stated as one sequence rather than left to a reader:
-
-    1. ``fsync`` the partial — the base's data is durable.
-    2. unlink any stale marker, and
-    3. ``fsync`` the directory, so its *absence* is durable before the rename.
-    4. ``os.replace`` publishes.
-    5. ``fsync`` the directory — the rename and the partial's unlink are durable.
-    6. create and ``fsync`` the marker, and
-    7. ``fsync`` the directory so the marker's link is durable.
-
-    Every crash point leaves one of two states, and both are correct: **no marker**, so the next
-    fetch re-stages; or a **marker over a base whose data was made durable at step 1**, so the next
-    fetch reuses it. Steps 2–3 are the re-stage case, and they are not decoration: the token is a
-    content address, so a re-stage can begin with a marker already present, and without them the
-    recovered state could be the *previous* base under a marker attesting to one this pass had
-    already rejected. Ordering the removal's durability ahead of the rename removes that state
-    outright rather than reasoning about a particular filesystem's metadata ordering — the derived
-    invariant ADR-0446 and ADR-0452 exist to delete.
+    The fsync order guarantees either no marker (re-stage) or a marker over durable base data.
     """
     marker = staged_rootfs_marker_path(dest)
     _fsync_path(partial, os.O_WRONLY)

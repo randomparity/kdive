@@ -96,24 +96,7 @@ def _object_error(detail: str) -> CategorizedError:
 
 
 def _short_read_error(request: StripDecodeRequest, offset: int) -> CategorizedError:
-    """The store served no bytes for a range inside the object: its failure, not the agent's.
-
-    ``compressed_size`` is the size the store's own ``HEAD`` reported, so a store that answers a
-    range below it with nothing is internally inconsistent — a fault on the read, indistinguishable
-    from the connection resets ``get_range`` raises for itself, and equally retryable. Both loops
-    raise it, so the same signal cannot mean two things depending on which one saw it.
-
-    It is emphatically *not* the truncated branch. That branch says the stored object ends before
-    its gzip trailer, which is a claim about the object; here the object is exactly as long as the
-    store says and the store simply did not hand it over. Reporting this as a defect would demand a
-    re-upload of an object that may be perfectly intact — the failure ADR-0523 §1 exists to remove,
-    reappearing on the one branch where the drain's own evidence can disprove it. It carries no
-    gate marker, so it is never logged as stored-object damage (ADR-0445 §4).
-
-    A *genuinely* truncated upload does not come through here: ``HEAD`` reports the short length,
-    so the pass reaches ``compressed_size`` with no empty read and the truncated branch fires as
-    before.
-    """
+    """Classify an empty range below the store-reported size as a retryable store failure."""
     return CategorizedError(
         f"the object store returned no bytes for a range of {request.key} at offset {offset} of "
         f"{request.compressed_size}: the stored object could not be read in full; retry",
@@ -122,30 +105,7 @@ def _short_read_error(request: StripDecodeRequest, offset: int) -> CategorizedEr
 
 
 def _transport_error(detail: str) -> CategorizedError:
-    """The bytes read back are not the bytes the signed PUT bound: retryable (ADR-0445).
-
-    The two constructors exist so the category follows from *what is being asserted* rather than
-    from which helper is nearest. A single ``_decode_error`` covered all three of this module's
-    failure outcomes, so the checksum mismatch inherited the object-defect category by proximity
-    and disagreed with the identity staging path over the byte-identical failure (#1523). One
-    observation, two modes: transient GET-side transport corruption, which a bare retry clears,
-    and permanent post-PUT bit rot, which it does not.
-
-    What the category controls is the **agent-visible** ``retryable`` boolean
-    ``mcp/responses.py`` derives from it, and the remediation the message gives — not any
-    automatic re-attempt. A staging failure reaches the queue through the provision handler, which
-    sets ``terminal`` on the error before re-raising (``jobs/handlers/systems.py``), so the job
-    dead-letters on the first attempt under *either* category and nothing is re-downloaded. The
-    retry this advises is the agent's own, against a System that is already terminally failed.
-
-    **Reach (ADR-0523, closing ADR-0445 §6).** The digest is now consulted *before* any
-    object-defect branch raises, so it reaches every shape of stored-byte damage: a flipped bit in
-    the deflate body or the CRC/ISIZE trailer, a post-PUT truncation, and damage that leaves the
-    decoded stream intact (header fields, deflate padding bits, a wholesale replacement by another
-    well-formed gzip under the bound) all land here. Under ADR-0445 §6 zlib's framing tripped first
-    for most of them and they reported the object-defect category instead, which disagreed with the
-    identity path over byte-identical damage.
-    """
+    """Classify bytes that differ from the signed PUT digest as retryable transport failure."""
     return CategorizedError(
         detail,
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,

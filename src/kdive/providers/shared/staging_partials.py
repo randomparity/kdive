@@ -151,37 +151,7 @@ def _probed(partial: Path) -> Iterator[_Liveness]:
 
 
 def live_writer_holds_partial(partial: Path) -> bool:
-    """Whether a live writer **provably** holds ``partial``'s ``flock`` — read-only, never unlinks.
-
-    The ADR-0495 reclaim gate's question. It differs from :func:`unlink_partial_if_unheld` in the
-    one way that matters for a caller whose answer licenses deleting a staged base, an object-store
-    object and an ``artifacts`` row: it does not touch the file. Collecting a partial stays the two
-    sweeps' job on every path, and a gate that mutated the filesystem to reach a verdict could not
-    be run speculatively. Nor would unlinking be free here — on a filesystem that cannot ``flock``
-    the writer staged unguarded, so it would destroy a possibly-live writer's only copy.
-
-    **Only :attr:`_Liveness.HELD` defers**, which is a deliberate re-application of ADR-0452 §5
-    rather than a convenience. A held ``flock`` is the one *provably transient* answer, because the
-    kernel drops it when the holding descriptor closes, including on ``SIGKILL``. Every other answer
-    is either "no writer" or a condition **permanent until an operator acts**: an ``EACCES`` partial
-    under the uid asymmetry ADR-0442 documents in this same subsystem does not heal on its own, and
-    neither does an ``ENOLCK`` NFS mount. ADR-0452 §5 settled this same question for these same
-    errnos one layer down — a permanently unsweepable file must not pin an investigation forever.
-
-    Failing *closed* on those looks safer and is worse, which is worth recording because it was
-    tried. Deferring keeps the checksum's ``artifacts`` row, which is the retry mechanism — and that
-    surviving row is also what makes ``_finish_drained_investigation`` compute ``drained=False``,
-    retiring the drain tail's partial collector. The orphan then pins the row and the row retires
-    the orphan's only collector: a permanent, **silent** leak of base, object and row, since the job
-    still succeeds and nothing dead-letters, plus a never-clearing ``rootfs_cleanup_pending_at``
-    re-firing the close-driven lane every backoff forever. That is the loop ADR-0442 was about.
-
-    So the gate reaches the one condition it can discharge soundly and no further. On an unevaluable
-    or unlockable candidate the reclaim proceeds exactly as it did before ADR-0495 — unchanged there
-    rather than improved — and the ``WARNING`` :func:`_probed` emits is the operator's signal that a
-    download could not be ruled out. Narrowing that needs #1558's option 2 (evidence that a
-    ``torn_down`` System was mid-provision), not a longer wait on a file nothing will fix.
-    """
+    """Report only a provably held writer lock, without mutating the partial (ADR-0495)."""
     with _probed(partial) as liveness:
         return liveness is _Liveness.HELD
 
