@@ -1387,6 +1387,39 @@ def test_worker_readiness_evidence_filter_rejects_non_exact_or_oversized_input(
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize(
+    "script",
+    (
+        "filter-worker-journal-evidence.py",
+        "filter-worker-readiness-evidence.py",
+    ),
+)
+def test_worker_evidence_filters_silence_deeply_nested_json_failure(
+    script: str, tmp_path: Path
+) -> None:
+    (tmp_path / "sitecustomize.py").write_text(
+        "import sys\nsys.setrecursionlimit(100)\n",
+        encoding="utf-8",
+    )
+    nested_json = "[" * 200 + "0" + "]" * 200 + "\n"
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/live-stack" / script)],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        input=nested_json,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert len(nested_json.encode()) < 4096
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
 def test_restart_host_processes_starts_ordinary_daemons_and_lifecycle_workers() -> None:
     text = (ROOT / "scripts/live-stack/lib.sh").read_text()
     assert "restart_host_processes" in text

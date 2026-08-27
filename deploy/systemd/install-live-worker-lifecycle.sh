@@ -443,12 +443,12 @@ _prepare_attested_runtime_root() {
   local runtime_root="$1" owner="$2" group="$3" parent
   parent="$(dirname -- "$runtime_root")"
   if [[ ! -d $parent || -L $parent ]]; then
-    echo "lifecycle runtime parent must be a real directory: $parent" >&2
+    echo "lifecycle-runtime-error component=lifecycle_runtime_parent reason=not_real_directory" >&2
     return 1
   fi
   install -d -o "$owner" -g "$group" -m 0755 -- "$parent"
   if [[ -L $runtime_root || (-e $runtime_root && ! -d $runtime_root) ]]; then
-    echo "lifecycle runtime root must be a real directory: $runtime_root" >&2
+    echo "lifecycle-runtime-error component=lifecycle_runtime_root reason=not_real_directory" >&2
     return 1
   fi
   install -d -o "$owner" -g "$group" -m 0755 -- "$runtime_root"

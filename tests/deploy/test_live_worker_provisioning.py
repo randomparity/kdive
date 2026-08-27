@@ -130,6 +130,34 @@ _prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
     assert stat.S_IMODE(runtime_root.stat().st_mode) == 0o755
 
 
+def test_installer_rejects_symlink_runtime_install_parent_without_path_output(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    parent = tmp_path / "SENSITIVE_PARENT_SENTINEL"
+    parent.symlink_to(external, target_is_directory=True)
+    runtime_root = parent / "runtime"
+    command = r"""
+source "$1"
+_prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
+"""
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(runtime_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "lifecycle-runtime-error component=lifecycle_runtime_parent reason=not_real_directory\n"
+    )
+    assert "SENSITIVE_PARENT_SENTINEL" not in result.stderr
+
+
 def test_installer_rejects_symlink_runtime_install_root(tmp_path: Path) -> None:
     parent = tmp_path / "opt"
     parent.mkdir()
@@ -137,7 +165,7 @@ def test_installer_rejects_symlink_runtime_install_root(tmp_path: Path) -> None:
     external = tmp_path / "external"
     external.mkdir()
     external.chmod(0o777)
-    runtime_root = parent / "kdive-live-worker-lifecycle"
+    runtime_root = parent / "SENSITIVE_ROOT_SENTINEL"
     runtime_root.symlink_to(external, target_is_directory=True)
     target_before = external.stat()
     command = r"""
@@ -155,7 +183,10 @@ _prepare_attested_runtime_root "$2" "$(id -u)" "$(id -g)"
 
     assert result.returncode != 0
     assert result.stdout == ""
-    assert "lifecycle runtime root must be a real directory" in result.stderr
+    assert result.stderr == (
+        "lifecycle-runtime-error component=lifecycle_runtime_root reason=not_real_directory\n"
+    )
+    assert "SENSITIVE_ROOT_SENTINEL" not in result.stderr
     assert runtime_root.is_symlink()
     assert (
         target_after.st_uid,
