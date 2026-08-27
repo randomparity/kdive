@@ -9,10 +9,12 @@ import ipaddress
 import json
 import socket
 import ssl
+import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from email.message import Message
 from pathlib import Path
 from typing import Any, cast
 
@@ -215,6 +217,40 @@ def test_authenticated_tokenreview_with_mismatched_returned_audience_is_refused(
     request_data = requests[0].data
     assert isinstance(request_data, bytes)
     assert json.loads(request_data)["spec"]["audiences"] == [BROKER_AUDIENCE]
+
+
+def test_unauthenticated_tokenreview_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected_token = tmp_path / "service-account-token"
+    projected_token.write_text("broker-token", encoding="utf-8")
+    response = io.BytesIO(b'{"status":{"authenticated":false}}')
+    monkeypatch.setattr(credential_broker, "_SERVICE_ACCOUNT_TOKEN", projected_token)
+    monkeypatch.setattr(credential_broker.ssl, "create_default_context", lambda **kwargs: object())
+    monkeypatch.setattr(
+        credential_broker.urllib.request, "urlopen", lambda *args, **kwargs: response
+    )
+
+    assert credential_broker._token_review("invalid-token", BROKER_AUDIENCE) is None
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_tokenreview_http_failures_propagate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
+) -> None:
+    projected_token = tmp_path / "service-account-token"
+    projected_token.write_text("broker-token", encoding="utf-8")
+
+    def fail_request(*args: object, **kwargs: object) -> object:
+        raise urllib.error.HTTPError("tokenreviews", status, "api failure", Message(), None)
+
+    monkeypatch.setattr(credential_broker, "_SERVICE_ACCOUNT_TOKEN", projected_token)
+    monkeypatch.setattr(credential_broker.ssl, "create_default_context", lambda **kwargs: object())
+    monkeypatch.setattr(credential_broker.urllib.request, "urlopen", fail_request)
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        credential_broker._token_review("bound-token", BROKER_AUDIENCE)
+    assert caught.value.code == status
 
 
 @pytest.mark.parametrize(

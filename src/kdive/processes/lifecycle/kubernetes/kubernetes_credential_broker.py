@@ -8,7 +8,6 @@ import logging
 import secrets
 import socket
 import ssl
-import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -242,13 +241,10 @@ def _token_review(token: str, audience: str) -> PodIdentity | None:
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(
-            request, timeout=3, context=ssl.create_default_context(cafile=str(_SERVICE_ACCOUNT_CA))
-        ) as response:
-            response_value = json.load(response)
-    except urllib.error.HTTPError:
-        return None
+    with urllib.request.urlopen(
+        request, timeout=3, context=ssl.create_default_context(cafile=str(_SERVICE_ACCOUNT_CA))
+    ) as response:
+        response_value = json.load(response)
     return _token_review_identity(response_value, audience)
 
 
