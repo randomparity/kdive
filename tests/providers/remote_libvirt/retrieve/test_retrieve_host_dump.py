@@ -39,7 +39,7 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     host_dump_volume_name,
     pool_type_and_target_strict,
 )
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry

@@ -28,7 +28,7 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_READINESS_POLL_S,
     KdumpCapturer,
 )
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import STORE_MTIME

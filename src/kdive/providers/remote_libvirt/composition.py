@@ -90,7 +90,7 @@ from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraRea
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (

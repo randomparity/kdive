@@ -39,7 +39,7 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import (
 )
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetrieve
+from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
@@ -323,7 +323,7 @@ def test_build_runtime_threads_secret_registry_into_each_registry_port() -> None
     assert runtime.installer._secret_registry is registry  # ty: ignore[unresolved-attribute]
     assert runtime.live_introspector._secret_registry is registry  # ty: ignore[unresolved-attribute]
     assert runtime.vmcore_introspector._secret_registry is registry  # ty: ignore[unresolved-attribute]
-    # Retriever capture collaborators and the separate crash-postmortem port all receive the same
+    # Retrieve capture collaborators and the separate crash-postmortem port all receive the same
     # provider registry.
     assert runtime.retriever._kdump._secret_registry is registry  # ty: ignore[unresolved-attribute]
     assert runtime.retriever._host_dump._secret_registry is registry  # ty: ignore[unresolved-attribute]

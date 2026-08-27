@@ -44,7 +44,7 @@ from kdive.store.objectstore import object_store_from_env
 
 
 class RemoteLibvirtRetrieve:
-    """The realized remote `Retriever` port for kdump and host_dump capture."""
+    """The realized remote `Retrieve` port for kdump and host_dump capture."""
 
     def __init__(
         self,
