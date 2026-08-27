@@ -99,8 +99,9 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
     registry_credentials: list[SecretStr] = []
 
-    def _registry(**kwargs: object) -> object:
-        registry_credentials.append(cast(SecretStr, kwargs["incarnation_credential"]))
+    def _registry(handler_assembly: object) -> object:
+        assert handler_assembly is assembly
+        registry_credentials.append(credential)
         return object()
 
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
@@ -110,7 +111,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         capture_supervisor=SimpleNamespace(dispose_recovery_spool=lambda operation_id: True),
     )
     monkeypatch.setattr(
-        "kdive.jobs.assembly.build_worker_handler_assembly", lambda **kwargs: assembly
+        "kdive.jobs.assembly.build_production_worker_handler_assembly", lambda **kwargs: assembly
     )
 
     async def _recover(*args: object) -> object:
