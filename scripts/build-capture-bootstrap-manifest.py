@@ -219,18 +219,21 @@ def _atomic_write_at(
     owner_uid: int,
     group_gid: int,
 ) -> bool:
-    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
     try:
         existing_fd = os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:
         pass
+    except OSError as error:
+        raise RuntimeError("manifest destination must be a regular file") from error
     else:
         try:
             metadata = os.fstat(existing_fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError("manifest destination must be a regular file")
             existing = os.read(existing_fd, len(data) + 1)
             if (
-                stat.S_ISREG(metadata.st_mode)
-                and stat.S_IMODE(metadata.st_mode) == mode
+                stat.S_IMODE(metadata.st_mode) == mode
                 and metadata.st_uid == owner_uid
                 and metadata.st_gid == group_gid
                 and existing == data
