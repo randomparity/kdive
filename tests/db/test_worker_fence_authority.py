@@ -510,9 +510,12 @@ def _seed_queued_job(conn: psycopg.Connection) -> UUID:
     job_id = uuid4()
     conn.execute(
         "INSERT INTO jobs (id, kind, state, max_attempts, payload, authorizing, dedup_key) "
-        "VALUES (%s, 'install', 'queued', 3, '{}'::jsonb, "
-        '\'{"principal":"principal","project":"project-a"}\'::jsonb, %s)',
-        (job_id, f"worker-fence-lease-{job_id}"),
+        "VALUES (%s, 'install', 'queued', 3, '{}'::jsonb, %s, %s)",
+        (
+            job_id,
+            Jsonb({"principal": "principal", "agent_session": None, "project": "project-a"}),
+            f"worker-fence-lease-{job_id}",
+        ),
     )
     return job_id
 
