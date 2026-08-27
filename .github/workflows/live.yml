@@ -607,7 +607,7 @@ jobs:
           # The window spans the job timeout plus margin and is bounded by 400 entries.
           journal_status=0
           journalctl -u 'kdive-live-worker@*' --since '-55min' -n 400 --no-pager \
-            --output=cat |
+            --output=cat 2>/dev/null |
             python3 scripts/live-stack/filter-worker-journal-evidence.py || journal_status=$?
           if ((journal_status != 0)); then
             echo "worker journal capture was unavailable or withheld" >&2

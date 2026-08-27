@@ -1217,6 +1217,38 @@ def test_worker_journal_evidence_filter_emits_only_fixed_records() -> None:
     assert result.stdout == f"{accepted}\n{claim}\n{provider}\n"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("enqueued_at", "NONE", id="missing-enqueued-at"),
+        pytest.param("claim_at", "NONE", id="missing-claim-at"),
+        pytest.param("enqueued_at", "2026-08-26T14:51:00", id="naive-enqueued-at"),
+        pytest.param("claim_at", "2026-08-26T14:51:01", id="naive-claim-at"),
+    ],
+)
+def test_worker_journal_evidence_filter_rejects_claim_without_authoritative_timestamps(
+    field: str, value: str
+) -> None:
+    timestamps = {
+        "enqueued_at": "2026-08-26T14:51:00.739273+00:00",
+        "claim_at": "2026-08-26T14:51:01.000000+00:00",
+    }
+    timestamps[field] = value
+    claim = (
+        "worker local-systemd:kdive-live-worker@1.service:"
+        "0123456789abcdef0123456789abcdef claimed provision job "
+        "11111111-1111-1111-1111-111111111111 lane=default attempt=0 "
+        f"enqueued_at={timestamps['enqueued_at']} claim_at={timestamps['claim_at']} "
+        "queue_delay_s=0.260727"
+    )
+
+    result = _run_worker_journal_filter(json.dumps({"msg": claim}).encode() + b"\n")
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
 def test_worker_journal_evidence_filter_fails_when_no_safe_record_exists() -> None:
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/live-stack/filter-worker-journal-evidence.py")],

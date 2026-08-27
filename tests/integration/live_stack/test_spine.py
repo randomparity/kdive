@@ -252,6 +252,54 @@ def test_worker_claim_captures_dequeue_record_before_mutation(
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("created_at", None, id="missing-enqueued-at"),
+        pytest.param("heartbeat_at", None, id="missing-claim-at"),
+        pytest.param("created_at", datetime(2026, 8, 26, 12), id="naive-enqueued-at"),
+        pytest.param("heartbeat_at", datetime(2026, 8, 26, 12), id="naive-claim-at"),
+    ],
+)
+def test_worker_claim_rejects_non_authoritative_timestamps_before_commit(
+    field: str,
+    value: datetime | None,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provision = _claimed_job(JobKind.PROVISION)
+    object.__setattr__(provision, field, value)
+    transaction_failed: list[bool] = []
+
+    class _FailClosedConnection(_WorkerConnection):
+        async def __aexit__(self, *args: object) -> None:
+            transaction_failed.append(args[0] is ValueError)
+
+    class _FailClosedPool(_WorkerPool):
+        def connection(self) -> _WorkerConnection:
+            return _FailClosedConnection()
+
+    async def queue_is_running(_conn: object) -> bool:
+        return False
+
+    async def dequeue(_conn: object, _worker_id: str, **_kwargs: object) -> Job:
+        return provision
+
+    monkeypatch.setattr(job_worker.queue, "is_queue_paused", queue_is_running)
+    monkeypatch.setattr(job_worker.queue, "dequeue", dequeue)
+    worker = _contract_worker(pool=_FailClosedPool())
+    caplog.clear()
+
+    with (
+        caplog.at_level(logging.INFO, logger="kdive.jobs.worker"),
+        pytest.raises(ValueError, match="timezone-aware"),
+    ):
+        asyncio.run(worker.run_once("claim-loop-lane"))
+
+    assert transaction_failed == [True]
+    assert not [record for record in caplog.records if "claimed provision" in record.getMessage()]
+
+
 def test_worker_claim_is_not_logged_when_queue_depth_rolls_back_transaction(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

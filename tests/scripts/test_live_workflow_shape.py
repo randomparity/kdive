@@ -6,8 +6,10 @@ cancellation, must fail here — the analogue of test_live_vm_tcg_tier.py pinnin
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import subprocess
 
 import pytest
 import yaml
@@ -529,6 +531,7 @@ def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> No
     if job == "tcg":
         assert "--output=cat" in run
         assert "scripts/live-stack/filter-worker-journal-evidence.py" in run
+        assert "--output=cat 2>/dev/null |" in run
     else:
         assert "--output=cat" not in run
         assert "scripts/live-stack/filter-worker-journal-evidence.py" not in run
@@ -540,6 +543,34 @@ def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> No
         < run.index("printf '::%s::\\n'")
     )
     assert "worker journal capture was unavailable or withheld" in run
+
+
+def test_tcg_journal_capture_discards_untrusted_upstream_stderr(tmp_path: pathlib.Path) -> None:
+    journalctl = tmp_path / "journalctl"
+    journalctl.write_text(
+        '#!/bin/sh\nprintf "journal failure at /sensitive/journal/path\\n" >&2\nexit 9\n',
+        encoding="utf-8",
+    )
+    journalctl.chmod(0o755)
+    sg = tmp_path / "sg"
+    sg.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    sg.chmod(0o755)
+    _, diagnostic = _named_step("tcg", "Capture worker lifecycle diagnostics")
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", diagnostic["run"]],
+        cwd=_ROOT,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert result.returncode == 0
+    assert "/sensitive/journal/path" not in result.stdout
+    assert "/sensitive/journal/path" not in result.stderr
+    assert result.stderr == "worker journal capture was unavailable or withheld\n"
 
 
 @pytest.mark.parametrize("job", ("tcg", "native"))
