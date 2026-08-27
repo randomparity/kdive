@@ -10,7 +10,7 @@ execution lives in ``kdive.jobs.handlers.systems``.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.errors import CategorizedError, suppressed_detail
 from kdive.domain.labels import validate_label
+from kdive.jobs.service_operations import JobOperations
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools._common import (
@@ -39,6 +40,7 @@ from kdive.services.idempotency.envelope import (
     resolve_replay,
     validate_idempotency_key,
 )
+from kdive.services.job_ports import ProvisionJobPort
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionRecovery,
@@ -172,9 +174,12 @@ class SystemProvisionHandlers:
     profile_policy: ProfilePolicy
     component_sources: ComponentSourceCapabilities
     rootfs_validator: RootfsValidator
+    jobs: ProvisionJobPort = field(default_factory=JobOperations)
 
     def _admission(self) -> SystemAdmission:
-        return SystemAdmission(self.profile_policy, self.component_sources, self.rootfs_validator)
+        return SystemAdmission(
+            self.profile_policy, self.component_sources, self.rootfs_validator, self.jobs
+        )
 
     async def provision_system(
         self,

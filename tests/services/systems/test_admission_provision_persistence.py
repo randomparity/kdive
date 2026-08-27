@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
+from kdive.jobs.service_operations import JobOperations
 from kdive.security.audit import args_digest
 from kdive.services.systems.admission import (
     AdmissionFailure,
@@ -47,7 +48,9 @@ from tests.mcp.systems_support import seed_system
 
 
 def _admission() -> SystemAdmission:
-    return SystemAdmission(_TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, lambda _rootfs: None)
+    return SystemAdmission(
+        _TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, lambda _rootfs: None, JobOperations()
+    )
 
 
 async def _provision(

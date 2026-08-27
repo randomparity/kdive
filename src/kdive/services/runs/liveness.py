@@ -16,10 +16,10 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs import queue
 from kdive.providers.shared.console_evidence import redacted_console_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
+from kdive.services.job_ports import JobQueryPort
 
 STATE_HEALTHY = "healthy"
 STATE_DEGRADED = "degraded"
@@ -119,16 +119,19 @@ def _parse_ssh_verdict(result_ref: str | None) -> tuple[bool | None, str | None]
 
 
 async def _latest_ssh_verdict(
-    conn: AsyncConnection, system_id: UUID
+    conn: AsyncConnection, system_id: UUID, jobs: JobQueryPort
 ) -> tuple[bool | None, str | None]:
-    job = await queue.latest_succeeded_job_for_system(conn, JobKind.CHECK_SSH_REACHABLE, system_id)
+    job = await jobs.latest_succeeded_for_system(conn, JobKind.CHECK_SSH_REACHABLE, system_id)
     if job is None:
         return None, None
     return _parse_ssh_verdict(job.result_ref)
 
 
 async def derive_liveness(
-    conn: AsyncConnection, system_id: UUID, secret_registry: SecretRegistry
+    conn: AsyncConnection,
+    system_id: UUID,
+    secret_registry: SecretRegistry,
+    jobs: JobQueryPort,
 ) -> Liveness:
     """Read both signals for ``system_id`` and combine them into a :class:`Liveness` (ADR-0373).
 
@@ -139,7 +142,7 @@ async def derive_liveness(
         system_id, secret_registry, max_chars=_STORM_TAIL_CHARS
     )
     console_storm = detect_console_storm(console_tail)
-    ssh_reachable, checked_at = await _latest_ssh_verdict(conn, system_id)
+    ssh_reachable, checked_at = await _latest_ssh_verdict(conn, system_id, jobs)
     state = derive_state(
         console_storm=console_storm,
         ssh_reachable=ssh_reachable,

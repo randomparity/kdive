@@ -13,6 +13,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import JobKind
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.job_ports import JobQueryPort
 from kdive.services.runs import liveness as liveness_mod
 from kdive.services.runs.liveness import (
     _STORM_TAIL_CHARS,
@@ -141,7 +142,7 @@ def _patch_signals(
     expected_conn: object,
     expected_system_id,
     expected_registry: SecretRegistry,
-) -> None:
+) -> JobQueryPort:
     # The fakes assert every argument the production calls forward: a mutant that drops or nulls
     # conn / system_id / kind / registry / max_chars reaches an assertion and is killed.
     async def _fake_tail(system_id, registry, *, max_chars: int = 0) -> str | None:
@@ -157,14 +158,14 @@ def _patch_signals(
         return None if ssh_result_ref is None else SimpleNamespace(result_ref=ssh_result_ref)
 
     monkeypatch.setattr(liveness_mod, "redacted_console_tail", _fake_tail)
-    monkeypatch.setattr(liveness_mod.queue, "latest_succeeded_job_for_system", _fake_job)
+    return cast(JobQueryPort, SimpleNamespace(latest_succeeded_for_system=_fake_job))
 
 
 def _run_derive(monkeypatch, *, console_tail: str | None, ssh_result_ref: str | None) -> Liveness:
     conn = object()
     system_id = uuid4()
     registry = SecretRegistry()
-    _patch_signals(
+    jobs = _patch_signals(
         monkeypatch,
         console_tail=console_tail,
         ssh_result_ref=ssh_result_ref,
@@ -172,7 +173,7 @@ def _run_derive(monkeypatch, *, console_tail: str | None, ssh_result_ref: str | 
         expected_system_id=system_id,
         expected_registry=registry,
     )
-    return asyncio.run(derive_liveness(cast(AsyncConnection, conn), system_id, registry))
+    return asyncio.run(derive_liveness(cast(AsyncConnection, conn), system_id, registry, jobs))
 
 
 def test_derive_liveness_degraded_on_console_storm(monkeypatch: pytest.MonkeyPatch) -> None:

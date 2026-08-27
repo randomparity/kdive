@@ -14,6 +14,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job
+from kdive.jobs.service_operations import JobOperations
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -31,6 +32,7 @@ from kdive.services.artifacts.listing import (
     list_run_console_artifacts,
 )
 from kdive.services.debug.sessions import active_session_ids_for_run
+from kdive.services.job_ports import JobQueryPort
 from kdive.services.runs.build_catalog import resolve_build_expiry
 from kdive.services.runs.liveness import Liveness, derive_liveness
 from kdive.services.runs.steps import (
@@ -45,6 +47,8 @@ from kdive.services.runs.steps import failed_boot_attempt as _failed_boot_attemp
 from kdive.services.runs.steps import install_method_for as _install_method_for
 from kdive.services.runs.steps import step_progress as _step_progress
 from kdive.services.runs.steps import system_arch as _system_arch
+
+_JOBS = JobOperations()
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,7 @@ async def get_run(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     include_console_artifacts: bool = False,
+    jobs: JobQueryPort = _JOBS,
 ) -> ToolResponse:
     """Return a Run the caller's project owns, advertising the boot's required cmdline.
 
@@ -95,6 +100,7 @@ async def get_run(
                 resolver=resolver,
                 secret_registry=secret_registry,
                 include_console_artifacts=include_console_artifacts,
+                jobs=jobs,
             )
         return envelope_for_run(
             run,
@@ -122,6 +128,7 @@ async def _load_run_read_details(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     include_console_artifacts: bool,
+    jobs: JobQueryPort,
 ) -> RunReadDetails:
     system = await SYSTEMS.get(conn, run.system_id) if run.system_id is not None else None
     runtime = await resolver.runtime_for_run(conn, run.id) if system is not None else None
@@ -132,11 +139,11 @@ async def _load_run_read_details(
         failing_job=await _failing_job(conn, run),
         active_debug_session_ids=await active_session_ids_for_run(conn, run.id),
         step_progress=progress,
-        boot_readiness=await _boot_readiness(conn, run, progress),
+        boot_readiness=await _boot_readiness(conn, run, progress, jobs),
         build_result=await _build_result(conn, run),
         console_manifest=await _console_manifest(conn, run, include_console_artifacts),
         latest_console_id=await _latest_console_id(conn, run),
-        liveness=await _liveness(conn, run, progress, secret_registry),
+        liveness=await _liveness(conn, run, progress, secret_registry, jobs),
         vmcore_artifact_id=await redacted_vmcore_artifact_id(conn, run.id),
         build_expires_at=build_expires_at,
         server_time=await _server_time(conn) if build_expires_at is not None else None,
@@ -176,6 +183,7 @@ async def _liveness(
     run: Run,
     progress: StepProgress | None,
     secret_registry: SecretRegistry,
+    jobs: JobQueryPort,
 ) -> Liveness | None:
     # Gated to a ready-booted local-libvirt Run — the only place a "healthy vs wedged" question is
     # meaningful, and the only provider whose console log and loopback SSH forward live on this host
@@ -187,7 +195,7 @@ async def _liveness(
         or progress.boot_outcome != READY_BOOT_OUTCOME
     ):
         return None
-    return await derive_liveness(conn, run.system_id, secret_registry)
+    return await derive_liveness(conn, run.system_id, secret_registry, jobs)
 
 
 def _required_cmdline(system: System | None, runtime: ProviderRuntime | None) -> str | None:
@@ -207,11 +215,11 @@ async def _failing_job(conn: AsyncConnection, run: Run) -> Job | None:
 
 
 async def _boot_readiness(
-    conn: AsyncConnection, run: Run, progress: StepProgress | None
+    conn: AsyncConnection, run: Run, progress: StepProgress | None, jobs: JobQueryPort
 ) -> BootAttempt | None:
     if progress is None or progress.boot == RUN_STEP_SUCCEEDED:
         return None
-    return await _failed_boot_attempt(conn, run.id)
+    return await _failed_boot_attempt(conn, run.id, jobs)
 
 
 async def _build_result(conn: AsyncConnection, run: Run) -> BuildStepResult | None:

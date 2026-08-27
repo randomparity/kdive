@@ -22,6 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import ALLOCATIONS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
+from kdive.jobs.service_operations import JobOperations
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionFailureReason,
@@ -60,7 +61,9 @@ _X86_GUEST_ARCHES = {
 
 
 def _admission() -> SystemAdmission:
-    return SystemAdmission(_TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, lambda _rootfs: None)
+    return SystemAdmission(
+        _TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, lambda _rootfs: None, JobOperations()
+    )
 
 
 async def _provision(
