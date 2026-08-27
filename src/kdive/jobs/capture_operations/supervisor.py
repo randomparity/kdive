@@ -283,44 +283,65 @@ class CaptureOperationSupervisor:
                     publisher,
                 )
         except asyncio.CancelledError:
-            if acknowledged:
-                assert operation is not None and launched is not None
-                await _finish_owned_cleanup(
-                    asyncio.create_task(
-                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
-                    )
-                )
-            else:
-                await self._cleanup_started(
-                    conn, operation, launched, launch_abort, snapshot, configuration
-                )
+            await self._cleanup_failed_execution(
+                conn,
+                operation,
+                launched,
+                launch_abort,
+                snapshot,
+                configuration,
+                acknowledged=acknowledged,
+                publication_recoverer=publication_recoverer,
+            )
             raise
         except CaptureAuthorityLost as error:
-            if acknowledged:
-                assert operation is not None and launched is not None
-                await _finish_owned_cleanup(
-                    asyncio.create_task(
-                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
-                    )
-                )
-            else:
-                await self._cleanup_started(
-                    conn, operation, launched, launch_abort, snapshot, configuration
-                )
+            await self._cleanup_failed_execution(
+                conn,
+                operation,
+                launched,
+                launch_abort,
+                snapshot,
+                configuration,
+                acknowledged=acknowledged,
+                publication_recoverer=publication_recoverer,
+            )
             raise _authority_error() from error
         except Exception:
-            if acknowledged:
-                assert operation is not None and launched is not None
-                await _finish_owned_cleanup(
-                    asyncio.create_task(
-                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
-                    )
-                )
-            else:
-                await self._cleanup_started(
-                    conn, operation, launched, launch_abort, snapshot, configuration
-                )
+            await self._cleanup_failed_execution(
+                conn,
+                operation,
+                launched,
+                launch_abort,
+                snapshot,
+                configuration,
+                acknowledged=acknowledged,
+                publication_recoverer=publication_recoverer,
+            )
             raise
+
+    async def _cleanup_failed_execution(
+        self,
+        conn: AsyncConnection,
+        operation: CaptureOperation | None,
+        launched: LaunchedCapture | None,
+        launch_abort: LaunchAbortEvidence | None,
+        snapshot: CaptureSnapshot,
+        configuration: bytes | None,
+        *,
+        acknowledged: bool,
+        publication_recoverer: CapturePublicationRecoverer,
+    ) -> None:
+        if acknowledged:
+            assert operation is not None and launched is not None
+            await _finish_owned_cleanup(
+                asyncio.create_task(
+                    self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                )
+            )
+            return
+        await self._cleanup_started(
+            conn, operation, launched, launch_abort, snapshot, configuration
+        )
 
     async def _cleanup_publication(
         self,
