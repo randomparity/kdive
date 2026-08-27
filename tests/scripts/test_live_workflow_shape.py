@@ -590,6 +590,7 @@ def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> No
         assert "--output=cat" in run
         assert "scripts/live-stack/filter-worker-journal-evidence.py" in run
         assert "--output=cat 2>/dev/null |" in run
+        assert "sudo --non-interactive journalctl" in run
     else:
         assert "--output=cat" not in run
         assert "scripts/live-stack/filter-worker-journal-evidence.py" not in run
@@ -610,6 +611,12 @@ def test_tcg_journal_capture_discards_untrusted_upstream_stderr(tmp_path: pathli
         encoding="utf-8",
     )
     journalctl.chmod(0o755)
+    sudo = tmp_path / "sudo"
+    sudo.write_text(
+        '#!/bin/sh\n[ "$1" = "--non-interactive" ] && shift\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    sudo.chmod(0o755)
     sg = tmp_path / "sg"
     sg.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     sg.chmod(0o755)
@@ -635,6 +642,12 @@ def test_tcg_journal_capture_bounds_a_hanging_pipeline(tmp_path: pathlib.Path) -
     journalctl = tmp_path / "journalctl"
     journalctl.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
     journalctl.chmod(0o755)
+    sudo = tmp_path / "sudo"
+    sudo.write_text(
+        '#!/bin/sh\n[ "$1" = "--non-interactive" ] && shift\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    sudo.chmod(0o755)
     sg = tmp_path / "sg"
     sg.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     sg.chmod(0o755)

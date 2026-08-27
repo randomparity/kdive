@@ -620,7 +620,8 @@ jobs:
           journal_status=0
           {
             timeout --signal=TERM --kill-after=2s 8s /bin/bash -o pipefail -c \
-              "journalctl -u 'kdive-live-worker@*' --since '-55min' -n 400 --no-pager \
+              "sudo --non-interactive journalctl -u 'kdive-live-worker@*' \
+                --since '-55min' -n 400 --no-pager \
                 --output=cat 2>/dev/null |
                 python3 scripts/live-stack/filter-worker-journal-evidence.py"
           } 2>/dev/null || journal_status=$?
