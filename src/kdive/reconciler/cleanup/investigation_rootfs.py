@@ -259,7 +259,7 @@ async def _enqueue_rootfs_reclaim(
 
     The dedup key is **stable** per investigation (ADR-0442 §6), so the sweeps hold at most one job
     row per investigation instead of one per ~30 s pass. Admission is gated here rather than left to
-    ``queue``'s ``recycle_terminal`` for the one reason the sweep cadence still makes load-bearing:
+    ``queue``'s terminal recycling for the one reason the sweep cadence still makes load-bearing:
     a settled job is left alone until :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` has passed, so a reclaim
     that keeps faulting retries on the order of minutes rather than twice a minute — and its
     ``failed`` row stays inspectable for that window instead of being reset within 30 s.

@@ -368,9 +368,9 @@ async def watch_for_crash_system(
                 # call while a watch is queued/running returns that same job (there is no reason to
                 # watch one console twice at once), so a contributor cannot flood the shared worker
                 # lane with unbounded pure-wait jobs — aggregate watch occupancy is bounded by the
-                # quota-gated count of READY Systems. `recycle_terminal`/`recycle_canceled` let a
+                # quota-gated count of READY Systems. Terminal-or-canceled recycling lets a
                 # re-issue after the prior watch completed *or was canceled* start a fresh watch (a
-                # new reproducer batch) in place — without recycle_canceled a canceled watch would
+                # new reproducer batch) in place — without it a canceled watch would
                 # wedge the stable slot forever and brick re-issue (the watch is
                 # contributor-cancelable).
                 job = await queue.enqueue(
@@ -379,8 +379,7 @@ async def watch_for_crash_system(
                     WatchForCrashPayload(system_id=system_id, deadline_s=clamped),
                     job_authorizing(ctx, system.project),
                     f"{system_id}:watch_for_crash",
-                    recycle_terminal=True,
-                    recycle_canceled=True,
+                    recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
                 )
                 return job_envelope(job, "system_id", uid)
 

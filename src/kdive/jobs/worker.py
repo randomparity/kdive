@@ -616,7 +616,7 @@ async def _fail_job_and_run(
 
     The Run's advisory lock is taken **before** ``queue.fail``, not after it, because
     ``runs.boot``/``runs.install`` hold ``LockScope.RUN`` and then row-lock this very job
-    (``queue.enqueue``'s ``recycle_terminal`` ``UPDATE`` on ``dedup_key = f"{run_id}:{step}"``).
+    (``queue.enqueue``'s terminal recycle on ``dedup_key = f"{run_id}:{step}"``).
     Row-locking the job first and then waiting on that lock would be an ABBA deadlock; this
     order matches every other RUN-scoped writer. Non-run-bearing kinds take no lock and open no
     outer transaction — ``queue.fail`` self-commits as it does for every other caller.

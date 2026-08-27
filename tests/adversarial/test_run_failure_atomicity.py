@@ -352,7 +352,7 @@ def test_worker_takes_the_run_lock_before_queue_fail_writes_anything(
     """Lock order: RUN advisory **then** the ``jobs`` row, matching every other RUN writer.
 
     ``runs.boot``/``runs.install`` hold ``LockScope.RUN`` and then row-lock this very job via
-    ``queue.enqueue``'s ``recycle_terminal`` ``UPDATE … WHERE dedup_key = %s``. Spanning the two
+    ``queue.enqueue``'s terminal-recycle ``UPDATE … WHERE dedup_key = %s``. Spanning the two
     worker writes in one transaction co-holds locks the old shape released between them, so
     row-locking the job first and *then* waiting on that advisory lock would be an ABBA deadlock
     against that caller.

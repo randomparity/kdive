@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from enum import StrEnum
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
@@ -46,6 +47,14 @@ DEFAULT_LEASE = timedelta(minutes=5)
 DEFAULT_DISPATCH_LANES = (DEFAULT_JOB_DISPATCH_LANE,)
 
 
+class JobRecyclePolicy(StrEnum):
+    """Terminal states an enqueue may reset under an existing deduplication key."""
+
+    NEVER = "never"
+    TERMINAL = "terminal"
+    TERMINAL_OR_CANCELED = "terminal_or_canceled"
+
+
 async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
@@ -54,8 +63,7 @@ async def enqueue(
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    recycle_terminal: bool = False,
-    recycle_canceled: bool = False,
+    recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
 ) -> Job:
     """Admit a job idempotently, returning the row for ``dedup_key``.
 
@@ -67,13 +75,10 @@ async def enqueue(
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
-        ValueError: ``recycle_canceled`` without ``recycle_terminal``.
         ValueError: ``kind`` is a retired historical kind without an active handler.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
-    if recycle_canceled and not recycle_terminal:
-        raise ValueError("recycle_canceled requires recycle_terminal")
     if kind in RETIRED_JOB_KINDS:
         raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
     dispatch_lane = dispatch_lane_for_kind(kind)
@@ -97,9 +102,9 @@ async def enqueue(
                 dedup_key,
             ),
         )
-        if recycle_terminal:
+        if recycle is not JobRecyclePolicy.NEVER:
             recyclable = [JobState.FAILED.value, JobState.SUCCEEDED.value]
-            if recycle_canceled:
+            if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
                 recyclable.append(JobState.CANCELED.value)
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
@@ -183,7 +188,7 @@ async def dequeue(
     computed deadline is valid.
 
     ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
-    inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
+    inserted: :func:`enqueue`'s terminal recycle re-dates ``created_at`` (ADR-0447), so a
     revived job queues behind the work admitted while it was settled instead of preempting it.
 
     Returns:

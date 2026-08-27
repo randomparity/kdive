@@ -360,7 +360,7 @@ async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
         return await cur.fetchone() is not None
 
 
-# The job states ``queue.enqueue(recycle_terminal=...)`` resets in place; must match its
+# The job states ``JobRecyclePolicy.TERMINAL`` resets in place; must match its
 # ``state IN ('failed','succeeded')`` fence so the ``replayed`` marker tracks the actual reset.
 _RECYCLABLE_JOB_STATES = frozenset({JobState.FAILED, JobState.SUCCEEDED})
 
@@ -399,7 +399,7 @@ async def _locked_enqueue(
         payload,
         job_authorizing(ctx, run.project),
         dedup_key,
-        recycle_terminal=recycle,
+        recycle=(queue.JobRecyclePolicy.TERMINAL if recycle else queue.JobRecyclePolicy.NEVER),
     )
     # A prior job is reset in place only when ``recycle`` fires on a recyclable (terminal) state;
     # otherwise a prior job is returned unchanged (a replay) and an absent prior is a fresh insert.

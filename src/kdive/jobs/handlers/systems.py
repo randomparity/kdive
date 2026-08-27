@@ -527,7 +527,7 @@ async def snapshot_handler(
         )
     except CategorizedError as exc:
         await _fail_snapshot_row(conn, snapshot_id)
-        # A failed capture is terminal (recycle_terminal on the dedup key frees a fresh re-issue),
+        # A failed capture is terminal (terminal recycling frees a fresh re-issue),
         # so it dead-letters at once rather than retrying and racing the failed row to available.
         exc.terminal = True
         raise

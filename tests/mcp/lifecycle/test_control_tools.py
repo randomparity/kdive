@@ -947,8 +947,8 @@ def test_watch_for_crash_is_capped_to_one_in_flight_per_system(migrated_url: str
 
 
 def test_watch_for_crash_re_issue_after_cancel_recycles(migrated_url: str) -> None:
-    # A canceled watch must not wedge the stable dedup key: recycle_canceled lets a re-issue
-    # reclaim the slot with a fresh queued watch, so cancel does not brick the tool on that System.
+    # A canceled watch must not wedge the stable dedup key: terminal-or-canceled policy lets a
+    # re-issue reclaim the slot with a fresh queued watch, so cancel does not brick the tool.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)

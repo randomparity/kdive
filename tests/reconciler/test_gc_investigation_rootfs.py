@@ -292,7 +292,7 @@ def test_a_settled_job_past_the_backoff_is_reissued_with_a_fresh_created_at(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The sweep drops the settled row and inserts a fresh one, so the reclaim is re-dated to the
-    # pass that decided it is due and carries that pass's due set. (`recycle_terminal` re-dates
+    # pass that decided it is due and carries that pass's due set. (Terminal recycling re-dates
     # `created_at` too since ADR-0447; what keeps the delete-and-insert here is the backoff.)
     monkeypatch.setattr(investigation_rootfs, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
 

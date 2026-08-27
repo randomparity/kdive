@@ -200,7 +200,7 @@ def test_concurrent_retry_terminal_failed_resets_once(migrated_url: str, racers:
                         _install_payload(),
                         _AUTHORIZING,
                         "dk-failed",
-                        recycle_terminal=True,
+                        recycle=queue.JobRecyclePolicy.TERMINAL,
                     )
                     for c in conns
                 )

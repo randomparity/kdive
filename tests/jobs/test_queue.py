@@ -300,22 +300,6 @@ def test_enqueue_rejects_max_attempts_below_one(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_enqueue_rejects_canceled_recycling_without_terminal_recycling(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with await _connect(migrated_url) as conn:
-            with pytest.raises(ValueError, match="recycle_canceled requires recycle_terminal"):
-                await queue.enqueue(
-                    conn,
-                    JobKind.INSTALL,
-                    _build_payload(),
-                    _AUTHORIZING,
-                    "dk-invalid-recycle",
-                    recycle_canceled=True,
-                )
-
-    asyncio.run(_run())
-
-
 def _fenced_payload(kind: JobKind) -> Any:
     """A minimal valid payload for each state-fenced kind (ADR-0550)."""
     system_id = str(uuid4())
@@ -386,7 +370,7 @@ def test_recycle_reroutes_a_row_first_inserted_on_another_lane(migrated_url: str
                 payload,
                 _AUTHORIZING,
                 "dk-recycle-lane",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
 
             assert recycled.id == job.id
@@ -726,7 +710,7 @@ def test_enqueue_recycle_terminal_resets_failed_job(migrated_url: str) -> None:
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-retry",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
 
             assert recycled.id == failed.id  # reset in place, not replaced
@@ -771,7 +755,7 @@ def test_enqueue_recycle_terminal_does_not_preempt_newer_work(migrated_url: str)
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-stale",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
             assert recycled.id == stale.id  # still reset in place, not replaced
             assert recycled.created_at > newer.created_at  # re-dated to the recycle
@@ -849,7 +833,7 @@ def test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue(migrated_url
                     _build_payload(),
                     _AUTHORIZING,
                     "dk-txn-stale",
-                    recycle_terminal=True,
+                    recycle=queue.JobRecyclePolicy.TERMINAL,
                 )
                 assert recycled.id == stale.id
                 assert recycled.created_at > newer.created_at
@@ -877,7 +861,7 @@ def test_enqueue_recycle_terminal_preserves_in_flight(migrated_url: str) -> None
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-q",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
             assert again.id == queued.id
             assert again.state is JobState.QUEUED
@@ -891,7 +875,7 @@ def test_enqueue_recycle_terminal_preserves_in_flight(migrated_url: str) -> None
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-run",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
             assert held.id == running.id
             assert held.state is JobState.RUNNING
@@ -927,7 +911,7 @@ def test_enqueue_recycle_terminal_resets_succeeded_job_with_new_payload(migrated
                 _install_payload(run_id, "a=2"),
                 _AUTHORIZING,
                 "dk-restage",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
             assert recycled.id == first.id  # reset in place
             assert recycled.state is JobState.QUEUED
@@ -940,7 +924,7 @@ def test_enqueue_recycle_terminal_resets_succeeded_job_with_new_payload(migrated
 
 def test_enqueue_recycle_canceled_reclaims_only_when_opted_in(migrated_url: str) -> None:
     # A stable-dedup-key caller re-issued after an explicit cancel (control.watch_for_crash,
-    # ADR-0367) reclaims the wedged slot only with recycle_canceled; recycle_terminal alone keeps
+    # ADR-0367) reclaims the wedged slot only with terminal-or-canceled policy; terminal-only keeps
     # the no-resurrection-of-canceled default.
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
@@ -955,7 +939,7 @@ def test_enqueue_recycle_canceled_reclaims_only_when_opted_in(migrated_url: str)
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-cancel",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
             assert kept.id == job.id and kept.state is JobState.CANCELED  # invariant preserved
 
@@ -965,8 +949,7 @@ def test_enqueue_recycle_canceled_reclaims_only_when_opted_in(migrated_url: str)
                 _build_payload(),
                 _AUTHORIZING,
                 "dk-cancel",
-                recycle_terminal=True,
-                recycle_canceled=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
             )
             assert reclaimed.id == job.id  # reset in place, not a duplicate
             assert reclaimed.state is JobState.QUEUED
