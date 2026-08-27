@@ -63,6 +63,33 @@ class CaptureSnapshot:
     quiescence: Callable[[bytes], TrafficCaptureQuiescence]
 
 
+@dataclass(frozen=True, slots=True)
+class _PreLaunch:
+    operation: CaptureOperation | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LaunchAborted:
+    operation: CaptureOperation
+    evidence: LaunchAbortEvidence
+
+
+@dataclass(frozen=True, slots=True)
+class _Launched:
+    operation: CaptureOperation
+    capture: LaunchedCapture
+    configuration: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Acknowledged:
+    operation: CaptureOperation
+    capture: LaunchedCapture
+
+
+type _ExecutionState = _PreLaunch | _LaunchAborted | _Launched | _Acknowledged
+
+
 class CaptureAuthorityLost(RuntimeError):
     """The heartbeat or lock-owning session stopped authorizing provider work."""
 
@@ -234,15 +261,12 @@ class CaptureOperationSupervisor:
         publication_recoverer: CapturePublicationRecoverer,
     ) -> UUID | None:
         """Execute and publish only while the exact job lock session remains responsive."""
-        launched: LaunchedCapture | None = None
-        operation: CaptureOperation | None = None
-        configuration: bytes | None = None
-        launch_abort: LaunchAbortEvidence | None = None
-        acknowledged = False
+        state: _ExecutionState = _PreLaunch()
 
         def record_launch_abort(evidence: LaunchAbortEvidence) -> None:
-            nonlocal launch_abort
-            launch_abort = evidence
+            nonlocal state
+            assert isinstance(state, _PreLaunch) and state.operation is not None
+            state = _LaunchAborted(state.operation, evidence)
 
         try:
             async with _capture_job_fence(conn, job.id):
@@ -253,11 +277,14 @@ class CaptureOperationSupervisor:
                     job.attempt,
                     _repository_snapshot(snapshot, request),
                 )
+                state = _PreLaunch(operation)
                 launched = await self._launcher.launch(
                     request, operation, on_abort=record_launch_abort
                 )
+                state = _Launched(operation, launched)
                 await record_identity(conn, self._credential, operation.id, _identity(launched))
                 configuration = snapshot.configuration()
+                state = _Launched(operation, launched, configuration)
                 launched.stage_configuration(configuration)
                 await _probe_lock_session(conn)
                 launched.release()
@@ -271,7 +298,7 @@ class CaptureOperationSupervisor:
                     exit_outcome="completed",
                     exit_code=returncode,
                 )
-                acknowledged = True
+                state = _Acknowledged(operation, launched)
                 data = self._consume_result(launched, request)
                 return await self._wait_for_publication(
                     conn,
@@ -285,36 +312,24 @@ class CaptureOperationSupervisor:
         except asyncio.CancelledError:
             await self._cleanup_failed_execution(
                 conn,
-                operation,
-                launched,
-                launch_abort,
+                state,
                 snapshot,
-                configuration,
-                acknowledged=acknowledged,
                 publication_recoverer=publication_recoverer,
             )
             raise
         except CaptureAuthorityLost as error:
             await self._cleanup_failed_execution(
                 conn,
-                operation,
-                launched,
-                launch_abort,
+                state,
                 snapshot,
-                configuration,
-                acknowledged=acknowledged,
                 publication_recoverer=publication_recoverer,
             )
             raise _authority_error() from error
         except Exception:
             await self._cleanup_failed_execution(
                 conn,
-                operation,
-                launched,
-                launch_abort,
+                state,
                 snapshot,
-                configuration,
-                acknowledged=acknowledged,
                 publication_recoverer=publication_recoverer,
             )
             raise
@@ -322,26 +337,25 @@ class CaptureOperationSupervisor:
     async def _cleanup_failed_execution(
         self,
         conn: AsyncConnection,
-        operation: CaptureOperation | None,
-        launched: LaunchedCapture | None,
-        launch_abort: LaunchAbortEvidence | None,
+        state: _ExecutionState,
         snapshot: CaptureSnapshot,
-        configuration: bytes | None,
         *,
-        acknowledged: bool,
         publication_recoverer: CapturePublicationRecoverer,
     ) -> None:
-        if acknowledged:
-            assert operation is not None and launched is not None
+        if isinstance(state, _Acknowledged):
             await _finish_owned_cleanup(
                 asyncio.create_task(
-                    self._cleanup_publication(conn, operation, launched, publication_recoverer)
+                    self._cleanup_publication(
+                        conn, state.operation, state.capture, publication_recoverer
+                    )
                 )
             )
             return
-        await self._cleanup_started(
-            conn, operation, launched, launch_abort, snapshot, configuration
-        )
+        if isinstance(state, _Launched):
+            await self._cleanup_launched(conn, state, snapshot)
+            return
+        if isinstance(state, _LaunchAborted):
+            await self._cleanup_launch_abort(conn, state)
 
     async def _cleanup_publication(
         self,
@@ -364,39 +378,50 @@ class CaptureOperationSupervisor:
                 )
             await record_spool_disposed(transition, self._credential, recovered.id)
 
-    async def _cleanup_started(
+    async def _cleanup_launch_abort(
         self,
         conn: AsyncConnection,
-        operation: CaptureOperation | None,
-        launched: LaunchedCapture | None,
-        launch_abort: LaunchAbortEvidence | None,
-        snapshot: CaptureSnapshot,
-        configuration: bytes | None,
+        state: _LaunchAborted,
     ) -> None:
-        if operation is None:
-            return
         try:
-            if launched is None:
-                if launch_abort is None:
-                    return
-                async with self._transition_connection(conn) as transition:
-                    await acknowledge_exit(
-                        transition,
-                        self._credential,
-                        operation.id,
-                        RecoveryEvidence(
-                            process_absent=launch_abort.process_absent,
-                            provider_quiescence=dict(launch_abort.provider_quiescence),
-                            exit_outcome=launch_abort.exit_outcome,
-                            exit_code=launch_abort.exit_code,
-                        ),
-                    )
-                return
-            await self._cancel_and_acknowledge(conn, operation, launched, snapshot, configuration)
+            evidence = state.evidence
+            async with self._transition_connection(conn) as transition:
+                await acknowledge_exit(
+                    transition,
+                    self._credential,
+                    state.operation.id,
+                    RecoveryEvidence(
+                        process_absent=evidence.process_absent,
+                        provider_quiescence=dict(evidence.provider_quiescence),
+                        exit_outcome=evidence.exit_outcome,
+                        exit_code=evidence.exit_code,
+                    ),
+                )
         except Exception as error:
             _log.warning(
                 "capture operation %s cleanup did not complete (%s)",
-                operation.id,
+                state.operation.id,
+                type(error).__name__,
+            )
+
+    async def _cleanup_launched(
+        self,
+        conn: AsyncConnection,
+        state: _Launched,
+        snapshot: CaptureSnapshot,
+    ) -> None:
+        try:
+            await self._cancel_and_acknowledge(
+                conn,
+                state.operation,
+                state.capture,
+                snapshot,
+                state.configuration,
+            )
+        except Exception as error:
+            _log.warning(
+                "capture operation %s cleanup did not complete (%s)",
+                state.operation.id,
                 type(error).__name__,
             )
 
