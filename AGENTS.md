@@ -131,9 +131,9 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 
 ## Architecture
 
-### Three processes, one codebase
+### Four runtime roles, one codebase
 
-`python -m kdive {server|worker|reconciler}` (`src/kdive/__main__.py`):
+`python -m kdive {server|worker|reconciler|lifecycle-witness}` (`src/kdive/__main__.py`):
 - **server** — the FastMCP streamable-HTTP app; owns state machines, authz, admission
   control. Thin and fast; never blocks on a long provision.
 - **worker** — pulls durable jobs from the Postgres-backed queue and runs provider
@@ -141,6 +141,9 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
   `{job_id, status: running}` and the agent polls `jobs.*`.
 - **reconciler** — periodic drift-repair loop (ADR-0021): tears down orphaned Systems,
   fails Runs on torn-down Systems, reclaims expired leases, detaches dead DebugSessions.
+- **lifecycle-witness** — deployment-specific worker-termination witness. Kubernetes runs it
+  as a fourth long-running workload; the portable Compose and systemd core uses only the first
+  three roles and handles lifecycle evidence through operator-side gates.
 
 State of record is **Postgres**; bulk artifacts (vmcores, transcripts) live in an
 **S3-compatible object store**, referenced by row. Postgres advisory locks replace the
@@ -259,8 +262,9 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   operator-provided KVM/nested-virt host with libvirt and a kdump-enabled guest image, and
   run only as a manually-dispatched self-hosted CI job. Unit/service tests depend only on
   disposable Postgres + MinIO + mock OIDC.
-- **`live_stack` tests** drive the spine over the real MCP HTTP transport against a running
-  host `server`/`worker`/`reconciler` + the compose backends; operator bring-up is in
+- **`live_stack` tests** drive the spine over the real MCP HTTP transport against the portable
+  three-role host stack (`server`/`worker`/`reconciler`) + the compose backends; they do not run
+  the Kubernetes-only `lifecycle-witness`. Operator bring-up is in
   [`docs/operating/runbooks/live-stack.md`](docs/operating/runbooks/live-stack.md) (ADR-0042). `just
   test-live-stack` skips cleanly when the stack/fixtures (or the marked suite) are absent.
 - **Three live tiers** (ADR-0353): `live_vm` (native, direct-provider ops against a
