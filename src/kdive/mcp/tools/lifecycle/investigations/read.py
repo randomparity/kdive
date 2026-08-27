@@ -9,10 +9,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import InvestigationState
 from kdive.domain.lifecycle.records import Investigation
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
@@ -38,7 +37,7 @@ class InvestigationsListRequest:
     """Direct-handler request for ``investigations.list`` filters and pagination."""
 
     project: str | None = None
-    state: str | None = None
+    state: InvestigationState | None = None
     limit: int = DEFAULT_LIST_LIMIT
     cursor: str | None = None
 
@@ -58,29 +57,12 @@ async def get_investigation(
         return await envelope_for_investigation(conn, inv)
 
 
-def _state_filter(state: str | None) -> InvestigationState | ToolResponse | None:
-    if state is None:
-        return None
-    try:
-        return InvestigationState(state)
-    except ValueError:
-        return _config_error_reason(
-            "investigations.list",
-            ConfigErrorReason.INVALID_STATE,
-            accepted_values=[s.value for s in InvestigationState],
-            detail=f"state {state!r} is not a valid Investigation state",
-        )
-
-
 async def list_investigations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     request: InvestigationsListRequest,
 ) -> ToolResponse:
     """List the caller's viewer-project Investigations, newest-first."""
-    resolved_state = _state_filter(request.state)
-    if isinstance(resolved_state, ToolResponse):
-        return resolved_state
     capped = _clamp_list_limit(request.limit)
     after = None
     if request.cursor:
@@ -92,7 +74,7 @@ async def list_investigations(
         pool,
         ctx,
         project=request.project,
-        state=resolved_state,
+        state=request.state,
         limit=capped + 1,
         after=after,
     )

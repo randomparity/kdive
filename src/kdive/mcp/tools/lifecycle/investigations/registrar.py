@@ -300,7 +300,7 @@ def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> No
             current_context(),
             InvestigationsListRequest(
                 project=payload.project,
-                state=payload.state.value if payload.state is not None else None,
+                state=payload.state,
                 limit=payload.limit,
                 cursor=payload.cursor,
             ),

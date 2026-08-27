@@ -69,7 +69,7 @@ class _RunsListPayload(ToolPayload):
         return _RunsListRequest(
             system_id=self.system_id,
             investigation_id=self.investigation_id,
-            state=self.state.value if self.state is not None else None,
+            state=self.state,
             limit=self.limit,
             cursor=self.cursor,
         )

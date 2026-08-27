@@ -19,10 +19,9 @@ from kdive.domain.capacity.state import RunState
 from kdive.domain.lifecycle.records import Run
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
@@ -40,7 +39,7 @@ class RunsListRequest:
 
     system_id: str | None = None
     investigation_id: str | None = None
-    state: str | None = None
+    state: RunState | None = None
     limit: int = DEFAULT_LIST_LIMIT
     cursor: str | None = None
 
@@ -55,7 +54,7 @@ def _build_filters(
     *,
     system_id: str | None,
     investigation_id: str | None,
-    state: str | None,
+    state: RunState | None,
 ) -> tuple[list[Composable], list[object]] | ToolResponse:
     """Translate filter args into SQL clauses + params, or a ``configuration_error``."""
     clauses: list[Composable] = [sql.SQL("project = ANY(%s)")]
@@ -73,24 +72,15 @@ def _build_filters(
         clauses.append(sql.SQL("investigation_id = %s"))
         params.append(uid)
     if state is not None:
-        try:
-            resolved = RunState(state)
-        except ValueError:
-            return _config_error_reason(
-                state,
-                ConfigErrorReason.INVALID_STATE,
-                accepted_values=[s.value for s in RunState],
-                detail=f"state {state!r} is not a valid Run state",
-            )
         clauses.append(sql.SQL("state = %s"))
-        params.append(resolved.value)
+        params.append(state.value)
     return clauses, params
 
 
 async def list_runs(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    request: RunsListRequest | None = None,
+    request: RunsListRequest,
 ) -> ToolResponse:
     """List the caller's Runs, filterable by system, investigation, and state.
 
@@ -99,7 +89,6 @@ async def list_runs(
     caller may see (ADR-0198). An empty viewer-project set then short-circuits to an empty
     collection without a query.
     """
-    request = request or RunsListRequest()
     viewer_projects = _viewer_projects(ctx)
     filters = _build_filters(
         viewer_projects,

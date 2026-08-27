@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
@@ -270,30 +269,8 @@ def test_filter_by_state(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             running = await _seed_run(pool, state=RunState.RUNNING)
             await _seed_run(pool, state=RunState.CREATED)
-            resp = await _list_runs(pool, _ctx(), state="running")
+            resp = await _list_runs(pool, _ctx(), state=RunState.RUNNING)
         assert [r.object_id for r in resp.items] == [str(running)]
-
-    asyncio.run(_run())
-
-
-def test_unknown_state_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _list_runs(pool, _ctx(), state="bogus")
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "invalid_state"
-        assert "running" in cast(list[str], resp.data["accepted_values"])
-
-    asyncio.run(_run())
-
-
-@pytest.mark.parametrize("bad_state", ["", "torn", "RUNNING"])
-def test_state_filter_rejects_invalid_values(migrated_url: str, bad_state: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _list_runs(pool, _ctx(), state=bad_state)
-        assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
 
@@ -357,15 +334,12 @@ def test_no_viewer_projects_returns_empty_collection(migrated_url: str) -> None:
 
 
 def test_validation_precedes_scoping(migrated_url: str) -> None:
-    """A malformed filter is a configuration_error even with no viewer projects (ADR-0198)."""
+    """A malformed cursor is a configuration_error even with no viewer projects (ADR-0198)."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ctx = RequestContext(principal="user-1", agent_session="s", projects=(), roles={})
-            bad_state = await _list_runs(pool, ctx, state="bogus")
             bad_cursor = await _list_runs(pool, ctx, cursor="!!!")
-        assert bad_state.error_category == "configuration_error"
-        assert bad_state.data["reason"] == "invalid_state"
         assert bad_cursor.error_category == "configuration_error"
         assert bad_cursor.data["reason"] == "invalid_cursor"
 

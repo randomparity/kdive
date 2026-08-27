@@ -1358,7 +1358,7 @@ def test_list_state_filter(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="a")
             await _open(pool, _ctx(), project="proj", title="b")
             await close_investigation(pool, _ctx(), opened.object_id, _SUMMARY)
-            resp = await _list(pool, _ctx(), state="open")
+            resp = await _list(pool, _ctx(), state=InvestigationState.OPEN)
             assert {i.data["title"] for i in resp.items} == {"b"}
 
     asyncio.run(scenario())
@@ -1386,18 +1386,6 @@ def test_registered_list_request_filters_by_state(
         assert resp.status == "ok"
         assert resp.data["count"] == 1
         assert resp.items[0].data["title"] == "open"
-
-    asyncio.run(scenario())
-
-
-def test_list_bad_state_is_config_error(migrated_url: str) -> None:
-    async def scenario() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _list(pool, _ctx(), state="nonsense")
-            assert resp.error_category == "configuration_error"
-            # ADR-0174: an unknown state filter enumerates the accepted Investigation states.
-            assert resp.data["reason"] == "invalid_state"
-            assert "open" in cast(list[str], resp.data["accepted_values"])
 
     asyncio.run(scenario())
 
