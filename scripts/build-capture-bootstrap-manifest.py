@@ -21,6 +21,7 @@ from kdive.jobs.capture_operations.bootstrap_elf import runtime_elf_closure
 
 SCHEMA_VERSION = 1
 DEFAULT_DESTINATION = Path("/usr/share/kdive/capture-bootstrap-manifest.json")
+_MAX_MANIFEST_BYTES = 1_048_576
 _ARCHITECTURES = {"amd64": "x86_64", "x86_64": "x86_64", "ppc64le": "ppc64le"}
 
 
@@ -266,11 +267,76 @@ def _atomic_write_at(
     return True
 
 
+def _read_regular_at(
+    parent_fd: int,
+    name: str,
+    *,
+    maximum: int,
+    owner_uid: int | None = None,
+    group_gid: int | None = None,
+    mode: int | None = None,
+) -> bytes:
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as error:
+        raise RuntimeError("manifest leaf must be a regular file") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise RuntimeError("manifest leaf must be a bounded regular file")
+        if owner_uid is not None and metadata.st_uid != owner_uid:
+            raise RuntimeError("installed manifest has the wrong owner")
+        if group_gid is not None and metadata.st_gid != group_gid:
+            raise RuntimeError("installed manifest has the wrong group")
+        if mode is not None and stat.S_IMODE(metadata.st_mode) != mode:
+            raise RuntimeError("installed manifest has the wrong mode")
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining and (chunk := os.read(descriptor, remaining)):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > maximum:
+            raise RuntimeError("manifest leaf exceeds the size bound")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def _read_staged_manifest(path: Path) -> bytes:
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RuntimeError("staged manifest must be a regular file") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_MANIFEST_BYTES:
+            raise RuntimeError("staged manifest must be a bounded regular file")
+        chunks: list[bytes] = []
+        remaining = _MAX_MANIFEST_BYTES + 1
+        while remaining and (chunk := os.read(descriptor, remaining)):
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if len(data) > _MAX_MANIFEST_BYTES:
+        raise RuntimeError("staged manifest exceeds the size bound")
+    try:
+        payload = json.loads(data)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("staged manifest contains malformed JSON") from error
+    if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+        raise RuntimeError("staged manifest has an unsupported structure")
+    return data
+
+
 def _install(args: argparse.Namespace) -> None:
     if os.geteuid() != 0:
         raise PermissionError("capture bootstrap manifest installation requires root")
-    staged = args.staged.resolve(strict=True)
-    data = staged.read_bytes()
+    data = _read_staged_manifest(args.staged)
     parent_fd, changed = _prepare_install_parent(args.destination.parent, owner_uid=0, group_gid=0)
     try:
         changed = (
@@ -284,17 +350,18 @@ def _install(args: argparse.Namespace) -> None:
             )
             or changed
         )
+        installed = _read_regular_at(
+            parent_fd,
+            args.destination.name,
+            maximum=_MAX_MANIFEST_BYTES,
+            owner_uid=0,
+            group_gid=0,
+            mode=0o644,
+        )
     finally:
         os.close(parent_fd)
-    installed = args.destination.stat()
-    if installed.st_uid != 0 or installed.st_gid != 0:
-        os.chown(args.destination, 0, 0)
-        changed = True
-    if args.destination.read_bytes() != data:
+    if installed != data:
         raise RuntimeError("installed manifest bytes differ from staged manifest")
-    metadata = args.destination.stat()
-    if metadata.st_uid != 0 or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o644:
-        raise RuntimeError("installed manifest is not root-owned mode 0644")
     print("changed" if changed else "unchanged")
 
 

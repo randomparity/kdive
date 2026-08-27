@@ -432,24 +432,24 @@ def test_manifest_install_closes_root_producer_worker_consumer_mode_gap(
     script_os = install.__globals__["os"]
     legacy_destination = tmp_path / "legacy" / "kdive" / "capture-bootstrap-manifest.json"
     destination = tmp_path / "fixed" / "kdive" / "capture-bootstrap-manifest.json"
-    root_owned_destinations = {legacy_destination, destination}
     for trusted_parent in (legacy_destination.parent.parent, destination.parent.parent):
         trusted_parent.mkdir()
         trusted_parent.chmod(0o755)
     monkeypatch.setattr(script_os, "geteuid", lambda: 0)
     monkeypatch.setattr(script_os, "fchown", lambda *_args: None)
     real_stat = Path.stat
+    read_regular_at = namespace["_read_regular_at"]
 
-    def root_owned_destination(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
-        metadata = real_stat(self, follow_symlinks=follow_symlinks)
-        if self not in root_owned_destinations:
-            return metadata
-        fields = list(metadata)
-        fields[stat.ST_UID] = 0
-        fields[stat.ST_GID] = 0
-        return os.stat_result(fields)
+    def current_user_owned_read(parent_fd: int, name: str, **kwargs: object) -> bytes:
+        kwargs["owner_uid"] = os.getuid()
+        kwargs["group_gid"] = os.getgid()
+        return read_regular_at(parent_fd, name, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", root_owned_destination)
+    monkeypatch.setitem(
+        install.__globals__,
+        "_read_regular_at",
+        current_user_owned_read,
+    )
     previous_umask = os.umask(0)
     try:
 
@@ -560,6 +560,61 @@ finally:
     assert result.returncode == 7
     assert result.stdout == "manifest destination must be a regular file\n"
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize("staged_kind", ("fifo", "symlink", "oversized", "malformed"))
+def test_manifest_install_rejects_untrusted_staged_leaf(tmp_path: Path, staged_kind: str) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    read_staged = namespace["_read_staged_manifest"]
+    maximum = namespace["_MAX_MANIFEST_BYTES"]
+    staged = tmp_path / "staged.json"
+    if staged_kind == "fifo":
+        os.mkfifo(staged)
+    elif staged_kind == "symlink":
+        external = tmp_path / "external"
+        external.write_text('{"schema_version":1}', encoding="utf-8")
+        staged.symlink_to(external)
+    elif staged_kind == "oversized":
+        with staged.open("wb") as output:
+            output.seek(maximum)
+            output.write(b"\n")
+    else:
+        staged.write_text("{", encoding="utf-8")
+
+    with pytest.raises(RuntimeError):
+        read_staged(staged)
+
+
+def test_manifest_install_keeps_parent_descriptor_across_path_retarget(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(_SCRIPT))
+    prepare_parent = namespace["_prepare_install_parent"]
+    atomic_write_at = namespace["_atomic_write_at"]
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    parent_fd, _ = prepare_parent(
+        visible,
+        owner_uid=os.getuid(),
+        group_gid=os.getgid(),
+    )
+    retained = tmp_path / "retained"
+    external = tmp_path / "external"
+    external.mkdir()
+    visible.rename(retained)
+    visible.symlink_to(external, target_is_directory=True)
+    try:
+        atomic_write_at(
+            parent_fd,
+            "manifest.json",
+            b'{"schema_version":1}\n',
+            0o644,
+            owner_uid=os.getuid(),
+            group_gid=os.getgid(),
+        )
+    finally:
+        os.close(parent_fd)
+
+    assert (retained / "manifest.json").is_file()
+    assert list(external.iterdir()) == []
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="unprivileged refusal requires a non-root test uid")
