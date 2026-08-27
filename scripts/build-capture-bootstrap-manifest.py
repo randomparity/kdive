@@ -503,7 +503,16 @@ def _read_staged_manifest(path: Path, *, expected_uid: int | None = None) -> byt
             maximum_size=_MAX_MANIFEST_BYTES,
         )
     except PermissionError as error:
-        raise RuntimeError("staged manifest path is not safely openable") from error
+        if str(error) != "capture bootstrap manifest has the wrong owner":
+            raise RuntimeError("staged manifest path is not safely openable") from error
+        try:
+            data = read_manifest(
+                selected_path,
+                expected_uid=0,
+                maximum_size=_MAX_MANIFEST_BYTES,
+            )
+        except PermissionError as root_error:
+            raise RuntimeError("staged manifest path is not safely openable") from root_error
     try:
         payload = json.loads(data)
     except (UnicodeError, json.JSONDecodeError) as error:
