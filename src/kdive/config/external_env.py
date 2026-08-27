@@ -342,27 +342,6 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by "
         "live.yml for its larger host-dep set (ADR-0566, #1978).",
     ),
-    ExternalEnvVar(
-        "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS",
-        "script",
-        "600",
-        "Positive whole-second monotonic bound for each external database, Docker, Helm, "
-        "Kubernetes, image, or migration operation in the protocol cutover wrappers.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS",
-        "script",
-        "10",
-        "Positive whole-second PostgreSQL connection bound exported by the protocol cutover "
-        "wrappers for each database operation.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS",
-        "script",
-        "300",
-        "Positive whole-second server-side statement bound exported by the protocol cutover "
-        "wrappers for each database operation.",
-    ),
     # live-vm guest-image stores (#1292, ADR-0388): scripts/live-vm/{warm-store,stage-tcg-images}.sh
     ExternalEnvVar(
         "KDIVE_WARM_STORE_DIR",
