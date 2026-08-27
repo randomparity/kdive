@@ -25,12 +25,7 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.processes.lifecycle.worker_incarnation import (
-    DockerWorkerDeathVerifier,
-    KubernetesWorkerDeathVerifier,
-    WorkerDeathVerifier,
-    worker_death_verifier_from_env,
-)
+from kdive.processes.lifecycle.worker_incarnation import WorkerDeathVerifier
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
@@ -89,19 +84,6 @@ def build_app(
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
 
-    configured_death_authority = worker_death_verifier_from_env()
-    durable_witness = (
-        worker_death_verifier
-        if worker_death_verifier is not None
-        else (
-            configured_death_authority
-            if isinstance(
-                configured_death_authority,
-                (DockerWorkerDeathVerifier, KubernetesWorkerDeathVerifier),
-            )
-            else None
-        )
-    )
     assembly = AppAssembly(
         resolver=resolver,
         secret_registry=composition.secret_registry,
@@ -109,7 +91,11 @@ def build_app(
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
         capture_reapers=composition.build_reconciler_capture_reapers(),
         object_stores=stores,
-        worker_death_verifier=durable_witness,
+        worker_death_verifier=(
+            worker_death_verifier
+            if worker_death_verifier is not None
+            else process.worker_death_verifier
+        ),
     )
     for register in build_plane_registrars(assembly):
         register(app, pool)

@@ -18,6 +18,7 @@ from pydantic import SecretStr
 import kdive.mcp.assembly.app as app_module
 import kdive.mcp.assembly.tool_registration as tool_module
 import kdive.mcp.schema.schema_advertising as envelope_module
+from kdive import assembly as process_assembly_module
 from kdive.assembly import ProcessAssembly
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
@@ -26,6 +27,7 @@ from kdive.jobs.assembly import build_handler_registry
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.assembly.app import build_app
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.processes.lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -156,8 +158,17 @@ def test_build_use_recovery_is_not_advertised_for_legacy_local_verifier(monkeypa
 
 def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -> None:
     monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "kubernetes")
+    stores = ObjectStoreAssembly(cast(Any, object()))
+    monkeypatch.setattr(process_assembly_module, "build_object_store_assembly", lambda: stores)
+    process = process_assembly_module.build_process_assembly(SecretRegistry())
+    assert isinstance(process.worker_death_verifier, KubernetesWorkerDeathVerifier)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=_verifier(),
+        process_assembly=process,
+        secret_registry=SecretRegistry(),
+    )
 
     names = {tool.name for tool in asyncio.run(app.list_tools())}
 
