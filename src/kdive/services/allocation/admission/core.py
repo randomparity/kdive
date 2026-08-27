@@ -1,28 +1,4 @@
-"""Budget/quota + host-cap allocation admission (ADR-0007 §4-6, ADR-0040).
-
-``admit`` is the fail-closed admission gate. It composes the per-**host** capacity cap
-(ADR-0023) with the per-**project** invariant — a concurrency quota and a spend
-budget — and reserves the lease estimate against budget in the same transaction it grants:
-
-1. **Validate first** (no lock, no write): the selector size, the lease window, and the
-   selector ≤ the chosen Resource's advertised caps. Any failure is a
-   ``configuration_error`` so a negative/oversized request can never reach the ledger
-   (ADR-0007 §2 — the budget-minting guard).
-2. **Resolve idempotency** under the project lock: a replayed ``(principal,
-   idempotency_key)`` returns the originally granted allocation with no second grant,
-   reserve, or ``spent_kcu`` change (ADR-0040 §3).
-3. **Check then debit** under ``PROJECT`` → ``RESOURCE`` (the global lock order, ADR-0040
-   §1): ``max_concurrent_allocations`` (→ ``quota_exceeded``), then ``(limit_kcu −
-   spent_kcu) ≥ estimate`` read O(1) from the budget row (→ ``allocation_denied``), then
-   the host cap (→ ``allocation_denied``). On success, **in one transaction**: insert
-   the ``granted`` Allocation (``lease_expiry``, ``requested_vcpus``/``requested_memory_gb``,
-   ``active_started_at`` null), write the ``reserved`` ledger row and bump ``spent_kcu``
-   (``accounting.reserve``), record the idempotency key, and write the audit row.
-
-Any failing check returns a denial with **no** durable write (ADR-0023's all-or-nothing
-rule). The ``cost_class`` is resolved admission-side from the chosen Resource (unlike
-``accounting.estimate``, which prices a hypothetical class with no host).
-"""
+"""Fail-closed budget, quota, and host-cap allocation admission (ADR-0007, ADR-0040)."""
 
 from __future__ import annotations
 
@@ -100,24 +76,10 @@ _REQUESTED_VALUE = AllocationState.REQUESTED.value
 
 @dataclass(frozen=True)
 class AllocationRequest:
-    """Inputs for one allocation admission attempt.
+    """Resolved inputs for one admission attempt.
 
-    ``selector`` carries the priced size (vcpus / memory_gb) — for a shape-sized request
-    the caller resolves the shape to this selector before admission (ADR-0067). ``disk_gb``
-    is the resolved disk size persisted as the at-grant snapshot (``requested_disk_gb``);
-    ``shape`` is the named preset the size resolved from (``None`` for full-custom), recorded
-    as a label, not re-resolved later.
-
-    ``pcie_specs`` is the resolved PCIe device-spec **union** (explicit ``pcie_devices``
-    plus a shape's ``pcie_match``) — already composed by the caller. An empty union is a
-    non-PCIe request. The specs are resolved to distinct free devices and claimed inside the
-    per-Resource lock (ADR-0068), never pre-lock.
-
-    ``on_capacity`` selects what a **capacity** denial does (ADR-0069): ``"deny"`` (default)
-    returns the denial; ``"queue"`` instead enqueues a ``requested``
-    allocation holding only a queue position. ``requested_kind`` / ``requested_resource_id``
-    are the original target descriptor persisted on the queued row so the promotion sweep
-    can re-resolve a host — exactly one is set, mirroring the by-kind / by-id selector.
+    PCIe specs are claimed only under the Resource lock. ``on_capacity="queue"`` creates a
+    non-occupying requested row whose original target can be re-resolved during promotion.
     """
 
     ctx: RequestContext
@@ -138,21 +100,10 @@ class AllocationRequest:
 
 @dataclass(frozen=True)
 class AdmissionOutcome:
-    """The result of an admission attempt.
+    """A granted allocation or typed denial.
 
-    On a grant, ``allocation`` is the inserted (or replayed) row and ``category`` is
-    ``None``. On a denial, ``allocation`` is ``None`` and ``category`` is the most
-    specific failure the handler maps to a typed response: ``configuration_error``
-    (validation), ``quota_exceeded`` (over the concurrency cap / no quota row), or
-    ``allocation_denied`` (over budget / no budget row / over the host cap). ``cap`` /
-    ``in_use`` carry the host-cap counters for the denial diagnostic.
-
-    ``queueable`` marks a denial that ``on_capacity=queue`` may enqueue (ADR-0069): the
-    grant-quota (``quota_exceeded``) and host-cap (``allocation_denied`` /
-    ``reason="at_capacity"``) denials. A **budget** denial shares the ``allocation_denied``
-    category with the host-cap denial but is NOT queueable (waiting frees no budget), so the
-    enqueue decision branches on this explicit flag, never on the category. Configuration and
-    PCIe-busy denials are queueable; PCIe-config denials are not.
+    ``queueable`` is explicit because funding and capacity denials can share an error category,
+    while only a denial that waiting can cure may create a requested row (ADR-0069).
     """
 
     granted: bool
@@ -169,20 +120,7 @@ async def admit(
     conn: AsyncConnection,
     request: AllocationRequest,
 ) -> AdmissionOutcome:
-    """Admit an allocation against the project budget/quota and the host cap.
-
-    Validates inputs, resolves idempotency, runs the check-then-debit under
-    ``PROJECT`` → ``RESOURCE``, and on success grants + reserves atomically. See the
-    module docstring for the full ordering and the denial categories.
-
-    Args:
-        conn: An async connection (the transaction is opened here).
-        request: The authenticated principal, target Resource/project, requested size,
-            lease window, and optional retry key.
-
-    Returns:
-        An :class:`AdmissionOutcome`: a grant, or a typed denial with no durable write.
-    """
+    """Validate and atomically grant or return a typed denial with no durable write."""
     try:
         window_hours, estimate = await price_window_and_estimate(conn, request)
     except CategorizedError as exc:
@@ -214,21 +152,7 @@ async def admit(
 async def price_window_and_estimate(
     conn: AsyncConnection, request: AllocationRequest
 ) -> tuple[Decimal, Decimal]:
-    """Validate the request and price the lease estimate (no lock, no write).
-
-    Resolves and clamps the lease window, validates the selector size against the resource
-    caps, and prices the ``reserved`` estimate. Shared by synchronous admission and the
-    promotion sweep so both price a request identically (ADR-0069). ``quantize_kcu`` is kept
-    inside the same guard so an extreme window×size fails closed as a typed denial rather
-    than an uncaught exception.
-
-    Returns:
-        ``(window_hours, estimate)`` — the clamped window and the quantized kcu reserve.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` for a bad window/size/over-caps request,
-            or a value-too-large estimate.
-    """
+    """Validate and return the clamped window plus quantized reserve, without writing."""
     window_hours = resolve_window_hours(request.window, bounds=configured_lease_bounds())
     validate_size(request.selector)
     validate_against_resource(request.selector, request.resource)
@@ -250,15 +174,7 @@ async def price_window_and_estimate(
 
 
 def _reserve_accel(request: AllocationRequest) -> str | None:
-    """Resolve the accelerator the reserve is priced at (ADR-0362), or ``None`` for baseline.
-
-    An arch-blind request (``arch is None``) or a resource that advertises no ``guest_arches``
-    prices at the native baseline — the pre-ADR-0362 rate. Otherwise the accelerator is the one
-    the host advertises for that arch (``kvm``/``tcg``), so a TCG-emulated guest reserves above a
-    native one. The chosen host already passed the placement arch filter, so a non-empty
-    ``guest_arches`` advertises the arch; a stale row that does not would raise a
-    ``configuration_error`` here — the same fail-closed resolution as System mint (ADR-0339).
-    """
+    """Return the advertised accelerator to price, or the native baseline (ADR-0362)."""
     if request.arch is None:
         return None
     resolved = resolve_accel_emulator(request.resource.capability_view.guest_arches(), request.arch)
@@ -352,12 +268,7 @@ async def _admit_under_project_lock(
     window_hours: Decimal,
     estimate: Decimal,
 ) -> AdmissionOutcome:
-    """Run idempotency + the shared check-then-debit holding the PROJECT lock.
-
-    Reuses :func:`admission_gate` (the same gate the promotion sweep replays). On a queueable
-    capacity denial with ``on_capacity=queue`` it enqueues; a budget denial hard-denies; on
-    success it grants. The gate acquires the nested ``RESOURCE`` lock.
-    """
+    """Resolve idempotency, then check and debit while holding the PROJECT lock."""
     if request.idempotency_key is not None:
         replay = await resolve_replay(
             conn,
@@ -399,27 +310,14 @@ async def _deny_or_enqueue(
     *,
     estimate: Decimal,
 ) -> AdmissionOutcome:
-    """Return the denial, or enqueue a queued row when the caller opted into the queue.
-
-    Enqueue only when ``on_capacity="queue"`` AND the denial is ``queueable`` (a capacity
-    denial — the grant quota or the host cap). All durable writes run inside the PROJECT-
-    locked transaction ``admit`` already opened, so the pending-cap check and the insert are
-    atomic (ADR-0069). A denial actually returned to the synchronous caller is enriched with
-    the aggregated funding report (#833); an enqueued request gets a queued allocation, not an
-    onboarding diagnostic.
-    """
+    """Return a denial, or atomically enqueue when the caller opted into a curable wait."""
     if request.on_capacity == "queue" and denial.queueable:
         return await _enqueue(conn, request)
     return await _enrich_funding_denial(conn, request.project, estimate, denial)
 
 
 def _is_funding_denial(denial: AdmissionOutcome) -> bool:
-    """A project-funding denial: over quota, or over budget (#833).
-
-    The two onboarding gates a fresh project must provision. Excludes the host-cap denial
-    (``ALLOCATION_DENIED`` / ``reason="at_capacity"``), the affinity denial, and PCIe denials —
-    runtime denials that no funding change resolves.
-    """
+    """Return whether project quota or budget provisioning can cure the denial."""
     return denial.category is ErrorCategory.QUOTA_EXCEEDED or (
         denial.category is ErrorCategory.ALLOCATION_DENIED and denial.reason == BUDGET_DENIAL_REASON
     )
@@ -428,15 +326,7 @@ def _is_funding_denial(denial: AdmissionOutcome) -> bool:
 async def _enrich_funding_denial(
     conn: AsyncConnection, project: str, estimate: Decimal, denial: AdmissionOutcome
 ) -> AdmissionOutcome:
-    """Attach the aggregated ``details["unmet"]`` to a funding denial (#833).
-
-    Re-reads both funding gates under the PROJECT lock ``admit`` already holds, so the report
-    is consistent with the gate's short-circuit check above; a non-funding denial is returned
-    unchanged. The gate's ``category`` / ``reason`` / ``queueable`` are untouched (the
-    top-level category stays the gate's primary, onboarding order), so only the synchronous
-    caller's view gains the aggregate — the promotion sweep, which never calls this, is
-    unchanged.
-    """
+    """Attach the in-lock aggregate ``details['unmet']`` report to funding denials."""
     if not _is_funding_denial(denial):
         return denial
     unmet = await funding_unmet(conn, project, estimate)
@@ -454,15 +344,7 @@ class _PCIeClaimResult:
 async def _resolve_pcie_claim(
     conn: AsyncConnection, request: AllocationRequest
 ) -> _PCIeClaimResult:
-    """Resolve the requested device union to distinct free devices under the held lock.
-
-    A locked read-modify-write (ADR-0068 Consequences): the host's occupancy set is read
-    under the per-Resource lock this caller already holds, so two requests cannot both
-    resolve the last free device. An empty union short-circuits to no devices. The matcher
-    splits the two denial modes — ``CONFIG`` (no host descriptor matches; the card is not
-    on this host) maps to ``configuration_error``; ``CAPACITY`` (matches exist but every
-    one is claimed) maps to ``allocation_denied``, the queueable case. Malformed
-    grammar raises a ``CategorizedError`` that ``admit`` catches and rolls back — no write.
+    """Resolve distinct free devices under the already-held Resource lock.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if any requested spec is malformed.

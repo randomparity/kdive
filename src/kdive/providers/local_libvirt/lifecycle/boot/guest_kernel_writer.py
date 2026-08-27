@@ -27,13 +27,7 @@ _RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
 
 
 def _validate_release(version: str) -> str:
-    """Return ``version`` iff it is a well-formed kernel release, else raise a config error.
-
-    The release is parsed from the uploaded modules tar's ``lib/modules/<version>/`` path and flows
-    into a root host ``depmod`` argument and guest paths, so an ill-formed value (a ``depmod``
-    option like ``-n``, a path fragment, whitespace, a shell metacharacter) is rejected here rather
-    than passed on.
-    """
+    """Validate a tar-derived kernel release before using it in host arguments and paths."""
     if not _RELEASE_RE.fullmatch(version):
         raise CategorizedError(
             "modules tarball kernel version is not a valid release string",
@@ -58,18 +52,10 @@ class DepmodRunner(Protocol):
 
 
 def _safe_module_extract_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
-    """A ``data``-safe extraction filter that skips only the benign absolute build/source symlink.
+    """Apply ``data`` safety, skipping only absolute module build/source symlinks.
 
-    Host-side indexing extracts the uploaded modules tar as root into a temp dir, so it keeps the
-    ``data`` filter's protections — no absolute member names, no ``..`` traversal, no writing
-    through a symlink outside the destination (the classic root symlink-escape write primitive).
-    A real kernel module tree carries ``build``/``source`` symlinks to *absolute* paths (e.g.
-    ``/usr/src/kernels/<ver>``), which ``data`` rejects outright (``AbsoluteLinkError``); those are
-    not needed for ``depmod`` or kdump, so **only that case** is skipped (returned ``None``) —
-    safety kept, indexing unblocked. Every other ``data`` violation still raises and rejects the
-    upload: an absolute member name, a ``..`` path, a special file, or a **path-traversal link**
-    (``LinkOutsideDestinationError``), which a legitimate module tree never contains. So a genuinely
-    hostile tar is rejected, not silently trimmed.
+    Other filter violations propagate so traversal, special files, and escaping links reject the
+    archive rather than being silently omitted.
     """
     try:
         return tarfile.data_filter(member, dest_path)
@@ -84,20 +70,7 @@ def _safe_module_extract_filter(member: tarfile.TarInfo, dest_path: str) -> tarf
 
 
 def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
-    """Extract a modules tar member-by-member under a cumulative-size and member-count cap.
-
-    Bounds the root host-side extraction so a gzip/tar bomb in a semi-trusted upload cannot exhaust
-    the worker's temp filesystem: :func:`capped_tar_members` enforces the member-count cap and
-    :func:`reject_oversize_member` the cumulative-size cap (both aborting before the offending
-    member is written), single-sourced with the earlier kernel-tar scans. Per-member extraction
-    applies :func:`_safe_module_extract_filter`, so path-traversal / symlink-escape protection is
-    unchanged.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the member count or cumulative uncompressed
-            size exceeds the shared kernel-tar bounds — an oversized/hostile upload the caller can
-            fix; the safe-extract filter's own categories propagate.
-    """
+    """Safely extract under the shared member-count and cumulative-size limits."""
     total = 0
     for member in capped_tar_members(archive):
         total += member.size if member.isfile() else 0
@@ -106,13 +79,7 @@ def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
 
 
 def _run_host_depmod(*, basedir: Path, version: str) -> None:
-    """Index ``basedir/lib/modules/<version>`` with the **host** ``depmod`` (ADR-0346).
-
-    ``depmod`` parses each module's ELF header and symbol tables to build ``modules.dep``; it never
-    executes module code, so the host's ``depmod`` indexes a foreign-arch (e.g. ppc64le) tree
-    correctly under an x86_64 host — the cross-arch fix for #1148. ``-b <basedir>`` points it at the
-    extracted tree; the produced index is host-endianness-independent (kmod writes the ``.bin``
-    files in network byte order and both x86_64 and ppc64le are little-endian anyway).
+    """Index ``basedir/lib/modules/<version>`` with host ``depmod`` (ADR-0346).
 
     Raises:
         CategorizedError: ``MISSING_DEPENDENCY`` when no ``depmod`` binary is on ``PATH``;
@@ -144,22 +111,7 @@ def _run_host_depmod(*, basedir: Path, version: str) -> None:
 def index_modules_tar(
     modules_tar: Path, version: str, *, workdir: Path, run_depmod: DepmodRunner = _run_host_depmod
 ) -> Path:
-    """Extract a modules tar, index it host-side, and repack the indexed tree (ADR-0346).
-
-    ``modules_tar`` is the ``lib/modules/<version>/`` subtree repacked from the combined kernel tar
-    (``extract_kernel_bundle``). It is extracted under ``workdir`` (an existing dir the caller
-    owns — typically a ``TemporaryDirectory``), ``run_depmod`` indexes it in place, and the whole
-    ``lib/modules/`` subtree — now carrying ``modules.dep`` and the ``.bin`` indices — is repacked
-    to a gzip tar the caller ``tar_in``s into the guest overlay. No guest binary is executed.
-
-    Args:
-        modules_tar: The modules-only gzip tar (members under ``lib/modules/<version>/``).
-        version: The kernel release, e.g. ``6.19.10-300.fc44.ppc64le`` (arch suffix preserved).
-        workdir: An existing directory to extract and repack under.
-        run_depmod: The indexing seam (defaults to the host ``depmod``); injected in tests.
-
-    Returns:
-        The path to the repacked, indexed ``lib/modules/`` gzip tar under ``workdir``.
+    """Safely extract, host-index, and repack a modules tree (ADR-0346).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if the tar is oversized/over the member cap or
@@ -169,9 +121,6 @@ def index_modules_tar(
     """
     try:
         with tarfile.open(modules_tar, "r:gz") as archive:
-            # Root extracts on the host: keep data-filter safety (skipping the unsafe build/source
-            # symlinks a module tree carries, see _safe_module_extract_filter) and bound the total
-            # size so a tar bomb cannot exhaust the host temp filesystem.
             _extract_modules_bounded(archive, workdir)
     except tarfile.FilterError as exc:
         # A path-traversal member/link or other data-filter violation: a hostile/malformed upload,
