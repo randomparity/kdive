@@ -87,15 +87,7 @@ def _section_label(provider: object) -> str:
 
 
 def _entry(key: object, value: object) -> str:
-    """Render one ``provider`` entry as either its kind name or a `<kind>=<not-an-object>` row.
-
-    Takes ``key: object`` and narrows with ``isinstance(key, str)`` rather than ``key: str``,
-    because the obvious form does not type-check: ``isinstance(provider, dict)`` in
-    :func:`_section_label` narrows to ``dict[Unknown, Unknown]``, so the keys are ``object`` and
-    both a ``key: str`` signature and indexing ``provider[key]`` are rejected by ``ty``. A key
-    outside ``_KNOWN_KINDS`` — including one that is not even a ``str`` — renders
-    ``"<unrecognized>"`` so its bytes never reach the terminal.
-    """
+    """Render a closed-vocabulary label without exposing an unrecognized key."""
     name = key if isinstance(key, str) and key in _KNOWN_KINDS else "<unrecognized>"
     return name if isinstance(value, dict) else f"{name}=<not-an-object>"
 
@@ -124,25 +116,7 @@ ORDER BY s.created_at, s.id
 
 
 async def scan_profile_kinds(conn: AsyncConnection) -> list[ProfileKindMismatch]:
-    """Return every stored System whose provider section mismatches its Resource kind (ADR-0579).
-
-    One static statement, no parameters and no interpolation, issued on ``conn`` as given — the
-    caller owns the connection's lifecycle, so a test can drive this against a migrated fixture
-    database with no pool. Nothing here writes.
-
-    The predicate is total over the shapes a stored row can hold, so a System can only fall out
-    of the scan through the inner join to ``resources``: an Allocation carrying a NULL
-    ``resource_id`` would drop its System. That is unreachable today and an accepted residual
-    (ADR-0579) — a ``LEFT JOIN`` would add a NULL branch to ``resource_kind``, a reported field,
-    for a row no code path can construct.
-
-    Args:
-        conn: An open connection to the kdive database.
-
-    Returns:
-        The mismatches in report order — ``created_at``, then ``id`` to break ties — each
-        carrying the rendered :func:`_section_label` rather than the raw stored value.
-    """
+    """Return stored provider-kind mismatches in deterministic report order (ADR-0579)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_SCAN_QUERY)
         rows = await cur.fetchall()
