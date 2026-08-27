@@ -282,21 +282,28 @@ def _prepare_install_parent(path: Path, *, owner_uid: int, group_gid: int) -> tu
                     label="manifest destination path",
                 )
                 final_component = index == len(components) - 1
+                replaceable_intermediate = (
+                    not final_component
+                    and child_metadata.st_uid == owner_uid
+                    and bool(child_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+                    and not child_metadata.st_mode & stat.S_ISVTX
+                )
+                normalize_component = created or final_component or replaceable_intermediate
                 normalized = (
                     _normalize_install_directory(
                         child,
                         owner_uid=owner_uid,
                         group_gid=group_gid,
                     )
-                    if created or final_component
+                    if normalize_component
                     else False
                 )
-                if created or normalized or final_component:
+                if normalize_component:
                     os.fsync(child)
                     os.fsync(descriptor)
                 changed = changed or created or normalized
                 child_metadata = os.fstat(child)
-                if (created or final_component) and (
+                if normalize_component and (
                     child_metadata.st_uid != owner_uid
                     or child_metadata.st_gid != group_gid
                     or stat.S_IMODE(child_metadata.st_mode) != 0o755
