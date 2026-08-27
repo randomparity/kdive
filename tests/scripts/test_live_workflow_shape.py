@@ -585,13 +585,14 @@ def test_live_job_diagnostics_capture_terminated_worker_journals(job: str) -> No
     """
     _, diagnostic = _named_step(job, "Capture worker lifecycle diagnostics")
     run = diagnostic["run"]
-    assert "journalctl -u 'kdive-live-worker@*'" in run
     if job == "tcg":
+        assert "journalctl -u kdive-live-worker@1.service" in run
         assert "--output=cat" in run
         assert "scripts/live-stack/filter-worker-journal-evidence.py" in run
         assert "--output=cat 2>/dev/null |" in run
         assert "sudo --non-interactive journalctl" in run
     else:
+        assert "journalctl -u 'kdive-live-worker@*'" in run
         assert "--output=cat" not in run
         assert "scripts/live-stack/filter-worker-journal-evidence.py" not in run
     assert "--no-pager" in run
