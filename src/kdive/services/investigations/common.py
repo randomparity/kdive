@@ -161,26 +161,30 @@ def invalid_external_refs_error(
     )
 
 
-async def get_for_update(conn: AsyncConnection, uid: UUID) -> Investigation | None:
+async def get_for_update(conn: AsyncConnection, investigation_id: UUID) -> Investigation | None:
     """Fetch one Investigation row under ``FOR UPDATE``."""
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT * FROM investigations WHERE id = %s FOR UPDATE", (uid,))
+        await cur.execute(
+            "SELECT * FROM investigations WHERE id = %s FOR UPDATE", (investigation_id,)
+        )
         row = await cur.fetchone()
     return Investigation.model_validate(row) if row else None
 
 
-async def get_mutable_investigation_locked(conn: AsyncConnection, uid: UUID) -> Investigation:
+async def get_mutable_investigation_locked(
+    conn: AsyncConnection, investigation_id: UUID
+) -> Investigation:
     """Return a locked non-terminal Investigation."""
-    current = await get_for_update(conn, uid)
+    current = await get_for_update(conn, investigation_id)
     if current is None:
         raise InvestigationServiceError(
-            object_id=str(uid),
+            object_id=str(investigation_id),
             reason=InvestigationErrorReason.NOT_FOUND,
             detail="Investigation no longer exists",
         )
     if current.state in TERMINAL_INVESTIGATION:
         raise InvestigationServiceError(
-            object_id=str(uid),
+            object_id=str(investigation_id),
             reason=InvestigationErrorReason.NON_MUTABLE,
             detail=f"Investigation is {current.state.value}; it cannot be edited",
             data={"current_status": current.state.value},
@@ -189,10 +193,10 @@ async def get_mutable_investigation_locked(conn: AsyncConnection, uid: UUID) -> 
 
 
 async def resolve_contributor_investigation(
-    conn: AsyncConnection, ctx: RequestContext, uid: UUID, raw_id: str
+    conn: AsyncConnection, ctx: RequestContext, investigation_id: UUID, raw_id: str
 ) -> Investigation:
     """Resolve a contributor-writable Investigation row."""
-    inv = await INVESTIGATIONS.get(conn, uid)
+    inv = await INVESTIGATIONS.get(conn, investigation_id)
     if inv is None or inv.project not in ctx.projects:
         raise InvestigationServiceError(
             object_id=raw_id,

@@ -157,7 +157,7 @@ class CompleteBuildFinalizer:
         try:
             prepared = await self._prepare(conn, run)
             validated = await self._validate_uploads(
-                conn, run.id, str(run.id), prepared, build_id=build_id, arch=_build_arch(run)
+                conn, run.id, prepared, build_id=build_id, arch=_build_arch(run)
             )
             return await _finalize_external_build(
                 conn,
@@ -195,8 +195,7 @@ class CompleteBuildFinalizer:
     async def _validate_uploads(
         self,
         conn: AsyncConnection,
-        uid: UUID,
-        run_id: str,
+        run_id: UUID,
         prepared: _ExternalBuildCompletion,
         *,
         build_id: str | None,
@@ -206,7 +205,6 @@ class CompleteBuildFinalizer:
         if prepared.store is not None:
             window_deadline, chunk_heads, final_versions = await _reassemble_chunked_artifacts(
                 conn,
-                uid,
                 run_id,
                 prepared.run.investigation_id,
                 prepared.manifest_row,
@@ -363,8 +361,7 @@ async def _require_open_window(
 
 async def _reassemble_chunked_artifacts(
     conn: AsyncConnection,
-    uid: UUID,
-    run_id: str,
+    run_id: UUID,
     investigation_id: UUID,
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
@@ -390,10 +387,10 @@ async def _reassemble_chunked_artifacts(
     async with (
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
-        advisory_xact_lock(conn, LockScope.RUN, uid),
+        advisory_xact_lock(conn, LockScope.RUN, run_id),
     ):
         refreshed = await upload_manifest.refresh_deadline(
-            conn, "runs", uid, ttl, max_window=max_window
+            conn, "runs", run_id, ttl, max_window=max_window
         )
     if refreshed is None:
         # `_require_open_window` passed on this transaction's clock, and `now()` is
@@ -413,13 +410,13 @@ async def _reassemble_chunked_artifacts(
             "runs.complete_build: upload window extension capped — the deadline stands at %s "
             "(run %s, cap %s past its mint); artifacts.create_run_upload re-mints a fresh window",
             refreshed.deadline,
-            uid,
+            run_id,
             max_window,
         )
     try:
         chunk_heads, final_versions = await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
-        recorded = await _existing_build_result(conn, uid)
+        recorded = await _existing_build_result(conn, run_id)
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
