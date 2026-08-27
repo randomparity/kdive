@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import SecretStr
 
-import kdive.processes.lifecycle.systemd.systemd_worker_lifecycle as lifecycle_module
+import kdive.processes.lifecycle.systemd.systemd_diagnostics as diagnostics_module
 import kdive.processes.lifecycle.systemd.systemd_worker_runtime as runtime_module
 import kdive.processes.lifecycle.systemd.systemd_worker_state as state_module
 from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
@@ -1347,7 +1347,7 @@ def test_diagnostics_bounds_render_attempts_for_near_limit_structural_collision(
         clock,
         redaction_sources={1: ("retained",)},
     )
-    real_render = lifecycle_module._render_sanitized_diagnostics
+    real_render = diagnostics_module._render_sanitized_diagnostics
     attempts = 0
 
     def bounded_render(
@@ -1368,7 +1368,7 @@ def test_diagnostics_bounds_render_attempts_for_near_limit_structural_collision(
             acquisition_truncated=acquisition_truncated,
         )
 
-    monkeypatch.setattr(lifecycle_module, "_render_sanitized_diagnostics", bounded_render)
+    monkeypatch.setattr(diagnostics_module, "_render_sanitized_diagnostics", bounded_render)
 
     response = _run(coordinator.diagnostics(_deadline(clock)))
 
