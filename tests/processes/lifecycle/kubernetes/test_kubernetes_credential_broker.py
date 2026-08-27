@@ -10,7 +10,7 @@ import json
 import socket
 import ssl
 import urllib.request
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -417,13 +417,21 @@ class _TestWriter:
 
 
 def _session_handler(
-    monkeypatch: pytest.MonkeyPatch,
     broker: KubernetesCredentialBroker,
+    run_with_timeout: credential_broker.SessionTimeout | None = None,
 ) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]]:
-    monkeypatch.setattr(credential_broker, "CONNECTION_TIMEOUT_SECONDS", 0.02, raising=False)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await credential_broker._handle_session(broker, reader, writer)
+        await credential_broker._handle_session(
+            broker,
+            reader,
+            writer,
+            run_with_timeout=(
+                run_with_timeout
+                if run_with_timeout is not None
+                else credential_broker._run_with_connection_timeout
+            ),
+        )
 
     return handle
 
@@ -448,16 +456,27 @@ def _invalid_reader() -> asyncio.StreamReader:
     [b"", b"\x00\x00", b"\x00\x00\x00\x08{"],
     ids=["no-prefix", "partial-prefix", "partial-payload"],
 )
-def test_partial_frames_are_closed_by_the_full_exchange_timeout(
-    monkeypatch: pytest.MonkeyPatch, partial: bytes
-) -> None:
+def test_partial_frames_are_closed_by_the_full_exchange_timeout(partial: bytes) -> None:
     async def run() -> None:
-        handler = _session_handler(monkeypatch, _broker(_Store(), {}))
+        entered = asyncio.Event()
+        expire = asyncio.Event()
+
+        async def controlled_timeout(operation: Awaitable[None]) -> None:
+            task = asyncio.ensure_future(operation)
+            entered.set()
+            await expire.wait()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise TimeoutError
+
+        handler = _session_handler(_broker(_Store(), {}), controlled_timeout)
         reader = asyncio.StreamReader()
         reader.feed_data(partial)
         writer = _TestWriter()
         task = asyncio.create_task(handler(reader, cast(asyncio.StreamWriter, writer)))
-        await asyncio.sleep(0.05)
+        await entered.wait()
+        expire.set()
+        await task
         try:
             assert task.done()
             assert writer.closed.is_set()
@@ -468,9 +487,7 @@ def test_partial_frames_are_closed_by_the_full_exchange_timeout(
     asyncio.run(run())
 
 
-def test_timed_out_application_operation_releases_capacity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_timed_out_application_operation_releases_capacity() -> None:
     class _BlockingBroker:
         calls = 0
 
@@ -483,12 +500,31 @@ def test_timed_out_application_operation_releases_capacity(
 
     async def run() -> None:
         broker = cast(KubernetesCredentialBroker, _BlockingBroker())
-        handler = _session_handler(monkeypatch, broker)
+        entered = asyncio.Event()
+        expire = asyncio.Event()
+        calls = 0
+
+        async def controlled_timeout(operation: Awaitable[None]) -> None:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                await operation
+                return
+            task = asyncio.ensure_future(operation)
+            entered.set()
+            await expire.wait()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise TimeoutError
+
+        handler = _session_handler(broker, controlled_timeout)
         timed_out_writer = _TestWriter()
         timed_out = asyncio.create_task(
             handler(_valid_reader(), cast(asyncio.StreamWriter, timed_out_writer))
         )
-        await asyncio.sleep(0.05)
+        await entered.wait()
+        expire.set()
+        await timed_out
         assert timed_out.done()
         assert timed_out_writer.closed.is_set()
         valid_writer = _TestWriter()
@@ -507,7 +543,7 @@ def test_success_and_error_release_capacity_for_the_next_request(
         store = _Store()
         broker = _broker(store, {"kdive-worker-0": _pod()})
         assert await broker.pre_register_once() == 1
-        handler = _session_handler(monkeypatch, broker)
+        handler = _session_handler(broker)
 
         first_writer = _TestWriter()
         await handler(first_reader(), cast(asyncio.StreamWriter, first_writer))

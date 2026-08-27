@@ -39,6 +39,7 @@ type TokenReview = Callable[[str, str], Awaitable[PodIdentity | None]]
 type Encrypt = Callable[[str], bytes]
 type Decrypt = Callable[[bytes], str]
 type Credential = Callable[[], str]
+type SessionTimeout = Callable[[Awaitable[None]], Awaitable[None]]
 
 
 class _FrameWriter(Protocol):
@@ -405,23 +406,37 @@ async def _accept_sessions(
                 accepted.close()
 
 
-async def _handle_session(
+async def _run_with_connection_timeout(operation: Awaitable[None]) -> None:
+    async with asyncio.timeout(CONNECTION_TIMEOUT_SECONDS):
+        await operation
+
+
+async def _exchange_session(
     broker: KubernetesCredentialBroker,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
     try:
-        async with asyncio.timeout(CONNECTION_TIMEOUT_SECONDS):
-            try:
-                request = decode_request(
-                    await read_frame(reader, maximum=MAX_REQUEST_BYTES, kind="request")
-                )
-                reply = await broker.handle(request)
-                await write_frame(writer, encode_reply(reply), maximum=MAX_RESPONSE_BYTES)
-            except Exception:  # noqa: BLE001 -- malformed/internal peers receive no details
-                _log.warning("worker credential broker rejected a request")
-            writer.close()
-            await writer.wait_closed()
+        request = decode_request(
+            await read_frame(reader, maximum=MAX_REQUEST_BYTES, kind="request")
+        )
+        reply = await broker.handle(request)
+        await write_frame(writer, encode_reply(reply), maximum=MAX_RESPONSE_BYTES)
+    except Exception:  # noqa: BLE001 -- malformed/internal peers receive no details
+        _log.warning("worker credential broker rejected a request")
+    writer.close()
+    await writer.wait_closed()
+
+
+async def _handle_session(
+    broker: KubernetesCredentialBroker,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    run_with_timeout: SessionTimeout = _run_with_connection_timeout,
+) -> None:
+    try:
+        await run_with_timeout(_exchange_session(broker, reader, writer))
     except TimeoutError:
         _log.warning("worker credential broker request timed out")
     finally:
