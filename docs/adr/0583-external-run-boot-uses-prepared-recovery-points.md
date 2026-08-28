@@ -33,6 +33,11 @@ idempotent operation. Shared values contain only immutable artifact identities, 
 kernel release, the complete ordered kernel argument set, a versioned root specification, a module
 installation obligation, and opaque provider references returned by those operations.
 
+For external boot, this ADR refines ADR-0061 and ADR-0183: core performs their platform-owned
+composition once when it creates the plan, and a provider renders the resulting `cmdline` without
+prepending, appending, inheriting, or shell-parsing anything. Their existing build/install and GRUB
+paths are unchanged.
+
 The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1`, serialized with
 the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
 these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
@@ -87,8 +92,11 @@ absolute symlink: #2107 must move local and remote materialization onto the shar
 either computes this manifest. Validation covers the complete topology before any write: every
 ancestor of an entry must be a declared or implicit directory, no entry path may traverse a symlink,
 and no two entries may resolve to the same destination. Extraction uses no-follow, directory-relative
-operations so archive order cannot change the result. The manifest then sorts relative UTF-8 paths
-by encoded bytes; rejects absolute paths, `.`/`..`,
+operations so archive order cannot change the result. A path is one or more nonempty UTF-8 NFC POSIX
+segments separated by exactly one `/`; leading or trailing `/`, repeated separators, `.`, `..`, NUL,
+and empty segments are rejected rather than rewritten. Symlink targets use the same grammar after
+lexically resolving their relative segments against the link's parent, and must remain beneath the
+release root. The manifest then sorts paths by encoded bytes; rejects
 duplicates, hard links, devices, sockets, and FIFOs; and admits only directories, regular files, and
 contained relative symlinks. Each entry records normalized path, type, normalized permission bits,
 and regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
@@ -140,6 +148,16 @@ verifies the same installed manifest after restore. Thus portable source identit
 metadata while provider-state CAS
 detects metadata drift that can change module usability.
 
+The prior tree is instead captured as `recovery-module-tree-v1`, with hash prefix
+`kdive-recovery-module-tree-v1`. It uses the installed entry metadata and path grammar, but records
+each symlink's lstat target verbatim as UTF-8 NFC and permits absolute targets; it never follows a
+symlink while hashing, copying, or restoring. This provider-state identity is not portable input and
+does not relax source validation. A prior tree containing a hard link, special file, undecodable
+name/target, or noncanonical path is ineligible for replacement and fails before publication. The
+recovery copy is created and restored with no-follow directory-relative operations, then verified
+against this manifest. Conventional release-root `build` and `source` absolute symlinks are therefore
+represented exactly rather than omitted from recovery CAS.
+
 Materialization does not change the System. Core first commits `preparing` with reservation state
 `pending`; the provider then creates the reservation and core records it `ready`. No quiesce or other
 guest mutation is allowed before `ready`. A deterministic provider prepare journal records the source definition and prior power state,
@@ -175,12 +193,23 @@ After verification it commits `abandoned`, releases the reservation, and reports
 `recovery_reserve_bytes`. Prepared, recovery, and conflict states retain the reservation;
 abandonment, recovery, and System teardown release it idempotently.
 
-The root specification is a versioned, closed data shape. Version 1 records the target architecture,
-one `root=` value, the ordered root-related arguments required by the image, and provenance with an
-authority class and immutable source identity. Build-produced facts and bounded stage inspection are
-verified authorities. Operator catalog data extends the existing typed attestation path with the
-same root value, ordered arguments, architecture, schema version, and immutable image identity; the
-current attestation fields alone are insufficient. No second untyped declaration path is added.
+Every `cmdline` element is one nonempty ASCII token containing bytes `0x21` through `0x7e` except
+single quote, double quote, and backslash. Whitespace, NUL, controls, and empty elements are rejected,
+not escaped. The canonical libvirt string joins the elements with one ASCII space. Exactly one token
+starts `root=` and it must equal `root.root`; `root.arguments` is a nonempty ordered array whose first
+element is that token and whose complete sequence occurs exactly once as a contiguous subsequence of
+`cmdline`. No other element may use a key present in `root.arguments`. This makes the plan's array,
+root provenance, and rendered direct-kernel string one value rather than three composition points.
+
+The root specification is a versioned, closed data shape with exactly `schema`, `architecture`,
+`root`, `arguments`, `authority`, and `source`. Version 1 admits authority/source-kind pairs
+`build/build`, `stage-inspection/staged-image`, and `catalog-attestation/catalog-image`; no other pair
+is valid. `source` has exactly `kind` and an immutable lowercase `sha256:<64-hex>` `identity` over,
+respectively, the build output, inspected staged-image version, or catalog image version. Build facts
+and bounded stage inspection are verified authorities. Catalog data extends the existing typed
+attestation path with the same root value, ordered arguments, architecture, schema version, and
+immutable image identity; the current attestation fields alone are insufficient. No second untyped
+declaration path is added.
 Unknown versions, missing facts, stale source identities, conflicting root arguments, and an
 architecture mismatch fail before materialization or activation and name the recovery action. A
 pre-schema image remains eligible for its existing GRUB boot but not external Run boot.
@@ -236,6 +265,7 @@ both provider state identities when preparation completes. The state machine is
 `activating|active -> recovering -> recovered`,
 `preparing|prepared -> abandoned`,
 `preparing|prepared|activating|active|recovering -> recovery_conflict`, and
+`recovery_conflict -> recovering`,
 failure metadata on an operation attempt.
 Transitions and provider calls run under the existing per-System advisory lock. Activation is
 compare-and-set from the recovery point's source-state identity: the provider refuses changed state
@@ -248,6 +278,17 @@ unreadable, or third component identity enters `recovery_conflict` for operator 
 of overwriting provider state. The portable plan identity is never compared directly with provider
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
+
+`recovery_conflict` has two resolutions only. A project administrator may invoke the audited
+`resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
+observed composite state identity. Under the System lock, the provider repeats that observation,
+compare-and-sets every component from it, records the authority and before/after identities, and
+transitions to `recovering`; a changed or unreadable value leaves the conflict untouched. The normal
+recovery journal and readiness gates then apply. Alternatively, ordinary authorized System teardown
+destroys the domain before releasing the reservation and artifacts. There is no adopt-current-state,
+force-overwrite, or automatic timeout edge, because a mixed external definition cannot become a
+trusted reusable baseline by declaration. Reconciliation preserves evidence and performs no provider
+write while the state remains `recovery_conflict`.
 
 Recovery restores a usable disk/GRUB baseline, not only persistent bytes. When an active Run becomes
 terminal and the System remains reusable, the provider first observes the complete recorded target
@@ -333,8 +374,8 @@ HTTP/iPXE.
   validated bundle input; the installed digest includes provider-generated indexes and is what
   activation and recovery compare.
 - A provider-side change outside KDIVE's System lock is preserved as `recovery_conflict`. Recovery
-  is therefore fail-closed and may require an operator to choose between the recorded point and the
-  newly observed definition.
+  is therefore fail-closed and requires an administrator either to compare-and-set restoration of
+  the recorded point from the acknowledged observed identity or to tear down the System.
 - Libvirt state identity compares the canonical full preserved inactive definition plus the three
   external-boot fields and module-tree content, never live XML. External boot still requires the
   running-kernel identity proof; GRUB recovery requires fresh-boot readiness because its bootloader
