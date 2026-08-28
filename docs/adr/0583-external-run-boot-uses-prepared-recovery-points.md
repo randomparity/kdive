@@ -44,9 +44,11 @@ compressed bundle is never itself a bootable kernel.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
-manifest applies the existing safe extraction normalization first: absolute symlinks named exactly
+manifest applies one shared extraction normalization first: absolute symlinks named exactly
 `build` or `source` at the release root are omitted, while every other absolute or escaping link is
-rejected. It then sorts relative UTF-8 paths by encoded bytes; rejects absolute paths, `.`/`..`,
+rejected. This exact-name rule intentionally tightens the current local filter, which omits every
+absolute symlink: #2107 must move local and remote materialization onto the shared validator before
+either computes this manifest. It then sorts relative UTF-8 paths by encoded bytes; rejects absolute paths, `.`/`..`,
 duplicates, hard links, devices, sockets, and FIFOs; and admits only directories, regular files, and
 contained relative symlinks. Each entry records normalized path, type, normalized permission bits,
 and regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
@@ -57,14 +59,23 @@ digest, and target state identity binds it.
 
 Both manifest hashes have exact bytes. The envelope is compact JSON with UTF-8 NFC strings, keys
 sorted by Unicode code point, arrays in the path order above, JSON integers for sizes and uid/gid,
-four-character lowercase octal strings for modes, lowercase `sha256:<hex>` content digests, standard
-JSON escaping, no insignificant whitespace, and no trailing newline. Paths and symlink targets that
+four-character lowercase octal strings for modes, lowercase `sha256:<hex>` content digests, and no
+insignificant whitespace or trailing newline. The serializer emits every non-control Unicode scalar
+as literal UTF-8 except `"` and `\`, which use `\"` and `\\`; emits solidus literally; uses the
+two-character escapes `\b`, `\t`, `\n`, `\f`, and `\r`; and emits every other U+0000 through U+001F
+control as lowercase `\u00xx`. Surrogates and non-scalar input are rejected. Paths and symlink targets that
 are not already NFC are rejected rather than normalized into another filename. The source envelope
 is `{"entries":[...],"schema":"module-source-manifest-v1"}` and its hash input is the ASCII
 prefix `kdive-module-source-manifest-v1` plus NUL plus the JSON bytes. The installed envelope uses
 schema/prefix `module-installed-tree-v1` / `kdive-module-installed-tree-v1` and additionally records
 uid, gid, `xattrs_supported`, and an xattrs object whose sorted names map to unpadded base64 values.
 An empty tree is an empty `entries` array, not absent input.
+
+A non-ASCII source-manifest vector is
+`{"entries":[{"mode":"0644","path":"kernel/café.ko","sha256":"sha256:` followed by 64 zero
+hex digits, then `","size":1,"type":"file"}],"schema":"module-source-manifest-v1"}`. Its
+domain-separated digest is
+`sha256:6fbb113f8a57314352634354b53e9270dfe141984226a3bf22bef7d7de95e2cf`.
 
 Source entries have exactly one of these shapes (shown in their sorted-key byte order):
 
@@ -155,6 +166,9 @@ vector: `<domain><os><type arch="x86_64">hvm</type></os></domain>` preserves to
 its digest is `sha256:3e3cde0b5115867e991160f1d361fef3ec0734e8a87e2ab003d62cc0f8af4eea`.
 The all-null boot projection digest is
 `sha256:c48b5e5a6e9ac64b1129c1d468ce0de305288a86a6575467fb15f71d3c14b925`.
+A non-ASCII projection
+`{"cmdline":"root=LABEL=café","initrd":null,"kernel":"/var/lib/kdive/café","schema":"libvirt-boot-projection-v1"}`
+has digest `sha256:06bf5b2aceb13f19b7debd17181ada54041d883f926c9c5f4c0acae4336f58fb`.
 
 Remote preparation also proves that the source is an owned disk/GRUB baseline. Its inactive boot
 projection has no kernel, initrd, or cmdline; KDIVE metadata binds it to this System; its sole boot
@@ -208,9 +222,30 @@ point and materialization and commits `abandoned`. A target or third identity fa
 serializes abandonment with activation and teardown.
 
 Local-libvirt adapts its existing staging and direct-kernel XML behavior behind these operations.
-Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts, resolves provider-local
-paths internally, records its disk/GRUB recovery point, and activates direct-kernel XML without
-changing the disk overlay, networking, guest-agent channel, console, gdbstub, or capture devices. A
+Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts and resolves
+provider-local paths internally. It cannot mount the remote overlay from the worker, and its existing
+guest-agent seam exists only while the System guest runs, so it gains one provider-private offline
+disk-editor operation. After stopping the System domain, the provider attaches that same overlay,
+and no other writable disk, to a deterministic transient maintenance domain on the remote libvirt
+host. The maintenance domain boots an operator-staged, architecture-matched immutable appliance,
+has no network interface, and exposes only a guest-agent command whose fixed helper can capture,
+stage, atomically publish, verify, or restore the release-qualified module tree. The helper receives
+content through a provider-owned read-only libvirt volume, never a presigned URL or caller-composed
+command. The provider verifies the System domain inactive and the maintenance domain destroyed before
+each attachment or System boot; both domains cannot hold the overlay concurrently.
+
+The prepare journal records the appliance and content-volume immutable identities, maintenance-domain
+identity, overlay target identity, requested helper operation, and helper result before advancing.
+Retry observes those identities and either resumes the same operation or fails closed; an unknown
+domain, attachment, volume, or helper result enters `recovery_conflict`. Recovery uses the same
+editor and saved tree. The appliance and helper are a remote-libvirt deployment prerequisite owned
+by its provisioning role, not a Profile initrd or part of the external boot plan. #2107 must unit-test
+the injected editor seam and live-prove capture, replacement, worker-loss retry, restore, and teardown
+against a remote libvirt host before remote external boot is enabled.
+
+After offline module publication, remote-libvirt records its disk/GRUB recovery point and activates
+direct-kernel XML without changing the disk overlay, networking, guest-agent channel, console,
+gdbstub, or capture devices. A
 test-only non-libvirt implementation consumes the shared value types and returns opaque references;
 it proves the boundary contains no libvirt type without claiming that the shape is sufficient for
 HTTP/iPXE.
