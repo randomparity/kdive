@@ -14,6 +14,8 @@ Contract of ``select_targets(changed, test_index)``:
 
 from __future__ import annotations
 
+import subprocess
+
 import scripts.select_changed_tests as selector
 from scripts.select_changed_tests import build_test_index, select_targets
 
@@ -104,5 +106,16 @@ def test_unresolvable_base_ref_runs_the_full_suite(monkeypatch, capsys) -> None:
     # No base branch resolves -> the changed set is unknowable -> full suite, never an
     # uncommitted-only HEAD diff that would skip committed branch work (ADR-0420 bias).
     monkeypatch.setattr(selector, "_resolve_base_ref", lambda repo_root: None)
+    assert selector.main() == 0
+    assert capsys.readouterr().out.strip() == "__ALL__"
+
+
+def test_failed_change_discovery_runs_the_full_suite(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(selector, "_resolve_base_ref", lambda _repo_root: "main")
+
+    def _failed_changed_files(_repo_root, _base_ref):
+        raise subprocess.CalledProcessError(1, ["git", "diff"])
+
+    monkeypatch.setattr(selector, "changed_files", _failed_changed_files)
     assert selector.main() == 0
     assert capsys.readouterr().out.strip() == "__ALL__"

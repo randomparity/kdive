@@ -107,9 +107,9 @@ def _git(args: list[str], repo_root: Path) -> str:
         cwd=repo_root,
         capture_output=True,
         text=True,
-        check=False,
+        check=True,
     )
-    return result.stdout if result.returncode == 0 else ""
+    return result.stdout
 
 
 def _git_lines(args: list[str], repo_root: Path) -> list[str]:
@@ -118,8 +118,11 @@ def _git_lines(args: list[str], repo_root: Path) -> list[str]:
 
 def _resolve_base_ref(repo_root: Path) -> str | None:
     for ref in _BASE_REFS:
-        if _git(["rev-parse", "--verify", "--quiet", ref], repo_root).strip():
-            return ref
+        try:
+            if _git(["rev-parse", "--verify", "--quiet", ref], repo_root).strip():
+                return ref
+        except subprocess.CalledProcessError:
+            continue
     return None
 
 
@@ -136,7 +139,11 @@ def changed_files(repo_root: Path, base_ref: str) -> list[str]:
 
 
 def main() -> int:
-    repo_root = Path(_git(["rev-parse", "--show-toplevel"], Path.cwd()).strip() or ".")
+    try:
+        repo_root = Path(_git(["rev-parse", "--show-toplevel"], Path.cwd()).strip())
+    except subprocess.CalledProcessError:
+        print(_FULL_SUITE)
+        return 0
     base_ref = _resolve_base_ref(repo_root)
     if base_ref is None:
         # No base branch resolves (default branch not 'main', no 'origin', shallow clone):
@@ -144,7 +151,12 @@ def main() -> int:
         # uncommitted-only HEAD diff that would silently skip committed branch work.
         print(_FULL_SUITE)
         return 0
-    targets = select_targets(changed_files(repo_root, base_ref), build_test_index(repo_root))
+    try:
+        changed = changed_files(repo_root, base_ref)
+    except subprocess.CalledProcessError:
+        print(_FULL_SUITE)
+        return 0
+    targets = select_targets(changed, build_test_index(repo_root))
     if targets is None:
         print(_FULL_SUITE)
     elif targets:
