@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -22,6 +23,32 @@ from kdive.worker_lifecycle.authority_store import (
 from tests.reconciler.conftest import connect
 
 _PROTOCOL = CURRENT_WORKER_FENCE_PROTOCOL
+
+
+def test_public_authority_apis_reject_mismatched_binding_shapes_before_database_access() -> None:
+    conn = cast(AsyncConnection, None)
+    docker_binding = DockerAuthorityBinding(container_id="container-1")
+
+    async def _run() -> None:
+        with pytest.raises(RuntimeError, match="invalid local authority binding"):
+            await register_worker_incarnation(
+                conn,
+                "worker-1",
+                "local",
+                cast(Any, docker_binding),
+                b"credential-hash",
+                _PROTOCOL,
+            )
+        with pytest.raises(RuntimeError, match="invalid kubernetes authority binding"):
+            await terminate_worker_incarnation(
+                conn,
+                "worker-1",
+                "kubernetes",
+                cast(Any, docker_binding),
+                "failed",
+            )
+
+    asyncio.run(_run())
 
 
 def _credential(value: str) -> SecretStr:

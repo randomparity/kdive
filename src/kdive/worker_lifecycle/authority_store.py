@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast, overload
 
 from psycopg import AsyncConnection, errors
 from psycopg.types.json import Jsonb
@@ -87,6 +87,39 @@ def _record(row: tuple[Any, ...]) -> WorkerIncarnation:
     )
 
 
+@overload
+async def register_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: Literal["local"],
+    binding: LocalAuthorityBinding,
+    credential_hash: bytes,
+    fence_protocol: int,
+) -> WorkerIncarnation: ...
+
+
+@overload
+async def register_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: Literal["docker"],
+    binding: DockerAuthorityBinding,
+    credential_hash: bytes,
+    fence_protocol: int,
+) -> WorkerIncarnation: ...
+
+
+@overload
+async def register_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: Literal["kubernetes"],
+    binding: KubernetesAuthorityBinding,
+    credential_hash: bytes,
+    fence_protocol: int,
+) -> WorkerIncarnation: ...
+
+
 async def register_worker_incarnation(
     conn: AsyncConnection,
     incarnation: str,
@@ -96,6 +129,7 @@ async def register_worker_incarnation(
     fence_protocol: int,
 ) -> WorkerIncarnation:
     """Ask the lifecycle-witness authority to register immutable incarnation facts."""
+    binding = _validated_binding(authority_kind, binding)
     require_top_level_transaction(conn, "register_worker_incarnation")
     try:
         async with conn.transaction():
@@ -142,6 +176,36 @@ async def authenticate_worker_incarnation(
     return _record(row)
 
 
+@overload
+async def terminate_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: Literal["local"],
+    binding: LocalAuthorityBinding,
+    outcome: TerminationOutcome,
+) -> bool: ...
+
+
+@overload
+async def terminate_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: Literal["docker"],
+    binding: DockerAuthorityBinding,
+    outcome: TerminationOutcome,
+) -> bool: ...
+
+
+@overload
+async def terminate_worker_incarnation(
+    conn: AsyncConnection,
+    incarnation: str,
+    authority_kind: Literal["kubernetes"],
+    binding: KubernetesAuthorityBinding,
+    outcome: TerminationOutcome,
+) -> bool: ...
+
+
 async def terminate_worker_incarnation(
     conn: AsyncConnection,
     incarnation: str,
@@ -150,6 +214,7 @@ async def terminate_worker_incarnation(
     outcome: TerminationOutcome,
 ) -> bool:
     """Terminate or confirm one exact immutable authority-bound incarnation."""
+    binding = _validated_binding(authority_kind, binding)
     require_top_level_transaction(conn, "terminate_worker_incarnation")
     async with conn.transaction():
         row = await (
