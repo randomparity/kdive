@@ -426,6 +426,47 @@ def test_child_serializes_categorized_failure_without_arbitrary_details(
     assert result.details == {"phase": "provider_execution"}
 
 
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_phase"),
+    [
+        ("construction", "provider_construction"),
+        ("execution", "provider_execution"),
+    ],
+)
+def test_child_serializes_safe_context_for_unexpected_provider_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
+    failure_stage: str,
+    expected_phase: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = _request()
+    failure = RuntimeError("provider exposed secret-marker in failure")
+    executor = _Executor(failure=failure)
+    written: list[bytes] = []
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(child, "_open_attempt_directory", lambda: directory_fd)
+    monkeypatch.setattr(child, "read_capture_inputs", lambda _fd: (request, b"{}\n"))
+
+    def build_executor(_request: CaptureRequest, _configuration: bytes | None) -> _Executor:
+        if failure_stage == "construction":
+            raise failure
+        return executor
+
+    monkeypatch.setattr(child, "build_capture_executor", build_executor)
+    monkeypatch.setattr(child, "_write_private_result", lambda _fd, data: written.append(data))
+
+    assert child.run_capture_child(launch_token, -1) == 0
+
+    assert b"secret-marker" not in written[0]
+    result = CaptureResult.from_canonical_json(written[0])
+    assert result.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert result.terminal is False
+    assert result.reason == "provider_execution_failed"
+    assert result.details == {"phase": expected_phase, "exception_type": "RuntimeError"}
+
+
 @pytest.mark.parametrize("provider_kind", ["local-libvirt", "remote-libvirt"])
 @pytest.mark.parametrize(
     "method", ["prepare", "attach", "captured_size", "detach", "fetch", "reclaim"]
