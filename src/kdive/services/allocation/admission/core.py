@@ -192,25 +192,10 @@ class _GateResult:
 async def admission_gate(
     conn: AsyncConnection, request: AllocationRequest, *, estimate: Decimal
 ) -> _GateResult:
-    """Replay the check-then-debit gate against the project + the chosen host.
+    """Evaluate admission while the caller holds project and resource locks.
 
-    The single, shared admission gate (no fork): the grant-quota and budget checks, then the
-    host cap and PCIe resolution. **The caller must already hold the ``PROJECT`` and per-
-    ``RESOURCE`` locks** (the global order ``PROJECT → RESOURCE → ALLOCATION``); this function
-    acquires no lock itself, so synchronous admit (``PROJECT → RESOURCE``) and the promotion
-    sweep (``PROJECT → RESOURCE → ALLOCATION``) both keep the documented order and never
-    invert against each other.
-
-    Returns a structured result carrying either the claimed PCIe devices to grant, or the
-    typed denial. The denial's explicit reason is what routes terminate-vs-wait at
-    promotion: a **budget** denial is ``ALLOCATION_DENIED`` with
-    ``reason="budget_exceeded"`` (terminate); a host-cap / quota / PCIe-busy denial is
-    queueable (wait). A PCIe-config denial (``CONFIGURATION_ERROR``) and affinity denial are
-    non-queueable but are not budget exhaustion.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if the host cap is invalid or a PCIe spec
-            is malformed grammar (the caller's transaction rolls back — no durable write).
+    Returns either claimed PCIe devices or a typed denial; malformed host or PCIe configuration
+    raises ``CONFIGURATION_ERROR``.
     """
     if not project_may_place(request.resource, request.project):
         # Per-project affinity backstop for an explicit ``resource_id`` (the selection filter

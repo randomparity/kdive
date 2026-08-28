@@ -40,62 +40,10 @@ def _starts_with_qcow2_magic(staged: Path) -> bool:
 
 
 def _staged_base_rejection(dest: Path, *, system_id: UUID) -> str | None:
-    """Why a present staged base may not back an overlay, or ``None`` when it may (#1526, #1539).
+    """Return the reuse rejection slug, or ``None`` for a durable valid qcow2 base.
 
-    The reuse fast path used to treat *any* present ``dest`` as authoritative (a bare
-    ``dest.is_file()``), which bypassed every verification gate exactly when the file was most
-    suspect: a base torn by a crash mid-stage is full-length and unverified, and under ADR-0441 §5
-    content-addressed reuse it would then silently back every System in the investigation until
-    close — with the checksum machinery skipped *because* the file existed.
-
-    The re-check is the qcow2-magic probe the staging path already applies. It is O(1), so it stays
-    affordable on the per-System provision hot path, and it catches the truncated, empty, garbage,
-    and whole-file-zeroed shapes. It is deliberately **not** a checksum re-verify — that is
-    O(filesize) against a base of tens of GiB, on every guest start, which would undo the point of
-    staging once per investigation. It is also deliberately not a size comparison:
-    ``artifacts.uncompressed_size`` is an upper *bound* rather than an exact size
-    (``strip_gzip_to_writer`` caps output at it and accepts less) and is NULL on the identity path,
-    so an equality gate would false-reject a good base and re-download it on every provision.
-
-    **The magic probe alone is not a crash-torn-base detector** (ADR-0443 §3), which is why
-    ADR-0451 added the completion marker above it. Damage past the first four bytes passes the
-    probe, and the rename follows the *completed* write — so writeback has already flushed most of a
-    multi-GiB base by then and the dirty residue at crash time is its **tail**. The expected large
-    crash survivor is head-intact and tail-zeroed, and it passes the probe. The marker is what
-    rejects it: a crash before :func:`_durable_replace` reaches its marker write leaves no marker
-    regardless of what the base looks like.
-
-    **The magic probe is nonetheless kept, not replaced.** The marker is a *completion* witness, not
-    an *integrity* one — it says a stage ran to a durable finish, and says nothing about damage
-    arriving after the publish. A dying disk, a stray ``cp``, a half-restored backup: ADR-0443 §3's
-    second population, for which the probe is still the only net on this path. It costs a 4-byte
-    read on a path that opens the base for ``qemu-img`` moments later regardless.
-
-    Not reusable, without reading anything: the path is absent, a non-directory sits on its parent
-    path, a directory sits on its own, what is there is **not a regular file**, or the marker is
-    missing. The regular-file test is why the mode is checked before the ``open`` rather than left
-    to the error taxonomy — opening a FIFO for reading blocks until a writer appears, so a probe
-    that skipped the ``S_ISREG`` test would hang the provision thread forever, and the post-lock
-    call site would hang *holding* the fetch advisory lock, wedging every sibling System on that
-    (investigation, checksum). Nothing in kdive creates a non-regular file here, but
-    ``dest.is_file()`` rejected one for free and this must not regress into a hang. The marker needs
-    no such argument because it is only ever ``stat``\\ ed, never opened.
-
-    Every other ``OSError`` — from either ``stat`` or the ``open`` — is raised as an
-    ``INFRASTRUCTURE_FAILURE``: a base that is present but unreadable (``EACCES`` under a
-    worker/staging-user asymmetry of the shape ADR-0442 documents, ``EMFILE`` under descriptor
-    exhaustion, a transient ``EIO``) is an operator-visible fault, **not** a cache miss. This is the
-    one place the gate is deliberately *narrower* than the ``dest.is_file()`` it replaces, which
-    swallowed every ``OSError`` alike: treating those as a cache miss would swap a good multi-GiB
-    base out from under any guest holding it (see the residue in ADR-0443 §2) and re-download it on
-    every provision, silently, for as long as the fault lasts.
-
-    Returns:
-        ``None`` when the base may be reused, or one of :data:`_REJECTION_PROSE`'s slugs naming the
-        gate that rejected it. Which gate is not diagnostic colour: on the first provision after an
-        upgrade **every** base in the tree is rejected for a missing marker, and reporting that as a
-        format-gate failure would tell an operator the durability bug had fired on a base that is
-        perfectly intact.
+    The regular-file check prevents blocking on a FIFO. Missing paths are cache misses; other I/O
+    errors are infrastructure failures rather than permission to replace a potentially live base.
     """
     try:
         if not stat.S_ISREG(dest.stat().st_mode):

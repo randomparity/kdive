@@ -89,52 +89,9 @@ async def repair_leaked_upload_objects(
 ) -> int:
     """Delete unreachable upload versions after their database fences commit.
 
-    Walks both upload roots with public version pages, attributes entries to exact owner keys, and
-    charges at most 200 inventory/deletion work units per root and 20 per key. A capped or
-    capture-faulted key is skipped with a key-only continuation marker so its history cannot starve
-    later keys. A denied capture pessimistically charges its requested allowance, while a broad-list
-    to empty-capture race charges one unit, so neither failure shape can evade the root brake.
-    Each batch is captured before the final artifact, manifest, live-write-lease, and grace recheck
-    under the owner's advisory lock. The transaction commits before exact VersionId deletion;
-    therefore store latency holds no owner lock and a later PUT cannot enter the captured batch.
-
-    The reclaim threshold is ``orphan_grace + upload_ttl``, and the second term is not padding
-    (ADR-0455 §2). The manifest fence protects an object only until the reaper deletes its window's
-    row, which happens a TTL after the mint — so a threshold measured on the object's mtime alone
-    and merely *equal* to the TTL makes the bytes reclaimable within seconds of the reap, and one
-    above it makes them reclaimable in the very pass that reaped them. Summing the two puts the
-    threshold a full ``orphan_grace`` past the earliest reap of any window the object could have
-    belonged to, at whatever TTL **this process** is configured with. Both terms parse as
-    non-negative, so no configured value can invert the cutoff; what remains is deployment skew the
-    code cannot see — a reconciler provisioned without ``KDIVE_UPLOAD_TTL_SECONDS`` while the
-    minting server raises it — which is the one way the margin can still go negative (ADR-0455 §2).
-
-    A live key protects all of its versions. Incomplete batches retain latest, while every survivor
-    of a failed exact delete, legacy ``null`` versions, markers, and uncaptured history remain in
-    version inventory. Listing, capture, database, and delete faults are logged and counted without
-    starving the sibling root; the pass raises once at the end so the reconciler error counter
-    observes them.
-
-    Args:
-        conn: An async connection. Each query runs in its own short transaction so no snapshot is
-            held across the blocking store calls.
-        store: The version-aware object store to inventory and exact-delete through.
-        orphan_grace: How long past the earliest possible reap an object is protected.
-        upload_ttl: The configured upload-window TTL, added to ``orphan_grace``.
-
-    Returns:
-        The number of immutable versions or markers confirmed deleted by completed
-        :meth:`UploadOrphanStore.delete_batch` calls; one INFO line per confirmed identity. A
-        raised batch may have deleted nonlatest targets before failing, but that partial progress
-        is deliberately neither counted nor logged because the batch API reports no partial count.
-
-    Raises:
-        CategorizedError: at least one root or key could not be swept
-            (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`), raised once after
-            the last root. Any fault that ends the pass *outright* instead — cancellation at
-            shutdown, a bug in this module — propagates unchanged, and takes the same count-logging
-            path on the way out, because it arrives after the same irreversible deletes
-            (ADR-0455 §5).
+    The grace period includes the upload-window TTL so objects remain protected after their
+    manifest expires. Store operations run outside owner locks; failures are accumulated across
+    roots and raised after the pass. Returns only deletions confirmed by completed batches.
     """
     grace = orphan_grace + upload_ttl
     tally = _Tally()

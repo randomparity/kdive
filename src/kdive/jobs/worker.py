@@ -154,18 +154,7 @@ def _log_provision_claim(worker_id: str, claim: _ProvisionClaim) -> None:
 
 
 def worker_pool_floor(accepted_lanes: Sequence[str]) -> int:
-    """The smallest ``pool.max_size`` a worker accepting ``accepted_lanes`` can run on.
-
-    Each lane dispatches one job at a time, and a dispatched job holds two connections at once —
-    its handler's and its background heartbeat's. The ``+ 1`` is the readiness probe, which shares
-    this pool: ``run_once`` skips ``dequeue`` while not ready, so a worker sized to exactly
-    ``2 * lanes`` would stop claiming precisely when every lane is busy.
-
-    A correctness floor, not a sizing recommendation — it leaves no headroom beyond that one
-    probe. Exported so the process composition sizes its pool from the same formula the
-    constructor enforces; two independent expressions of it would drift and the worker would
-    raise at startup.
-    """
+    """Return the two connections per lane plus one readiness-probe connection."""
     return 2 * len(accepted_lanes) + 1
 
 
