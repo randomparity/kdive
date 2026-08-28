@@ -569,26 +569,7 @@ def _failure_category(exc: Exception) -> ErrorCategory:
 
 
 def _is_terminal(exc: Exception, category: ErrorCategory) -> bool:
-    """Decide whether this failure dead-letters now or is re-dispatched for another attempt.
-
-    The **category** is the primary signal (ADR-0483): a category the taxonomy calls
-    non-retryable is permanent by construction — a denied guest-agent RPC, a malformed
-    payload, a host binary that is not installed — so re-dispatching it can only reproduce
-    the same failure, three times slower, under a category that already told the caller not
-    to retry. Requiring every such raise site to remember ``terminal=True`` made the safe
-    behaviour opt-in and it was widely missed (#1631).
-
-    ``CategorizedError.terminal`` remains as the **escalation**: it forces an immediate
-    dead-letter for a category that *is* retryable, where a retry would otherwise be
-    reasonable but this particular failure already drove the target to a terminal state.
-
-    Args:
-        exc: The exception the handler raised.
-        category: The category ``exc`` was classified as by :func:`_failure_category`.
-
-    Returns:
-        ``True`` to dead-letter immediately, ``False`` to requeue while attempts remain.
-    """
+    """Return whether to dead-letter; an explicit terminal flag overrides retryability."""
     if isinstance(exc, CategorizedError) and exc.terminal:
         return True
     return not retryable_category(category)
