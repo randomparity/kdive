@@ -32,19 +32,27 @@ from kdive.artifacts.uploads.transport_encoding import StripDecodeRequest, strip
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.rootfs import rootfs_upload_fetch
+from kdive.providers.local_libvirt.lifecycle.rootfs import (
+    rootfs_upload_fetch,
+    upload_contracts,
+    upload_staging,
+)
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsUploadContext,
     staged_rootfs_path,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
-    _STAGING_FREE_SPACE_MARGIN_BYTES,
-    _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
-    _starts_with_qcow2_magic,
-    _unlink_orphan_partials,
     fetch_uploaded_rootfs,
     rootfs_upload_fetch_from_env,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs.upload_publication import (
+    _starts_with_qcow2_magic,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs.upload_staging import (
+    _STAGING_FREE_SPACE_MARGIN_BYTES,
+    _STREAM_CHUNK_BYTES,
+    _unlink_orphan_partials,
     stage_uploaded_rootfs,
 )
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
@@ -58,10 +66,14 @@ _CHECKSUM = base64.b64encode(bytes(range(32))).decode("ascii")
 _TOKEN = rootfs_object_token(_CHECKSUM)
 
 
+def test_upload_store_contract_lives_with_the_pipeline() -> None:
+    assert upload_contracts.UploadObjectStore.__module__.endswith(".upload_contracts")
+
+
 def test_native_fallocate_preserves_lengths_above_two_gib(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    native = rootfs_upload_fetch._fallocate
+    native = upload_staging._fallocate
     assert native.restype is ctypes.c_int
     assert native.argtypes == [
         ctypes.c_int,
@@ -75,8 +87,8 @@ def test_native_fallocate_preserves_lengths_above_two_gib(
         calls.append((fd, mode, offset, length))
         return 0
 
-    monkeypatch.setattr(rootfs_upload_fetch, "_fallocate", _call)
-    rootfs_upload_fetch._native_fallocate(17, 3 * 1024**3)
+    monkeypatch.setattr(upload_staging, "_fallocate", _call)
+    upload_staging._native_fallocate(17, 3 * 1024**3)
 
     assert calls == [(17, 0, 0, 3 * 1024**3)]
 
@@ -86,10 +98,10 @@ def test_native_fallocate_captures_errno(monkeypatch: pytest.MonkeyPatch) -> Non
         ctypes.set_errno(errno.ENOSPC)
         return -1
 
-    monkeypatch.setattr(rootfs_upload_fetch, "_fallocate", _call)
+    monkeypatch.setattr(upload_staging, "_fallocate", _call)
 
     with pytest.raises(OSError) as error:
-        rootfs_upload_fetch._native_fallocate(17, 4096)
+        upload_staging._native_fallocate(17, 4096)
 
     assert error.value.errno == errno.ENOSPC
 
@@ -100,7 +112,7 @@ def test_native_fallocate_allocates_a_real_temporary_file(tmp_path: Path) -> Non
     fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         try:
-            rootfs_upload_fetch._native_fallocate(fd, requested)
+            upload_staging._native_fallocate(fd, requested)
         except OSError as error:
             if error.errno in {errno.ENOSYS, errno.EOPNOTSUPP}:
                 pytest.skip(f"native fallocate unsupported on test filesystem: errno={error.errno}")
@@ -298,7 +310,7 @@ def _staging_volume_has_room(monkeypatch: pytest.MonkeyPatch) -> None:
     test body, i.e. after this fixture, and monkeypatch's later write wins — so they still choose
     their own figure.
     """
-    monkeypatch.setattr(rootfs_upload_fetch, "disk_usage", _ample_free_space)
+    monkeypatch.setattr(upload_staging, "disk_usage", _ample_free_space)
 
 
 # --- stage_uploaded_rootfs: identity path (checksum + qcow2-magic + unique partial) --------------
@@ -583,7 +595,7 @@ def test_stage_identity_writes_without_truncating_the_guarded_inode(tmp_path: Pa
     fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         os.ftruncate(fd, len(_QCOW2))
-        actual = rootfs_upload_fetch._stage_identity(
+        actual = upload_staging._stage_identity(
             store,
             key="k",
             checksum=_sha256_b64(_QCOW2),
@@ -779,8 +791,8 @@ def test_stage_gzip_shrinks_its_reservation_before_the_format_gate(
             next(tmp_path.glob(f"{_TOKEN}.*.partial")).stat().st_size
         ),
     )
-    original_flocked_partial = rootfs_upload_fetch._flocked_partial
-    original_format_gate = rootfs_upload_fetch._require_qcow2_magic
+    original_flocked_partial = upload_staging._flocked_partial
+    original_format_gate = upload_staging._require_qcow2_magic
 
     @contextmanager
     def _preallocated_partial(partial: Path) -> Iterator[int]:
@@ -792,8 +804,8 @@ def test_stage_gzip_shrinks_its_reservation_before_the_format_gate(
         sizes_at_format_gate.append(partial.stat().st_size)
         original_format_gate(partial, system_id=system_id)
 
-    monkeypatch.setattr(rootfs_upload_fetch, "_flocked_partial", _preallocated_partial)
-    monkeypatch.setattr(rootfs_upload_fetch, "_require_qcow2_magic", _record_format_gate)
+    monkeypatch.setattr(upload_staging, "_flocked_partial", _preallocated_partial)
+    monkeypatch.setattr(upload_staging, "_require_qcow2_magic", _record_format_gate)
 
     dest = _stage(store, tmp_path, encoding="gzip", uncompressed_size=reserved)
 
@@ -854,7 +866,7 @@ def _pin_free_space(monkeypatch: pytest.MonkeyPatch, free: int) -> list[Path]:
         measured.append(Path(path))
         return types.SimpleNamespace(total=free, used=0, free=free)
 
-    monkeypatch.setattr(rootfs_upload_fetch, "disk_usage", _usage)
+    monkeypatch.setattr(upload_staging, "disk_usage", _usage)
     return measured
 
 
@@ -1104,7 +1116,7 @@ def test_stage_precheck_stages_anyway_when_the_filesystem_cannot_be_measured(
     def _raise(_path: object) -> object:
         raise OSError(errno.EACCES, "Permission denied")
 
-    monkeypatch.setattr(rootfs_upload_fetch, "disk_usage", _raise)
+    monkeypatch.setattr(upload_staging, "disk_usage", _raise)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     with caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__):
@@ -1171,7 +1183,7 @@ def test_concurrent_native_reservations_admit_exactly_one_stager(
         except CategorizedError as error:
             outcomes[index] = error
 
-    monkeypatch.setattr(rootfs_upload_fetch, "_native_fallocate", _allocate)
+    monkeypatch.setattr(upload_staging, "_native_fallocate", _allocate)
     workers = [threading.Thread(target=_run, args=(index,)) for index in range(2)]
     for worker in workers:
         worker.start()
@@ -1207,7 +1219,7 @@ def test_unsupported_native_reservation_degrades_without_posix_fallocate(
     def _forbidden_posix_fallocate(_fd: int, _offset: int, _length: int) -> None:
         raise AssertionError("native-allocation degrade must not invoke posix_fallocate emulation")
 
-    monkeypatch.setattr(rootfs_upload_fetch, "_native_fallocate", _unsupported)
+    monkeypatch.setattr(upload_staging, "_native_fallocate", _unsupported)
     monkeypatch.setattr(os, "posix_fallocate", _forbidden_posix_fallocate)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
@@ -1227,7 +1239,7 @@ def test_native_reservation_io_failure_does_not_degrade(
     def _io_failure(_fd: int, _length: int) -> None:
         raise OSError(errno.EIO, "Input/output error")
 
-    monkeypatch.setattr(rootfs_upload_fetch, "_native_fallocate", _io_failure)
+    monkeypatch.setattr(upload_staging, "_native_fallocate", _io_failure)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     with pytest.raises(CategorizedError) as error:
@@ -2309,7 +2321,7 @@ def _fetch_child(
 ) -> None:  # pragma: no cover - runs in a child process
     # A spawned child re-imports the module fresh, so the parent's autouse free-space pin does not
     # reach it. Pin it here too, or this test would depend on the runner's real free disk (#1525).
-    rootfs_upload_fetch.disk_usage = _ample_free_space  # ty: ignore[invalid-assignment]  # a stub
+    upload_staging.disk_usage = _ample_free_space  # ty: ignore[invalid-assignment]  # a stub
     store = _CountingStore(_QCOW2, Path(counter))
     upload = RootfsUploadContext("local", UUID(system_id), Path(upload_dir), checksum, UUID(job_id))
     barrier.wait(timeout=30)  # both children reach the fetch together, racing for the lock
@@ -2759,7 +2771,7 @@ def test_the_partial_stays_locked_after_the_stagers_writer_closes(tmp_path: Path
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     dest = _dest(tmp_path)
     swept: list[list[Path]] = []
-    real_require = rootfs_upload_fetch._require_qcow2_magic
+    real_require = upload_staging._require_qcow2_magic
 
     def sweeping_require(staged: Path, *, system_id: str) -> None:
         _unlink_orphan_partials(dest)  # a sibling sweeps between the writer close and the publish
@@ -2767,7 +2779,7 @@ def test_the_partial_stays_locked_after_the_stagers_writer_closes(tmp_path: Path
         real_require(staged, system_id=system_id)
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(rootfs_upload_fetch, "_require_qcow2_magic", sweeping_require)
+        patch.setattr(upload_staging, "_require_qcow2_magic", sweeping_require)
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert swept and swept[0], "the sweep unlinked the partial after the stager closed its writer"
