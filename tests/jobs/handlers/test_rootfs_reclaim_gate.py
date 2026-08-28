@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.types.json import Jsonb
 
-from kdive.artifacts.content_address import rootfs_object_token
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.jobs.handlers.artifacts.rootfs_reclaim import rootfs_base_reclaimable
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
 from tests.reconciler.conftest import connect

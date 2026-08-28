@@ -42,9 +42,9 @@ from kdive.providers.remote_libvirt.connection.transport import (
 )
 from kdive.providers.remote_libvirt.guest.agent import GuestDomain
 from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
-from kdive.providers.remote_libvirt.lifecycle.gdb import (
+from kdive.providers.remote_libvirt.lifecycle.port_allocation import (
     DOMAIN_PREFIX,
-    allocate_gdb_port,
+    allocate_port,
     used_gdb_ports,
     used_ssh_ports,
 )
@@ -84,7 +84,7 @@ __all__ = [
     "KDIVE_METADATA_NS",
     "QEMU_NS",
     "RemoteLibvirtProvisioning",
-    "allocate_gdb_port",
+    "allocate_port",
     "overlay_volume_name",
     "recorded_gdb_port",
     "render_domain_xml",
@@ -435,7 +435,7 @@ class RemoteLibvirtProvisioning:
         ssh_tried: set[int] = set()
         last_error: libvirt.libvirtError | None = None
         for _attempt in range(_START_ATTEMPTS):
-            gdb_port = allocate_gdb_port(
+            gdb_port = allocate_port(
                 used_gdb,
                 own_name=domain_name,
                 # Reserve gdb_port_min as the ACL-probe port; Systems start one above it so the
@@ -484,7 +484,7 @@ class RemoteLibvirtProvisioning:
         if ssh_forward is None:
             return None
         _addr, ssh_min, ssh_max = ssh_forward
-        return allocate_gdb_port(
+        return allocate_port(
             used_ssh, own_name=domain_name, port_min=ssh_min, port_max=ssh_max, exclude=ssh_tried
         )
 

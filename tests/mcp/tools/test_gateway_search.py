@@ -71,6 +71,18 @@ def _match_names(content: dict[str, Any]) -> list[str]:
     return [m["name"] for m in content["data"]["matches"]]
 
 
+@pytest.mark.parametrize("key", ["properties", "$defs", "definitions", "mapping"])
+def test_schema_term_collection_never_exceeds_limit(key: str) -> None:
+    from kdive.mcp.tools.gateway import _SCHEMA_TERM_LIMIT, _append_schema_terms
+
+    schema = {key: {f"field_{index}": {"description": "value"} for index in range(250)}}
+    terms: list[str] = []
+
+    _append_schema_terms(schema, terms)
+
+    assert len(terms) == _SCHEMA_TERM_LIMIT
+
+
 # ---------------------------------------------------------------------------
 # Test 1: keyword query surfaces the relevant tool
 # ---------------------------------------------------------------------------

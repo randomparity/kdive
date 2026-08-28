@@ -1,6 +1,6 @@
 """Descriptor types for the schema-generated ``kdivectl`` verbs (epic #1442 R5/R6).
 
-The generator (:mod:`scripts.gen_cli_verbs`) emits :data:`GENERATED_VERBS` in the
+The generator (:mod:`scripts.generate.gen_cli_verbs`) emits :data:`GENERATED_VERBS` in the
 committed module :mod:`kdive.cli.commands._generated_verbs` as a tuple of
 :class:`GeneratedVerb`, one per registered MCP tool. A descriptor is the sole source for
 its command path and parser shape; this module defines that stable type so the generated

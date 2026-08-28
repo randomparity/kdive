@@ -29,7 +29,6 @@ from kdive.mcp.tools.debug.introspection import gate as introspect_gate
 from kdive.mcp.tools.debug.introspection import live as introspect_live
 from kdive.mcp.tools.debug.introspection import offline as introspect_offline
 from kdive.mcp.tools.debug.introspection import registrar as introspect_registrar
-from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
 from kdive.providers.ports.retrieve import (
@@ -38,6 +37,7 @@ from kdive.providers.ports.retrieve import (
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_mapping, json_mapping, json_sequence
 

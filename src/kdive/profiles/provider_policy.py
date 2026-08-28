@@ -18,29 +18,12 @@ class ProfilePolicy(Protocol):
 
     @property
     def kind(self) -> ResourceKind:
-        """The ``ResourceKind`` whose profile section this policy reads (ADR-0549).
-
-        The section-reading members here read that one section, so a policy applied to a profile
-        carrying a different section reads an absent attribute. The policy is resolved from the
-        Resource (``ProviderResolver.runtime_for_allocation``/``runtime_for_system``), so this is
-        what admission cross-checks ``ProviderSection.kind`` against.
-
-        Read-only on purpose: it is the discriminant the admission guard trusts, and declaring it
-        as a mutable attribute would both make it assignable and reject the two idiomatic constant
-        spellings (``ClassVar`` and ``@property``) in an implementer.
-        """
+        """The resource kind whose provider-profile section this policy reads (ADR-0549)."""
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None: ...
 
     def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
-        """Return whether a drgn-live ``start_session`` gates+seeds on the per-System bootstrap key.
-
-        True iff the drgn-live transport-open at ``start_session`` authenticates over the loopback
-        SSH forward, so the handler must fail closed on a missing per-System bootstrap key and seed
-        redaction from it before opening the transport (ADR-0289, ADR-0315). A provider that opens
-        drgn-live over the guest agent returns ``False`` — it needs no start-time seed even though
-        it still uses the bootstrap key at ``introspect.run``.
-        """
+        """Whether drgn-live startup requires and redacts the System bootstrap key."""
 
     def validate_profile(self, profile: ProvisioningProfile) -> None: ...
 
@@ -69,22 +52,7 @@ def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> Prov
 def require_investigation_binding_for_upload(
     policy: ProfilePolicy, profile: ProvisioningProfile, investigation_id: UUID | None
 ) -> None:
-    """Require a bound investigation when the profile's rootfs is an ``upload`` (ADR-0441 §2).
-
-    An investigation-scoped uploaded rootfs is resolved by content checksum within the System's
-    own investigation, so a ``{"kind": "upload"}`` rootfs with no ``investigation_id`` is
-    unresolvable. Reject it at admission with an actionable ``configuration_error`` naming the
-    missing binding rather than letting it fail late at provision.
-
-    Args:
-        policy: The provider profile policy (to read the rootfs source).
-        profile: The parsed provisioning profile.
-        investigation_id: The System's effective investigation binding, or ``None``.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the rootfs is ``upload`` and
-            ``investigation_id`` is ``None``.
-    """
+    """Reject an uploaded rootfs without the investigation binding needed to resolve it."""
     rootfs = policy.rootfs_source(profile)
     if rootfs is not None and rootfs.kind == "upload" and investigation_id is None:
         raise CategorizedError(

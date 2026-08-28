@@ -40,8 +40,8 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
-from kdive.artifacts.upload_manifest import RUN_UPLOAD_OWNER, lock_scope_for
-from kdive.artifacts.write_lease import hold_write_lease, reap_stale_write_leases
+from kdive.artifacts.uploads.upload_manifest import RUN_UPLOAD_OWNER, lock_scope_for
+from kdive.artifacts.uploads.write_lease import hold_write_lease, reap_stale_write_leases
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -51,7 +51,7 @@ from kdive.jobs import queue
 from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.providers.ports.retrieve import CaptureOutput
-from kdive.reconciler.cleanup.upload_orphans import repair_leaked_upload_objects
+from kdive.reconciler.cleanup.uploads.upload_orphans import repair_leaked_upload_objects
 from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver

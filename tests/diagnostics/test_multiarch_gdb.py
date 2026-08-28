@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
-from kdive.diagnostics.multiarch_gdb import (
+from kdive.diagnostics.contributions.multiarch_gdb import (
     default_multiarch_gdb_probe,
     diagnostic_contribution,
 )

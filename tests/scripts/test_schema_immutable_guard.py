@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.schema_immutable_guard import GuardError, find_violations
+from scripts.guards.schema_immutable_guard import GuardError, find_violations
 
 _EXISTING = "src/kdive/db/schema/0003_reprovision_job_kind.sql"
 _NEW = "src/kdive/db/schema/0069_new_migration.sql"
@@ -177,7 +177,7 @@ def _run(
     therefore the only base CI ever compares against. Running it as `python3` with no venv
     also holds it to its stdlib-only contract.
     """
-    guard = Path(__file__).resolve().parents[2] / "scripts/schema_immutable_guard.py"
+    guard = Path(__file__).resolve().parents[2] / "scripts/guards/schema_immutable_guard.py"
     argv = ["python3", str(guard)] + ([] if base_ref is None else [base_ref])
     return subprocess.run(argv, cwd=cwd or repo, capture_output=True, text=True)
 

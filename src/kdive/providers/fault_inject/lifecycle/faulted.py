@@ -1,21 +1,4 @@
-"""Faulting wrappers that thread the seeded engine into the fault-inject ports (ADR-0074).
-
-The happy-path mock ports stay synthetic and untouched; these thin
-decorators consult a :class:`~kdive.providers.fault_inject.faulting.engine.FaultEngine` before
-delegating, so a seeded fault actually perturbs the spine op:
-
-- a drawn ``fail`` raises ``CategorizedError(decision.category)`` **iff** ``decision.fail``
-  (the catalog category, never ``lease_expired``);
-- a drawn ``latency`` blocks the op for the engine-computed delay via an injected ``sleep_s``
-  seam (default :func:`time.sleep`) — the ports are synchronous and the worker offloads them
-  via ``asyncio.to_thread``, so a blocking sleep there matches a real slow provider without
-  stalling the event loop;
-- ``attempt`` is a caller-supplied **durable** input (``attempt_for``, default first attempt),
-  never a wrapper-held counter (ADR-0072's determinism leg).
-
-A wrapper is assembled only when fault config is present (``build_fault_inject_runtime`` with a
-non-None ``engine``); the happy-path composition stays unchanged when no fault is configured.
-"""
+"""Fault-before-delegate wrappers using durable attempt inputs (ADR-0074)."""
 
 from __future__ import annotations
 
@@ -37,12 +20,7 @@ _AttemptFor = Callable[[UUID], int]
 
 
 def _apply(decision: FaultDecision, sleep_s: _SyncSleep) -> None:
-    """Realize a decision: sleep the drawn latency, then raise iff the draw failed.
-
-    Latency is applied before a failure raise so a slow-then-failing op spends its delay
-    (matching a provider that hangs then errors). Raises ``CategorizedError`` only when
-    ``decision.fail`` is true, in which case ``decision.category`` is guaranteed non-None.
-    """
+    """Apply latency before raising a drawn failure."""
     if decision.latency_s > 0.0:
         sleep_s(decision.latency_s)
     if decision.fail:
@@ -111,7 +89,7 @@ class FaultedProvisioning:
         self._inner.teardown(domain_name)
 
     def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
-        """Delegate to the wrapped provisioner (a synthetic domain reads ``None``, ADR-0369)."""
+        """Return the wrapped provisioner's resolved CPU data."""
         return self._inner.read_resolved_cpu(system_id)
 
     def _draw(self, system_id: UUID, plane: FaultPlane) -> None:

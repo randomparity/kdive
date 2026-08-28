@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,14 +20,15 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 import kdive.mcp.tools.debug.operations.breakpoints as debug_breakpoint_tools
-from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
+from kdive.artifacts.uploads.content_address import rootfs_object_token
+from kdive.assembly import ProcessAssembly
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
-from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.app import build_app, build_app_from_assembly
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as resources_tools
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
@@ -44,6 +45,8 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import ObjectStoreAssembly
+from kdive.store.objectstore import ObjectStore
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.systems_support import (
     fault_inject_profile,
@@ -375,11 +378,13 @@ def test_systems_provision_resolves_fault_inject_runtime(
             config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()
             provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
-            app = build_app(
+            process = ProcessAssembly(
+                ObjectStoreAssembly(cast(ObjectStore, object())), provider_composition
+            )
+            app = build_app_from_assembly(
                 pool,
                 verifier=_verifier(),
-                provider_composition=provider_composition,
-                secret_registry=secret_registry,
+                process_assembly=process,
             )
             async with Client(app) as client:
                 granted = await _call_tool(
@@ -417,11 +422,13 @@ def test_debug_ops_resolve_fault_inject_runtime_through_fastmcp(
             config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()
             provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
-            app = build_app(
+            process = ProcessAssembly(
+                ObjectStoreAssembly(cast(ObjectStore, object())), provider_composition
+            )
+            app = build_app_from_assembly(
                 pool,
                 verifier=_verifier(),
-                provider_composition=provider_composition,
-                secret_registry=secret_registry,
+                process_assembly=process,
             )
             async with Client(app) as client:
                 session = await _call_tool(

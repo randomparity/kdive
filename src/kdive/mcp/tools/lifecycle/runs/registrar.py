@@ -69,7 +69,7 @@ class _RunsListPayload(ToolPayload):
         return _RunsListRequest(
             system_id=self.system_id,
             investigation_id=self.investigation_id,
-            state=self.state.value if self.state is not None else None,
+            state=self.state,
             limit=self.limit,
             cursor=self.cursor,
         )
@@ -207,7 +207,7 @@ def _register_runs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List the caller's Runs, filterable by system/investigation/state. Requires viewer.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        ``request.cursor`` for the next page.
         """
         return await _list_runs(
             pool,

@@ -19,7 +19,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import BootStepResult
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
@@ -30,6 +29,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.lifecycle import Booter, Connector
+from kdive.providers.shared import console_evidence
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
@@ -1330,6 +1330,50 @@ def test_expected_crash_inert_capture_threads_args(monkeypatch: pytest.MonkeyPat
     assert out == ["gdbstub"]
     assert seen["get"] == (conn, sid)
     assert None not in profiles_seen  # the parsed profile threads into inert_capture
+
+
+def test_expected_crash_inert_capture_omits_invalid_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _get(_conn: object, _system_id: UUID) -> _FakeSystem:
+        return _FakeSystem(_PROFILE_DICT)
+
+    def _invalid(_data: object) -> ProvisioningProfile:
+        raise CategorizedError(
+            "invalid provisioning profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_invalid))
+
+    result = asyncio.run(
+        boot_evidence._expected_crash_inert_capture(
+            cast(AsyncConnection, object()), uuid4(), cast(ProfilePolicy, object())
+        )
+    )
+
+    assert result == []
+
+
+def test_expected_crash_inert_capture_propagates_unexpected_parser_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _get(_conn: object, _system_id: UUID) -> _FakeSystem:
+        return _FakeSystem(_PROFILE_DICT)
+
+    def _fault(_data: object) -> ProvisioningProfile:
+        raise RuntimeError("parser fault")
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_fault))
+
+    with pytest.raises(RuntimeError, match="parser fault"):
+        asyncio.run(
+            boot_evidence._expected_crash_inert_capture(
+                cast(AsyncConnection, object()), uuid4(), cast(ProfilePolicy, object())
+            )
+        )
 
 
 def test_evaluate_expected_failure_none_when_artifact_missing() -> None:

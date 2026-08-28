@@ -10,20 +10,21 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 import kdive.config as config
+from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
-from kdive.jobs.handlers import image_build, systems
-from kdive.jobs.handlers.artifacts import vmcore
+from kdive.jobs.handlers import diagnostics, image_build, systems
+from kdive.jobs.handlers.artifacts import rootfs_reclaim, vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
-from kdive.jobs.handlers.control import control
+from kdive.jobs.handlers.control import capture_traffic, control, diagnostic_sysrq, watch_for_crash
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry
-from kdive.providers.assembly.composition import ProviderComposition
+from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
+from kdive.store.assembly import ObjectStoreAssembly
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,20 +36,18 @@ class WorkerHandlerAssembly:
     secret_registry: SecretRegistry
     object_stores: ObjectStoreAssembly
     capture_supervisor: CaptureOperationSupervisor
+    worker_check_builders: diagnostics.WorkerCheckBuilders
 
 
 def build_worker_handler_assembly(
     *,
-    secret_registry: SecretRegistry,
+    process_assembly: ProcessAssembly,
     incarnation_credential: SecretStr,
-    provider_composition: ProviderComposition | None = None,
     pool: AsyncConnectionPool | None = None,
 ) -> WorkerHandlerAssembly:
-    """Assemble provider/store/supervision dependencies once for startup and handlers."""
-    stores = build_object_store_assembly()
-    composition = provider_composition or ProviderComposition(
-        secret_registry=secret_registry, object_store=stores.store
-    )
+    """Derive worker handler ports from one completed process assembly."""
+    stores = process_assembly.object_stores
+    composition = process_assembly.providers
     resolver = composition.build_provider_resolver()
     supervisor = CaptureOperationSupervisor(
         launcher=GatedCaptureLauncher(
@@ -63,27 +62,49 @@ def build_worker_handler_assembly(
         secret_registry=composition.secret_registry,
         object_stores=stores,
         capture_supervisor=supervisor,
+        worker_check_builders={
+            contribution.provider: contribution.worker_checks
+            for contribution in diagnostic_provider_contributions()
+            if contribution.enabled()
+        },
     )
 
 
-def build_handler_registry(
+def build_production_worker_handler_assembly(
     *,
     secret_registry: SecretRegistry,
     incarnation_credential: SecretStr,
-    provider_composition: ProviderComposition | None = None,
     pool: AsyncConnectionPool | None = None,
-    assembly: WorkerHandlerAssembly | None = None,
-) -> HandlerRegistry:
-    """Build the worker's `HandlerRegistry` from provider-aware handler registrars."""
-    registry = HandlerRegistry()
-    resolved = assembly or build_worker_handler_assembly(
-        secret_registry=secret_registry,
+) -> WorkerHandlerAssembly:
+    """Build the production process graph and derive worker handler ports from it."""
+    return build_worker_handler_assembly(
+        process_assembly=build_process_assembly(secret_registry),
         incarnation_credential=incarnation_credential,
-        provider_composition=provider_composition,
         pool=pool,
     )
-    register_all_handlers(registry, resolved)
+
+
+def build_handler_registry(assembly: WorkerHandlerAssembly) -> HandlerRegistry:
+    """Build the worker's registry from one completed handler assembly."""
+    registry = HandlerRegistry()
+    register_all_handlers(registry, assembly)
     return registry
+
+
+def build_production_handler_registry(
+    *,
+    secret_registry: SecretRegistry,
+    incarnation_credential: SecretStr,
+    pool: AsyncConnectionPool | None = None,
+) -> HandlerRegistry:
+    """Build the production handler assembly and register it."""
+    return build_handler_registry(
+        build_production_worker_handler_assembly(
+            secret_registry=secret_registry,
+            incarnation_credential=incarnation_credential,
+            pool=pool,
+        )
+    )
 
 
 def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAssembly) -> None:
@@ -110,8 +131,6 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
     )
     control.register_handlers(registry, resolver=assembly.resolver)
 
-    from kdive.jobs.handlers.control import diagnostic_sysrq
-
     diagnostic_sysrq.register_handlers(
         registry,
         resolver=assembly.resolver,
@@ -119,16 +138,12 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         artifact_store=assembly.object_stores.store,
     )
 
-    from kdive.jobs.handlers.control import capture_traffic
-
     capture_traffic.register_handlers(
         registry,
         resolver=assembly.resolver,
         artifact_store=assembly.object_stores.store,
         supervisor=assembly.capture_supervisor,
     )
-
-    from kdive.jobs.handlers.control import watch_for_crash
 
     watch_for_crash.register_handlers(
         registry,
@@ -147,10 +162,8 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         store=assembly.object_stores.store,
     )
 
-    from kdive.jobs.handlers.artifacts import rootfs_reclaim
-
     rootfs_reclaim.register_handlers(registry, artifact_store=assembly.object_stores.store)
-
-    from kdive.jobs.handlers import diagnostics
-
-    diagnostics.register_handlers(registry)
+    diagnostics.register_handlers(
+        registry,
+        worker_check_builders=assembly.worker_check_builders,
+    )

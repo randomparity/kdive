@@ -20,11 +20,11 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts.read_model import (
+from kdive.artifacts.catalog.read_model import (
     RunFetchContext,
+    fetch_context_for_run,
     raw_pcap_key,
     raw_vmcore_key,
-    run_fetch_context,
 )
 from kdive.artifacts.storage import HeadResult
 from kdive.config.core_settings import ARTIFACT_DOWNLOAD_TTL_SECONDS
@@ -132,7 +132,7 @@ async def fetch_raw(
         return _config_error(run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            run = await run_fetch_context(conn, uid)
+            run = await fetch_context_for_run(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _not_found(run_id)
             resolved = await _resolve_key(conn, ctx, run, asset, uid, artifact_id)

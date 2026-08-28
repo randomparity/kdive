@@ -20,7 +20,7 @@ from kdive.jobs.capture_operations import child
 from kdive.jobs.capture_operations import launcher as launcher_module
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher, LaunchedCapture
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 from kdive.providers.ports.traffic import (
     CaptureExecutionResult,
     LocalCaptureConfiguration,
@@ -31,7 +31,7 @@ _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
 _PRIVATE_PROVIDER_VALUE = b"qemu+tls://secret-host/system"
 _PRIVATE_PROVIDER_DETAILS = b"provider-private-detail-marker"
 _ROOT = Path(__file__).parents[3]
-_MANIFEST_BUILDER = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+_MANIFEST_BUILDER = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.py"
 
 
 def _request(provider_kind: str = "local-libvirt") -> CaptureRequest:
@@ -424,6 +424,47 @@ def test_child_serializes_categorized_failure_without_arbitrary_details(
     assert result.terminal is True
     assert result.reason == "provider_execution_failed"
     assert result.details == {"phase": "provider_execution"}
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_phase"),
+    [
+        ("construction", "provider_construction"),
+        ("execution", "provider_execution"),
+    ],
+)
+def test_child_serializes_safe_context_for_unexpected_provider_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
+    failure_stage: str,
+    expected_phase: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    request = _request()
+    failure = RuntimeError("provider exposed secret-marker in failure")
+    executor = _Executor(failure=failure)
+    written: list[bytes] = []
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(child, "_open_attempt_directory", lambda: directory_fd)
+    monkeypatch.setattr(child, "read_capture_inputs", lambda _fd: (request, b"{}\n"))
+
+    def build_executor(_request: CaptureRequest, _configuration: bytes | None) -> _Executor:
+        if failure_stage == "construction":
+            raise failure
+        return executor
+
+    monkeypatch.setattr(child, "build_capture_executor", build_executor)
+    monkeypatch.setattr(child, "_write_private_result", lambda _fd, data: written.append(data))
+
+    assert child.run_capture_child(launch_token, -1) == 0
+
+    assert b"secret-marker" not in written[0]
+    result = CaptureResult.from_canonical_json(written[0])
+    assert result.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert result.terminal is False
+    assert result.reason == "provider_execution_failed"
+    assert result.details == {"phase": expected_phase, "exception_type": "RuntimeError"}
 
 
 @pytest.mark.parametrize("provider_kind", ["local-libvirt", "remote-libvirt"])

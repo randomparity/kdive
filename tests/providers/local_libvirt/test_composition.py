@@ -20,7 +20,7 @@ from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
-from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
+from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.security.secrets.redaction import Redactor

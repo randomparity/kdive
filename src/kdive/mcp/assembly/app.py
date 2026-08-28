@@ -11,6 +11,7 @@ from opentelemetry.metrics import Meter
 from opentelemetry.trace import Tracer
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.mcp.assembly.tool_registration import AppAssembly, build_plane_registrars
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.exposure import gateway_enabled
@@ -24,26 +25,18 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
-from kdive.processes.lifecycle.worker_incarnation import (
-    DockerWorkerDeathVerifier,
-    KubernetesWorkerDeathVerifier,
-    WorkerDeathVerifier,
-    worker_death_verifier_from_env,
-)
-from kdive.providers.assembly.composition import ProviderComposition
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 
 _log = logging.getLogger(__name__)
 
 
-def build_app(
+def build_app_from_assembly(
     pool: AsyncConnectionPool,
     *,
+    process_assembly: ProcessAssembly,
     verifier: JWTVerifier | None = None,
-    provider_composition: ProviderComposition | None = None,
-    object_store_assembly: ObjectStoreAssembly | None = None,
-    secret_registry: SecretRegistry,
     tracer: Tracer | None = None,
     meter: Meter | None = None,
     worker_death_verifier: WorkerDeathVerifier | None = None,
@@ -53,14 +46,14 @@ def build_app(
     Args:
         pool: The Postgres pool the recording middlewares and tool handlers write through.
         verifier: Token verifier; defaults to the configured one.
-        provider_composition: Provider wiring; defaults to one built over ``secret_registry``.
-        object_store_assembly: Object-store wiring; defaults to the validated production store.
-            Offline schema consumers may inject wiring that they never invoke.
-        secret_registry: The app-owned registry redaction and providers read through.
+        process_assembly: Completed provider/object-store/lifecycle wiring.
         tracer: Span emitter for ``TelemetryMiddleware``; defaults to the process-global
             tracer. Injectable per ADR-0487 so telemetry can be observed for one app.
         meter: RED-metric emitter for ``TelemetryMiddleware``; defaults to the
             process-global meter, on the same terms as ``tracer``.
+        worker_death_verifier: Optional override for
+            ``process_assembly.worker_death_verifier``. When configured, build-use recovery tools
+            are registered with this verifier.
 
     Returns:
         The assembled FastMCP app.
@@ -77,16 +70,16 @@ def build_app(
     # are overridable per app (ADR-0487): the OTel globals are set-once per process, so an
     # app's telemetry is otherwise only observable by mutating state every other app in the
     # process shares.
+    effective_meter = meter or metrics.get_meter("kdive.mcp")
     app.add_middleware(
         TelemetryMiddleware(
             tracer=tracer or trace.get_tracer("kdive.mcp"),
-            meter=meter or metrics.get_meter("kdive.mcp"),
+            meter=effective_meter,
         )
     )
-    stores = object_store_assembly or build_object_store_assembly()
-    composition = provider_composition or ProviderComposition(
-        secret_registry=secret_registry, object_store=stores.store
-    )
+    process = process_assembly
+    stores = process.object_stores
+    composition = process.providers
     resolver = composition.build_provider_resolver()
     app.add_middleware(UsageTrackingMiddleware(pool, secret_registry=composition.secret_registry))
     app.add_middleware(ToolExposureMiddleware(resolver))
@@ -94,19 +87,6 @@ def build_app(
     app.add_middleware(DenialAuditMiddleware(pool))
     app.add_middleware(BindingErrorMiddleware())
 
-    configured_death_authority = worker_death_verifier_from_env()
-    durable_witness = (
-        worker_death_verifier
-        if worker_death_verifier is not None
-        else (
-            configured_death_authority
-            if isinstance(
-                configured_death_authority,
-                (DockerWorkerDeathVerifier, KubernetesWorkerDeathVerifier),
-            )
-            else None
-        )
-    )
     assembly = AppAssembly(
         resolver=resolver,
         secret_registry=composition.secret_registry,
@@ -114,9 +94,34 @@ def build_app(
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
         capture_reapers=composition.build_reconciler_capture_reapers(),
         object_stores=stores,
-        worker_death_verifier=durable_witness,
+        debug_session_telemetry=DebugSessionTelemetry(meter=effective_meter),
+        worker_death_verifier=(
+            worker_death_verifier
+            if worker_death_verifier is not None
+            else process.worker_death_verifier
+        ),
     )
     for register in build_plane_registrars(assembly):
         register(app, pool)
     advertise_envelope_output_schema(app)
     return app
+
+
+def build_app(
+    pool: AsyncConnectionPool,
+    *,
+    verifier: JWTVerifier | None = None,
+    secret_registry: SecretRegistry,
+    tracer: Tracer | None = None,
+    meter: Meter | None = None,
+    worker_death_verifier: WorkerDeathVerifier | None = None,
+) -> FastMCP:
+    """Construct the production FastMCP app from environment-backed process assembly."""
+    return build_app_from_assembly(
+        pool,
+        process_assembly=build_process_assembly(secret_registry),
+        verifier=verifier,
+        tracer=tracer,
+        meter=meter,
+        worker_death_verifier=worker_death_verifier,
+    )

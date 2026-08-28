@@ -5,20 +5,21 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from typing import Any, NoReturn
 
 import pytest
 
 from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.tools.lifecycle.runs import steps as run_steps_module
-from kdive.reconciler.cleanup import artifact_retention as artifact_retention_module
-from kdive.reconciler.cleanup.artifact_retention import (
+from kdive.reconciler.cleanup.artifacts import artifact_retention as artifact_retention_module
+from kdive.reconciler.cleanup.artifacts.artifact_retention import (
     gc_expired_build_artifacts,
     gc_investigation_artifacts,
 )
 from kdive.services.runs import admission as run_admission_module
 from kdive.services.runs import complete_build as complete_build_module
-from kdive.services.runs.complete_build import CompleteBuildFinalizer
+from kdive.services.runs.complete_build import CompleteBuildFinalizer as _CompleteBuildFinalizer
 from tests.mcp.complete_build_support import (
     FakeValidator,
     build_output,
@@ -46,6 +47,15 @@ class _Store:
 
     def delete_version(self, key: str, version_id: str) -> None:
         self.deleted.append((key, version_id))
+
+
+def _unexpected_store() -> NoReturn:
+    raise AssertionError("this test did not inject an object store")
+
+
+def CompleteBuildFinalizer(**kwargs: Any) -> _CompleteBuildFinalizer:
+    kwargs.setdefault("object_store_factory", _unexpected_store)
+    return _CompleteBuildFinalizer(**kwargs)
 
 
 def test_real_create_wins_before_reclaim_lock(

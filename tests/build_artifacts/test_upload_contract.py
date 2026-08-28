@@ -12,9 +12,9 @@ import json
 
 import pytest
 
-from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES
+from kdive.artifacts.catalog.read_model import RUN_ARTIFACT_NAMES
 from kdive.artifacts.storage import HeadResult
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.build_artifacts import validation
 from kdive.build_artifacts.validation import (
     EFFECTIVE_CONFIG_MAX_BYTES,

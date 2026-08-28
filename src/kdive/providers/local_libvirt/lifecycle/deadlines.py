@@ -14,25 +14,7 @@ from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLI
 
 
 def tcg_deadline_multiplier(accel: str | None) -> float:
-    """Return the boot-deadline multiplier for a System's persisted accelerator (ADR-0341).
-
-    KVM guests run at native speed and are unscaled (``1.0``); the KVM path does not read
-    configuration, so an over-optimistic operator value can never break the fast path. Every
-    other classification — ``"tcg"`` and, per the TCG-safe fallback, an unknown or ``None``
-    (unrecorded) accelerator — scales by the operator-tunable
-    ``KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER``. Scaling ``None``/unknown is deliberate: an
-    over-optimistic ``kvm`` classification then degrades to a slow-but-correct boot rather
-    than a spurious timeout.
-
-    Args:
-        accel: The System's persisted accelerator (``"kvm"`` / ``"tcg"`` / ``None``).
-
-    Returns:
-        ``1.0`` for KVM, else the configured multiplier (``>= 1.0``).
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if the multiplier is set but malformed.
-    """
+    """Return 1 for KVM and the safe TCG multiplier for all other accelerators (ADR-0341)."""
     if accel == "kvm":
         return 1.0
     return config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER)

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.assembly import build_process_assembly
 from kdive.config.core_settings import (
     BUILD_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
@@ -41,10 +42,8 @@ _log = logging.getLogger(__name__)
 async def run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
-    from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
     from kdive.store.objectstore import object_store_from_env
 
-    ensure_libvirt_event_loop()
     stop = install_stop()
 
     def build_probe(pool: AsyncConnectionPool) -> HealthProbe:
@@ -76,14 +75,9 @@ async def run_reconciler_body(
     secret_registry: SecretRegistry,
     telemetry: Telemetry,
 ) -> None:
-    from kdive.providers.assembly.composition import ProviderComposition
-    from kdive.store.assembly import build_object_store_assembly
-
-    object_stores = build_object_store_assembly()
-    upload_store = object_stores.store
-    provider_composition = ProviderComposition(
-        secret_registry=secret_registry, object_store=upload_store
-    )
+    process = build_process_assembly(secret_registry)
+    upload_store = process.object_stores.store
+    provider_composition = process.providers
     provider_resolver = provider_composition.build_provider_resolver()
     discovery_task = asyncio.create_task(register_provider_resources(pool, provider_resolver))
     try:

@@ -15,7 +15,7 @@ import psycopg
 import kdive.config as config
 from kdive.components.references import CatalogComponentRef
 from kdive.config.core_settings import DATABASE_URL
-from kdive.images.rootfs.fetch import fetch_registered_rootfs_sync
+from kdive.images.rootfs.fetch import fetch_public_provisioning_rootfs
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import CatalogFetch
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.store.objectstore import object_store_from_env
@@ -40,7 +40,7 @@ def rootfs_catalog_fetch_from_env(allowed_roots: list[Path]) -> CatalogFetch:
 
     def _fetch(ref: CatalogComponentRef, arch: str) -> Path:
         with psycopg.connect(config.require(DATABASE_URL)) as conn:
-            return fetch_registered_rootfs_sync(
+            return fetch_public_provisioning_rootfs(
                 conn,
                 object_store_from_env,
                 allowed_roots=allowed_roots,

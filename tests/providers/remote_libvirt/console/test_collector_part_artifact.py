@@ -14,9 +14,9 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+from kdive.artifacts.console.rotation import part_object_name
 from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.providers.console_parts.rotation import part_object_name
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
 
 _TENANT = "remote-libvirt"

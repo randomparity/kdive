@@ -15,11 +15,10 @@ import pytest
 
 import tests.integration.live_stack.spine as spine
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import worker as job_worker
 from kdive.mcp.responses import ToolResponse
-from kdive.providers.local_libvirt.lifecycle import provisioning
 from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
@@ -113,17 +112,6 @@ def test_record_provision_evidence_target_refuses_existing_target(tmp_path: Path
 
 _PAYLOAD_SENTINEL = "PAYLOAD_SENTINEL"
 _AUTHORIZING_SENTINEL = "AUTHORIZING_SENTINEL"
-_PROVISION_STAGES = (
-    "resolve-arch",
-    "snapshot-pre-existing",
-    "materialize-rootfs",
-    "prepare-baseline",
-    "prepare-overlay",
-    "render-domain",
-    "customize-overlay",
-    "prepare-console",
-    "define-start",
-)
 
 
 def _claimed_job(kind: JobKind) -> Job:
@@ -332,184 +320,6 @@ def test_worker_claim_is_not_logged_when_queue_depth_rolls_back_transaction(
         asyncio.run(worker.run_once("claim-loop-lane"))
 
     assert not [record for record in caplog.records if "claimed provision" in record.getMessage()]
-
-
-def test_provision_stage_logs_completion_only_after_success(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    system_id = UUID("22222222-2222-2222-2222-222222222222")
-    job_id = UUID("11111111-1111-1111-1111-111111111111")
-
-    with caplog.at_level(
-        logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
-    ):
-        with provisioning._provision_stage(system_id, job_id, "prepare-baseline"):
-            pass
-        with (
-            pytest.raises(RuntimeError, match="stalled"),
-            provisioning._provision_stage(system_id, job_id, "prepare-overlay"),
-        ):
-            raise RuntimeError("stalled")
-
-    messages = [record.getMessage() for record in caplog.records]
-    assert [message.rsplit(" event=", 1)[-1] for message in messages] == [
-        "start",
-        "complete",
-        "start",
-    ]
-
-
-def _provision_operation(failing_stage: str | None, stage: str, result: object) -> Any:
-    def operation(*_args: object, **_kwargs: object) -> object:
-        if failing_stage == stage:
-            raise CategorizedError(
-                "GUEST_OUTPUT_SENTINEL CREDENTIAL_SENTINEL",
-                category=ErrorCategory.PROVISIONING_FAILURE,
-            )
-        return result
-
-    return operation
-
-
-def _configured_provisioner(
-    monkeypatch: pytest.MonkeyPatch, failing_stage: str | None = None
-) -> tuple[Any, object, Any]:
-    provider_config = SimpleNamespace(
-        rootfs=SimpleNamespace(value="PROFILE_SENTINEL"),
-        baseline_kernel="PROFILE_SENTINEL",
-        debug=SimpleNamespace(gdbstub=True),
-    )
-    profile = SimpleNamespace(
-        arch="PROFILE_SENTINEL",
-        disk_gb=10,
-        provider=SimpleNamespace(local_libvirt=provider_config),
-    )
-    instance = cast(Any, object.__new__(provisioning.LocalLibvirtProvisioning))
-    instance._guest_egress = False
-    instance._files = SimpleNamespace(
-        prepare_overlay=_provision_operation(
-            failing_stage,
-            "prepare-overlay",
-            SimpleNamespace(path=Path("/PATH_SENTINEL/overlay"), created=True),
-        ),
-        prepare_console=_provision_operation(failing_stage, "prepare-console", None),
-    )
-    instance._resolve_guest_arch = _provision_operation(
-        failing_stage, "resolve-arch", ("kvm", "/PATH_SENTINEL/emulator")
-    )
-    instance._materialize_rootfs = _provision_operation(
-        failing_stage, "materialize-rootfs", Path("/PATH_SENTINEL/base")
-    )
-    instance._prepare_baseline_kernel = _provision_operation(
-        failing_stage,
-        "prepare-baseline",
-        SimpleNamespace(
-            kernel=Path("/PATH_SENTINEL/kernel"),
-            initrd=Path("/PATH_SENTINEL/initrd"),
-        ),
-    )
-    instance._gdb_port_for = lambda _system_id: 1234
-    instance._ssh_port_for = lambda _system_id: 22000
-    instance._define_and_start = _provision_operation(failing_stage, "define-start", None)
-    instance._snapshot_pre_existing = _provision_operation(
-        failing_stage,
-        "snapshot-pre-existing",
-        SimpleNamespace(overlay=False, baseline=False),
-    )
-    instance._reclaim_materialized_on_failure = lambda *_args, **_kwargs: None
-    monkeypatch.setattr(
-        provisioning,
-        "render_domain_xml",
-        _provision_operation(
-            failing_stage,
-            "render-domain",
-            "<XML_SENTINEL>GUEST_OUTPUT_SENTINEL CREDENTIAL_SENTINEL</XML_SENTINEL>",
-        ),
-    )
-    customizer = _provision_operation(failing_stage, "customize-overlay", "GUEST_OUTPUT_SENTINEL")
-    return instance, profile, customizer
-
-
-def _provider_records(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        message
-        for record in caplog.records
-        if (message := record.getMessage()).startswith("local-libvirt provision ")
-    ]
-
-
-def _expected_provider_records(system_id: UUID, job_id: UUID, stages: tuple[str, ...]) -> list[str]:
-    return [
-        f"local-libvirt provision system={system_id} job={job_id} stage={stage} event={event}"
-        for stage in stages
-        for event in ("start", "complete")
-    ]
-
-
-def test_provision_logs_exact_safe_records_for_every_mapped_stage(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    system_id = UUID("22222222-2222-2222-2222-222222222222")
-    job_id = UUID("11111111-1111-1111-1111-111111111111")
-    instance, profile, customizer = _configured_provisioner(monkeypatch)
-
-    with caplog.at_level(
-        logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
-    ):
-        instance.provision(
-            system_id,
-            profile,
-            overlay_customizers=(customizer,),
-            bootstrap_pubkey="CREDENTIAL_SENTINEL",
-            job_id=job_id,
-        )
-
-    records = _provider_records(caplog)
-    assert records == _expected_provider_records(system_id, job_id, _PROVISION_STAGES)
-    rendered = "\n".join(records)
-    for sentinel in (
-        "PROFILE_SENTINEL",
-        "PATH_SENTINEL",
-        "XML_SENTINEL",
-        "GUEST_OUTPUT_SENTINEL",
-        "CREDENTIAL_SENTINEL",
-    ):
-        assert sentinel not in rendered
-
-
-@pytest.mark.parametrize("failing_stage", _PROVISION_STAGES)
-def test_provision_operation_failure_leaves_exact_stage_start_unmatched(
-    failing_stage: str,
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    system_id = UUID("22222222-2222-2222-2222-222222222222")
-    job_id = UUID("11111111-1111-1111-1111-111111111111")
-    instance, profile, customizer = _configured_provisioner(monkeypatch, failing_stage)
-
-    with (
-        caplog.at_level(
-            logging.INFO, logger="kdive.providers.local_libvirt.lifecycle.provisioning"
-        ),
-        pytest.raises(CategorizedError),
-    ):
-        instance.provision(
-            system_id,
-            profile,
-            overlay_customizers=(customizer,),
-            bootstrap_pubkey="CREDENTIAL_SENTINEL",
-            job_id=job_id,
-        )
-
-    failed_index = _PROVISION_STAGES.index(failing_stage)
-    expected = _expected_provider_records(system_id, job_id, _PROVISION_STAGES[:failed_index])
-    expected.append(
-        f"local-libvirt provision system={system_id} job={job_id} stage={failing_stage} event=start"
-    )
-    records = _provider_records(caplog)
-    assert records == expected
-    assert records[-1].endswith(f"stage={failing_stage} event=start")
 
 
 async def _no_sleep(_seconds: float) -> None:

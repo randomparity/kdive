@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import pytest
 
-from kdive.diagnostics.guest_arch_accel import (
+from kdive.diagnostics.contributions.guest_arch_accel import (
     kvm_probe_for_uri,
     qemu_system_binary,
     resolved_libvirt_uri,

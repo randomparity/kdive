@@ -12,22 +12,30 @@ from typing import Any, cast
 import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from opentelemetry import metrics
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 import kdive.mcp.assembly.app as app_module
 import kdive.mcp.assembly.tool_registration as tool_module
 import kdive.mcp.schema.schema_advertising as envelope_module
+from kdive import assembly as process_assembly_module
+from kdive.assembly import ProcessAssembly
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import assembly as handler_module
-from kdive.jobs.assembly import build_handler_registry
+from kdive.jobs.assembly import (
+    build_handler_registry,
+    build_production_handler_registry,
+    build_worker_handler_assembly,
+)
 from kdive.jobs.models import HandlerRegistry
-from kdive.mcp.assembly.app import build_app
+from kdive.mcp.assembly.app import build_app, build_app_from_assembly
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
+from kdive.worker_lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 _WORKER_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
@@ -155,8 +163,16 @@ def test_build_use_recovery_is_not_advertised_for_legacy_local_verifier(monkeypa
 
 def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -> None:
     monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "kubernetes")
+    stores = ObjectStoreAssembly(cast(Any, object()))
+    monkeypatch.setattr(process_assembly_module, "build_object_store_assembly", lambda: stores)
+    process = process_assembly_module.build_process_assembly(SecretRegistry())
+    assert isinstance(process.worker_death_verifier, KubernetesWorkerDeathVerifier)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    app = build_app_from_assembly(
+        pool,
+        verifier=_verifier(),
+        process_assembly=process,
+    )
 
     names = {tool.name for tool in asyncio.run(app.list_tools())}
 
@@ -235,14 +251,13 @@ def test_build_app_uses_injected_composition_secret_registry(
     monkeypatch.setattr(app_module, "build_plane_registrars", _build_registrars)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     composition_registry = SecretRegistry()
-    caller_registry = SecretRegistry()
     provider_composition = composition.ProviderComposition(secret_registry=composition_registry)
+    process = ProcessAssembly(ObjectStoreAssembly(cast(Any, object())), provider_composition)
 
-    build_app(
+    build_app_from_assembly(
         pool,
         verifier=_verifier(),
-        provider_composition=provider_composition,
-        secret_registry=caller_registry,
+        process_assembly=process,
     )
 
     assert captured[0].secret_registry is composition_registry
@@ -327,6 +342,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     app = FastMCP("probe")
     expected_resolver = object()
     expected_secret_registry = SecretRegistry()
+    expected_telemetry = DebugSessionTelemetry(meter=metrics.get_meter("test.mcp"))
     captured: dict[str, object] = {}
 
     def _register(
@@ -346,7 +362,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     monkeypatch.setattr(tool_module.debug_tools, "register", _register)
 
     registrar = tool_module._debug_tools_registrar(
-        cast(Any, expected_resolver), expected_secret_registry
+        cast(Any, expected_resolver), expected_secret_registry, expected_telemetry
     )
     registrar(app, pool)
 
@@ -355,8 +371,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     assert captured["resolver"] is expected_resolver
     assert captured["secret_registry"] is expected_secret_registry
     telemetry = captured["telemetry"]
-    assert isinstance(telemetry, DebugSessionTelemetry)
-    assert telemetry.enabled
+    assert telemetry is expected_telemetry
 
 
 def test_object_store_assembly_preserves_configured_store_error(
@@ -392,7 +407,11 @@ def test_build_app_default_propagates_object_store_assembly_error(
         raise error
 
     monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
-    monkeypatch.setattr(app_module, "build_object_store_assembly", build_object_store_assembly)
+    monkeypatch.setattr(
+        app_module,
+        "build_process_assembly",
+        lambda _registry: ProcessAssembly(build_object_store_assembly(), cast(Any, object())),
+    )
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     with pytest.raises(CategorizedError) as caught:
@@ -413,10 +432,14 @@ def test_worker_registry_default_propagates_object_store_assembly_error(
         raise error
 
     monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
-    monkeypatch.setattr(handler_module, "build_object_store_assembly", build_object_store_assembly)
+    monkeypatch.setattr(
+        handler_module,
+        "build_process_assembly",
+        lambda _registry: ProcessAssembly(build_object_store_assembly(), cast(Any, object())),
+    )
 
     with pytest.raises(CategorizedError) as caught:
-        build_handler_registry(
+        build_production_handler_registry(
             secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
         )
 
@@ -427,7 +450,7 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the install + boot plane (#19)
     # registers install/boot, and the retrieve plane (#24) registers capture_vmcore — each
     # building its provider lazily from env (no libvirt/S3 connection at registration).
-    registry = build_handler_registry(
+    registry = build_production_handler_registry(
         secret_registry=SecretRegistry(), incarnation_credential=_WORKER_CREDENTIAL
     )
     assert isinstance(registry, HandlerRegistry)
@@ -468,11 +491,13 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     monkeypatch.setattr(handler_module, "register_all_handlers", _register)
 
-    build_handler_registry(
-        secret_registry=caller_registry,
+    assembly = build_worker_handler_assembly(
         incarnation_credential=_WORKER_CREDENTIAL,
-        provider_composition=cast(Any, _FakeComposition()),
+        process_assembly=ProcessAssembly(
+            ObjectStoreAssembly(cast(Any, object())), cast(Any, _FakeComposition())
+        ),
     )
+    build_handler_registry(assembly)
 
     assert captured["resolver"] is resolver
     assert captured["secret_registry"] is caller_registry

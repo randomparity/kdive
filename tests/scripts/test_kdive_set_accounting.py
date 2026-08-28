@@ -1,11 +1,11 @@
-"""Behavioral tests for scripts/kdive_set_accounting.py (no live server)."""
+"""Behavioral tests for scripts/operations/kdive_set_accounting.py (no live server)."""
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
-import scripts.kdive_set_accounting as acct
+import scripts.operations.kdive_set_accounting as acct
 
 
 class _FakeResult:

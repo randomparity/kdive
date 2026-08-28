@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 import kdive.jobs.capture_operations.child as capture_child
-from kdive import capture_bootstrap
 from kdive.__main__ import build_parser
-from kdive.jobs.capture_operations import sandbox
+from kdive.jobs.capture_operations.bootstrap import bootstrap_entrypoint
+from kdive.jobs.capture_operations.process import sandbox
 
 
 def test_filter_failure_occurs_before_handshake_or_gate_read(
@@ -21,11 +21,11 @@ def test_filter_failure_occurs_before_handshake_or_gate_read(
         "install_capture_filter",
         lambda: (_ for _ in ()).throw(RuntimeError("filter fault")),
     )
-    monkeypatch.setattr(capture_bootstrap.os, "write", lambda _fd, data: writes.append(data))
-    monkeypatch.setattr(capture_bootstrap.os, "read", lambda fd, _size: reads.append(fd) or b"R")
+    monkeypatch.setattr(bootstrap_entrypoint.os, "write", lambda _fd, data: writes.append(data))
+    monkeypatch.setattr(bootstrap_entrypoint.os, "read", lambda fd, _size: reads.append(fd) or b"R")
 
     with pytest.raises(RuntimeError, match="filter fault"):
-        capture_bootstrap.main(["--launch-token", launch_token, "--gate-fd", "9"])
+        bootstrap_entrypoint.main(["--launch-token", launch_token, "--gate-fd", "9"])
     assert writes == []
     assert reads == []
 

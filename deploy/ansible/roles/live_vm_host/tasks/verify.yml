@@ -17,7 +17,7 @@
   ansible.builtin.meta: reset_connection
 
 - name: Run check-local-libvirt.sh as the service account
-  ansible.builtin.command: ./scripts/check-local-libvirt.sh
+  ansible.builtin.command: ./scripts/operations/check-local-libvirt.sh
   args:
     chdir: "{{ live_vm_venv }}"
   environment:

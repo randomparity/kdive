@@ -44,7 +44,7 @@ libvirt/QMP, pytest, Helm/Compose deployment documentation.
 Files:
 
 - Create `src/kdive/db/schema/0112_capture_operation_supervision.sql`.
-- Create `src/kdive/jobs/capture_operations/repository.py` and package initializer.
+- Create `src/kdive/jobs/capture_operations/storage/repository.py` and package initializer.
 - Modify `src/kdive/services/runs/worker_incarnations.py` and `src/kdive/jobs/queue.py`.
 - Read `src/kdive/db/schema/0106_worker_fence_protocol_claim.sql` as an immutable reference only;
   migration 0112 uses `CREATE OR REPLACE` for its registration and claim functions. Fresh-install

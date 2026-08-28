@@ -36,17 +36,17 @@ _PLATFORM_ARCH_ATTRS = frozenset({"machine", "uname", "processor", "architecture
 _HOST_ARCH_READ_ALLOWLIST = frozenset(
     {
         # per-arch guest-accelerator doctor probe (ADR-0352): reports KVM-native vs TCG-only.
-        "kdive/diagnostics/guest_arch_accel.py",
+        "kdive/diagnostics/contributions/guest_arch_accel.py",
         # cross-arch gdb doctor probe (ADR-0347): is a multiarch gdb present for foreign guests?
-        "kdive/diagnostics/multiarch_gdb.py",
+        "kdive/diagnostics/contributions/multiarch_gdb.py",
         # the gdb-engine's cross-arch binary selection (ADR-0347): guest arch comes from the
         # staged vmlinux ELF; the host arch only picks gdb vs gdb-multiarch.
         "kdive/providers/shared/debug_common/gdbmi/core/engine.py",
         # capture-child attestation selects the worker host's approved manifest architecture;
         # this never influences guest architecture (ADR-0558).
-        "kdive/jobs/capture_operations/launcher.py",
+        "kdive/jobs/capture_operations/bootstrap/manifest_attestation.py",
         # seccomp syscall/audit-ABI policy is selected for the worker host kernel, not a guest.
-        "kdive/jobs/capture_operations/sandbox.py",
+        "kdive/jobs/capture_operations/process/sandbox.py",
     }
 )
 

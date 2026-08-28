@@ -25,18 +25,14 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import VersionBatch
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload, load_payload
-from kdive.providers.shared.rootfs_fetch_leases import (
-    fetch_lease_pins_base,
-    reap_dead_fetch_leases,
-)
 from kdive.providers.shared.runtime_paths import (
     ROOTFS_DIR,
     STAGED_ROOTFS_MARKER_SUFFIX,
@@ -45,7 +41,11 @@ from kdive.providers.shared.runtime_paths import (
     staged_rootfs_marker_path,
     staged_rootfs_path,
 )
-from kdive.providers.shared.staging_partials import (
+from kdive.providers.shared.staging.rootfs_fetch_leases import (
+    fetch_lease_pins_base,
+    reap_dead_fetch_leases,
+)
+from kdive.providers.shared.staging.staging_partials import (
     live_writer_holds_partial,
     unlink_partial_if_unheld,
 )

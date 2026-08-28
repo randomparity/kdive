@@ -5,14 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
-import signal
-import sys
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
 
@@ -28,41 +24,54 @@ from kdive.jobs.capture_operations.launcher import (
     LaunchAbortEvidence,
     LaunchedCapture,
 )
-from kdive.jobs.capture_operations.linux_identity import LinuxIdentity, scan_launch_token
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.publication import (
-    CapturePublicationIdentityConflict,
-    recover_publication,
-)
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
+    CaptureExitOutcome,
     CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,
     CaptureProviderKind,
-    CaptureRecoveryCandidate,
     RecoveryEvidence,
     acknowledge_exit,
-    claim_publication_recovery,
     create_launching,
-    list_recovery_candidates,
     mark_running,
     record_identity,
     record_spool_disposed,
-    recover_operation,
     request_cancel,
 )
-from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.traffic import TrafficCaptureQuiescence, capture_qom_id
-from kdive.store.objectstore import ObjectStore
 
 LOCK_PROBE_INTERVAL_SECONDS = 0.25
 LOCK_PROBE_TIMEOUT_SECONDS = 1.0
 _STATEMENT_TIMEOUT_MILLISECONDS = 1000
-_SIGNAL_WAIT_SECONDS = 5.0
 _log = logging.getLogger(__name__)
 _CAPTURE_AUTHORITY_LOST: ContextVar[asyncio.Event | None] = ContextVar(
     "capture_authority_lost", default=None
 )
+
+
+async def _wait_with_capture_authority[T](conn: AsyncConnection, operation: Awaitable[T]) -> T:
+    """Return an operation result only while the lock session still holds authority."""
+    operation_task = asyncio.ensure_future(operation)
+    authority_task = asyncio.create_task(_monitor_lock_session(conn))
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, authority_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if authority_task in done:
+            await authority_task
+            raise AssertionError("lock monitor returned without losing authority")
+        await asyncio.sleep(0)
+        if authority_task.done():
+            await authority_task
+            raise AssertionError("lock monitor returned without losing authority")
+        await require_capture_authority()
+        return operation_task.result()
+    finally:
+        for task in (operation_task, authority_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(operation_task, authority_task, return_exceptions=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,33 @@ class CaptureSnapshot:
     write_remediation: str
     configuration: Callable[[], bytes]
     quiescence: Callable[[bytes], TrafficCaptureQuiescence]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreLaunch:
+    operation: CaptureOperation | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LaunchAborted:
+    operation: CaptureOperation
+    evidence: LaunchAbortEvidence
+
+
+@dataclass(frozen=True, slots=True)
+class _Launched:
+    operation: CaptureOperation
+    capture: LaunchedCapture
+    configuration: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Acknowledged:
+    operation: CaptureOperation
+    capture: LaunchedCapture
+
+
+type _ExecutionState = _PreLaunch | _LaunchAborted | _Launched | _Acknowledged
 
 
 class CaptureAuthorityLost(RuntimeError):
@@ -138,15 +174,6 @@ async def _finish_owned_cleanup(task: asyncio.Task[None]) -> None:
         except asyncio.CancelledError:
             current.uncancel()
     task.result()
-
-
-@dataclass(frozen=True, slots=True)
-class RecoverySummary:
-    """Startup recovery counts; any pending operation bars readiness and claims."""
-
-    scanned: int
-    recovered: int
-    pending: int
 
 
 @asynccontextmanager
@@ -259,15 +286,12 @@ class CaptureOperationSupervisor:
         publication_recoverer: CapturePublicationRecoverer,
     ) -> UUID | None:
         """Execute and publish only while the exact job lock session remains responsive."""
-        launched: LaunchedCapture | None = None
-        operation: CaptureOperation | None = None
-        configuration: bytes | None = None
-        launch_abort: LaunchAbortEvidence | None = None
-        acknowledged = False
+        state: _ExecutionState = _PreLaunch()
 
         def record_launch_abort(evidence: LaunchAbortEvidence) -> None:
-            nonlocal launch_abort
-            launch_abort = evidence
+            nonlocal state
+            assert isinstance(state, _PreLaunch) and state.operation is not None
+            state = _LaunchAborted(state.operation, evidence)
 
         try:
             async with _capture_job_fence(conn, job.id):
@@ -278,11 +302,14 @@ class CaptureOperationSupervisor:
                     job.attempt,
                     _repository_snapshot(snapshot, request),
                 )
+                state = _PreLaunch(operation)
                 launched = await self._launcher.launch(
                     request, operation, on_abort=record_launch_abort
                 )
+                state = _Launched(operation, launched)
                 await record_identity(conn, self._credential, operation.id, _identity(launched))
                 configuration = snapshot.configuration()
+                state = _Launched(operation, launched, configuration)
                 launched.stage_configuration(configuration)
                 await _probe_lock_session(conn)
                 launched.release()
@@ -296,7 +323,7 @@ class CaptureOperationSupervisor:
                     exit_outcome="completed",
                     exit_code=returncode,
                 )
-                acknowledged = True
+                state = _Acknowledged(operation, launched)
                 data = self._consume_result(launched, request)
                 return await self._wait_for_publication(
                     conn,
@@ -308,44 +335,49 @@ class CaptureOperationSupervisor:
                     publisher,
                 )
         except asyncio.CancelledError:
-            if acknowledged:
-                assert operation is not None and launched is not None
-                await _finish_owned_cleanup(
-                    asyncio.create_task(
-                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
-                    )
-                )
-            else:
-                await self._cleanup_started(
-                    conn, operation, launched, launch_abort, snapshot, configuration
-                )
+            await self._cleanup_failed_execution(
+                conn,
+                state,
+                snapshot,
+                publication_recoverer=publication_recoverer,
+            )
             raise
         except CaptureAuthorityLost as error:
-            if acknowledged:
-                assert operation is not None and launched is not None
-                await _finish_owned_cleanup(
-                    asyncio.create_task(
-                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
-                    )
-                )
-            else:
-                await self._cleanup_started(
-                    conn, operation, launched, launch_abort, snapshot, configuration
-                )
+            await self._cleanup_failed_execution(
+                conn,
+                state,
+                snapshot,
+                publication_recoverer=publication_recoverer,
+            )
             raise _authority_error() from error
         except Exception:
-            if acknowledged:
-                assert operation is not None and launched is not None
-                await _finish_owned_cleanup(
-                    asyncio.create_task(
-                        self._cleanup_publication(conn, operation, launched, publication_recoverer)
-                    )
-                )
-            else:
-                await self._cleanup_started(
-                    conn, operation, launched, launch_abort, snapshot, configuration
-                )
+            await self._cleanup_failed_execution(
+                conn,
+                state,
+                snapshot,
+                publication_recoverer=publication_recoverer,
+            )
             raise
+
+    async def _cleanup_failed_execution(
+        self,
+        conn: AsyncConnection,
+        state: _ExecutionState,
+        snapshot: CaptureSnapshot,
+        *,
+        publication_recoverer: CapturePublicationRecoverer,
+    ) -> None:
+        if isinstance(state, _Acknowledged):
+            cleanup = self._cleanup_publication(
+                conn, state.operation, state.capture, publication_recoverer
+            )
+        elif isinstance(state, _Launched):
+            cleanup = self._cleanup_launched(conn, state, snapshot)
+        elif isinstance(state, _LaunchAborted):
+            cleanup = self._cleanup_launch_abort(conn, state)
+        else:
+            return
+        await _finish_owned_cleanup(asyncio.create_task(cleanup))
 
     async def _cleanup_publication(
         self,
@@ -368,63 +400,55 @@ class CaptureOperationSupervisor:
                 )
             await record_spool_disposed(transition, self._credential, recovered.id)
 
-    async def _cleanup_started(
+    async def _cleanup_launch_abort(
         self,
         conn: AsyncConnection,
-        operation: CaptureOperation | None,
-        launched: LaunchedCapture | None,
-        launch_abort: LaunchAbortEvidence | None,
-        snapshot: CaptureSnapshot,
-        configuration: bytes | None,
+        state: _LaunchAborted,
     ) -> None:
-        if operation is None:
-            return
         try:
-            if launched is None:
-                if launch_abort is None:
-                    return
-                async with self._transition_connection(conn) as transition:
-                    await acknowledge_exit(
-                        transition,
-                        self._credential,
-                        operation.id,
-                        RecoveryEvidence(
-                            process_absent=launch_abort.process_absent,
-                            provider_quiescence=dict(launch_abort.provider_quiescence),
-                            exit_outcome=launch_abort.exit_outcome,
-                            exit_code=launch_abort.exit_code,
-                        ),
-                    )
-                return
-            await self._cancel_and_acknowledge(conn, operation, launched, snapshot, configuration)
+            evidence = state.evidence
+            async with self._transition_connection(conn) as transition:
+                await acknowledge_exit(
+                    transition,
+                    self._credential,
+                    state.operation.id,
+                    RecoveryEvidence(
+                        process_absent=evidence.process_absent,
+                        provider_quiescence=dict(evidence.provider_quiescence),
+                        exit_outcome=evidence.exit_outcome,
+                        exit_code=evidence.exit_code,
+                    ),
+                )
         except Exception as error:
             _log.warning(
                 "capture operation %s cleanup did not complete (%s)",
-                operation.id,
+                state.operation.id,
+                type(error).__name__,
+            )
+
+    async def _cleanup_launched(
+        self,
+        conn: AsyncConnection,
+        state: _Launched,
+        snapshot: CaptureSnapshot,
+    ) -> None:
+        try:
+            await self._cancel_and_acknowledge(
+                conn,
+                state.operation,
+                state.capture,
+                snapshot,
+                state.configuration,
+            )
+        except Exception as error:
+            _log.warning(
+                "capture operation %s cleanup did not complete (%s)",
+                state.operation.id,
                 type(error).__name__,
             )
 
     async def _wait_for_exit(self, conn: AsyncConnection, launched: LaunchedCapture) -> int:
-        process = asyncio.create_task(launched.wait_process())
-        authority = asyncio.create_task(_monitor_lock_session(conn))
-        try:
-            done, _pending = await asyncio.wait(
-                {process, authority}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if authority in done:
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await asyncio.sleep(0)
-            if authority.done():
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await require_capture_authority()
-            return process.result()
-        finally:
-            for task in (process, authority):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(process, authority, return_exceptions=True)
+        return await _wait_with_capture_authority(conn, launched.wait_process())
 
     async def _wait_for_publication(
         self,
@@ -436,28 +460,10 @@ class CaptureOperationSupervisor:
         data: bytes,
         publisher: CapturePublisher,
     ) -> UUID:
-        publication = asyncio.create_task(
-            self._publish_and_dispose(conn, job, operation, snapshot, launched, data, publisher)
+        return await _wait_with_capture_authority(
+            conn,
+            self._publish_and_dispose(conn, job, operation, snapshot, launched, data, publisher),
         )
-        authority = asyncio.create_task(_monitor_lock_session(conn))
-        try:
-            done, _pending = await asyncio.wait(
-                {publication, authority}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if authority in done:
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await asyncio.sleep(0)
-            if authority.done():
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await require_capture_authority()
-            return publication.result()
-        finally:
-            for task in (publication, authority):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(publication, authority, return_exceptions=True)
 
     async def _publish_and_dispose(
         self,
@@ -518,7 +524,7 @@ class CaptureOperationSupervisor:
         snapshot: CaptureSnapshot,
         configuration: bytes,
         *,
-        exit_outcome: str,
+        exit_outcome: CaptureExitOutcome,
         exit_code: int | None,
     ) -> None:
         probe = snapshot.quiescence(configuration)
@@ -559,188 +565,3 @@ class CaptureOperationSupervisor:
                 details={"reason": "capture_result_size_mismatch"},
             )
         return data
-
-
-async def _pidfd_ready(pidfd: int) -> None:
-    loop = asyncio.get_running_loop()
-    ready = loop.create_future()
-
-    def mark_ready() -> None:
-        if not ready.done():
-            ready.set_result(None)
-
-    loop.add_reader(pidfd, mark_ready)
-    try:
-        await ready
-    finally:
-        loop.remove_reader(pidfd)
-
-
-async def _wait_identity(identity: LinuxIdentity, pidfd: int, seconds: float) -> bool:
-    try:
-        await asyncio.wait_for(_pidfd_ready(pidfd), timeout=seconds)
-    except TimeoutError:
-        return identity.is_absent(current_host_instance=identity.host_instance)
-    return True
-
-
-async def _terminate_identity(identity: LinuxIdentity) -> bool:
-    try:
-        pidfd = identity.open_pidfd(current_host_instance=identity.host_instance)
-    except ProcessLookupError:
-        return True
-    try:
-        with contextlib.suppress(ProcessLookupError):
-            identity.signal(pidfd, signal.SIGTERM)
-        if await _wait_identity(identity, pidfd, _SIGNAL_WAIT_SECONDS):
-            return True
-        with contextlib.suppress(ProcessLookupError):
-            identity.signal(pidfd, signal.SIGKILL)
-        return await _wait_identity(identity, pidfd, _SIGNAL_WAIT_SECONDS)
-    finally:
-        os.close(pidfd)
-
-
-async def _launching_evidence(candidate: CaptureRecoveryCandidate) -> RecoveryEvidence | None:
-    if candidate.launch_token is None:
-        return None
-    matches = await asyncio.to_thread(
-        scan_launch_token,
-        candidate.launch_token,
-        interpreter=Path(os.path.realpath(sys.executable)),
-        host_instance=candidate.host_instance,
-    )
-    for identity in matches:
-        if not await _terminate_identity(identity):
-            return None
-    remaining = await asyncio.to_thread(
-        scan_launch_token,
-        candidate.launch_token,
-        interpreter=Path(os.path.realpath(sys.executable)),
-        host_instance=candidate.host_instance,
-    )
-    if remaining:
-        return None
-    return RecoveryEvidence(
-        process_absent=True,
-        provider_quiescence={
-            "evidence_kind": "closed_gate_boundary_token_scan_v1",
-            "gate_closed": True,
-            "boundary_scan_complete": True,
-            "boundary_processes_absent": True,
-            "host_instance": candidate.host_instance,
-            "launch_token": candidate.launch_token,
-            "launch_token_absent": True,
-        },
-        exit_outcome="aborted_before_identity",
-        exit_code=None,
-    )
-
-
-async def _recovery_quiescence(
-    conn: AsyncConnection,
-    resolver: ProviderResolver,
-    candidate: CaptureRecoveryCandidate,
-) -> TrafficCaptureQuiescence:
-    binding = await resolver.binding_for_system(conn, candidate.system_id)
-    if binding.kind.value != candidate.provider_kind:
-        raise RuntimeError("capture recovery provider binding changed")
-    operation_ports = binding.runtime.traffic_capture_operation
-    if operation_ports is None:
-        raise RuntimeError("capture recovery provider does not support quiescence")
-    configuration = operation_ports.configuration(candidate.resource_id)
-    return operation_ports.quiescence(configuration)
-
-
-async def _recover_identified(
-    conn: AsyncConnection,
-    resolver: ProviderResolver,
-    host_identity: str,
-    credential: SecretStr,
-    candidate: CaptureRecoveryCandidate,
-) -> CaptureOperation | None:
-    if candidate.host_instance != host_identity:
-        return None
-    if candidate.boot_id is None or candidate.pid is None or candidate.start_ticks is None:
-        return None
-    identity = LinuxIdentity(
-        host_instance=candidate.host_instance,
-        boot_id=candidate.boot_id,
-        pid=candidate.pid,
-        start_ticks=candidate.start_ticks,
-    )
-    absent = identity.is_absent(current_host_instance=host_identity)
-    if not absent:
-        absent = await _terminate_identity(identity)
-    if not absent:
-        return None
-    probe = await _recovery_quiescence(conn, resolver, candidate)
-    evidence = await asyncio.to_thread(
-        probe.prove_absent,
-        candidate.resource_id,
-        candidate.domain_name,
-        capture_qom_id(candidate.job_id),
-    )
-    return await recover_operation(
-        conn,
-        credential,
-        candidate.id,
-        RecoveryEvidence(
-            process_absent=True,
-            provider_quiescence=evidence.as_dict(),
-            exit_outcome="recovered",
-            exit_code=None,
-        ),
-    )
-
-
-async def recover_capture_operations(
-    pool: AsyncConnectionPool,
-    resolver: ProviderResolver,
-    store: ObjectStore,
-    supervisor: CaptureOperationSupervisor,
-    host_identity: str,
-    credential: SecretStr,
-) -> RecoverySummary:
-    """Recover every authority-eligible operation before worker readiness or claiming."""
-    async with pool.connection() as conn:
-        candidates = await list_recovery_candidates(conn, credential)
-        recovered = 0
-        for candidate in candidates:
-            try:
-                operation: CaptureOperation | None = None
-                if candidate.state == "launching":
-                    evidence = await _launching_evidence(candidate)
-                    if evidence is None:
-                        continue
-                    operation = await recover_operation(conn, credential, candidate.id, evidence)
-                elif candidate.state == "exited":
-                    operation = await claim_publication_recovery(conn, credential, candidate.id)
-                else:
-                    operation = await _recover_identified(
-                        conn, resolver, host_identity, credential, candidate
-                    )
-                if operation is None:
-                    continue
-                operation = await recover_publication(conn, store, credential, operation)
-                disposed = await asyncio.to_thread(supervisor.dispose_recovery_spool, operation.id)
-                if not disposed:
-                    continue
-                await record_spool_disposed(conn, credential, operation.id)
-                recovered += 1
-            except CapturePublicationIdentityConflict as error:
-                _log.error(
-                    "capture_publication_object_identity_conflict operation_id=%s key=%s reason=%s",
-                    error.operation_id,
-                    error.key,
-                    error.reason,
-                )
-                continue
-            except Exception:
-                _log.exception("capture operation %s recovery remains pending", candidate.id)
-                continue
-    return RecoverySummary(
-        scanned=len(candidates),
-        recovered=recovered,
-        pending=len(candidates) - recovered,
-    )

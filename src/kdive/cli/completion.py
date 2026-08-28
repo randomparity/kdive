@@ -30,22 +30,7 @@ _SAFE_TOKEN = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*$|^[A-Za-z0-9][A-Za-z0-9
 
 
 def build_completion_tree(parser: argparse.ArgumentParser) -> dict[str, list[str]]:
-    """Walk ``parser`` into ``{space-joined path: sorted completable tokens}`` (ADR-0424).
-
-    The root path is the empty string; a group path is its name; a verb path is
-    ``"group verb"``. Each value is the sorted, de-duplicated set of long (``--``) options
-    declared at that path plus the names of its immediate subcommands. Subparser aliases that
-    point at the same parser object are walked once.
-
-    Args:
-        parser: A fully-constructed ``kdivectl`` parser (from ``build_parser``).
-
-    Returns:
-        A mapping from every reachable subcommand path to the tokens completable at it.
-
-    Raises:
-        ValueError: If a subcommand name or option is not a shell-safe token.
-    """
+    """Map command paths to their sorted completion tokens (ADR-0424)."""
     tree: dict[str, list[str]] = {}
     _walk(parser, _ROOT, tree)
     return tree

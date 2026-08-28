@@ -92,34 +92,9 @@ def clamp_extension_hours(
 ) -> LeaseExtension:
     """Return the billable added hours and the new expiry, clamped to ``bounds.max_hours``.
 
-    A renew asks to push ``lease_expiry`` out by ``requested_extend_hours`` (already
-    validated ``> 0`` by the caller). The new expiry is clamped so the lease never
-    extends past ``now + max_hours`` (ADR-0036 §3): the cap is on the *remaining*
-    window measured from ``now``, not on the cumulative lease. The project is charged for
-    the added span only, measured from whichever of ``now`` / ``current_expiry`` is
-    later — a still-live lease extends contiguously from its current expiry (the agent
-    already paid up to it), while a *lapsed* lease bills from ``now`` so the dead past
-    gap is never charged. So this returns the billable delta in hours:
-
-    * the base is ``max(now, current_expiry)``;
-    * the unclamped target is ``current_expiry + requested_extend_hours``;
-    * the ceiling is ``now + max_hours``;
-    * the added hours = ``max(0, min(target, ceiling) − base)`` in hours.
-
-    A lease already at or past the ceiling yields ``0`` (no billable extension); the
-    caller treats that as "cannot extend" and leaves the window unchanged.
-
-    Args:
-        current_expiry: The allocation's current ``lease_expiry`` (must be non-null —
-            a renewable allocation always carries one).
-        requested_extend_hours: The requested extension in hours (``> 0``).
-        now: The reference instant (the DB ``now()`` the caller read).
-        bounds: The already-resolved default and maximum lease bounds.
-
-    Returns:
-        A :class:`LeaseExtension` with the billable added hours (``≥ 0``) and the clamped
-        new expiry; ``added_hours == 0`` and ``new_expiry == current_expiry`` when the
-        lease is already at the cap.
+    The remaining window cannot exceed ``now + max_hours``. Billing starts at the later of ``now``
+    and the current expiry, so a lapsed lease never charges for its dead interval (ADR-0036 §3).
+    A lease already at the ceiling returns zero added hours and keeps its current expiry.
 
     """
     ceiling = now + timedelta(seconds=int(bounds.max_hours * _SECONDS_PER_HOUR))

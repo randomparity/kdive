@@ -318,16 +318,6 @@ def can_transition(frm: StrEnum, to: StrEnum) -> bool:
 
 
 def ensure_transition(frm: StrEnum, to: StrEnum) -> None:
-    """Assert ``frm → to`` is legal, raising :class:`IllegalTransition` if not.
-
-    Args:
-        frm: The current state.
-        to: The proposed next state.
-
-    Raises:
-        IllegalTransition: If the transition is not permitted.
-        TypeError: Propagated from :func:`can_transition` for cross-enum or
-            unknown-state misuse.
-    """
+    """Raise :class:`IllegalTransition` unless ``frm → to`` is legal."""
     if not can_transition(frm, to):
         raise IllegalTransition(f"illegal {type(frm).__name__} transition: {frm} -> {to}")

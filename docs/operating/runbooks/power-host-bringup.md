@@ -12,7 +12,7 @@ POWER host with `/dev/kvm`. It was validated on a POWER9 (see the proof record
 `docs/design/2026-07-15-power-native-kvm-hv-validation-1156-proof-record.md`, #1156).
 
 > The exit criterion for the whole bring-up is a single command:
-> `KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/check-local-libvirt.sh` printing
+> `KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/operations/check-local-libvirt.sh` printing
 > **`local-libvirt host is ready`**. Run it after each step below; it names the exact fix for every
 > gap. The steps here are the fixes that check emits on a clean Ubuntu 26.04 ppc64el host.
 
@@ -107,7 +107,7 @@ ln -sf /usr/lib/python3/dist-packages/libguestfsmod*.so "$site"/
 Confirm the host is ready (probe the **venv** interpreter the worker uses, not system `python3`):
 
 ```bash
-KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/check-local-libvirt.sh   # -> "local-libvirt host is ready"
+KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/operations/check-local-libvirt.sh   # -> "local-libvirt host is ready"
 ```
 
 The remaining WARN (`non-root worker under qemu:///system` cannot read the root-owned console log)
@@ -125,7 +125,7 @@ verify this root-owned manifest; a stale manifest makes readiness fail.
 just build-capture-bootstrap-manifest \
   "$PWD/.venv/bin/python" \
   "$PWD/build/capture-bootstrap-manifest.json"
-sudo "$PWD/.venv/bin/python" scripts/build-capture-bootstrap-manifest.py install \
+sudo "$PWD/.venv/bin/python" scripts/generate/build-capture-bootstrap-manifest.py install \
   --staged "$PWD/build/capture-bootstrap-manifest.json" \
   --destination /usr/share/kdive/capture-bootstrap-manifest.json
 sudo test "$(stat -c '%u:%g:%a' /usr/share/kdive/capture-bootstrap-manifest.json)" = "0:0:644"

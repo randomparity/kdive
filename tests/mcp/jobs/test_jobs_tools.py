@@ -108,7 +108,7 @@ async def _list_jobs(
     *,
     limit: int,
     cursor: str | None = None,
-    status: JobState | None = None,
+    state: JobState | None = None,
     kind: JobKind | None = None,
     investigation_id: str | None = None,
     system_id: str | None = None,
@@ -119,7 +119,7 @@ async def _list_jobs(
         jobs_tools.JobsListRequest(
             limit=limit,
             cursor=cursor,
-            status=status,
+            state=state,
             kind=kind,
             investigation_id=investigation_id,
             system_id=system_id,
@@ -1003,13 +1003,13 @@ async def _enqueue_install_for_investigation(pool: AsyncConnectionPool, dedup: s
     return str(inv_row[0])
 
 
-def test_list_jobs_filters_by_status(migrated_url: str) -> None:
+def test_list_jobs_filters_by_state(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             failed = await _enqueue(pool, "f")
             await _set_state(pool, failed, JobState.FAILED)
             await _enqueue(pool, "q")  # stays queued
-            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, status=JobState.FAILED)
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, state=JobState.FAILED)
         assert [r.object_id for r in resp.items] == [failed]
 
     asyncio.run(_run())

@@ -24,10 +24,6 @@ from kdive.mcp.tools.debug.introspection.common import (
 )
 from kdive.mcp.tools.debug.introspection.gate import augment_with_runtime_probe
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
-from kdive.prereqs.system_bootstrap_key import (
-    load_system_bootstrap_private_key,
-    materialized_private_key,
-)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import DebugTransportKind, IntrospectionMode
@@ -35,6 +31,10 @@ from kdive.providers.ports.retrieve import LiveIntrospector, LiveScriptOutput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 from kdive.serialization import JsonValue
 
 _LIVE_HELPERS = frozenset({"tasks", "modules", "sysinfo"})

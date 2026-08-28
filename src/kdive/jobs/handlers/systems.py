@@ -13,6 +13,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.console.sidecar import sidecar_object_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import (
     SNAPSHOTS,
@@ -41,18 +42,17 @@ from kdive.jobs.payloads import (
     load_payload,
 )
 from kdive.jobs.provider_context import set_provider_kind
-from kdive.prereqs.system_bootstrap_key import (
-    delete_system_bootstrap_key,
-    ensure_system_bootstrap_key,
-)
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
+    delete_system_bootstrap_key,
+    ensure_system_bootstrap_key,
+)
 from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)
@@ -188,6 +188,13 @@ async def _record_system_failure(
     failure to record the reason must never displace the provider error the caller re-raises.
 
     Args:
+        conn: Connection owning the failure-recording transaction.
+        job: Provision or teardown job whose authorization is audited.
+        system_id: System to transition to ``failed``.
+        project: Owning project written to the audit record.
+        transition: Audit transition name for the failed operation.
+        tool: Agent-facing tool name that initiated the operation.
+        operation: Human-readable operation name used in fallback logs.
         category: The provider error's category — the System's own verdict, independent of
             whatever the job row later comes to say.
     """
@@ -527,7 +534,7 @@ async def snapshot_handler(
         )
     except CategorizedError as exc:
         await _fail_snapshot_row(conn, snapshot_id)
-        # A failed capture is terminal (recycle_terminal on the dedup key frees a fresh re-issue),
+        # A failed capture is terminal (terminal recycling frees a fresh re-issue),
         # so it dead-letters at once rather than retrying and racing the failed row to available.
         exc.terminal = True
         raise

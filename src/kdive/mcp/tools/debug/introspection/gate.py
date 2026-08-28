@@ -15,8 +15,8 @@ import asyncio
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.kernel_config.gate import debuginfo_unloadable_warning
-from kdive.prereqs.system_bootstrap_key import materialized_private_key
 from kdive.providers.ports.retrieve import LiveIntrospector
+from kdive.security.secrets.system_bootstrap_key import materialized_private_key
 from kdive.serialization import JsonValue
 
 # A drgn-live runtime resolution probe: a bare lookup of a stable kernel global. On a kernel whose

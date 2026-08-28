@@ -15,14 +15,14 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import (
     HeadResult,
     MultipartCompletion,
     PresignedUpload,
     PresignPutRequest,
 )
-from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
 from kdive.config.core_settings import BUILD_ARTIFACT_RETENTION_DAYS
 from kdive.db.repositories import RUNS

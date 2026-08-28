@@ -164,7 +164,9 @@ def test_list_carries_staged_volume_token(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _insert_staged(pool, name="fedora-remote", volume="fedora-remote.qcow2")
             await _insert(pool, name="local-s3", visibility="public", owner=None)
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         assert _volume_of(resp, "fedora-remote") == "fedora-remote.qcow2"
         assert _volume_of(resp, "local-s3") == ""  # no staged volume -> empty string
 
@@ -179,7 +181,9 @@ def test_list_surfaces_staged_path_without_leaking_path(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _insert_staged_path(pool, name="local-rootfs", path=secret)
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         assert "local-rootfs" in _names(resp)
         item = next(i for i in resp.items if i.data["name"] == "local-rootfs")
         assert "path" not in item.data
@@ -194,7 +198,9 @@ def test_list_returns_public_and_own_private_only(migrated_url: str) -> None:
             await _insert(pool, name="fedora", visibility="public", owner=None)
             await _insert(pool, name="mine", visibility="private", owner="proj-a")
             await _insert(pool, name="theirs", visibility="private", owner="proj-b")
-            resp = await catalog_images.list_images(pool, _ctx("proj-a"))
+            resp = await catalog_images.list_images(
+                pool, _ctx("proj-a"), catalog_images.ImagesListRequest()
+            )
         assert resp.status == "ok"
         assert _names(resp) == {"fedora", "mine"}
 
@@ -205,7 +211,9 @@ def test_list_hides_private_images_without_viewer_role(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="mine", visibility="private", owner="proj-a")
-            resp = await catalog_images.list_images(pool, _member_ctx("proj-a"))
+            resp = await catalog_images.list_images(
+                pool, _member_ctx("proj-a"), catalog_images.ImagesListRequest()
+            )
         assert _names(resp) == set()
 
     asyncio.run(_run())
@@ -215,7 +223,9 @@ def test_list_excludes_other_projects_private(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="theirs", visibility="private", owner="proj-b")
-            resp = await catalog_images.list_images(pool, _ctx("proj-a"))
+            resp = await catalog_images.list_images(
+                pool, _ctx("proj-a"), catalog_images.ImagesListRequest()
+            )
         assert _names(resp) == set()
 
     asyncio.run(_run())
@@ -226,7 +236,9 @@ def test_list_no_projects_sees_only_public(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="fedora", visibility="public", owner=None)
             await _insert(pool, name="mine", visibility="private", owner="proj-a")
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         assert _names(resp) == {"fedora"}
 
     asyncio.run(_run())
@@ -239,7 +251,9 @@ def test_list_includes_pending_and_defined_states(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="baseline", visibility="public", owner=None, state="defined")
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         assert "baseline" in _names(resp)
 
     asyncio.run(_run())
@@ -253,7 +267,9 @@ def test_list_paginates_with_natural_key_cursor(migrated_url: str) -> None:
             seen: set[str] = set()
             cursor: str | None = None
             for _ in range(10):
-                page = await catalog_images.list_images(pool, _ctx(), limit=2, cursor=cursor)
+                page = await catalog_images.list_images(
+                    pool, _ctx(), catalog_images.ImagesListRequest(limit=2, cursor=cursor)
+                )
                 seen |= _names(page)
                 if not page.data["truncated"]:
                     break
@@ -270,7 +286,9 @@ def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="a", visibility="public", owner=None)
             await _insert(pool, name="b", visibility="public", owner=None)
-            resp = await catalog_images.list_images(pool, _ctx(), limit=2)
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest(limit=2)
+            )
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None
 
@@ -280,7 +298,9 @@ def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
 def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await catalog_images.list_images(pool, _ctx(), cursor="!!!")
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest(cursor="!!!")
+            )
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
 
@@ -320,7 +340,9 @@ def test_list_row_carries_capabilities_os_description(migrated_url: str) -> None
                 },
                 description="RHEL-family debug host",
             )
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         data = _item(resp, "fedora-kdive-ready-43").data
         assert data["capabilities"] == ["kdump", "drgn", "ssh"]
         assert data["os"] == {"id": "fedora", "version_id": "43"}
@@ -344,7 +366,9 @@ def test_list_row_advertises_has_kernel_config(migrated_url: str) -> None:
             await _insert_characterized(
                 pool, name="no-config", capabilities=[], provenance={}, description=None
             )
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         assert _item(resp, "with-config").data["has_kernel_config"] is True
         assert _item(resp, "no-config").data["has_kernel_config"] is False
         # the internal object key never reaches the list surface (ADR-0317)
@@ -363,7 +387,9 @@ def test_list_row_omits_os_and_empties_description_when_unset(migrated_url: str)
                 provenance={},
                 description=None,
             )
-            resp = await catalog_images.list_images(pool, _ctx())
+            resp = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
         data = _item(resp, "bare-image").data
         assert data["capabilities"] == []
         assert data["os"] == {}
@@ -383,9 +409,13 @@ def test_public_baseline_scope_drops_a_private_row_the_caller_can_see(migrated_u
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="fedora", visibility="public", owner=None)
             await _insert(pool, name="mine", visibility="private", owner="proj-a")
-            visible = await catalog_images.list_images(pool, _ctx("proj-a"))
+            visible = await catalog_images.list_images(
+                pool, _ctx("proj-a"), catalog_images.ImagesListRequest()
+            )
             baseline = await catalog_images.list_images(
-                pool, _ctx("proj-a"), scope=ImageListScope.PUBLIC_BASELINE
+                pool,
+                _ctx("proj-a"),
+                catalog_images.ImagesListRequest(scope=ImageListScope.PUBLIC_BASELINE),
             )
         assert _names(visible) == {"fedora", "mine"}
         assert _names(baseline) == {"fedora"}, "a private image is never a baseline fixture"
@@ -405,9 +435,11 @@ def test_public_baseline_keeps_the_collection_envelope_and_row_fields(migrated_u
                 provenance={"os_release": {"id": "fedora", "version_id": "43"}},
                 description="baseline",
             )
-            visible = await catalog_images.list_images(pool, _ctx())
+            visible = await catalog_images.list_images(
+                pool, _ctx(), catalog_images.ImagesListRequest()
+            )
             baseline = await catalog_images.list_images(
-                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE
+                pool, _ctx(), catalog_images.ImagesListRequest(scope=ImageListScope.PUBLIC_BASELINE)
             )
         assert baseline.status == "ok"
         assert baseline.object_id == "images"
@@ -426,7 +458,9 @@ def test_public_baseline_default_scope_is_visible(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _insert(pool, name="mine", visibility="private", owner="proj-a")
-            resp = await catalog_images.list_images(pool, _ctx("proj-a"))
+            resp = await catalog_images.list_images(
+                pool, _ctx("proj-a"), catalog_images.ImagesListRequest()
+            )
         assert _names(resp) == {"mine"}, "omitting scope must not narrow to the baseline"
 
     asyncio.run(_run())
@@ -440,7 +474,7 @@ def test_public_baseline_surfaces_staged_rows_without_leaking_path(migrated_url:
             await _insert_staged_path(pool, name="local-rootfs", path=secret)
             await _insert_staged(pool, name="fedora-remote", volume="fedora-remote.qcow2")
             resp = await catalog_images.list_images(
-                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE
+                pool, _ctx(), catalog_images.ImagesListRequest(scope=ImageListScope.PUBLIC_BASELINE)
             )
         assert _names(resp) == {"local-rootfs", "fedora-remote"}
         assert _volume_of(resp, "fedora-remote") == "fedora-remote.qcow2"
@@ -454,7 +488,7 @@ def test_public_baseline_empty_catalog_yields_no_items(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await catalog_images.list_images(
-                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE
+                pool, _ctx(), catalog_images.ImagesListRequest(scope=ImageListScope.PUBLIC_BASELINE)
             )
         assert resp.status == "ok"
         assert resp.items == []
@@ -474,9 +508,9 @@ def test_public_baseline_paginates_with_natural_key_cursor(migrated_url: str) ->
                 page = await catalog_images.list_images(
                     pool,
                     _ctx("proj-a"),
-                    scope=ImageListScope.PUBLIC_BASELINE,
-                    limit=2,
-                    cursor=cursor,
+                    catalog_images.ImagesListRequest(
+                        scope=ImageListScope.PUBLIC_BASELINE, limit=2, cursor=cursor
+                    ),
                 )
                 seen |= _names(page)
                 if not page.data["truncated"]:
@@ -493,7 +527,11 @@ def test_public_baseline_malformed_cursor_is_config_error(migrated_url: str) -> 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await catalog_images.list_images(
-                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE, cursor="!!!"
+                pool,
+                _ctx(),
+                catalog_images.ImagesListRequest(
+                    scope=ImageListScope.PUBLIC_BASELINE, cursor="!!!"
+                ),
             )
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"

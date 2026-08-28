@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.jobs.service_operations import JobOperations
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
@@ -21,6 +22,9 @@ from kdive.services.investigations.lifecycle import (
     close_investigation_record,
     open_investigation_record,
 )
+from kdive.services.job_ports import TeardownJobPort
+
+_JOBS = JobOperations()
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,7 @@ async def close_investigation(
     summary: str,
     *,
     force: bool = False,
+    jobs: TeardownJobPort = _JOBS,
 ) -> ToolResponse:
     """Drive an Investigation to `closed`, recording a required summary of the work."""
     uid = _as_uuid(investigation_id)
@@ -80,7 +85,13 @@ async def close_investigation(
         return _invalid_uuid_error("investigation_id", investigation_id)
     try:
         inv = await close_investigation_record(
-            pool, ctx, uid, raw_id=investigation_id, summary=summary, force=force
+            pool,
+            ctx,
+            uid,
+            raw_id=investigation_id,
+            summary=summary,
+            force=force,
+            jobs=jobs,
         )
     except InvestigationServiceError as exc:
         return investigation_error_response(exc)

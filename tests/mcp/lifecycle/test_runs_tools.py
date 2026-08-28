@@ -31,9 +31,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import BootOutcome
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.handlers.console import console_evidence
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
+from kdive.jobs.service_operations import JobOperations
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
@@ -55,6 +55,7 @@ from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
+from kdive.providers.shared import console_evidence
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
@@ -1633,7 +1634,7 @@ def test_failed_boot_attempt_none_when_no_boot_job(migrated_url: str) -> None:
         async with runs_support.pool(migrated_url) as pool:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             async with pool.connection() as conn:
-                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id), JobOperations())
         assert attempt is None
 
     asyncio.run(_run())
@@ -1645,7 +1646,7 @@ def test_failed_boot_attempt_none_for_queued_job(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             await _seed_boot_job(pool, run_id, state=JobState.QUEUED)
             async with pool.connection() as conn:
-                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id), JobOperations())
         assert attempt is None
 
     asyncio.run(_run())
@@ -1657,7 +1658,7 @@ def test_failed_boot_attempt_none_for_running_job(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             await _seed_boot_job(pool, run_id, state=JobState.RUNNING)
             async with pool.connection() as conn:
-                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id), JobOperations())
         assert attempt is None
 
     asyncio.run(_run())
@@ -1674,7 +1675,7 @@ def test_failed_boot_attempt_surfaces_failed_job(migrated_url: str) -> None:
                 error_category=ErrorCategory.READINESS_FAILURE,
             )
             async with pool.connection() as conn:
-                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id), JobOperations())
         assert attempt is not None
         assert attempt.job_id == UUID(job_id)
         assert attempt.error_category is ErrorCategory.READINESS_FAILURE
@@ -1693,7 +1694,7 @@ def test_failed_boot_attempt_null_category(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             await _seed_boot_job(pool, run_id, state=JobState.FAILED, error_category=None)
             async with pool.connection() as conn:
-                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id))
+                attempt = await run_steps.failed_boot_attempt(conn, UUID(run_id), JobOperations())
         assert attempt is not None
         assert attempt.error_category is None
         assert attempt.as_data() == {
@@ -5471,7 +5472,7 @@ def test_boot_handler_console_is_readable_via_artifacts(
     The SQL-count tests only verify the row was inserted; this test proves the artifacts
     read surface actually returns the console artifact, closing the behavioral gap.
     """
-    from kdive.mcp.tools.catalog.artifacts.reads import artifacts_list
+    from kdive.mcp.tools.catalog.artifacts.reads import ArtifactsListRequest, artifacts_list
 
     monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
@@ -5495,7 +5496,7 @@ def test_boot_handler_console_is_readable_via_artifacts(
             assert result == run_id
 
             # artifacts_list must return the console as a redacted artifact envelope.
-            listed = await artifacts_list(pool, ctx(), system_id=system_id)
+            listed = await artifacts_list(pool, ctx(), ArtifactsListRequest(system_id=system_id))
 
         items = listed.items
         assert len(items) == 1

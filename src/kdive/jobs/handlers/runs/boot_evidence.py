@@ -14,7 +14,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
@@ -27,12 +27,12 @@ from kdive.domain.lifecycle.run_steps import (
     BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
     BootStepResult,
 )
-from kdive.jobs.handlers.console.console_evidence import read_redacted_console
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import Connector
+from kdive.providers.shared.console_evidence import read_redacted_console
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
@@ -311,7 +311,7 @@ async def _expected_crash_inert_capture(
         return []
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
-    except Exception:
+    except CategorizedError:
         _log.warning(
             "could not parse provisioning profile for system %s; inert capture set omitted",
             system_id,

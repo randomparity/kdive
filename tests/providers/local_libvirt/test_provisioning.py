@@ -37,7 +37,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,
 )
-from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import UploadObjectStore
+from kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition import UploadObjectStore
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared import libvirt_xml as libvirt_xml_contract
 from kdive.providers.shared.libvirt_xml import (

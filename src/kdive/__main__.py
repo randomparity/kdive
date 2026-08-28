@@ -19,6 +19,12 @@ from typing import TYPE_CHECKING, Any
 
 import kdive.config as config
 from kdive.cli.errors import exit_code_for_category
+from kdive.cli.rootfs_commands import (
+    add_build_fs_parser,
+    add_stage_volume_parser,
+    run_build_fs,
+    run_stage_volume,
+)
 from kdive.config.core_settings import (
     HTTP_HOST,
     HTTP_PORT,
@@ -26,12 +32,6 @@ from kdive.config.core_settings import (
 )
 from kdive.db.pool import create_pool
 from kdive.domain.errors import CategorizedError
-from kdive.images.rootfs.command import (
-    add_build_fs_parser,
-    add_stage_volume_parser,
-    run_build_fs,
-    run_stage_volume,
-)
 from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
 from kdive.processes.lifecycle.lifecycle_witness import (
     run_lifecycle_witness as _run_lifecycle_witness,
@@ -247,7 +247,7 @@ def _handle_capture_operation(
         interpreter,
         "-S",
         "-m",
-        "kdive.capture_bootstrap",
+        "kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
         "--launch-token",
         args.launch_token,
         "--gate-fd",

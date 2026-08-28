@@ -18,7 +18,7 @@ import kdive.cli.commands.verb_spec as verb_spec
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS
-from scripts import gen_cli_verbs as gen
+from scripts.generate import gen_cli_verbs as gen
 
 
 @dataclass(frozen=True)

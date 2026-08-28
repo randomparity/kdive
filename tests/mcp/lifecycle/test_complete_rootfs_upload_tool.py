@@ -14,8 +14,8 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest, artifact_key
+from kdive.artifacts.uploads import upload_manifest
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState
 from kdive.domain.catalog.artifacts import Sensitivity

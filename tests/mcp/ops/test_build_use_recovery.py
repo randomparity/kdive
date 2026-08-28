@@ -14,10 +14,19 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.ops import build_uses
 from kdive.security.authz.rbac import PlatformRole, Role
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    LocalAuthorityBinding,
     register_worker_incarnation,
     terminate_worker_incarnation,
+)
+
+_LOCAL_BINDING = LocalAuthorityBinding(
+    unit="kdive-worker@1.service",
+    generation="generation-1",
+    boot_id="boot-123",
+    invocation_id="invocation-987",
+    host="host-a",
 )
 
 
@@ -75,7 +84,7 @@ async def _seed(pool: AsyncConnectionPool, *, terminated: bool = False) -> tuple
             conn,
             holder,
             "local",
-            {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
+            _LOCAL_BINDING,
             hashlib.sha256(holder.encode()).digest(),
             CURRENT_WORKER_FENCE_PROTOCOL,
         )
@@ -85,7 +94,7 @@ async def _seed(pool: AsyncConnectionPool, *, terminated: bool = False) -> tuple
                 conn,
                 holder,
                 "local",
-                {"host": "host-a", "pid": 42, "boot_id": "boot-123", "start_ticks": "987"},
+                _LOCAL_BINDING,
                 "failed",
             )
     return use_id, holder
@@ -120,12 +129,7 @@ def test_recover_build_use_requires_operator_and_independent_death_proof(
                     conn,
                     holder,
                     "local",
-                    {
-                        "host": "host-a",
-                        "pid": 42,
-                        "boot_id": "boot-123",
-                        "start_ticks": "987",
-                    },
+                    _LOCAL_BINDING,
                     "failed",
                 )
 

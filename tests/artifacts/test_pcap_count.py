@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from kdive.artifacts.pcap_count import count_pcap_packets
+from kdive.artifacts.formats.pcap import count_pcap_packets
 
 
 def _header(magic: int, endian: str) -> bytes:

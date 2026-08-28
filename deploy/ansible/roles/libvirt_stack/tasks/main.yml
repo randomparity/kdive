@@ -102,7 +102,7 @@
       ansible.builtin.command:
         argv:
           - "{{ libvirt_stack_capture_manifest_interpreter }}"
-          - "{{ libvirt_stack_capture_manifest_source_root }}/../scripts/build-capture-bootstrap-manifest.py"
+          - "{{ libvirt_stack_capture_manifest_source_root }}/../scripts/generate/build-capture-bootstrap-manifest.py"
           - build
           - --interpreter
           - "{{ libvirt_stack_capture_manifest_interpreter }}"
@@ -117,7 +117,7 @@
       ansible.builtin.command:
         argv:
           - "{{ libvirt_stack_capture_manifest_interpreter }}"
-          - "{{ libvirt_stack_capture_manifest_source_root }}/../scripts/build-capture-bootstrap-manifest.py"
+          - "{{ libvirt_stack_capture_manifest_source_root }}/../scripts/generate/build-capture-bootstrap-manifest.py"
           - install
           - --staged
           - "{{ libvirt_stack_capture_manifest_staged }}"

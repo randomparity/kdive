@@ -154,18 +154,7 @@ def _log_provision_claim(worker_id: str, claim: _ProvisionClaim) -> None:
 
 
 def worker_pool_floor(accepted_lanes: Sequence[str]) -> int:
-    """The smallest ``pool.max_size`` a worker accepting ``accepted_lanes`` can run on.
-
-    Each lane dispatches one job at a time, and a dispatched job holds two connections at once —
-    its handler's and its background heartbeat's. The ``+ 1`` is the readiness probe, which shares
-    this pool: ``run_once`` skips ``dequeue`` while not ready, so a worker sized to exactly
-    ``2 * lanes`` would stop claiming precisely when every lane is busy.
-
-    A correctness floor, not a sizing recommendation — it leaves no headroom beyond that one
-    probe. Exported so the process composition sizes its pool from the same formula the
-    constructor enforces; two independent expressions of it would drift and the worker would
-    raise at startup.
-    """
+    """Return the two connections per lane plus one readiness-probe connection."""
     return 2 * len(accepted_lanes) + 1
 
 
@@ -205,8 +194,12 @@ class Worker:
         """Build a worker.
 
         Args:
+            pool: Shared database pool sized for every accepted dispatch lane.
+            registry: Job-kind to handler registry used for dispatch.
+            worker_id: Stable identifier recorded on claimed jobs.
             incarnation_credential: Authority-minted credential for ``worker_id``. Every claim
                 authenticates it at the database boundary.
+            secret_registry: Per-operation secret redaction registry passed to handlers.
             config: Lease timing plus optional ``/livez`` heartbeat, readiness gate, and
                 per-job telemetry. ``None`` values in the config disable the optional
                 collaborators (always ready, no background liveness ticker, no-op telemetry).
@@ -569,26 +562,7 @@ def _failure_category(exc: Exception) -> ErrorCategory:
 
 
 def _is_terminal(exc: Exception, category: ErrorCategory) -> bool:
-    """Decide whether this failure dead-letters now or is re-dispatched for another attempt.
-
-    The **category** is the primary signal (ADR-0483): a category the taxonomy calls
-    non-retryable is permanent by construction — a denied guest-agent RPC, a malformed
-    payload, a host binary that is not installed — so re-dispatching it can only reproduce
-    the same failure, three times slower, under a category that already told the caller not
-    to retry. Requiring every such raise site to remember ``terminal=True`` made the safe
-    behaviour opt-in and it was widely missed (#1631).
-
-    ``CategorizedError.terminal`` remains as the **escalation**: it forces an immediate
-    dead-letter for a category that *is* retryable, where a retry would otherwise be
-    reasonable but this particular failure already drove the target to a terminal state.
-
-    Args:
-        exc: The exception the handler raised.
-        category: The category ``exc`` was classified as by :func:`_failure_category`.
-
-    Returns:
-        ``True`` to dead-letter immediately, ``False`` to requeue while attempts remain.
-    """
+    """Return whether to dead-letter; an explicit terminal flag overrides retryability."""
     if isinstance(exc, CategorizedError) and exc.terminal:
         return True
     return not retryable_category(category)
@@ -616,7 +590,7 @@ async def _fail_job_and_run(
 
     The Run's advisory lock is taken **before** ``queue.fail``, not after it, because
     ``runs.boot``/``runs.install`` hold ``LockScope.RUN`` and then row-lock this very job
-    (``queue.enqueue``'s ``recycle_terminal`` ``UPDATE`` on ``dedup_key = f"{run_id}:{step}"``).
+    (``queue.enqueue``'s terminal recycle on ``dedup_key = f"{run_id}:{step}"``).
     Row-locking the job first and then waiting on that lock would be an ABBA deadlock; this
     order matches every other RUN-scoped writer. Non-run-bearing kinds take no lock and open no
     outer transaction — ``queue.fail`` self-commits as it does for every other caller.

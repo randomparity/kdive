@@ -26,11 +26,11 @@ from kdive.artifacts.storage import (
 from kdive.domain.capacity.state import JobState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.capture_operations.publication import (
+from kdive.jobs.capture_operations.storage.publication import (
     CapturePublicationCoordinator,
     recover_publication,
 )
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,
@@ -41,8 +41,8 @@ from kdive.jobs.capture_operations.repository import (
     record_identity,
 )
 from kdive.jobs.capture_operations.supervisor import CaptureSnapshot
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
 from kdive.store.objectstore import ObjectStore
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.db_waits import wait_until_backend_waiting
 from tests.reconciler.conftest import connect
 
@@ -293,7 +293,7 @@ def test_coordinator_refreshes_durable_state_before_recovery(
     migrated_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kdive.jobs.capture_operations import publication as publication_module
+    from kdive.jobs.capture_operations.storage import publication as publication_module
 
     async def _run() -> None:
         subject = await _subject(migrated_url)
@@ -335,7 +335,7 @@ def test_cancellation_at_synchronized_publication_stages_leaves_durable_boundary
     object_created: bool,
 ) -> None:
     async def _run() -> None:
-        from kdive.jobs.capture_operations import publication
+        from kdive.jobs.capture_operations.storage import publication
 
         subject = await _subject(migrated_url)
         store = _Store(block_create=stage == "during_create")
@@ -433,7 +433,7 @@ def test_cancellation_while_audit_claim_is_blocked_rolls_back_the_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _run() -> None:
-        from kdive.jobs.capture_operations import publication
+        from kdive.jobs.capture_operations.storage import publication
 
         subject = await _subject(migrated_url)
         blocker = await psycopg.AsyncConnection.connect(migrated_url)

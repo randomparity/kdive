@@ -6,14 +6,13 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import JobKind
-from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs import liveness as liveness_mod
+from kdive.services.job_ports import JobQueryPort
 from kdive.services.runs.liveness import (
     _STORM_TAIL_CHARS,
     STATE_DEGRADED,
@@ -134,45 +133,37 @@ def test_parse_verdict_without_checked_at() -> None:
 
 
 def _patch_signals(
-    monkeypatch,
     *,
-    console_tail: str | None,
     ssh_result_ref: str | None,
     expected_conn: object,
     expected_system_id,
-    expected_registry: SecretRegistry,
-) -> None:
-    # The fakes assert every argument the production calls forward: a mutant that drops or nulls
-    # conn / system_id / kind / registry / max_chars reaches an assertion and is killed.
-    async def _fake_tail(system_id, registry, *, max_chars: int = 0) -> str | None:
-        assert system_id == expected_system_id
-        assert registry is expected_registry
-        assert max_chars == _STORM_TAIL_CHARS
-        return console_tail
-
+) -> JobQueryPort:
     async def _fake_job(conn, kind, system_id):
         assert conn is expected_conn
         assert kind is JobKind.CHECK_SSH_REACHABLE
         assert system_id == expected_system_id
         return None if ssh_result_ref is None else SimpleNamespace(result_ref=ssh_result_ref)
 
-    monkeypatch.setattr(liveness_mod, "redacted_console_tail", _fake_tail)
-    monkeypatch.setattr(liveness_mod.queue, "latest_succeeded_job_for_system", _fake_job)
+    return cast(JobQueryPort, SimpleNamespace(latest_succeeded_for_system=_fake_job))
 
 
 def _run_derive(monkeypatch, *, console_tail: str | None, ssh_result_ref: str | None) -> Liveness:
     conn = object()
     system_id = uuid4()
-    registry = SecretRegistry()
-    _patch_signals(
-        monkeypatch,
-        console_tail=console_tail,
+    jobs = _patch_signals(
         ssh_result_ref=ssh_result_ref,
         expected_conn=conn,
         expected_system_id=system_id,
-        expected_registry=registry,
     )
-    return asyncio.run(derive_liveness(cast(AsyncConnection, conn), system_id, registry))
+
+    async def read_console_tail(read_system_id: UUID, max_chars: int) -> str | None:
+        assert read_system_id == system_id
+        assert max_chars == _STORM_TAIL_CHARS
+        return console_tail
+
+    return asyncio.run(
+        derive_liveness(cast(AsyncConnection, conn), system_id, read_console_tail, jobs)
+    )
 
 
 def test_derive_liveness_degraded_on_console_storm(monkeypatch: pytest.MonkeyPatch) -> None:

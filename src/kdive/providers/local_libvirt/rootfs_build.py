@@ -20,10 +20,11 @@ provenance** into the :class:`RootfsBuildOutput`. The pipeline is:
    cloud-init first-boot wiring is actually baked in (ADR-0288) — the guard against a silent no-op
    that CI cannot catch by booting.
 
-The slow libguestfs/network seams are **injected** (:class:`RootfsBuildTools`) and default to the
-real implementations, so unit tests cover the orchestration/provenance contract without libguestfs,
-qemu, or the network; the real path is exercised on the operator-run live-stack path. ``build()``
-is synchronous — the worker offloads the whole call via ``asyncio.to_thread`` (ADR-0092).
+The slow libguestfs/network seams are injected as acquisition, customization, and provenance
+dependencies. They default to the real implementations, so unit tests cover the orchestration and
+provenance contracts without libguestfs, qemu, or the network; the real path is exercised on the
+operator-run live-stack path. ``build()`` is synchronous — the worker offloads the whole call via
+``asyncio.to_thread`` (ADR-0092).
 """
 
 from __future__ import annotations
@@ -467,27 +468,39 @@ def _assert_no_network_disable(qcow2: Path, cfgd: str) -> None:  # pragma: no co
 
 
 @dataclass(frozen=True, slots=True)
-class RootfsBuildTools:
-    """The injectable build seams; default to the real libguestfs/network implementations."""
+class RootfsAcquisition:
+    """Dependencies used only to resolve and acquire a catalog base image."""
 
     acquire_base: AcquireBase = acquire_base
     virt_builder: VirtBuilder = _real_virt_builder
     downloader: Downloader = _real_download
+    family_for: FamilyResolver = family_for
+
+
+@dataclass(frozen=True, slots=True)
+class RootfsCustomization:
+    """Dependencies used to customize, repack, and validate an acquired image."""
+
     customize: Customize = _real_virt_customize
     repack_whole_disk_ext4: RepackWholeDiskExt4 = _real_repack_whole_disk_ext4
-    family_for: FamilyResolver = family_for
-    inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
-    probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
-    probe_drgn: DrgnProbeSeam = DEFAULT_DRGN_PROBE
-    probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
-    probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
-    probe_kernel_config: KernelConfigProbeSeam = DEFAULT_KERNEL_CONFIG_PROBE
     verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
     inject_offline: InjectOffline = _real_inject_offline
     run_customization_boot: RunCustomizationBoot = _real_run_customization_boot
     seal_customized_image: SealCustomizedImage = _real_seal_customized_image
     extract_baseline_kernel: ExtractBaselineKernel = _real_extract_baseline_kernel
     resolve_accel: ResolveAccel = _real_resolve_accel
+
+
+@dataclass(frozen=True, slots=True)
+class RootfsProvenanceInspection:
+    """Advisory probes used only to describe the completed image."""
+
+    inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
+    probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
+    probe_drgn: DrgnProbeSeam = DEFAULT_DRGN_PROBE
+    probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
+    probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
+    probe_kernel_config: KernelConfigProbeSeam = DEFAULT_KERNEL_CONFIG_PROBE
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
@@ -508,11 +521,15 @@ class LocalLibvirtRootfsBuildPlane:
         *,
         workspace: Path | None = None,
         size: str = _DEFAULT_IMAGE_SIZE,
-        tools: RootfsBuildTools | None = None,
+        acquisition: RootfsAcquisition | None = None,
+        customization: RootfsCustomization | None = None,
+        provenance: RootfsProvenanceInspection | None = None,
     ) -> None:
         self._workspace = workspace or Path(_DEFAULT_WORKSPACE)
         self._size = size
-        self._tools = tools or RootfsBuildTools()
+        self._acquisition = acquisition or RootfsAcquisition()
+        self._customization = customization or RootfsCustomization()
+        self._provenance = provenance or RootfsProvenanceInspection()
 
     @classmethod
     def from_env(cls, *, workspace: Path | None = None) -> LocalLibvirtRootfsBuildPlane:
@@ -535,16 +552,16 @@ class LocalLibvirtRootfsBuildPlane:
         """
         validate_image_name(spec.name)
         entry = _resolve_entry(spec)
-        family = self._tools.family_for(entry.family)
+        family = self._acquisition.family_for(entry.family)
         with build_workspace(self._workspace, prefix="rootfs-build-") as work_dir:
             scratch = work_dir / "scratch.qcow2"
-            self._tools.acquire_base(
+            self._acquisition.acquire_base(
                 entry.source,
                 scratch,
                 releasever=spec.releasever,
                 arch=spec.arch,
-                virt_builder=self._tools.virt_builder,
-                downloader=self._tools.downloader,
+                virt_builder=self._acquisition.virt_builder,
+                downloader=self._acquisition.downloader,
             )
             staged = work_dir / f"{spec.name}.qcow2"
             probe_src = self._customize_and_stage(
@@ -609,9 +626,9 @@ class LocalLibvirtRootfsBuildPlane:
     ) -> Path:
         """The virt-customize path: customize the scratch, repack, normalize; probe from scratch."""
         self._customize(scratch, family, spec=spec, entry=entry)
-        self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
+        self._customization.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
         family.normalize(staged)
-        self._tools.verify_cloud_init(staged)
+        self._customization.verify_cloud_init(staged)
         return scratch
 
     def _build_via_boot(
@@ -631,15 +648,15 @@ class LocalLibvirtRootfsBuildPlane:
         and normalized (leaving ``/.autorelabel`` to the seal) *before* customization, then the
         image boots its own kernel to install packages and run the firstboot script (ADR-0345).
         """
-        self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
+        self._customization.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
         family.normalize(staged, relabel=False)
         self._boot_customize(staged, family, work_dir, spec=spec, entry=entry)
-        self._tools.seal_customized_image(
+        self._customization.seal_customized_image(
             staged,
             unit_name=CUSTOMIZE_UNIT,
             selinux=family.guest_mac.startswith("selinux"),
         )
-        self._tools.verify_cloud_init(staged)
+        self._customization.verify_cloud_init(staged)
         return staged
 
     def _boot_customize(
@@ -666,7 +683,7 @@ class LocalLibvirtRootfsBuildPlane:
                 fail_marker=FAIL_MARKER,
             )
             unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)
-            self._tools.inject_offline(staged, file_ops, script, unit)
+            self._customization.inject_offline(staged, file_ops, script, unit)
             self._run_boot(staged, work_dir, spec.arch)
         finally:
             for path in cleanup:
@@ -674,9 +691,9 @@ class LocalLibvirtRootfsBuildPlane:
 
     def _run_boot(self, staged: Path, work_dir: Path, arch: str) -> None:
         """Extract the baseline kernel, render the build domain XML, and drive the boot to ok."""
-        baseline = self._tools.extract_baseline_kernel(staged, work_dir / "baseline", None)
+        baseline = self._customization.extract_baseline_kernel(staged, work_dir / "baseline", None)
         _grant_hypervisor_traversal(work_dir)
-        accel, emulator = self._tools.resolve_accel(arch)
+        accel, emulator = self._customization.resolve_accel(arch)
         build_id = uuid4()
         xml = render_customization_domain_xml(
             build_id,
@@ -687,7 +704,7 @@ class LocalLibvirtRootfsBuildPlane:
             accel=accel,
             emulator=emulator,
         )
-        self._tools.run_customization_boot(build_id, xml, accel=accel)
+        self._customization.run_customization_boot(build_id, xml, accel=accel)
 
     def _inspect_installed(self, scratch: Path) -> dict[str, str]:
         """The full installed ``{name: version}`` map; ``{}`` (logged) on inspector failure.
@@ -698,7 +715,7 @@ class LocalLibvirtRootfsBuildPlane:
         ``package_versions`` and consult the full map for the makedumpfile fallback (ADR-0253).
         """
         try:
-            return self._tools.inspect_versions(scratch)
+            return self._provenance.inspect_versions(scratch)
         except CategorizedError:
             _log.warning(
                 "package-version capture failed; provenance omits package_versions", exc_info=True
@@ -715,7 +732,7 @@ class LocalLibvirtRootfsBuildPlane:
         source degrades to ``None`` so the build still publishes (ADR-0253).
         """
         try:
-            raw = self._tools.probe_makedumpfile(scratch)
+            raw = self._provenance.probe_makedumpfile(scratch)
         except CategorizedError:
             _log.warning(
                 "makedumpfile probe failed; trying package-version fallback", exc_info=True
@@ -741,7 +758,7 @@ class LocalLibvirtRootfsBuildPlane:
         build still publishes and ``live_drgn`` honestly reports ``unverified`` (ADR-0334).
         """
         try:
-            raw = self._tools.probe_drgn(scratch)
+            raw = self._provenance.probe_drgn(scratch)
         except CategorizedError:
             _log.warning("drgn probe failed; trying package-version fallback", exc_info=True)
             raw = None
@@ -763,7 +780,7 @@ class LocalLibvirtRootfsBuildPlane:
         ``None`` so the build still publishes and the operand is simply omitted.
         """
         try:
-            raw = self._tools.probe_os_release(scratch)
+            raw = self._provenance.probe_os_release(scratch)
         except CategorizedError:
             _log.warning("os-release probe failed; provenance omits os_release")
             return None
@@ -783,7 +800,7 @@ class LocalLibvirtRootfsBuildPlane:
         ``/boot`` (a meaningful "not provisionable" operand), distinct from ``None`` (unknown).
         """
         try:
-            entries = self._tools.probe_boot_entries(scratch)
+            entries = self._provenance.probe_boot_entries(scratch)
         except CategorizedError:
             _log.warning("boot-entries probe failed; provenance omits boot facts")
             return _BootFacts(None, None, None)
@@ -806,7 +823,7 @@ class LocalLibvirtRootfsBuildPlane:
         if version is None:
             return None
         try:
-            return self._tools.probe_kernel_config(scratch, version)
+            return self._provenance.probe_kernel_config(scratch, version)
         except CategorizedError:
             _log.warning(
                 "kernel-config probe failed for %s; provenance omits the config offer",
@@ -829,7 +846,7 @@ class LocalLibvirtRootfsBuildPlane:
         try:
             ctx = self._context(unit_path, spec=spec, entry=entry)
             argv = render_argv(family.customize_steps(ctx), cleanup=cleanup)
-            self._tools.customize(scratch, argv)
+            self._customization.customize(scratch, argv)
         finally:
             for path in cleanup:
                 path.unlink(missing_ok=True)

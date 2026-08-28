@@ -36,7 +36,6 @@ from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreInt
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
-    LocalCaptureExecutor,
     LocalLibvirtCaptureQuiescence,
 )
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
@@ -53,7 +52,7 @@ from kdive.providers.local_libvirt.reaping import (
     LibvirtInfraReaper,
     LocalLibvirtCaptureReaper,
 )
-from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
+from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
@@ -61,6 +60,7 @@ from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
@@ -80,7 +80,7 @@ def capture_operation_configuration(resource_id: UUID) -> bytes:
 
 def build_capture_executor(
     configuration: LocalCaptureConfiguration,
-) -> LocalCaptureExecutor:
+) -> CaptureExecutor:
     """Reconstruct the local synchronous executor from released configuration."""
     import libvirt_qemu
 
@@ -88,7 +88,7 @@ def build_capture_executor(
         connect=lambda: libvirt.open(configuration.uri),
         monitor=libvirt_qemu.qemuMonitorCommand,
     )
-    return LocalCaptureExecutor(capturer=capturer)
+    return CaptureExecutor(capturer=capturer, provider_label="local")
 
 
 def build_capture_quiescence(

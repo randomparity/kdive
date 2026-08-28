@@ -15,11 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from kdive.jobs.capture_operations import bootstrap_attestation, bootstrap_elf
+from kdive.jobs.capture_operations.bootstrap import bootstrap_attestation, bootstrap_elf
 from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
 
 _ROOT = Path(__file__).parents[3]
-_SCRIPT = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+_SCRIPT = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.py"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -121,10 +121,10 @@ def _fixture_manifest(interpreter: Path) -> dict[str, object]:
         "interpreter": str(interpreter.resolve()),
         "bootstrap_modules": [
             "kdive",
-            "kdive.capture_bootstrap",
             "kdive.jobs",
             "kdive.jobs.capture_operations",
-            "kdive.jobs.capture_operations.sandbox",
+            "kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
+            "kdive.jobs.capture_operations.process.sandbox",
         ],
         "files": entries,
     }
@@ -941,6 +941,10 @@ def test_install_refuses_unprivileged_user(tmp_path: Path) -> None:
 
 def test_docker_and_ansible_generate_after_final_interpreter() -> None:
     dockerfile = (_ROOT / "Dockerfile").read_text()
+    assert (
+        "COPY --from=builder /app/scripts/generate/build-capture-bootstrap-manifest.py "
+        "/usr/local/libexec/build-capture-bootstrap-manifest.py"
+    ) in dockerfile
     build = dockerfile.index("build-capture-bootstrap-manifest.py build")
     final = dockerfile.index("FROM python:3.14.6-slim-bookworm", dockerfile.index("AS builder") + 1)
     user = dockerfile.index("USER kdive")

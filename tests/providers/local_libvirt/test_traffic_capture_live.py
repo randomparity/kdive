@@ -100,7 +100,7 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
     except ImportError:
         pytest.skip("libvirt-python / libvirt_qemu unavailable")
 
-    from kdive.artifacts.pcap_count import count_pcap_packets  # noqa: PLC0415
+    from kdive.artifacts.formats.pcap import count_pcap_packets  # noqa: PLC0415
     from kdive.providers.local_libvirt.lifecycle.traffic_capture import (  # noqa: PLC0415
         LocalLibvirtTrafficCapture,
     )

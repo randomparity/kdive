@@ -13,12 +13,12 @@ from pydantic import SecretStr
 
 from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.jobs.capture_operations import publication
-from kdive.jobs.capture_operations.publication import (
+from kdive.jobs.capture_operations.storage import publication
+from kdive.jobs.capture_operations.storage.publication import (
     CapturePublicationIdentityConflict,
     recover_publication,
 )
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 

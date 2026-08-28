@@ -231,8 +231,7 @@ async def snapshot_system(
                 ),
                 job_authorizing(ctx, system.project),
                 f"{uid}:snapshot:{validated}",
-                recycle_terminal=True,
-                recycle_canceled=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
             )
             return job_envelope(job, "system_id", uid)
 
@@ -316,7 +315,7 @@ async def restore_system(
                 RestorePayload(system_id=system_id, name=name, start_paused=start_paused),
                 job_authorizing(ctx, system.project),
                 f"{uid}:restore:{name}:{start_paused}",
-                recycle_terminal=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL,
             )
             return job_envelope(job, "system_id", uid)
 
@@ -422,8 +421,7 @@ async def delete_snapshot(
                 SnapshotDeletePayload(system_id=system_id, snapshot_id=str(snapshot.id), name=name),
                 job_authorizing(ctx, system.project),
                 f"{uid}:delete_snapshot:{name}",
-                recycle_terminal=True,
-                recycle_canceled=True,
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
             )
             return job_envelope(job, "system_id", uid)
 

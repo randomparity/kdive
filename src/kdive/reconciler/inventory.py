@@ -1,32 +1,8 @@
-"""The reconciler's inventory pass: reconcile ``systems.toml`` into the catalog (ADR-0112).
+"""Reconcile ``systems.toml`` into the catalog (ADR-0112).
 
-This is the loop trigger of the M2.6 inventory engine (#391/#393). Each pass resolves the
-inventory path via :func:`kdive.inventory.path.systems_toml_path` (``KDIVE_SYSTEMS_TOML``, else
-the XDG default ``~/.config/kdive/systems.toml``) and reconciles it through the one ordered
-chain (:func:`kdive.inventory.reconcile.pipeline.reconcile_all`): into ``image_catalog`` via
-:func:`kdive.inventory.reconcile.images.reconcile_images`, prices ``cost_class_coefficients``
-via :func:`kdive.inventory.reconcile.coefficients.reconcile_coefficients` run **before** the
-resource pass (ADR-0115), and into ``resources`` via
-:func:`kdive.inventory.reconcile.resources.reconcile_resources` (the fault-inject/remote
-config overlay that supplies the sizing #385 lacked).
-
-Two load-bearing invariants (plan Task 1.6):
-
-* **Absent default file = quiet no-op.** ``systems.toml`` is gitignored, so an absent file is
-  the normal pre-config state; :func:`kdive.inventory.load_inventory_optional` returns ``None``
-  and the pass does nothing and records **no** failure. Feeding an empty document to
-  ``reconcile_images`` would prune every config row, so an absent file must short-circuit
-  *before* the reconcile step, not parse to an empty doc.
-* **Drift repair is NOT gated on the file hash.** This is the ADR-0021 drift-repair spec: it
-  must repair DB drift (a config-owned row manually deleted/corrupted) even when the file is
-  unchanged. The content-hash cache therefore only skips the *parse/validate* step (caching
-  the last-good :class:`~kdive.inventory.model.InventoryDoc` keyed by the file's hash); the
-  reconcile-against-DB step runs **every** pass. With #390's change-detecting upserts a
-  no-drift pass is cheap (reads + diff, no writes).
-
-A present-but-malformed file raises :class:`~kdive.inventory.InventoryError`; the pass logs and
-re-raises so the loop's per-repair ``try/except`` records it as a failed-this-pass spec while
-sibling reaper repairs keep running. It never raises out of ``reconcile_once``.
+An absent inventory is a quiet no-op; it must not become an empty document that prunes configured
+rows. The file hash only avoids repeated parsing: reconciliation still runs every pass to repair
+database drift (ADR-0021). A malformed present file fails this repair without stopping siblings.
 """
 
 from __future__ import annotations

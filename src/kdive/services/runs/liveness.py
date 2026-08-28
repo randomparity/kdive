@@ -10,16 +10,15 @@ black-box console-storm heuristic over the current redacted console tail, and th
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs import queue
-from kdive.jobs.handlers.console.console_evidence import redacted_console_tail
-from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
+from kdive.services.job_ports import JobQueryPort
 
 STATE_HEALTHY = "healthy"
 STATE_DEGRADED = "degraded"
@@ -47,6 +46,8 @@ _STORM_SIGNATURES = (
 
 # A single benign line (e.g. one app OOM) stays below this; a storm repeats its line many times.
 _STORM_MIN_HITS = 3
+
+type ConsoleTailReader = Callable[[UUID, int], Awaitable[str | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,27 +120,28 @@ def _parse_ssh_verdict(result_ref: str | None) -> tuple[bool | None, str | None]
 
 
 async def _latest_ssh_verdict(
-    conn: AsyncConnection, system_id: UUID
+    conn: AsyncConnection, system_id: UUID, jobs: JobQueryPort
 ) -> tuple[bool | None, str | None]:
-    job = await queue.latest_succeeded_job_for_system(conn, JobKind.CHECK_SSH_REACHABLE, system_id)
+    job = await jobs.latest_succeeded_for_system(conn, JobKind.CHECK_SSH_REACHABLE, system_id)
     if job is None:
         return None, None
     return _parse_ssh_verdict(job.result_ref)
 
 
 async def derive_liveness(
-    conn: AsyncConnection, system_id: UUID, secret_registry: SecretRegistry
+    conn: AsyncConnection,
+    system_id: UUID,
+    read_console_tail: ConsoleTailReader,
+    jobs: JobQueryPort,
 ) -> Liveness:
     """Read both signals for ``system_id`` and combine them into a :class:`Liveness` (ADR-0373).
 
     Best-effort: an unreadable console yields ``console_storm=False`` with no signal, and an
     un-probed guest yields ``ssh_reachable=None``; the state derivation degrades gracefully.
     """
-    console_tail = await redacted_console_tail(
-        system_id, secret_registry, max_chars=_STORM_TAIL_CHARS
-    )
+    console_tail = await read_console_tail(system_id, _STORM_TAIL_CHARS)
     console_storm = detect_console_storm(console_tail)
-    ssh_reachable, checked_at = await _latest_ssh_verdict(conn, system_id)
+    ssh_reachable, checked_at = await _latest_ssh_verdict(conn, system_id, jobs)
     state = derive_state(
         console_storm=console_storm,
         ssh_reachable=ssh_reachable,

@@ -22,6 +22,8 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.console.rotation import RotationState, rotate
+from kdive.artifacts.console.sidecar import read_sidecar
 from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     FetchedArtifact,
@@ -34,8 +36,6 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.console import console_rotate
-from kdive.providers.console_parts.rotation import RotationState, rotate
-from kdive.providers.console_parts.sidecar import read_sidecar
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.clock import STORE_MTIME

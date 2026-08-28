@@ -273,6 +273,9 @@ only renders define blocks from _*.tpl when included), so the check lives in a
 named template that a rendered manifest (the ConfigMap) includes.
 */}}
 {{- define "kdive.validateValues" -}}
+{{- if hasKey .Values.config "KDIVE_DATABASE_URL" -}}
+{{- fail "config.KDIVE_DATABASE_URL was removed; configure databaseCredentials.* Secret references" -}}
+{{- end -}}
 {{- if and .Values.bundledBackends (not .Values.demoAcknowledged) -}}
 {{- fail "bundledBackends is ephemeral/demo-only: set demoAcknowledged=true to use it (data is NOT durable)" -}}
 {{- end -}}

@@ -179,39 +179,10 @@ def _rebuild_with_masked_userinfo(parsed: urllib.parse.SplitResult) -> str:
 
 
 def redact_database_url(url: str) -> str:
-    """Mask the password in a Postgres conninfo so it is safe to print (ADR-0256).
+    """Return a display-safe Postgres conninfo without raising (ADR-0256).
 
-    Which credential the string actually carries is decided by libpq's own parser,
-    ``psycopg.conninfo.conninfo_to_dict``. ``urllib.parse`` is not a conninfo parser: it splits
-    a userinfo password at a raw ``#`` or ``?``, so it reports no password at all for a string
-    libpq reads as carrying one, and the conninfo used to be printed as it came (#2080).
-
-    A ``postgresql://`` URL is rebuilt with its userinfo password masked (``***``), keeping
-    host/port/db, but only when ``urlsplit`` reads the same credential libpq does — that is the
-    one case where the span being overwritten is known to be the whole secret. The rendering is
-    then held to one rule, which is also the whole treatment of every other form: **if it still
-    mentions** ``password``**, it is replaced wholesale** with the marker. A partial mask could
-    leak the tail of a real secret, so it is never attempted — that is why a libpq keyword/value
-    conninfo (whose value may be quoted or spaced) goes wholesale, and why a URL carrying a
-    second credential somewhere the userinfo mask does not reach goes wholesale too. libpq reads
-    connection keywords from the URI **query** and percent-decodes them, and a query ``password``
-    wins over the userinfo one, so masking only the userinfo would print the effective credential
-    (#2077); the check therefore runs over the percent-decoded rendering and covers the fragment
-    as well.
-
-    Every other way of not reaching a rendering it can vouch for ends at that same marker rather
-    than raising out of a helper whose job is to make output printable (#2076): a conninfo libpq
-    rejects, and a URL whose port is not a number, are both redacted wholesale. A conninfo
-    mentioning ``password`` nowhere is returned unchanged — the diagnostic value is the host/db,
-    not the secret.
-
-    Args:
-        url: A psycopg URL or keyword/value conninfo string.
-
-    Returns:
-        A display-safe rendering: either the userinfo-masked URL, the redaction marker, or the
-        input unchanged. It never contains the word ``password`` outside that marker, and it
-        never raises.
+    Libpq decides which credential is effective. Anything that cannot be masked with certainty,
+    including keyword/value conninfo and query credentials, is replaced wholesale.
     """
     try:
         password = conninfo_to_dict(url).get("password")

@@ -16,12 +16,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.connection.transport import remote_libvirt_connections
-from kdive.providers.remote_libvirt.lifecycle.gdb import used_gdb_ports
+from kdive.providers.remote_libvirt.lifecycle.port_allocation import used_gdb_ports
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (
     KDIVE_METADATA_NS,
     QEMU_NS,
     RemoteLibvirtProvisioning,
-    allocate_gdb_port,
+    allocate_port,
     overlay_volume_name,
     recorded_gdb_port,
     render_domain_xml,
@@ -282,24 +282,24 @@ def test_tolerant_domain_xml_helpers_handle_forbidden_xml() -> None:
 
 def test_allocate_lowest_free_port_skips_used() -> None:
     used = {"kdive-a": 47000, "kdive-b": 47002}
-    assert allocate_gdb_port(used, own_name="kdive-new", port_min=47000, port_max=47005) == 47001
+    assert allocate_port(used, own_name="kdive-new", port_min=47000, port_max=47005) == 47001
 
 
 def test_allocate_reuses_own_recorded_port() -> None:
     used = {"kdive-a": 47000, "kdive-b": 47002}
-    assert allocate_gdb_port(used, own_name="kdive-a", port_min=47000, port_max=47005) == 47000
+    assert allocate_port(used, own_name="kdive-a", port_min=47000, port_max=47005) == 47000
 
 
 def test_allocate_ignores_own_out_of_range_port() -> None:
     # A recorded port outside the (narrowed) configured range is not reused.
     used = {"kdive-a": 9999}
-    assert allocate_gdb_port(used, own_name="kdive-a", port_min=47000, port_max=47005) == 47000
+    assert allocate_port(used, own_name="kdive-a", port_min=47000, port_max=47005) == 47000
 
 
 def test_allocate_exhausted_range_raises_provisioning_failure() -> None:
     used = {"kdive-a": 47000, "kdive-b": 47001}
     with pytest.raises(CategorizedError) as excinfo:
-        allocate_gdb_port(used, own_name="kdive-new", port_min=47000, port_max=47001)
+        allocate_port(used, own_name="kdive-new", port_min=47000, port_max=47001)
     assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert "47000" in str(excinfo.value.details)
 
@@ -308,9 +308,7 @@ def test_allocate_excludes_tried_ports() -> None:
     # The bounded start-failure advance never re-picks a port it already tried.
     used = {"kdive-a": 47000}
     assert (
-        allocate_gdb_port(
-            used, own_name="kdive-new", port_min=47000, port_max=47005, exclude={47001}
-        )
+        allocate_port(used, own_name="kdive-new", port_min=47000, port_max=47005, exclude={47001})
         == 47002
     )
 
@@ -336,7 +334,7 @@ def test_allocate_does_not_reuse_own_excluded_port() -> None:
     # must not be re-picked by the reuse fast-path.
     used = {"kdive-a": 47000}
     assert (
-        allocate_gdb_port(used, own_name="kdive-a", port_min=47000, port_max=47005, exclude={47000})
+        allocate_port(used, own_name="kdive-a", port_min=47000, port_max=47005, exclude={47000})
         == 47001
     )
 

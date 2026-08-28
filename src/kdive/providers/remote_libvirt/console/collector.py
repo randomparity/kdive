@@ -30,7 +30,7 @@ import threading
 from typing import Protocol
 from uuid import UUID
 
-from kdive.providers.console_parts.rotation import ROTATION_THRESHOLD, SEAM_OVERLAP
+from kdive.artifacts.console.rotation import ROTATION_THRESHOLD, SEAM_OVERLAP
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -181,7 +181,11 @@ class ConsoleCollector:
             try:
                 chunk = stream.recv(self._read_chunk)
             except Exception:  # noqa: BLE001 - any stream error is a drop; reconnect next pump
-                _log.info("console stream for %s dropped; will reconnect", self._system_id)
+                _log.warning(
+                    "console stream receive failed for %s; will reconnect",
+                    self._system_id,
+                    exc_info=True,
+                )
                 self._drop_stream()
                 return False
             if chunk is None:

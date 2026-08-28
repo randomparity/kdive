@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from kdive.jobs.capture_operations import linux_identity, linux_pidfd
-from kdive.jobs.capture_operations.linux_identity import (
+from kdive.jobs.capture_operations.process import linux_identity, linux_pidfd
+from kdive.jobs.capture_operations.process.linux_identity import (
     HostIdentityMismatch,
     LinuxIdentity,
     scan_launch_token,
@@ -36,7 +36,8 @@ def _register_bootstrap(proc: Path, *, interpreter: Path, token: str) -> None:
     capture-bootstrap probe: same exe target, cmdline carrying the exact token."""
     proc.joinpath("exe").symlink_to(interpreter)
     proc.joinpath("cmdline").write_bytes(
-        b"python\0-S\0-m\0kdive.capture_bootstrap\0--launch-token\0" + token.encode() + b"\0"
+        b"python\0-S\0-m\0kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint\0"
+        b"--launch-token\0" + token.encode() + b"\0"
     )
 
 

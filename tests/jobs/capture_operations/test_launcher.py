@@ -16,18 +16,26 @@ from uuid import uuid4
 import pytest
 
 from kdive.jobs.capture_operations import launcher as launcher_module
-from kdive.jobs.capture_operations import linux_identity as linux_identity_module
+from kdive.jobs.capture_operations.bootstrap import manifest_attestation
 from kdive.jobs.capture_operations.launcher import (
     GatedCaptureLauncher,
     LaunchAbortEvidence,
     LaunchedCapture,
 )
+from kdive.jobs.capture_operations.process import linux_identity as linux_identity_module
+from kdive.jobs.capture_operations.process import process_fence as process_fence_module
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage import spool
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 from kdive.providers.ports.traffic import LocalCaptureConfiguration
 
 _ROOT = Path(__file__).parents[3]
-_MANIFEST_BUILDER = _ROOT / "scripts/build-capture-bootstrap-manifest.py"
+_MANIFEST_BUILDER = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.py"
+
+
+def test_launcher_collaborators_have_direct_test_ownership() -> None:
+    assert manifest_attestation.verify_capture_bootstrap_manifest
+    assert spool._dispose_operation_spool
 
 
 def _request() -> CaptureRequest:
@@ -146,7 +154,7 @@ def test_real_child_is_gated_and_has_exact_process_contract(
                 os.fsencode(str(Path(sys.executable).resolve())),
                 b"-S",
                 b"-m",
-                b"kdive.capture_bootstrap",
+                b"kdive.jobs.capture_operations.bootstrap.bootstrap_entrypoint",
                 b"--launch-token",
                 operation.launch_token.encode(),
                 b"--gate-fd",
@@ -590,7 +598,7 @@ def test_stale_post_spawn_numeric_identity_never_signals_unrelated_group(
         return linux_identity_module.scan_launch_token(*args, **kwargs)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(launcher_module, "LinuxIdentity", _StaleIdentity)
-    monkeypatch.setattr(launcher_module, "scan_launch_token", _scan, raising=False)
+    monkeypatch.setattr(process_fence_module, "scan_launch_token", _scan)
     monkeypatch.setattr(
         launcher_module.os,
         "killpg",
@@ -634,13 +642,13 @@ def test_exact_process_members_are_all_attested_before_any_signal(
     members = {pid: _Identity(pid) for pid in (10, 20, 30)}
     members[10] = leader
     leader_fd = os.open(os.devnull, os.O_RDONLY)
-    monkeypatch.setattr(launcher_module, "LinuxIdentity", _Identity)
+    monkeypatch.setattr(process_fence_module, "LinuxIdentity", _Identity)
     monkeypatch.setattr(
-        launcher_module,
+        process_fence_module,
         "_read_process_group_member",
         lambda pid, **_kwargs: events.append(("revalidate", pid)) or members[pid],
     )
-    handles = launcher_module._attest_process_members(
+    handles = process_fence_module._attest_process_members(
         members,  # ty: ignore[invalid-argument-type] - identity fakes
         process_group=10,
         host_instance="host-a",
@@ -710,15 +718,15 @@ def test_extra_member_pid_reuse_never_signals_replacement(
         token_scans.append("token")
         return ()
 
-    monkeypatch.setattr(launcher_module, "LinuxIdentity", _Identity)
-    monkeypatch.setattr(launcher_module, "_process_group_members", _group_scan)
+    monkeypatch.setattr(process_fence_module, "LinuxIdentity", _Identity)
+    monkeypatch.setattr(process_fence_module, "_process_group_members", _group_scan)
     monkeypatch.setattr(
-        launcher_module,
+        process_fence_module,
         "_read_process_group_member",
         lambda *_args, **_kwargs: replacement,
         raising=False,
     )
-    monkeypatch.setattr(launcher_module, "scan_launch_token", _token_scan)
+    monkeypatch.setattr(process_fence_module, "scan_launch_token", _token_scan)
 
     with pytest.raises(ProcessLookupError, match="reused"):
         asyncio.run(
@@ -769,14 +777,14 @@ def test_process_group_recovery_scan_is_bounded(
         time.sleep(0.05)
         return {10: leader}
 
-    monkeypatch.setattr(launcher_module, "_SIGNAL_WAIT_SECONDS", 0.001)
-    monkeypatch.setattr(launcher_module, "_process_group_members", _slow_group_scan)
+    monkeypatch.setattr(process_fence_module, "_SIGNAL_WAIT_SECONDS", 0.001)
+    monkeypatch.setattr(process_fence_module, "_process_group_members", _slow_group_scan)
     monkeypatch.setattr(
-        launcher_module,
+        process_fence_module,
         "_read_process_group_member",
         lambda *_args, **_kwargs: replacement,
     )
-    monkeypatch.setattr(launcher_module, "scan_launch_token", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(process_fence_module, "scan_launch_token", lambda *_args, **_kwargs: ())
 
     with pytest.raises(RuntimeError, match="process-group scan exceeded"):
         asyncio.run(
@@ -828,12 +836,17 @@ def test_recovery_acquisition_failure_closes_each_owned_pidfd_once(
     async def _token_scan(*_args: object, **_kwargs: object) -> tuple[_Identity, ...]:
         return (token_failure,)
 
-    monkeypatch.setattr(launcher_module, "_complete_process_group_scan", _group_scan)
-    monkeypatch.setattr(launcher_module, "_complete_token_scan", _token_scan)
+    monkeypatch.setattr(process_fence_module, "_complete_process_group_scan", _group_scan)
+    monkeypatch.setattr(process_fence_module, "_complete_token_scan", _token_scan)
     monkeypatch.setattr(
-        launcher_module,
+        process_fence_module,
         "_read_process_group_member",
         lambda pid, **_kwargs: recovered if pid == 20 else leader,
+    )
+    monkeypatch.setattr(
+        process_fence_module,
+        "_close_process_handles",
+        lambda handles: closed.extend(pidfd for _identity, pidfd in handles.values()),
     )
     monkeypatch.setattr(
         launcher_module,
@@ -882,7 +895,7 @@ def test_unreadable_token_recovery_scan_fails_closed_without_numeric_signal(
 
     monkeypatch.setattr(launcher_module, "LinuxIdentity", _UnavailableIdentity)
     monkeypatch.setattr(
-        launcher_module,
+        process_fence_module,
         "scan_launch_token",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unreadable token scan")),
     )

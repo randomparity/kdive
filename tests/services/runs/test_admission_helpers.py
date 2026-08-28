@@ -179,14 +179,14 @@ def _resolver(kinds: set[ResourceKind]) -> ProviderResolver:
 
 def test_validate_unbound_target_kind_none_is_required() -> None:
     with pytest.raises(RunCreateError) as exc:
-        _validate_unbound_target_kind("obj", None, _resolver({_A_KIND}))
+        _validate_unbound_target_kind("obj", None, frozenset({_A_KIND}))
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "target_kind_required"}
 
 
 def test_validate_unbound_target_kind_unknown_value() -> None:
     with pytest.raises(RunCreateError) as exc:
-        _validate_unbound_target_kind("obj", "nonsense-kind", _resolver({_A_KIND}))
+        _validate_unbound_target_kind("obj", "nonsense-kind", frozenset({_A_KIND}))
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "unknown_target_kind"}
 
@@ -194,13 +194,13 @@ def test_validate_unbound_target_kind_unknown_value() -> None:
 def test_validate_unbound_target_kind_unregistered_value() -> None:
     # a valid ResourceKind that the resolver does not register is still rejected
     with pytest.raises(RunCreateError) as exc:
-        _validate_unbound_target_kind("obj", _A_KIND.value, _resolver(set()))
+        _validate_unbound_target_kind("obj", _A_KIND.value, frozenset())
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "unknown_target_kind"}
 
 
 def test_validate_unbound_target_kind_registered_passes() -> None:
-    assert _validate_unbound_target_kind("obj", _A_KIND.value, _resolver({_A_KIND})) is _A_KIND
+    assert _validate_unbound_target_kind("obj", _A_KIND.value, frozenset({_A_KIND})) is _A_KIND
 
 
 def test_parse_expected_boot_failure_none_returns_none() -> None:

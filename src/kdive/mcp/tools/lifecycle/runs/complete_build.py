@@ -8,7 +8,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.upload_manifest import UPLOAD_WINDOW_EXPIRED
+from kdive.artifacts.uploads.upload_manifest import UPLOAD_WINDOW_EXPIRED
 from kdive.db.repositories import RUNS
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.cmdline import cmdline_extra_error

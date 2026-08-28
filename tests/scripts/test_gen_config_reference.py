@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from kdive.config.external_env import ExternalEnvVar
+from kdive.config.external_env import EXTERNAL_ENV_VARS, ExternalEnvVar
 from kdive.config.registry import Setting
-from scripts.gen_config_reference import render, render_external
+from scripts.generate.gen_config_reference import render, render_external
 
 
 def _str(raw: str) -> str:
@@ -106,3 +106,14 @@ def test_render_external_omits_an_empty_scope() -> None:
     assert "## Test (gated suites)" in out
     assert "## Operator scripts" not in out
     assert "## In-guest helpers" not in out
+
+
+def test_removed_cutover_commands_leave_no_documented_configuration() -> None:
+    names = {variable.name for variable in EXTERNAL_ENV_VARS}
+    assert names.isdisjoint(
+        {
+            "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS",
+            "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS",
+            "KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS",
+        }
+    )

@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 
 from kdive.__main__ import build_parser
+from kdive.assembly import ProcessAssembly
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.observability.facade import Telemetry
@@ -17,6 +18,7 @@ from kdive.processes.runtime import (
     POOL_CLOSE_TIMEOUT_SECONDS,
     POOL_OPEN_TIMEOUT_SECONDS,
 )
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
@@ -66,7 +68,6 @@ def _fake_telemetry() -> Telemetry:
 def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """`_run_reconciler` opens a pool, constructs a Reconciler, runs, closes."""
     from kdive import __main__
-    from kdive.providers.assembly import composition
     from kdive.providers.infra.reaping import NullCaptureReaper
     from kdive.reconciler import loop
 
@@ -115,22 +116,11 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     sentinel_store = cast(ObjectStore, object())
     constructed: dict[str, object] = {}
     readiness_store_factory: Callable[[], object] | None = None
-    constructed_assemblies: list[ObjectStoreAssembly] = []
 
     def _fresh_readiness_store() -> object:
         return object()
 
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _fresh_readiness_store)
-
-    def _build_object_store_assembly() -> ObjectStoreAssembly:
-        assembly = ObjectStoreAssembly(store=sentinel_store)
-        constructed_assemblies.append(assembly)
-        return assembly
-
-    monkeypatch.setattr(
-        "kdive.store.assembly.build_object_store_assembly",
-        _build_object_store_assembly,
-    )
 
     def _capture_readiness_store_factory(**kwargs: object) -> object:
         nonlocal readiness_store_factory
@@ -189,7 +179,16 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
             constructed["console_telemetry"] = console_telemetry
             return expected_hosting
 
-    monkeypatch.setattr(composition, "ProviderComposition", _FakeProviderComposition)
+    provider_composition = _FakeProviderComposition(
+        secret_registry=expected_registry, object_store=sentinel_store
+    )
+    monkeypatch.setattr(
+        "kdive.processes.reconciler.build_process_assembly",
+        lambda _registry: ProcessAssembly(
+            ObjectStoreAssembly(sentinel_store),
+            cast(ProviderComposition, provider_composition),
+        ),
+    )
 
     def _fake_init(self: object, pool: object, reaper: object, **kw: object) -> None:
         constructed["reaper"] = reaper
@@ -224,7 +223,6 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     assert constructed["object_store"] is sentinel_store
     assert constructed["upload_store"] is sentinel_store
     assert constructed["image_store"] is sentinel_store
-    assert len(constructed_assemblies) == 1
     assert readiness_store_factory is not None
     assert readiness_store_factory() is not readiness_store_factory()
 

@@ -16,6 +16,7 @@ envelope, same per-row fields.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, LiteralString
 
@@ -120,6 +121,15 @@ class _ImagesListPayload(ToolPayload):
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ImagesListRequest:
+    """Transport-neutral image list request."""
+
+    scope: ImageListScope = ImageListScope.VISIBLE
+    limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
+
+
 def _compact_os(provenance: dict[str, Any]) -> dict[str, JsonValue]:
     """Project ``provenance["os_release"]`` into a compact ``{id[, version_id]}`` identity.
 
@@ -170,10 +180,7 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
 async def list_images(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    scope: ImageListScope = ImageListScope.VISIBLE,
-    limit: int = DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
+    request: ImagesListRequest,
 ) -> ToolResponse:
     """List catalog images for ``scope``, keyset-paginated over the natural key.
 
@@ -186,11 +193,11 @@ async def list_images(
     Keyset-paginated over the ``(provider, name, arch)`` natural key (ADR-0192): fetches one row
     past ``limit`` to set ``data.truncated`` / ``data.next_cursor`` from the last kept row's key.
     """
-    capped = _clamp_list_limit(limit)
+    capped = _clamp_list_limit(request.limit)
     after_parts: list[str] | None = None
-    if cursor:
+    if request.cursor:
         try:
-            after_parts = _decode_cursor(_LIST_TAG, cursor, arity=3)
+            after_parts = _decode_cursor(_LIST_TAG, request.cursor, arity=3)
         except InvalidCursor:
             return _invalid_cursor_error("images")
     with bind_context(principal=ctx.principal):
@@ -207,7 +214,7 @@ async def list_images(
             "limit": capped + 1,
         }
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_LIST_SQL[scope], params)
+            await cur.execute(_LIST_SQL[request.scope], params)
             rows = await cur.fetchall()
     kept, truncated = _paginate(rows, capped)
     items = [_row_envelope(ImageCatalogEntry.model_validate(row)) for row in kept]
@@ -356,9 +363,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await list_images(
             pool,
             current_context(),
-            scope=payload.scope,
-            limit=payload.limit,
-            cursor=payload.cursor,
+            ImagesListRequest(scope=payload.scope, limit=payload.limit, cursor=payload.cursor),
         )
 
     @app.tool(

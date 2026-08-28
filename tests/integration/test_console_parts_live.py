@@ -36,13 +36,13 @@ import pytest
 
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
-from kdive.prereqs.system_bootstrap_key import (
-    load_system_bootstrap_private_key,
-    materialized_private_key,
-)
 from kdive.providers.shared.libvirt_xml import recorded_ssh_port
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,

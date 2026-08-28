@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-import scripts.gen_tool_reference as gen_tool_reference
-from scripts.gen_tool_reference import ToolDoc, render_namespace, tool_docs
+import scripts.generate.gen_tool_reference as gen_tool_reference
+from kdive.assembly import ProcessAssembly
+from scripts.generate.gen_tool_reference import ToolDoc, render_namespace, tool_docs
 
 
 @dataclass
@@ -169,14 +171,22 @@ def test_write_reference_writes_namespace_and_index_files(
 
 
 def test_live_registry_extraction_is_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _fail_if_default_store_is_built() -> object:
-        raise AssertionError("offline schema extraction reached production object-store assembly")
+    captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(
-        "kdive.mcp.assembly.app.build_object_store_assembly", _fail_if_default_store_is_built
-    )
+    class _App:
+        async def list_tools(self) -> list[Any]:
+            return []
 
-    assert gen_tool_reference._registry_tools()
+    def _build_app(*args: Any, **kwargs: Any) -> _App:
+        captured.update(kwargs)
+        return _App()
+
+    monkeypatch.setattr(gen_tool_reference, "build_app_from_assembly", _build_app)
+
+    assert gen_tool_reference._registry_tools() == []
+    process = captured["process_assembly"]
+    assert isinstance(process, ProcessAssembly)
+    assert process.object_stores.store is not None
 
 
 def test_registry_catalog_keeps_conditionally_available_recovery_tools(

@@ -32,7 +32,7 @@ require_path() {
 # an unusable /dev/kvm otherwise surfaces minutes into a multi-GB build as an opaque libvirt socket
 # error. Deliberately checks the CONFIGURED uri rather than qemu:///system: the live_vm gates run
 # session-mode (worker-owned QEMU, readable console — ADR-0223), which the system-mode probe in
-# scripts/check-local-libvirt.sh cannot express.
+# scripts/operations/check-local-libvirt.sh cannot express.
 # Runtime dirs the provider writes into whose paths are HARDCODED in src (runtime_paths.py's
 # console/pcap dirs, storage.py's ROOTFS_DIR) — no env points them elsewhere. They live under
 # root-owned /var/lib/kdive, so a non-root worker cannot create them and the deployment must.

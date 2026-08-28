@@ -19,8 +19,8 @@ import pytest
 import yaml
 
 from kdive.mcp import MCP_PROTOCOL_VERSION, MCP_SUPPORTED_PROTOCOL_VERSIONS
-from scripts import check_mcp_spec_version
-from scripts.check_mcp_spec_version import main, newer_revisions
+from scripts.guards import check_mcp_spec_version
+from scripts.guards.check_mcp_spec_version import main, newer_revisions
 
 # The upstream `schema/` listing as published today, `draft` included.
 _LISTING = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28", "draft")

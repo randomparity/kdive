@@ -35,7 +35,7 @@ from kdive.jobs import queue
 from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.providers.ports.retrieve import CaptureOutput
-from kdive.reconciler.cleanup.upload_orphans import repair_leaked_upload_objects
+from kdive.reconciler.cleanup.uploads.upload_orphans import repair_leaked_upload_objects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
 

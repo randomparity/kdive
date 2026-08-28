@@ -26,8 +26,8 @@ from kdive.jobs.handlers.connectivity.ssh_authorize import (
     build_authorize_argv,
 )
 from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult
-from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
 
 _NOW = datetime(2025, 1, 1)
 _KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
@@ -216,9 +216,9 @@ def test_handler_preflight_reason_survives_failure_context() -> None:
 # Async-DB tests follow the PROVEN in-repo pattern in
 # tests/jobs/handlers/test_boot_evidence_run_id.py: a SYNC `def test_(migrated_url)` with an
 # inner `async def _run()` driven by `asyncio.run(_run())`. The handler now loads the per-System
-# bootstrap key from Postgres (kdive.prereqs.system_bootstrap_key), so these tests need a REAL
-# conn — a MagicMock conn cannot answer a real `SELECT`. The mock-based tests above stay mocked
-# because they never reach the load-key call (they fail before it, or don't assert on it).
+# bootstrap key from Postgres (kdive.security.secrets.system_bootstrap_key), so these tests need
+# a REAL conn — a MagicMock conn cannot answer a real `SELECT`. The mock-based tests above stay
+# mocked because they never reach the load-key call (they fail before it, or don't assert on it).
 
 
 async def _seed_system(conn: AsyncConnection) -> UUID:

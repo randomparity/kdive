@@ -8,7 +8,7 @@ import pytest
 
 from kdive.mcp.exposure import ExposureScope
 from kdive.security.authz.rbac import PlatformRole, Role
-from scripts import gen_rbac_tool_matrix as gen
+from scripts.generate import gen_rbac_tool_matrix as gen
 
 
 def test_every_exposure_scope_has_a_label() -> None:

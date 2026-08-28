@@ -36,7 +36,7 @@ from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.local_libvirt.lifecycle.install import _open
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.integration._seed import (
     seed_granted_allocation,
     seed_running_run,

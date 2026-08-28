@@ -17,7 +17,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.read_model import run_fetch_context, system_project
+from kdive.artifacts.catalog.read_model import fetch_context_for_run, system_project
 from kdive.artifacts.storage import HeadResult
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
@@ -131,18 +131,18 @@ async def _seed_pcap_row(
 # --- DB readers (Task 1) ------------------------------------------------------------------
 
 
-def test_run_fetch_context_returns_row_fields(migrated_url: str) -> None:
+def test_fetch_context_for_run_returns_row_fields(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_run_with_vmlinux(pool)
             async with pool.connection() as conn:
-                ctx = await run_fetch_context(conn, UUID(run_id))
+                ctx = await fetch_context_for_run(conn, UUID(run_id))
                 assert ctx is not None
                 assert ctx.project == "proj"
                 assert ctx.debuginfo_ref == _VMLINUX_REF
                 assert ctx.system_id is not None
                 assert await system_project(conn, ctx.system_id) == "proj"
-                assert await run_fetch_context(conn, uuid4()) is None
+                assert await fetch_context_for_run(conn, uuid4()) is None
                 assert await system_project(conn, uuid4()) is None
 
     asyncio.run(_run())

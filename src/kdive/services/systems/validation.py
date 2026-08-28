@@ -48,42 +48,13 @@ def _reject_unknown_destructive_ops(profile: ProvisioningProfile) -> None:
 
 
 def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | None:
-    """Validate ``arch`` against a resource's guest arches and resolve its accelerator (ADR-0339).
-
-    A thin wrapper over :func:`resolve_accel_emulator` (the one branch definition shared with the
-    local-libvirt provisioner, ADR-0340) that keeps admission's accel-only ``str | None``
-    contract: the emulator is dropped here and only the provisioner's renderer consumes it.
-
-    ``guest_arches`` is what :meth:`ResourceCapabilities.guest_arches` returns for the bound
-    Resource — ``{arch: {"accel", "emulator"}}`` filtered to the kdive-provisionable set (ADR-0338).
-
-    Returns:
-        The advertised accelerator name (``kvm``/``tcg``) for ``arch``, or ``None`` when the
-        resource advertises **no** guest arches — remote-libvirt, fault-inject, or a host not
-        re-discovered since ADR-0338. That fail-open case skips the check and records no accel,
-        preserving pre-ADR-0339 behavior.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when ``guest_arches`` is non-empty and does not
-            advertise ``arch``. The message names the supported set — the same fail-fast rule as
-            ``arch_traits()``, never a silent x86 fallback.
-    """
+    """Resolve the advertised accelerator while preserving admission's accel-only contract."""
     resolved = resolve_accel_emulator(guest_arches, arch)
     return resolved[0] if resolved is not None else None
 
 
 def require_fadump_supported(*, requested: bool, supported: bool) -> None:
-    """Reject a fadump-opted provision on a host that does not advertise pseries fadump (ADR-0349).
-
-    ``requested`` is the profile's fadump opt-in (``ProfilePolicy.fadump_provisioned``);
-    ``supported`` is the bound Resource's discovered ``pseries_fadump`` capability. Fail-closed:
-    when fadump is requested but the host does not support it, raises ``CONFIGURATION_ERROR``
-    naming the QEMU floor. The caller resolves ``supported`` to ``False`` for a missing resource or
-    a host not re-discovered since ADR-0349, so an unknown host denies fadump rather than hanging.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when ``requested`` and not ``supported``.
-    """
+    """Fail closed when a requested fadump host does not advertise support (ADR-0349)."""
     if not requested or supported:
         return
     raise CategorizedError(
@@ -98,23 +69,7 @@ def require_fadump_supported(*, requested: bool, supported: bool) -> None:
 def _require_profile_matches_resource_kind(
     profile: ProvisioningProfile, profile_policy: ProfilePolicy
 ) -> None:
-    """Reject a profile whose provider section is not the bound Resource's kind (ADR-0549).
-
-    The policy is resolved from the Resource — ``runtime_for_allocation`` on the create lane,
-    ``runtime_for_system`` on reprovision — so ``profile_policy.kind`` *is* that Resource's kind.
-    A profile carrying a different section makes the policy's section-reading members dereference
-    an absent ``ProviderSection`` attribute, which raises a bare ``AttributeError`` admission does
-    not catch — or, for fault-inject, whose admission-time members read no section at all, raises
-    nothing until long after the System is stored.
-
-    Runs before ``_reject_unknown_destructive_ops`` and before any provider dereference, so the
-    mismatch is what an agent is told rather than whatever the mismatched section trips over
-    first.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` naming both the profile's provider section and
-            the Resource kind, so the caller can tell which of the two to change.
-    """
+    """Reject a provider section that differs from the bound Resource kind (ADR-0549)."""
     declared = profile.provider.kind
     if declared is profile_policy.kind:
         return

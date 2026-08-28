@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import psycopg
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.artifact_retention import gc_report_artifacts
+from kdive.reconciler.cleanup.artifacts.artifact_retention import gc_report_artifacts
 from tests.reconciler.conftest import connect
 
 

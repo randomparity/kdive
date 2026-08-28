@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, NamedTuple
+from typing import Any, BinaryIO
 from uuid import UUID
 
 import libvirt
@@ -53,7 +53,8 @@ def host_dump_volume_name(system_id: UUID) -> str:
     return f"kdive-host-dump-{system_id}.kdump"
 
 
-class HostDumpOptions(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class HostDumpOptions:
     core_build_id_from_file: CoreBuildIdFromFile
     core_dmesg_from_file: CoreDmesgFromFile
     dump_format: int

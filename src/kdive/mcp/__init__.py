@@ -11,7 +11,7 @@ it appears in ``SUPPORTED_PROTOCOL_VERSIONS``, falling back to ``LATEST_PROTOCOL
 otherwise. Asserting only the ceiling is blind in the direction that breaks clients — a
 release that drops an older supported revision leaves the ceiling untouched.
 
-``scripts/check_mcp_spec_version.py`` asserts both against the installed library on every PR.
+``scripts/guards/check_mcp_spec_version.py`` asserts both against the installed library on every PR.
 """
 
 from __future__ import annotations

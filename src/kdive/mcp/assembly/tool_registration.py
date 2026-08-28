@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from fastmcp import FastMCP
-from opentelemetry import metrics
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.service import DiagnosticsService, default_service_factory
@@ -52,12 +51,12 @@ from kdive.mcp.tools.ops.security import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops.security import secrets as ops_secrets_tools
 from kdive.mcp.tools.reports import generate as reports_generate
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
-from kdive.processes.lifecycle.worker_incarnation import WorkerDeathVerifier
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +69,7 @@ class AppAssembly:
     dump_volume_reaper: DumpVolumeReaper
     capture_reapers: Mapping[str, CaptureReaper]
     object_stores: ObjectStoreAssembly
+    debug_session_telemetry: DebugSessionTelemetry
     worker_death_verifier: WorkerDeathVerifier | None
 
 
@@ -153,7 +153,9 @@ def _vmcore_tools_registrar(
 
 
 def _debug_tools_registrar(
-    resolver: ProviderResolver, secret_registry: SecretRegistry
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    telemetry: DebugSessionTelemetry,
 ) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         debug_tools.register(
@@ -161,7 +163,7 @@ def _debug_tools_registrar(
             pool,
             resolver=resolver,
             secret_registry=secret_registry,
-            telemetry=DebugSessionTelemetry(meter=metrics.get_meter("kdive.mcp")),
+            telemetry=telemetry,
         )
 
     return _register
@@ -238,7 +240,9 @@ def _doc_resources_registrar(resolver: ProviderResolver) -> PlaneRegistrar:
 
 
 def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> None:
-    def maturity_record(meta: Mapping[str, object] | None) -> lifecycle_prompts.ToolMaturity:
+    def tool_maturity_from_meta(
+        meta: Mapping[str, object] | None,
+    ) -> lifecycle_prompts.ToolMaturity:
         meta = meta or {}
         detail = meta.get("maturity_detail")
         reason = detail.get("reason") if isinstance(detail, Mapping) else None
@@ -247,7 +251,9 @@ def _register_lifecycle_prompts(app: FastMCP, _pool: AsyncConnectionPool) -> Non
             reason=reason if isinstance(reason, str) else None,
         )
 
-    tool_maturity = {tool.name: maturity_record(tool.meta) for tool in registered_tools(app)}
+    tool_maturity = {
+        tool.name: tool_maturity_from_meta(tool.meta) for tool in registered_tools(app)
+    }
     lifecycle_prompts.register(app, tool_maturity=tool_maturity)
 
 
@@ -286,7 +292,11 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _resolver_tools_registrar(control_tools.register, assembly.resolver),
         _resolver_tools_registrar(artifacts_tools.register, assembly.resolver),
         _vmcore_tools_registrar(assembly.resolver, assembly.secret_registry),
-        _debug_tools_registrar(assembly.resolver, assembly.secret_registry),
+        _debug_tools_registrar(
+            assembly.resolver,
+            assembly.secret_registry,
+            assembly.debug_session_telemetry,
+        ),
         _introspection_tools_registrar(assembly.resolver, assembly.secret_registry),
         _pool_only_plane_registrar(ops_queue_tools.register),
         *recovery,

@@ -182,18 +182,6 @@ class RemoteLibvirtVmcoreIntrospect:
             ) from exc
 
 
-def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
-    from kdive.store.objectstore import object_store_from_env
-
-    return object_store_from_env().get_artifact(ref, None).data
-
-
-def _real_fetch_versioned_object(ref: str, version_id: str) -> bytes:  # pragma: no cover
-    from kdive.store.objectstore import object_store_from_env
-
-    return object_store_from_env().get_artifact(ref, None, version_id=version_id).data
-
-
 class RemoteLibvirtLiveIntrospect:
     """In-guest drgn-live over the qemu-guest-agent seam (ADR-0079/0083 §4).
 

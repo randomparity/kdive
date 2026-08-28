@@ -16,7 +16,7 @@ import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db.repositories import ARTIFACTS
 from kdive.providers.ports.console import ConsoleSnapshot

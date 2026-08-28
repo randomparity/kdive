@@ -22,6 +22,7 @@ from kdive.mcp.tools.catalog.artifacts.reads import (
     ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
     ARTIFACT_GET_WINDOW_MAX_BYTES,
     ArtifactsGetRequest,
+    ArtifactsListRequest,
     artifacts_get,
     artifacts_list,
 )
@@ -164,7 +165,7 @@ def test_artifacts_list_returns_redacted_only(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, red_id = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_list(pool, _ctx(), system_id=sys_id)
+            resp = await artifacts_list(pool, _ctx(), ArtifactsListRequest(system_id=sys_id))
         ids = {r.object_id for r in resp.items}
         assert ids == {red_id}  # the sensitive row is never surfaced
 
@@ -175,7 +176,7 @@ def test_artifacts_list_bounded_page_carries_truncated_and_null_cursor(migrated_
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_list(pool, _ctx(), system_id=sys_id)
+            resp = await artifacts_list(pool, _ctx(), ArtifactsListRequest(system_id=sys_id))
         assert resp.data["truncated"] is False
         assert resp.data["next_cursor"] is None  # a page that fits carries no continuation
         assert "total" not in resp.data  # keyset lists report truncation, not a page-size total
@@ -202,10 +203,14 @@ def test_artifacts_list_keyset_paginates_over_limit(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             seeded = {await _seed_console(pool, sys_id, f"console-{i:03d}") for i in range(3)}
-            first = await artifacts_list(pool, _ctx(), system_id=sys_id, limit=2)
+            first = await artifacts_list(
+                pool, _ctx(), ArtifactsListRequest(system_id=sys_id, limit=2)
+            )
             cursor = first.data["next_cursor"]
             assert isinstance(cursor, str)
-            second = await artifacts_list(pool, _ctx(), system_id=sys_id, limit=2, cursor=cursor)
+            second = await artifacts_list(
+                pool, _ctx(), ArtifactsListRequest(system_id=sys_id, limit=2, cursor=cursor)
+            )
         collected = [r.object_id for r in first.items] + [r.object_id for r in second.items]
         return seeded, collected, bool(first.data["truncated"]), bool(second.data["truncated"])
 
@@ -222,7 +227,9 @@ def test_artifacts_list_rejects_foreign_cursor(migrated_url: str) -> None:
     async def _run() -> Any:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
-            return await artifacts_list(pool, _ctx(), system_id=sys_id, cursor="not-a-valid-cursor")
+            return await artifacts_list(
+                pool, _ctx(), ArtifactsListRequest(system_id=sys_id, cursor="not-a-valid-cursor")
+            )
 
     resp = asyncio.run(_run())
     assert resp.status == "error"
@@ -235,7 +242,7 @@ def test_artifacts_list_requires_viewer_role(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
             with pytest.raises(AuthorizationError):
-                await artifacts_list(pool, _ctx(role=None), system_id=sys_id)
+                await artifacts_list(pool, _ctx(role=None), ArtifactsListRequest(system_id=sys_id))
 
     asyncio.run(_run())
 
@@ -754,7 +761,9 @@ def test_artifacts_list_cross_project_is_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
-            resp = await artifacts_list(pool, _ctx(projects=("other",)), system_id=sys_id)
+            resp = await artifacts_list(
+                pool, _ctx(projects=("other",)), ArtifactsListRequest(system_id=sys_id)
+            )
         assert resp.items == []
 
     asyncio.run(_run())
@@ -763,7 +772,7 @@ def test_artifacts_list_cross_project_is_empty(migrated_url: str) -> None:
 def test_artifacts_list_malformed_system_id_is_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await artifacts_list(pool, _ctx(), system_id="not-a-uuid")
+            resp = await artifacts_list(pool, _ctx(), ArtifactsListRequest(system_id="not-a-uuid"))
         assert resp.items == []
 
     asyncio.run(_run())
@@ -790,7 +799,7 @@ def test_artifacts_list_excludes_quarantined(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, red_id = await _seed_system_with_artifacts(pool)
             quar_id = await _seed_quarantined_artifact(pool, sys_id)
-            resp = await artifacts_list(pool, _ctx(), system_id=sys_id)
+            resp = await artifacts_list(pool, _ctx(), ArtifactsListRequest(system_id=sys_id))
         ids = {r.object_id for r in resp.items}
         assert quar_id not in ids
         assert red_id in ids

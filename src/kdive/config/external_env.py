@@ -2,16 +2,17 @@
 
 The runtime settings the processes read flow through the config registry
 (:func:`kdive.config.all_settings`) and are auto-documented by
-``scripts/gen_config_reference.py``. A second class of ``KDIVE_*`` variables is read **outside**
-the registry — by the gated test suites, the operator setup/live-stack shell scripts, the in-guest
-capture/install helpers, and the image/wheel build. Those cannot go through ``kdive.config`` (a
+``scripts/generate/gen_config_reference.py``. A second class of ``KDIVE_*`` variables is read
+**outside** the registry — by the gated test suites, operator setup/live-stack shell scripts,
+in-guest capture/install helpers, and the image/wheel build. Those cannot go through
+``kdive.config`` (a
 bash helper has no Python import; a build arg is not a process setting), so they are catalogued
 here by hand.
 
 This module is the single source of truth for that second class. The config-reference generator
 renders it into a second section of ``docs/guide/reference/config.md``, and
-``scripts/check_env_documented.py`` treats every name here as documented — so a new non-registry
-variable fails CI until it is added.
+``scripts/guards/check_env_documented.py`` treats every name here as documented — so a new
+non-registry variable fails CI until it is added.
 """
 
 from __future__ import annotations
@@ -340,27 +341,6 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Positive whole-second wall-clock bound for each `apt-get install` in "
         "scripts/apt-install.sh; `apt-get update` is capped at 60s independently. Raised by "
         "live.yml for its larger host-dep set (ADR-0566, #1978).",
-    ),
-    ExternalEnvVar(
-        "KDIVE_CUTOVER_OPERATION_TIMEOUT_SECONDS",
-        "script",
-        "600",
-        "Positive whole-second monotonic bound for each external database, Docker, Helm, "
-        "Kubernetes, image, or migration operation in the protocol cutover wrappers.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_CUTOVER_DB_CONNECT_TIMEOUT_SECONDS",
-        "script",
-        "10",
-        "Positive whole-second PostgreSQL connection bound exported by the protocol cutover "
-        "wrappers for each database operation.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_CUTOVER_DB_STATEMENT_TIMEOUT_SECONDS",
-        "script",
-        "300",
-        "Positive whole-second server-side statement bound exported by the protocol cutover "
-        "wrappers for each database operation.",
     ),
     # live-vm guest-image stores (#1292, ADR-0388): scripts/live-vm/{warm-store,stage-tcg-images}.sh
     ExternalEnvVar(

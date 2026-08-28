@@ -13,9 +13,6 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import IllegalTransition, InvestigationState, SystemState
 from kdive.domain.lifecycle.records import Investigation
-from kdive.domain.operations.jobs import JobKind
-from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, SystemPayload
 from kdive.log import bind_context
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
@@ -31,6 +28,7 @@ from kdive.services.investigations.common import (
     resolve_contributor_investigation,
     validate_text,
 )
+from kdive.services.job_ports import TeardownJobPort
 
 # A System is "bound and live" — and so blocks/needs a forced teardown at close — when it names
 # this Investigation and has not reached a terminal state (ADR-0441 §7). `torn_down` and `failed`
@@ -138,7 +136,13 @@ def _require_admin_for_force(ctx: RequestContext, uid: UUID, project: str) -> No
 
 
 async def _couple_bound_systems(
-    conn: AsyncConnection, ctx: RequestContext, uid: UUID, *, project: str, force: bool
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    uid: UUID,
+    *,
+    project: str,
+    force: bool,
+    jobs: TeardownJobPort,
 ) -> None:
     """Refuse the close (default) or force-teardown (all-or-nothing) any bound live Systems.
 
@@ -175,16 +179,12 @@ async def _couple_bound_systems(
             ),
             data={"reprovisioning_systems": list(ids)},
         )
-    authorizing = Authorizing(
-        principal=ctx.principal, agent_session=ctx.agent_session, project=project
-    )
     for system_id in live:
-        await queue.enqueue(
+        await jobs.enqueue_teardown(
             conn,
-            JobKind.TEARDOWN,
-            SystemPayload(system_id=str(system_id)),
-            authorizing,
-            f"{system_id}:teardown",
+            ctx,
+            project=project,
+            system_id=system_id,
         )
 
 
@@ -196,6 +196,7 @@ async def _close_locked(
     summary: str,
     project: str,
     force: bool,
+    jobs: TeardownJobPort,
 ) -> Investigation:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
         current = await INVESTIGATIONS.get(conn, uid)
@@ -213,7 +214,7 @@ async def _close_locked(
                 detail="cannot close an abandoned Investigation",
                 data={"current_status": "abandoned"},
             )
-        await _couple_bound_systems(conn, ctx, uid, project=project, force=force)
+        await _couple_bound_systems(conn, ctx, uid, project=project, force=force, jobs=jobs)
         old = current.state
         updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
         await conn.execute(
@@ -245,6 +246,7 @@ async def close_investigation_record(
     raw_id: str,
     summary: str,
     force: bool = False,
+    jobs: TeardownJobPort,
 ) -> Investigation:
     """Drive an Investigation to `closed`, recording a required summary of the work.
 
@@ -257,7 +259,13 @@ async def close_investigation_record(
             inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
             try:
                 return await _close_locked(
-                    conn, ctx, uid, summary=summary, project=inv.project, force=force
+                    conn,
+                    ctx,
+                    uid,
+                    summary=summary,
+                    project=inv.project,
+                    force=force,
+                    jobs=jobs,
                 )
             except IllegalTransition:
                 async with pool.connection() as conn2:

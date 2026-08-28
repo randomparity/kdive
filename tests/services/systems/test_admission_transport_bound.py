@@ -22,6 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import ErrorCategory
+from kdive.jobs.service_operations import JobOperations
 from kdive.mcp.tools.lifecycle.systems.provision import _admission_response
 from kdive.profiles.provisioning import RootfsSource
 from kdive.services.systems.admission import (
@@ -61,6 +62,7 @@ def _admission(
         _TEST_PROFILE_POLICY,
         _TEST_COMPONENT_SOURCES,
         rootfs_validator,
+        JobOperations(),
         premutation_timeout_s=premutation_timeout_s,
         timeout_factory=timeout_factory,
     )

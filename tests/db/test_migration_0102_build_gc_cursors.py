@@ -7,24 +7,18 @@ import psycopg
 from kdive.db import migrate
 
 
-def test_0102_seeds_public_build_gc_lanes(pg_conn: psycopg.Connection) -> None:
+def test_0102_is_retained_in_migration_history(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
 
-    rows = pg_conn.execute(
-        "SELECT lane, after_id FROM build_artifact_gc_cursors ORDER BY lane"
-    ).fetchall()
-
-    assert rows == [
-        ("closed-investigations", None),
-        ("closed-legacy-artifacts", None),
-        ("expired-legacy-artifacts", None),
-    ]
+    assert pg_conn.execute(
+        "SELECT version FROM schema_migrations WHERE version = '0102'"
+    ).fetchone() == ("0102",)
 
 
 def test_0102_precedes_worker_incarnation_migration() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(migration.version, migration.filename) for migration in migrations[-17:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-18:]] == [
         ("0102", "0102_build_artifact_gc_cursors.sql"),
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
@@ -42,4 +36,5 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0116", "0116_capture_claimable_queue_depth.sql"),
         ("0117", "0117_worker_bootstrap_key_insert.sql"),
         ("0118", "0118_worker_audit_log_insert.sql"),
+        ("0119", "0119_drop_obsolete_build_gc_cursors.sql"),
     ]

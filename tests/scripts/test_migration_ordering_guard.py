@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.migration_ordering_guard import GuardError, find_violations, parse_version
+from scripts.guards.migration_ordering_guard import GuardError, find_violations, parse_version
 
 
 def _names(hits) -> list[str]:
@@ -151,7 +151,7 @@ def _run(
     how `just migration-order-check` invokes it, and therefore the only path CI takes.
     Running it as `python3` with no venv also holds it to its stdlib-only contract.
     """
-    guard = Path(__file__).resolve().parents[2] / "scripts/migration_ordering_guard.py"
+    guard = Path(__file__).resolve().parents[2] / "scripts/guards/migration_ordering_guard.py"
     argv = ["python3", str(guard)] + ([] if base_ref is None else [base_ref])
     return subprocess.run(argv, cwd=cwd or repo, capture_output=True, text=True)
 

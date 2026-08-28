@@ -30,14 +30,14 @@ require_exact_file() {
 require_compatible_lifecycle() {
   local expected installed
   expected="$("$py" -I -c \
-    'import sys; sys.path.insert(0, sys.argv[1]); from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
+    'import sys; sys.path.insert(0, sys.argv[1]); from kdive.processes.lifecycle.systemd.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
     "${repo_root}/src" \
     2>/dev/null)" || {
     echo "checkout lifecycle compatibility probe failed" >&2
     return 1
   }
   installed="$(env -u PYTHONPATH "$WORKER_PYTHON" -I -c \
-    'from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
+    'from kdive.processes.lifecycle.systemd.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
     2>/dev/null)" || {
     echo "installed lifecycle protocol is unavailable; reprovision the runner" >&2
     return 1
@@ -199,8 +199,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from kdive.processes.lifecycle.systemd_worker_control import ProtocolRejected, request_path
-from kdive.processes.lifecycle.systemd_worker_contract import LifecycleRequest, client_exit_status
+from kdive.processes.lifecycle.systemd.systemd_worker_control import ProtocolRejected, request_path
+from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleRequest, client_exit_status
 
 try:
     operation = os.environ["KDIVE_LIFECYCLE_OPERATION"]

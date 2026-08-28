@@ -75,6 +75,8 @@ def _append_schema_terms(value: object, terms: list[str], *, depth: int = 0) -> 
                 return
             if key == "properties" and isinstance(child, dict):
                 for prop_name, prop_schema in child.items():
+                    if len(terms) >= _SCHEMA_TERM_LIMIT:
+                        return
                     terms.append(str(prop_name))
                     _append_schema_terms(prop_schema, terms, depth=depth + 1)
                 continue
@@ -82,7 +84,8 @@ def _append_schema_terms(value: object, terms: list[str], *, depth: int = 0) -> 
                 terms.extend(str(item) for item in child[: _SCHEMA_TERM_LIMIT - len(terms)])
                 continue
             if key in {"$defs", "definitions", "mapping"} and isinstance(child, dict):
-                terms.extend(str(name) for name in child)
+                remaining = _SCHEMA_TERM_LIMIT - len(terms)
+                terms.extend(str(name) for name in list(child)[:remaining])
                 _append_schema_terms(child, terms, depth=depth + 1)
                 continue
             if key == "discriminator" and isinstance(child, dict):

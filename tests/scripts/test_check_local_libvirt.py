@@ -1,5 +1,5 @@
 # tests/scripts/test_check_local_libvirt.py
-"""Behavioral tests for scripts/check-local-libvirt.sh.
+"""Behavioral tests for scripts/operations/check-local-libvirt.sh.
 
 Runtime state is faked via PATH stubs (virsh, id) and the KDIVE_KVM_NODE override,
 so the script's pass/fail paths run without a real libvirt host.
@@ -12,7 +12,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-local-libvirt.sh"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "operations" / "check-local-libvirt.sh"
 BASH = shutil.which("bash")
 
 
@@ -70,7 +70,7 @@ def test_all_healthy_exits_zero(tmp_path: Path) -> None:
 
 def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None:
     """With KDIVE_PYTHON unset, the guestfs/drgn probe autodetects the repo .venv even under a
-    relative invocation (`bash scripts/check-local-libvirt.sh` from the repo root, #1328).
+    relative invocation (running the operations script from the repo root, #1328).
 
     The planted repo venv can import guestfs+drgn; system python3 on PATH cannot. A relative
     invocation must still resolve the venv ($PWD-anchored), so the probe reports OK, not fail.
@@ -78,8 +78,9 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
     assert BASH is not None
     repo = tmp_path / "repo"
     scripts = repo / "scripts"
-    scripts.mkdir(parents=True)
-    shutil.copy(SCRIPT, scripts / "check-local-libvirt.sh")
+    operations = scripts / "operations"
+    operations.mkdir(parents=True)
+    shutil.copy(SCRIPT, operations / "check-local-libvirt.sh")
     venv_bin = repo / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
     _stub_python(venv_bin, "python", imports_ok=True)  # the repo venv can import guestfs, drgn
@@ -99,7 +100,7 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
     (boot / "vmlinuz-test").write_text("")
 
     result = subprocess.run(
-        [BASH, "scripts/check-local-libvirt.sh"],  # relative path; KDIVE_PYTHON unset
+        [BASH, "scripts/operations/check-local-libvirt.sh"],  # relative path; KDIVE_PYTHON unset
         cwd=str(repo),
         env={
             "PATH": str(bindir),

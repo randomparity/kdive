@@ -53,7 +53,7 @@ from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
 from kdive.cli.commands.registry import HANDLER_OVERRIDES
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
-from scripts import gen_cli_verbs as gen
+from scripts.generate import gen_cli_verbs as gen
 
 _OK_ENVELOPE = {"object_id": "o", "status": "ok", "data": {}, "items": []}
 

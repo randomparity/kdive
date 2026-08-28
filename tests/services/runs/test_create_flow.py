@@ -28,7 +28,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, System
-from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
+from kdive.reconciler.cleanup.artifacts.artifact_retention import gc_expired_build_artifacts
 from kdive.security.audit import args_digest
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
@@ -150,7 +150,13 @@ async def _create(
     *,
     recorder: _Recorder | None = None,
 ):
-    return await create_run(pool, ctx, request, resolver=provider_resolver(), recorder=recorder)
+    return await create_run(
+        pool,
+        ctx,
+        request,
+        available_target_kinds=provider_resolver().registered_kinds(),
+        recorder=recorder,
+    )
 
 
 async def _fetchall(pool: AsyncConnectionPool, query: LiteralString, params: tuple) -> list[tuple]:

@@ -20,7 +20,7 @@ metadata:
   {{- end }}
 data:
   {{- range $k, $v := .Values.config }}
-  {{- if not (or (eq $k "KDIVE_DATABASE_URL") (eq $k "KDIVE_S3_ENDPOINT_URL") (eq $k "KDIVE_OIDC_ISSUER") (eq $k "KDIVE_OIDC_JWKS_URI") (eq $k "KDIVE_LOCAL_LIBVIRT_ENABLED")) }}
+  {{- if not (or (eq $k "KDIVE_S3_ENDPOINT_URL") (eq $k "KDIVE_OIDC_ISSUER") (eq $k "KDIVE_OIDC_JWKS_URI") (eq $k "KDIVE_LOCAL_LIBVIRT_ENABLED")) }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}
   {{- end }}

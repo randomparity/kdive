@@ -34,6 +34,7 @@ from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import (
     ArtifactsGetRequest,
+    ArtifactsListRequest,
     artifacts_get,
     artifacts_list,
 )
@@ -272,7 +273,7 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
                 pool, ctx, request=ArtifactsGetRequest(artifact_id=core_id)
             )
             refs.extend(published.refs.values())
-            listed = await artifacts_list(pool, ctx, system_id=sys_id)
+            listed = await artifacts_list(pool, ctx, ArtifactsListRequest(system_id=sys_id))
             for r in listed.items:
                 refs.extend(r.refs.values())
                 got = await artifacts_get(

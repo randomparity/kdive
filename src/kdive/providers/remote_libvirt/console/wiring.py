@@ -19,6 +19,7 @@ from uuid import UUID
 import libvirt
 import psycopg
 
+from kdive.artifacts.console.rotation import part_object_name
 from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     FetchedArtifact,
@@ -27,7 +28,6 @@ from kdive.artifacts.storage import (
     owner_prefix,
 )
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.providers.console_parts.rotation import part_object_name
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
 from kdive.providers.remote_libvirt.console.collector import ConsoleStream

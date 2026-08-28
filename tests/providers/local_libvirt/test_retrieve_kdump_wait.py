@@ -9,7 +9,7 @@ tested with fakes; only the live libvirt probe/sleep wiring is ``live_vm``-gated
 
 from __future__ import annotations
 
-from kdive.providers.local_libvirt.retrieve import (
+from kdive.providers.local_libvirt.retrieve.guestfs import (
     _KDUMP_SETTLE_POLL_INTERVAL_S,
     _KDUMP_SETTLE_TIMEOUT_S,
     _poll_until_settled,

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import LiteralString
+from typing import LiteralString, TypedDict, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -39,6 +39,18 @@ class _TargetKindLookup:
     object_kind: str
     sql: LiteralString
     required_role: Role
+
+
+class _ProjectRow(TypedDict):
+    project: str
+
+
+class _BoundRunRow(_ProjectRow):
+    system_id: UUID | None
+
+
+class _TargetKindRow(_ProjectRow):
+    kind: str | None
 
 
 _AUTHORIZED_ALLOCATION: LiteralString = "SELECT a.project FROM allocations a WHERE a.id = %s"
@@ -101,9 +113,9 @@ async def _authorize_object(
 ) -> None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(lookup.sql, (uid,))
-        row = await cur.fetchone()
-    row = _authorize_row(row, ctx, uid, lookup.object_kind, lookup.required_role)
-    if lookup.requires_bound_run and row["system_id"] is None:
+        raw_row = await cur.fetchone()
+    _authorize_project(raw_row, ctx, uid, lookup.object_kind, lookup.required_role)
+    if lookup.requires_bound_run and cast(_BoundRunRow, raw_row)["system_id"] is None:
         raise CategorizedError(
             f"{lookup.object_kind} {uid} is not bound to a system",
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -119,8 +131,9 @@ async def _authorized_target_kind(
 ) -> ResourceKind:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(lookup.sql, (uid,))
-        row = await cur.fetchone()
-    row = _authorize_row(row, ctx, uid, lookup.object_kind, lookup.required_role)
+        raw_row = await cur.fetchone()
+    _authorize_project(raw_row, ctx, uid, lookup.object_kind, lookup.required_role)
+    row = cast(_TargetKindRow, raw_row)
     if row["kind"] is None:
         raise CategorizedError(
             f"{lookup.object_kind} {uid} has no resolved provider resource",
@@ -130,13 +143,13 @@ async def _authorized_target_kind(
     return ResourceKind(row["kind"])
 
 
-def _authorize_row(
-    row: dict[str, object] | None,
+def _authorize_project(
+    row: Mapping[str, object] | None,
     ctx: RequestContext,
     uid: UUID,
     object_kind: str,
     required_role: Role,
-) -> dict[str, object]:
+) -> str:
     if row is None:
         raise CategorizedError(
             f"{object_kind} {uid} was not found",
@@ -151,7 +164,7 @@ def _authorize_row(
             details={"object_kind": object_kind, "object_id": str(uid)},
         )
     require_role(ctx, project, required_role)
-    return row
+    return project
 
 
 async def _with_bound_runtime_for_object(

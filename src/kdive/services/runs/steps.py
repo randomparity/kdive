@@ -25,10 +25,10 @@ from kdive.domain.lifecycle.run_steps import (
 )
 from kdive.domain.platform.arch_traits import arch_traits
 from kdive.images.families._fedora_customize import READINESS_MARKER
-from kdive.jobs import queue
 from kdive.profiles.provider_policy import ProfilePolicy, capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.serialization import JsonValue
+from kdive.services.job_ports import JobQueryPort
 
 # Disable KASLR on a gdbstub-debug boot so the running kernel's base matches the fetched
 # vmlinux's link-time symbol addresses. With CONFIG_RANDOMIZE_BASE=y (the kdump fragment
@@ -292,7 +292,9 @@ class BootAttempt:
         }
 
 
-async def failed_boot_attempt(conn: AsyncConnection, run_id: UUID) -> BootAttempt | None:
+async def failed_boot_attempt(
+    conn: AsyncConnection, run_id: UUID, jobs: JobQueryPort
+) -> BootAttempt | None:
     """Return the Run's boot job iff it is terminally ``failed`` (#750, ADR-0230).
 
     Looks the boot job up by its deterministic ``dedup_key`` (``f"{run_id}:boot"``, matching
@@ -300,7 +302,7 @@ async def failed_boot_attempt(conn: AsyncConnection, run_id: UUID) -> BootAttemp
     ``queued``/``running``/``succeeded`` (an attempt in flight or already done) — only a terminal
     ``failed`` job is reportable boot-failure evidence.
     """
-    job = await queue.get_by_dedup_key(conn, f"{run_id}:boot")
+    job = await jobs.find_by_dedup_key(conn, f"{run_id}:boot")
     if job is None or job.state is not JobState.FAILED:
         return None
     return BootAttempt(job_id=job.id, error_category=job.error_category)

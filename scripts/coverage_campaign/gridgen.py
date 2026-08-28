@@ -14,9 +14,11 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.assembly.app import build_app
+from kdive.assembly import ProcessAssembly
+from kdive.mcp.assembly.app import build_app_from_assembly
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
 from kdive.mcp.tools import _docmeta
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
 from kdive.store.objectstore import ObjectStore
@@ -44,12 +46,16 @@ def _build_tools() -> list[FunctionTool]:
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
+    registry = SecretRegistry()
     object_stores = ObjectStoreAssembly(store=cast(ObjectStore, object()))
-    app = build_app(
+    process = ProcessAssembly(
+        object_stores,
+        ProviderComposition(secret_registry=registry, object_store=object_stores.store),
+    )
+    app = build_app_from_assembly(
         pool,
         verifier=verifier,
-        object_store_assembly=object_stores,
-        secret_registry=SecretRegistry(),
+        process_assembly=process,
     )
     return cast(list[FunctionTool], asyncio.run(app.list_tools()))
 

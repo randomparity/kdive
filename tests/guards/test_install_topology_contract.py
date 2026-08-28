@@ -101,10 +101,8 @@ def test_compose_worker_fence_guidance_uses_the_public_stop_workflow(
         positions.append(section.index(step))
     assert positions == sorted(positions), path
     assert "raw docker/compose commands" in section, path
-    assert (
-        "do not invoke `python -m kdive.processes.lifecycle.compose_worker_lifecycle` directly"
-        in section
-    ), path
+    lifecycle_command = "python -m kdive.processes.lifecycle.compose.compose_worker_lifecycle"
+    assert f"do not invoke `{lifecycle_command}` directly" in section, path
 
 
 @pytest.mark.parametrize(

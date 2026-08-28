@@ -119,7 +119,7 @@ class _SystemsListPayload(ToolPayload):
         """Convert the public MCP payload into the handler request record."""
         return _SystemsListRequest(
             allocation_id=self.allocation_id,
-            state=self.state.value if self.state is not None else None,
+            state=self.state,
             shape=self.shape,
             pcie=self.pcie,
             limit=self.limit,
@@ -256,7 +256,9 @@ def _register_systems_get(
 
         ``data.supports_snapshots`` is whether the backing provider can checkpoint/restore this
         System (``systems.snapshot`` / ``systems.restore``); ``false`` for a provider with no
-        snapshot support.
+        snapshot support. ``data.supports_traffic_capture`` likewise reports whether the provider
+        can capture this System's traffic. Both capability fields are absent when the System's
+        provider is no longer registered.
         """
         return await _get_system(pool, current_context(), system_id, resolver=resolver)
 
@@ -370,7 +372,7 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        ``request.cursor`` for the next page.
         """
         return await _list_systems(
             pool,

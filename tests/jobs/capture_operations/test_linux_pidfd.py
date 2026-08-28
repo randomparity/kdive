@@ -9,7 +9,7 @@ import signal
 
 import pytest
 
-from kdive.jobs.capture_operations import linux_pidfd
+from kdive.jobs.capture_operations.process import linux_pidfd
 
 
 class _Function:

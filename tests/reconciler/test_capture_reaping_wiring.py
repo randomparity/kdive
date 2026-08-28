@@ -16,7 +16,7 @@ from kdive.providers.infra.reaping import (
 from kdive.providers.local_libvirt.reaping import LocalLibvirtCaptureReaper
 from kdive.providers.remote_libvirt.reaping.capture import RemoteLibvirtCaptureReaper
 from kdive.reconciler import loop
-from kdive.reconciler.cleanup import provider_reaping
+from kdive.reconciler.cleanup.provider_resources import capture_reaping
 from kdive.reconciler.loop import ReconcileConfig, ReconcileReport
 from tests.reconcile_helpers import make_reconcile_config
 
@@ -38,7 +38,7 @@ def test_the_capture_sweep_is_a_named_catalog_repair_with_a_report_field() -> No
     assert "reaped_captures" in loop.ALL_REPAIR_KINDS
     assert "reaped_captures" in names
     assert "reaped_captures" in {field.name for field in fields(ReconcileReport)}
-    assert "reaped_captures" in loop._REPORT_FIELDS
+    assert "reaped_captures" in {entry.report_field for entry in loop._REPAIR_CATALOG}
 
 
 def test_the_capture_sweep_runs_after_the_abandoned_job_repair() -> None:
@@ -123,11 +123,11 @@ def test_a_disabled_provider_contributes_no_capture_reaper() -> None:
 
 
 def test_the_pacing_defaults_are_the_documented_ones() -> None:
-    assert timedelta(minutes=30) == provider_reaping.DEFAULT_CAPTURE_SETTLE
-    assert provider_reaping.DEFAULT_CAPTURE_REAP_BATCH == 25
-    assert timedelta(minutes=5) == provider_reaping.DEFAULT_CAPTURE_RETRY_BASE
-    assert timedelta(hours=6) == provider_reaping.DEFAULT_CAPTURE_RETRY_CAP
-    assert loop.DEFAULT_CAPTURE_SETTLE is provider_reaping.DEFAULT_CAPTURE_SETTLE
+    assert timedelta(minutes=30) == capture_reaping.DEFAULT_CAPTURE_SETTLE
+    assert capture_reaping.DEFAULT_CAPTURE_REAP_BATCH == 25
+    assert timedelta(minutes=5) == capture_reaping.DEFAULT_CAPTURE_RETRY_BASE
+    assert timedelta(hours=6) == capture_reaping.DEFAULT_CAPTURE_RETRY_CAP
+    assert loop.DEFAULT_CAPTURE_SETTLE is capture_reaping.DEFAULT_CAPTURE_SETTLE
 
 
 def test_the_on_demand_reconcile_pass_runs_the_same_capture_lane() -> None:

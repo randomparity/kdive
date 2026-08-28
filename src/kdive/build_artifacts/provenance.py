@@ -105,7 +105,7 @@ def dirty_tracked_files(
     ``git -C <tree> diff --name-only -z HEAD`` lists every tracked path whose working-tree content
     differs from ``HEAD`` (modified, added-to-index, or deleted), NUL-separated so paths with
     unusual characters need no quote parsing. Untracked files are not reported (use
-    :func:`has_untracked_files`). Returns an empty list on a clean tracked state (the probe
+    :func:`probe_untracked_files`). Returns an empty list on a clean tracked state (the probe
     succeeded with no changes) and ``None`` (unknowable) when ``tree`` is empty, not a git work
     tree, has no ``HEAD``, or any git/OS error occurs — so a failed probe omits the key rather
     than reporting a spurious empty list. Captures git-tracked content only (gitignored paths are
@@ -117,7 +117,7 @@ def dirty_tracked_files(
     return [path for path in out.split("\0") if path]
 
 
-def has_untracked_files(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> bool | None:
+def probe_untracked_files(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> bool | None:
     """Return whether the staged ``tree`` has non-ignored untracked files (#938, ADR-0282).
 
     ``True`` iff ``git -C <tree> ls-files --others --exclude-standard -z`` lists any path.

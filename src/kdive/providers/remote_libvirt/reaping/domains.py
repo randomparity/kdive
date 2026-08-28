@@ -33,7 +33,7 @@ import libvirt
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.remote_libvirt.connection.transport import RemoteLibvirtConnections
-from kdive.providers.remote_libvirt.lifecycle.gdb import DOMAIN_PREFIX
+from kdive.providers.remote_libvirt.lifecycle.port_allocation import DOMAIN_PREFIX
 from kdive.providers.remote_libvirt.lifecycle.storage import Pool, delete_volume
 from kdive.providers.remote_libvirt.lifecycle.xml import disk_pool_strict, overlay_volume_name
 from kdive.providers.remote_libvirt.reaping.connections import (

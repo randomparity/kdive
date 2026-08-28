@@ -53,6 +53,12 @@ class _InstallPlan:
     crashkernel: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _SettledTask:
+    cancelled: bool
+    error: BaseException | None = None
+
+
 async def install_handler(
     conn: AsyncConnection,
     job: Job,
@@ -272,6 +278,22 @@ async def _wait_through_cancellation(task: asyncio.Task[object]) -> bool:
     return cancelled
 
 
+async def _settle_task(
+    task: asyncio.Task[object], *, preserve_task_cancellation: bool = False
+) -> _SettledTask:
+    """Drain a cleanup-sensitive task and retain its caller-visible outcome."""
+    cancelled = await _drain_through_cancellation(task)
+    try:
+        task.result()
+    except asyncio.CancelledError as exc:
+        if not preserve_task_cancellation:
+            raise
+        return _SettledTask(cancelled=cancelled, error=exc)
+    except Exception as exc:
+        return _SettledTask(cancelled=cancelled, error=exc)
+    return _SettledTask(cancelled=cancelled)
+
+
 async def _abandon_claim_through_cancellation(conn: AsyncConnection, run_id: UUID) -> bool:
     cleanup = asyncio.create_task(abandon_run_step_best_effort(conn, run_id, "install"))
     return await _wait_through_cancellation(cleanup)
@@ -301,59 +323,47 @@ async def _run_install_step(
     except Exception, asyncio.CancelledError:
         await _abandon_claim_through_cancellation(conn, run_id)
         raise
-    claim_abandoned = False
-    provider_error: Exception | None = None
-    provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
-    cancelled = await _drain_through_cancellation(provider_task)
     try:
-        provider_task.result()
-    except Exception as exc:
-        provider_error = exc
-        cancelled = await _abandon_claim_through_cancellation(conn, run_id) or cancelled
-        claim_abandoned = True
-    if cancelled and not claim_abandoned:
-        cancelled = await _abandon_claim_through_cancellation(conn, run_id) or cancelled
-        claim_abandoned = True
-
-    release = asyncio.create_task(
-        release_build_use(
-            conn,
-            use_id,
-            incarnation_credential=incarnation_credential,
+        provider_task = asyncio.create_task(asyncio.to_thread(installer.install, request))
+        provider = await _settle_task(provider_task)
+        claim_abandoned = provider.cancelled or provider.error is not None
+        abandon_cancelled = (
+            await _abandon_claim_through_cancellation(conn, run_id) if claim_abandoned else False
         )
-    )
-    release_cancelled = await _drain_through_cancellation(release)
-    cancelled = release_cancelled or cancelled
-    release_error: BaseException | None = None
-    try:
-        release.result()
-    except (Exception, asyncio.CancelledError) as exc:
-        release_error = exc
-    if (release_cancelled or release_error is not None) and not claim_abandoned:
+    finally:
+        release_task = asyncio.create_task(
+            release_build_use(
+                conn,
+                use_id,
+                incarnation_credential=incarnation_credential,
+            )
+        )
+        release = await _settle_task(release_task, preserve_task_cancellation=True)
+    cancelled = provider.cancelled or abandon_cancelled or release.cancelled
+    if (release.cancelled or release.error is not None) and not claim_abandoned:
         cancelled = await _abandon_claim_through_cancellation(conn, run_id) or cancelled
-        claim_abandoned = True
 
     if cancelled:
-        if provider_error is not None and release_error is not None:
+        if provider.error is not None and release.error is not None:
             _log.warning(
                 "build-use release failed after provider failure for run %s; "
                 "preserving cancellation outcome (%s, %s)",
                 run_id,
-                type(provider_error).__name__,
-                type(release_error).__name__,
+                type(provider.error).__name__,
+                type(release.error).__name__,
             )
         raise asyncio.CancelledError
-    if provider_error is not None:
-        if release_error is not None:
+    if provider.error is not None:
+        if release.error is not None:
             _log.warning(
                 "build-use release failed after provider failure for run %s; "
                 "preserving provider outcome (%s)",
                 run_id,
-                type(release_error).__name__,
+                type(release.error).__name__,
             )
-        raise provider_error
-    if release_error is not None:
-        raise release_error
+        raise provider.error
+    if release.error is not None:
+        raise release.error
     return True
 
 

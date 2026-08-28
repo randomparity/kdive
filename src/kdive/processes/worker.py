@@ -12,20 +12,20 @@ import kdive.config as config
 from kdive.config.core_settings import WORKER_ACCEPTED_LANES
 from kdive.db.pool import create_pool
 from kdive.jobs.worker import worker_pool_floor
-from kdive.processes.lifecycle.worker_incarnation import (
-    worker_incarnation_credential,
-    worker_incarnation_id,
-)
 from kdive.processes.runtime import (
     HEARTBEAT_STALE_SECONDS,
     install_stop,
     readiness,
     run_process_runtime,
 )
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     WorkerIncarnation,
     authenticate_worker_incarnation,
+)
+from kdive.worker_lifecycle.worker_incarnation import (
+    worker_incarnation_credential,
+    worker_incarnation_id,
 )
 
 # The historic pool ceiling. Kept as a floor of its own so a single-lane worker keeps the same
@@ -54,13 +54,13 @@ def _validate_worker_incarnation(
 
 
 def _capture_host_identity(incarnation: WorkerIncarnation) -> str:
-    binding_key = {
-        "local": "host",
-        "docker": "container_id",
-        "kubernetes": "uid",
-    }[incarnation.authority_kind]
-    identity = incarnation.authority_binding.get(binding_key)
-    if not isinstance(identity, str) or not 1 <= len(identity.encode()) <= 512:
+    if incarnation.authority_kind == "local":
+        identity = incarnation.authority_binding["host"]
+    elif incarnation.authority_kind == "docker":
+        identity = incarnation.authority_binding["container_id"]
+    else:
+        identity = incarnation.authority_binding["uid"]
+    if not 1 <= len(identity.encode()) <= 512:
         raise RuntimeError("authenticated worker incarnation has no valid capture host identity")
     return identity
 
@@ -68,9 +68,12 @@ def _capture_host_identity(incarnation: WorkerIncarnation) -> str:
 async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
     from kdive.health.processes.server import build_postgres_ping
     from kdive.health.processes.worker import build_worker_probe
-    from kdive.jobs.assembly import build_handler_registry, build_worker_handler_assembly
+    from kdive.jobs.assembly import (
+        build_handler_registry,
+        build_production_worker_handler_assembly,
+    )
     from kdive.jobs.capture_operations.launcher import verify_capture_bootstrap_manifest
-    from kdive.jobs.capture_operations.supervisor import recover_capture_operations
+    from kdive.jobs.capture_operations.recovery import recover_capture_operations
     from kdive.jobs.worker import Worker, WorkerConfig
     from kdive.jobs.worker_telemetry import WorkerTelemetry
     from kdive.store.objectstore import object_store_from_env
@@ -105,7 +108,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
             incarnation, configured_worker_id=configured_worker_id
         )
         await asyncio.to_thread(object_store_from_env().validate_conditional_create)
-        handler_assembly = build_worker_handler_assembly(
+        handler_assembly = build_production_worker_handler_assembly(
             secret_registry=secret_registry,
             incarnation_credential=incarnation_credential,
             pool=pool,
@@ -114,7 +117,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
             pool,
             handler_assembly.resolver,
             handler_assembly.object_stores.store,
-            handler_assembly.capture_supervisor,
+            handler_assembly.capture_supervisor.dispose_recovery_spool,
             _capture_host_identity(incarnation),
             incarnation_credential,
         )
@@ -125,12 +128,7 @@ async def run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> N
         capture_recovery_complete = True
         worker = Worker(
             pool,
-            build_handler_registry(
-                secret_registry=secret_registry,
-                incarnation_credential=incarnation_credential,
-                assembly=handler_assembly,
-                pool=pool,
-            ),
+            build_handler_registry(handler_assembly),
             worker_id=worker_id,
             incarnation_credential=incarnation_credential,
             secret_registry=secret_registry,

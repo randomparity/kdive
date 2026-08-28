@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
+from enum import StrEnum
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
@@ -46,6 +47,14 @@ DEFAULT_LEASE = timedelta(minutes=5)
 DEFAULT_DISPATCH_LANES = (DEFAULT_JOB_DISPATCH_LANE,)
 
 
+class JobRecyclePolicy(StrEnum):
+    """Terminal states an enqueue may reset under an existing deduplication key."""
+
+    NEVER = "never"
+    TERMINAL = "terminal"
+    TERMINAL_OR_CANCELED = "terminal_or_canceled"
+
+
 async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
@@ -54,78 +63,22 @@ async def enqueue(
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    recycle_terminal: bool = False,
-    recycle_canceled: bool = False,
+    recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
 ) -> Job:
-    """Admit a job, returning the existing one on a ``dedup_key`` conflict.
+    """Admit a job idempotently, returning the row for ``dedup_key``.
 
-    Upsert-then-fetch: ``INSERT … ON CONFLICT (dedup_key) DO NOTHING`` then
-    ``SELECT … WHERE dedup_key = …`` in one transaction, so a re-issue returns the
-    **same** job (in whatever state it has since reached) and never enqueues a
-    duplicate. ``DO NOTHING RETURNING`` is avoided — it returns no row on conflict.
-
-    When ``recycle_terminal`` is set, a **terminal** (``failed`` or ``succeeded``) job for
-    ``dedup_key`` is reset in place to a fresh ``queued`` attempt before the fetch:
-    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, ``created_at`` re-dated
-    to the recycle, **and the payload overwritten with the newly-supplied one**. Re-dating
-    ``created_at`` is what keeps the recycle fair (ADR-0447): :func:`dequeue` orders by it and the
-    reset ``attempt`` makes the row eligible again, so a job left at its original creation would
-    win every claim and head-of-line-block its lane. Re-dated, it queues at the back — the recycle
-    becomes equivalent to the delete-and-re-insert a caller would otherwise hand-roll (ADR-0442
-    §6). So ``jobs.created_at`` means *when this attempt was queued*, not when the row was first
-    inserted; ``updated_at`` is no substitute (its trigger stamps ``now()``, so a recycled row can
-    read ``created_at > updated_at``) — the caller's audit entry and the log line below are.
-
-    **Both statements stamp ``clock_timestamp()``, not ``now()``.** ``now()`` is
-    ``transaction_timestamp()``, and no production caller reaches here in a transaction of its own:
-    the re-stage and snapshot tools open ``conn.transaction()`` and then *block* on an
-    ``advisory_xact_lock`` first, and ``control.watch_for_crash`` runs on a pooled connection whose
-    implicit transaction opened several reads earlier. Stamping the transaction's start would date
-    the job to before that wait, leaving it ahead of everything another connection enqueued during
-    it — the very preemption this prevents, back again under the contention that makes it matter.
-    That holds for a first enqueue as much as a recycle, hence the explicit stamp on the ``INSERT``
-    rather than the column's ``DEFAULT now()``. Being always at or after the transaction's clock,
-    it also keeps a row's ``created_at`` moving only forward, so ``jobs.list``'s ``(created_at,
-    id)`` keyset cursor can only *skip* a re-dated row, never return it twice.
-
-    ``authorizing``, ``max_attempts`` and ``kind`` are deliberately **not** reset: they describe the
-    job's slot, not the attempt. ``authorizing`` in particular stays with the principal who first
-    enqueued it, so a re-dated ``created_at`` must not be read as the recycling principal's action
-    time.
-
-    ``dispatch_lane`` **is** reset, to the same kind-derived value the ``INSERT`` uses (ADR-0550
-    amending ADR-0447). It has to be: ``systems.restore`` and ``systems.snapshot`` recycle under a
-    durable ``dedup_key``, so a row first inserted before the state-fenced lane existed would keep
-    its original lane for **every future attempt** — the routing would silently never reach a
-    System that had already used the feature, which is the opposite of the availability fix it
-    exists for. Re-deriving here means a row's lane converges on its kind's lane at the first
-    recycle, and a kind can never end up split across two lanes.
-
-    Overwriting the payload matters for a re-stage
-    (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
-    the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
-    case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
-    row is what selects ``recycle_terminal``). ``recycle_canceled`` additionally admits a
-    ``canceled`` row into that reset (only alongside ``recycle_terminal``): a caller whose dedup
-    key is a stable per-resource slot re-issued after an explicit cancel
-    (``control.watch_for_crash``, ADR-0367) wants a fresh run, not the dead canceled job wedged in
-    the slot forever. It stays **off** by default, so the install/boot re-stage keeps
-    ``no-resurrection-of-canceled``. The ``state IN ('failed','succeeded')`` fence leaves an
-    in-flight ``queued``/``running`` job and (unless ``recycle_canceled``) a ``canceled`` job
-    untouched, so in-flight dedup and
-    no-resurrection-of-canceled hold. It is opt-in: the default off keeps a failed ``provision`` job
-    ``failed`` so admission can surface its original reason (ADR-0149), and never resurrects a
-    succeeded job.
+    Recycling resets eligible terminal rows to a fresh queued attempt with the new payload and
+    kind-derived dispatch lane. It preserves slot metadata (kind, authorizing principal, and
+    ``max_attempts``), never replaces an in-flight row, and does not resurrect canceled work unless
+    explicitly requested. ``created_at`` uses the wall clock so recycled jobs return to the back of
+    the queue even when the caller's transaction waited on a lock (ADR-0447, ADR-0550).
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
-        ValueError: ``recycle_canceled`` without ``recycle_terminal``.
         ValueError: ``kind`` is a retired historical kind without an active handler.
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
-    if recycle_canceled and not recycle_terminal:
-        raise ValueError("recycle_canceled requires recycle_terminal")
     if kind in RETIRED_JOB_KINDS:
         raise ValueError(f"job kind {kind.value!r} is retired and cannot be enqueued")
     dispatch_lane = dispatch_lane_for_kind(kind)
@@ -149,9 +102,9 @@ async def enqueue(
                 dedup_key,
             ),
         )
-        if recycle_terminal:
+        if recycle is not JobRecyclePolicy.NEVER:
             recyclable = [JobState.FAILED.value, JobState.SUCCEEDED.value]
-            if recycle_canceled:
+            if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
                 recyclable.append(JobState.CANCELED.value)
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
@@ -172,10 +125,7 @@ async def enqueue(
                 recycled_id = recycled["id"]
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
-    # The reset leaves a recycled row indistinguishable from a first enqueue, so this line is the
-    # only record that a dedup_key is churning. It is an upper bound, not proof: for a production
-    # caller the block above is a SAVEPOINT in the caller's transaction, so releasing it is not a
-    # commit and the caller can still roll back. Read it as "a recycle was attempted".
+    # This records an attempted recycle; an outer transaction may still roll it back.
     if recycled_id is not None:
         _log.info(
             "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",
@@ -209,40 +159,10 @@ async def dequeue(
     lease: timedelta = DEFAULT_LEASE,
     accepted_lanes: Sequence[str] = DEFAULT_DISPATCH_LANES,
 ) -> Job | None:
-    """Claim the oldest eligible job for ``worker_id``, charging an attempt.
+    """Claim the oldest eligible job in an accepted lane, charging one attempt.
 
-    Eligible: ``queued``, or ``running`` with a lapsed lease (an abandoned job), and
-    ``attempt < max_attempts``. The single ``UPDATE`` sets ``running``/``worker_id``/
-    lease/``heartbeat_at`` and ``attempt = attempt + 1`` (charging the claim bounds
-    retries across worker death). ``FOR UPDATE SKIP LOCKED`` lets parallel workers
-    claim disjoint rows without blocking. ``now()`` is the database clock, so no
-    worker clocks need to agree.
-
-    ``accepted_lanes`` is the worker's explicit dispatch boundary. A worker claims only
-    queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
-    workers do not acquire work they cannot execute.
-
-    ``incarnation_credential`` is authority-minted for this exact worker. The guarded
-    database function derives the incarnation from its hash and claims only when it is active,
-    matches ``worker_id``, and uses the fixed current fence protocol.
-
-    A ``capture_traffic`` retry remains ineligible while any prior supervised operation lacks
-    complete provider quiescence, closed publication, or disposed spool evidence. Refusal does not
-    charge an attempt or clear the current operation link; startup recovery must close the whole
-    operation product first.
-
-    ``lease`` is one PostgreSQL interval applied to ``clock_timestamp()`` captured by the database
-    after the blocking incarnation fence and immediately before this claim. The computed deadline
-    must be after that reference and no more than one hour later. SQLSTATE ``22023`` is raised
-    before any job mutation when it is outside that elapsed bound; retry with an interval whose
-    computed deadline is valid.
-
-    ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
-    inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
-    revived job queues behind the work admitted while it was settled instead of preempting it.
-
-    Returns:
-        The claimed :class:`Job`, or ``None`` when nothing is eligible for the accepted lanes.
+    The database authenticates the exact worker incarnation and owns lease-clock validation.
+    An empty lane set or a queue with no eligible work returns ``None``.
     """
     if not accepted_lanes:
         return None
@@ -410,7 +330,11 @@ async def set_queue_paused(conn: AsyncConnection, paused: bool) -> None:
 
 
 async def all_recent_jobs(
-    conn: AsyncConnection, limit: int, *, states: Sequence[JobState] | None = None
+    conn: AsyncConnection,
+    limit: int,
+    *,
+    states: Sequence[JobState] | None = None,
+    before: tuple[datetime, UUID] | None = None,
 ) -> list[Job]:
     """Return the most recent jobs across **every** project, newest first, capped.
 
@@ -418,21 +342,26 @@ async def all_recent_jobs(
     **not** project-scoped — it spans all tenants for an operator's cross-project queue
     inspection, so its only caller must already hold ``platform_operator``. ``states``,
     when given, filters to those job states (e.g. ``[JobState.QUEUED]``); an empty
-    sequence yields no rows. The ``id`` tiebreaker totals the order on a shared
-    ``created_at`` so the cap never drops an arbitrary one of a tied pair.
+    sequence yields no rows. ``before`` is an exclusive ``(created_at, id)`` keyset
+    boundary. The ``id`` tiebreaker totals the order on a shared ``created_at`` so pages
+    neither skip nor repeat a tied row.
     """
+    predicates: list[sql.Composable] = []
+    params: dict[str, object] = {"limit": limit}
+    if states is not None:
+        predicates.append(sql.SQL("state = ANY(%(states)s::text[])"))
+        params["states"] = [state.value for state in states]
+    if before is not None:
+        predicates.append(sql.SQL("(created_at, id) < (%(before_ts)s, %(before_id)s)"))
+        params["before_ts"], params["before_id"] = before
+    where = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(predicates) if predicates else sql.SQL("")
+    query = (
+        sql.SQL("SELECT * FROM jobs")
+        + where
+        + sql.SQL(" ORDER BY created_at DESC, id DESC LIMIT %(limit)s")
+    )
     async with conn.cursor(row_factory=dict_row) as cur:
-        if states is None:
-            await cur.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT %(limit)s",
-                {"limit": limit},
-            )
-        else:
-            await cur.execute(
-                "SELECT * FROM jobs WHERE state = ANY(%(states)s::text[]) "
-                "ORDER BY created_at DESC, id DESC LIMIT %(limit)s",
-                {"limit": limit, "states": [state.value for state in states]},
-            )
+        await cur.execute(query, params)
         rows = await cur.fetchall()
     return [Job.model_validate(row) for row in rows]
 
@@ -503,7 +432,7 @@ async def recent_jobs(
     projects: Sequence[str],
     *,
     after: tuple[datetime, UUID] | None = None,
-    status: JobState | None = None,
+    state: JobState | None = None,
     kind: JobKind | None = None,
     investigation_id: UUID | None = None,
     system_id: UUID | None = None,
@@ -525,7 +454,7 @@ async def recent_jobs(
     Optional filters (ADR-0197), applied before the keyset seek so the cursor stays a pure
     boundary across pages:
 
-    - ``status`` / ``kind`` are equality predicates on the ``state`` / ``kind`` columns.
+    - ``state`` / ``kind`` are equality predicates on the corresponding columns.
     - ``investigation_id`` filters to jobs whose Run belongs to that Investigation. The
       ``jobs`` table has no Run/Investigation column, so the query joins ``runs`` on
       ``jobs.payload->>'run_id'``; only run-bearing kinds (``build``/``install``/``boot``)
@@ -548,9 +477,9 @@ async def recent_jobs(
         join = sql.SQL(" JOIN runs r ON r.id::text = j.payload->>'run_id'")
         clauses.append(sql.SQL("r.investigation_id = %s"))
         params.append(investigation_id)
-    if status is not None:
+    if state is not None:
         clauses.append(sql.SQL("j.state = %s"))
-        params.append(status.value)
+        params.append(state.value)
     if kind is not None:
         clauses.append(sql.SQL("j.kind = %s"))
         params.append(kind.value)

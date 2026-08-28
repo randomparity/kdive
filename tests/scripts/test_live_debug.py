@@ -10,13 +10,14 @@ import urllib.error
 from email.message import Message
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.schema.tool_index import NAMESPACE_TOC
 from kdive.mcp.tools.gateway import _SEARCH_LIMIT_MAX
+from scripts.operations import live_debug_build, live_debug_transport
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,7 +39,7 @@ _TOP_RANKED_DECOY = "control.capture_traffic"
 
 def _load_live_debug() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "live_debug_script", ROOT / "scripts/live-debug.py"
+        "live_debug_script", ROOT / "scripts/operations/live-debug.py"
     )
     assert spec is not None
     assert spec.loader is not None
@@ -153,7 +154,7 @@ def _bind_client(monkeypatch: pytest.MonkeyPatch, live_debug: Any, client: _Clie
 
 
 def test_wrap_request_only_for_single_request_schema() -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     request_schema = {"properties": {"request": {"type": "object"}}}
     flat_schema = {"properties": {"run_id": {"type": "string"}}}
 
@@ -167,13 +168,18 @@ def test_wrap_request_only_for_single_request_schema() -> None:
 
 
 def test_call_uses_listed_schema_without_searching_for_a_core_tool() -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     _Client.calls = []
     client = _gateway_surface_client()
     assert "runs.list" in CORE_TOOLS  # premise: the default surface does advertise it
 
     result = asyncio.run(
-        live_debug._call(client, "runs.list", {"project": "demo"}, live_debug._SchemaResolver())
+        live_debug._call(
+            cast(Any, client),
+            "runs.list",
+            {"project": "demo"},
+            live_debug._SchemaResolver(),
+        )
     )
 
     assert result["object_id"] == "runs.list"
@@ -182,7 +188,7 @@ def test_call_uses_listed_schema_without_searching_for_a_core_tool() -> None:
 
 def test_call_resolves_a_non_core_tool_schema_through_tools_search() -> None:
     """#1608: the default surface lists only CORE_TOOLS, so everything else resolves by search."""
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     _Client.calls = []
     client = _gateway_surface_client()
     # The premise of the bug: this tool is callable but absent from the advertised catalog, so
@@ -191,7 +197,10 @@ def test_call_resolves_a_non_core_tool_schema_through_tools_search() -> None:
 
     result = asyncio.run(
         live_debug._call(
-            client, "allocations.list", {"project": "demo"}, live_debug._SchemaResolver()
+            cast(Any, client),
+            "allocations.list",
+            {"project": "demo"},
+            live_debug._SchemaResolver(),
         )
     )
 
@@ -207,20 +216,22 @@ def test_call_resolves_a_non_core_tool_schema_through_tools_search() -> None:
 
 def test_schema_resolution_is_cached_across_calls() -> None:
     """A poller re-enters _call every few seconds; each tool must cost at most one search."""
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     _Client.calls = []
     client = _gateway_surface_client()
     schemas = live_debug._SchemaResolver()
 
     for _ in range(3):
-        asyncio.run(live_debug._call(client, "allocations.list", {"project": "demo"}, schemas))
+        asyncio.run(
+            live_debug._call(cast(Any, client), "allocations.list", {"project": "demo"}, schemas)
+        )
 
     assert [tool for tool, _ in _Client.calls].count("tools.search") == 1
     assert client._client.list_calls == 1
 
 
 def test_schema_resolution_caches_and_reports_a_miss(capsys: pytest.CaptureFixture[str]) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     _Client.calls = []
     client = _gateway_surface_client()
     schemas = live_debug._SchemaResolver()
@@ -228,7 +239,7 @@ def test_schema_resolution_caches_and_reports_a_miss(capsys: pytest.CaptureFixtu
     # Neither surface knows this name. The call still goes out (and fails server-side with a
     # real error), but the fruitless search must not repeat on every poll tick.
     for _ in range(3):
-        asyncio.run(live_debug._call(client, "nowhere.missing", {"x": 1}, schemas))
+        asyncio.run(live_debug._call(cast(Any, client), "nowhere.missing", {"x": 1}, schemas))
 
     assert [tool for tool, _ in _Client.calls].count("tools.search") == 1
     assert _Client.calls[-1] == ("nowhere.missing", {"x": 1})
@@ -242,13 +253,16 @@ def test_schema_resolution_caches_and_reports_a_miss(capsys: pytest.CaptureFixtu
 def test_a_clipped_search_says_so_instead_of_blaming_the_name(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     _Client.calls = []
     client = _gateway_surface_client(truncated=True)
 
     asyncio.run(
         live_debug._call(
-            client, "allocations.list", {"project": "demo"}, live_debug._SchemaResolver()
+            cast(Any, client),
+            "allocations.list",
+            {"project": "demo"},
+            live_debug._SchemaResolver(),
         )
     )
 
@@ -258,7 +272,7 @@ def test_a_clipped_search_says_so_instead_of_blaming_the_name(
 
 
 def test_input_schemas_reads_harness_tool_catalog() -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     client = _Client(
         [
             _SchemaTool("runs.list", {"properties": {"request": {"type": "object"}}}),
@@ -266,7 +280,7 @@ def test_input_schemas_reads_harness_tool_catalog() -> None:
         ]
     )
 
-    schemas = asyncio.run(live_debug._input_schemas(client))
+    schemas = asyncio.run(live_debug._input_schemas(cast(Any, client)))
 
     assert schemas["runs.list"]["properties"] == {"request": {"type": "object"}}
     assert schemas["debug.continue"]["properties"] == {"session_id": {"type": "string"}}
@@ -275,7 +289,7 @@ def test_input_schemas_reads_harness_tool_catalog() -> None:
 def test_poll_waits_until_terminal_state(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     states = iter(
         [
             {"object_id": "job", "status": "running", "data": {"state": "running"}},
@@ -299,7 +313,7 @@ def test_poll_waits_until_terminal_state(
 
     result = asyncio.run(
         live_debug._poll(
-            object(),
+            cast(Any, object()),
             "jobs.wait",
             {"job_id": "j1"},
             live_debug._SchemaResolver(),
@@ -317,7 +331,7 @@ def test_poll_waits_until_terminal_state(
 def test_wait_job_selects_matching_job_and_requires_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_transport
     seen_poll_args: dict[str, Any] = {}
 
     async def fake_call(
@@ -357,7 +371,12 @@ def test_wait_job_selects_matching_job_and_requires_success(
     monkeypatch.setattr(live_debug, "_poll", fake_poll)
 
     asyncio.run(
-        live_debug._wait_job(object(), live_debug._SchemaResolver(), kind="boot", timeout_sec=30)
+        live_debug._wait_job(
+            cast(Any, object()),
+            live_debug._SchemaResolver(),
+            kind="boot",
+            timeout_sec=30,
+        )
     )
 
     assert seen_poll_args == {
@@ -397,7 +416,7 @@ def _record_build_runs(
 
 
 def test_combined_kernel_tar_runs_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     kernel_src = _built_kernel_src(tmp_path)
     dest = tmp_path / "scratch"
     dest.mkdir()
@@ -426,7 +445,7 @@ def test_combined_kernel_tar_runs_recipe(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_combined_kernel_tar_uses_pigz_when_available(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     kernel_src = _built_kernel_src(tmp_path)
     dest = tmp_path / "scratch"
     dest.mkdir()
@@ -450,7 +469,7 @@ def test_combined_kernel_tar_uses_pigz_when_available(
 
 
 def test_combined_kernel_tar_times_out(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     kernel_src = _built_kernel_src(tmp_path)
     dest = tmp_path / "scratch"
     dest.mkdir()
@@ -467,7 +486,7 @@ def test_combined_kernel_tar_times_out(monkeypatch: pytest.MonkeyPatch, tmp_path
 
 
 def test_combined_kernel_tar_requires_built_bzimage(tmp_path: Path) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     with pytest.raises(RuntimeError, match="packages x86_64 kernels only"):
         live_debug._combined_kernel_tar(tmp_path / "unbuilt", tmp_path / "scratch")
 
@@ -475,7 +494,7 @@ def test_combined_kernel_tar_requires_built_bzimage(tmp_path: Path) -> None:
 def test_upload_kernel_drives_declare_put_complete(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     kernel_tar = tmp_path / "kernel.tar.gz"
     kernel_tar.write_bytes(b"kernel-bytes")
     vmlinux = tmp_path / "vmlinux"
@@ -513,7 +532,7 @@ def test_upload_kernel_drives_declare_put_complete(
 
     asyncio.run(
         live_debug._upload_kernel(
-            FakeClient(),
+            cast(Any, FakeClient()),
             live_debug._SchemaResolver(),
             run_id="r1",
             kernel_tar=kernel_tar,
@@ -537,7 +556,7 @@ def test_upload_kernel_drives_declare_put_complete(
 
 
 def test_upload_kernel_rejects_missing_kernel_contract(tmp_path: Path) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     kernel_tar = tmp_path / "kernel.tar.gz"
     kernel_tar.write_bytes(b"k")
     vmlinux = tmp_path / "vmlinux"
@@ -556,7 +575,7 @@ def test_upload_kernel_rejects_missing_kernel_contract(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="no longer accepts run artifact"):
         asyncio.run(
             live_debug._upload_kernel(
-                FakeClient(),
+                cast(Any, FakeClient()),
                 live_debug._SchemaResolver(),
                 run_id="r1",
                 kernel_tar=kernel_tar,
@@ -566,7 +585,7 @@ def test_upload_kernel_rejects_missing_kernel_contract(tmp_path: Path) -> None:
 
 
 def test_elf_build_id_reads_the_gnu_note(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_bytes(b"\x7fELF")
     readelf_out = (
@@ -589,7 +608,7 @@ def test_elf_build_id_reads_the_gnu_note(monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_elf_build_id_fails_loud_without_a_note(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    live_debug = _load_live_debug()
+    live_debug = live_debug_build
     vmlinux = tmp_path / "vmlinux"
     vmlinux.write_bytes(b"\x7fELF")
 

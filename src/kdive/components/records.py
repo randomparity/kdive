@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import NamedTuple, Protocol, cast
+from typing import Protocol, cast
 from uuid import UUID
 
 from psycopg.rows import dict_row
@@ -78,7 +78,8 @@ class ComponentUploadIntentRequest:
     ttl: timedelta = timedelta(hours=1)
 
 
-class ProviderComponent(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class ProviderComponent:
     id: UUID
     provider: str
     component_kind: ComponentKind

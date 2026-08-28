@@ -10,11 +10,11 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.read_model import raw_vmcore_key, redacted_vmcore_artifact_id
-from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.catalog.read_model import raw_vmcore_key, redacted_vmcore_artifact_id
+from kdive.artifacts.catalog.registration import register_artifact_row
 from kdive.artifacts.storage import HeadResult, StoredArtifact
-from kdive.artifacts.upload_manifest import RUN_UPLOAD_OWNER
-from kdive.artifacts.write_lease import hold_write_lease, release_write_lease
+from kdive.artifacts.uploads.upload_manifest import RUN_UPLOAD_OWNER
+from kdive.artifacts.uploads.write_lease import hold_write_lease, release_write_lease
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
@@ -27,7 +27,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.shared.host_dump_volume_leases import (
+from kdive.providers.shared.staging.host_dump_volume_leases import (
     hold_host_dump_volume_lease,
     release_host_dump_volume_lease,
 )

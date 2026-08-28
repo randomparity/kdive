@@ -76,7 +76,7 @@ def _installed_protocol_python(tmp_path: Path, identity: str) -> Path:
     (site_packages / "dependencies.pth").write_text(
         f"{Path(pytest.__file__).parent.parent}\n", encoding="utf-8"
     )
-    contract = site_packages / "kdive/processes/lifecycle/systemd_worker_contract.py"
+    contract = site_packages / "kdive/processes/lifecycle/systemd/systemd_worker_contract.py"
     contract.parent.mkdir(parents=True)
     for package in (contract.parents[2], contract.parent.parent, contract.parent):
         (package / "__init__.py").touch()
@@ -141,11 +141,13 @@ def test_lifecycle_protocol_mismatch_fails_before_mutation(tmp_path: Path, opera
 
 
 def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_path: Path) -> None:
-    from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity
+    from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
+        lifecycle_protocol_identity,
+    )
 
     installed_python = _installed_protocol_python(tmp_path, lifecycle_protocol_identity())
     lifecycle = _copied_lifecycle(tmp_path, installed_python)
-    shadow = tmp_path / "shadow/kdive/processes/lifecycle/systemd_worker_contract.py"
+    shadow = tmp_path / "shadow/kdive/processes/lifecycle/systemd/systemd_worker_contract.py"
     shadow.parent.mkdir(parents=True)
     for package in (shadow.parents[2], shadow.parent.parent, shadow.parent):
         (package / "__init__.py").touch()
@@ -156,8 +158,8 @@ def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_pat
     (tmp_path / "shadow/sitecustomize.py").write_text(
         "import os, sys\n"
         f"sys.path.insert(0, {str(ROOT / 'src')!r})\n"
-        "from kdive.processes.lifecycle import systemd_worker_control as control\n"
-        "from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse\n"
+        "from kdive.processes.lifecycle.systemd import systemd_worker_control as control\n"
+        "from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse\n"
         "def request_path(path, request):\n"
         "    open(os.environ['LIFECYCLE_REQUEST_PROBE'], 'w').write(request.operation)\n"
         "    return LifecycleResponse(ok=True, code='ok', message='ok', retry_action='none')\n"
@@ -187,14 +189,16 @@ def _lifecycle_status(
     tmp_path: Path, response: str, *, expected_slots: str = ""
 ) -> subprocess.CompletedProcess[str]:
     """Run the real wrapper against a Python import-time lifecycle response stub."""
-    from kdive.processes.lifecycle.systemd_worker_contract import lifecycle_protocol_identity
+    from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
+        lifecycle_protocol_identity,
+    )
 
     installed_python = _installed_protocol_python(tmp_path, lifecycle_protocol_identity())
     lifecycle = _copied_lifecycle(tmp_path, installed_python)
     (tmp_path / "sitecustomize.py").write_text(
         "import os\n"
-        "from kdive.processes.lifecycle import systemd_worker_control as control\n"
-        "from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse\n"
+        "from kdive.processes.lifecycle.systemd import systemd_worker_control as control\n"
+        "from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse\n"
         "def request_path(path, request):\n"
         "    values = [os.environ.get(name, '<missing>') for name in (\n"
         "        'KDIVE_DATABASE_URL', 'KDIVE_MIGRATION_DATABASE_URL',\n"
@@ -229,7 +233,7 @@ def _lifecycle_status(
 
 def _response(*, ok: bool, code: str, slots: list[dict[str, object]] | None = None) -> str:
     """Build a validated wire response without duplicating JSON serialization in Bash."""
-    from kdive.processes.lifecycle.systemd_worker_contract import LifecycleResponse
+    from kdive.processes.lifecycle.systemd.systemd_worker_contract import LifecycleResponse
 
     return LifecycleResponse.model_validate(
         {

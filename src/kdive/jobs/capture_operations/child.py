@@ -105,8 +105,10 @@ def run_capture_child(launch_token: str, gate_fd: int) -> int:
     directory_fd = _open_attempt_directory()
     try:
         request, configuration = read_capture_inputs(directory_fd)
+        phase = "provider_construction"
         try:
             executor = build_capture_executor(request, configuration)
+            phase = "provider_execution"
             execution = executor.execute(request, Path.cwd())
             result = CaptureResult(
                 outcome="truncated" if execution.truncated else "success",
@@ -121,9 +123,9 @@ def run_capture_child(launch_token: str, gate_fd: int) -> int:
                 error_category=error.category,
                 terminal=error.terminal,
                 reason="provider_execution_failed",
-                details={"phase": "provider_execution"},
+                details={"phase": phase},
             )
-        except Exception:
+        except Exception as error:
             result = CaptureResult(
                 outcome="failure",
                 size_bytes=0,
@@ -131,7 +133,7 @@ def run_capture_child(launch_token: str, gate_fd: int) -> int:
                 error_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 terminal=False,
                 reason="provider_execution_failed",
-                details={"phase": "provider_execution"},
+                details={"phase": phase, "exception_type": type(error).__name__},
             )
         _write_private_result(directory_fd, result.to_canonical_json())
     finally:

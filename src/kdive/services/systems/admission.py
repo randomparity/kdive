@@ -40,10 +40,7 @@ from kdive.domain.catalog.resource_capabilities import ResourceCapabilities, hos
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
-from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs import queue
-from kdive.jobs.context import authorizing as job_authorizing
-from kdive.jobs.payloads import SystemPayload
+from kdive.domain.operations.jobs import Job
 from kdive.profiles.provider_policy import (
     ProfilePolicy,
     require_investigation_binding_for_upload,
@@ -60,6 +57,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue, safe_error_details
 from kdive.services.idempotency.envelope import StoredResult
+from kdive.services.job_ports import ProvisionJobPort
 from kdive.services.systems.validation import (
     RootfsValidator,
     require_fadump_supported,
@@ -338,6 +336,7 @@ class SystemAdmission:
     profile_policy: ProfilePolicy
     component_sources: ComponentSourceCapabilities
     rootfs_validator: RootfsValidator
+    jobs: ProvisionJobPort
     premutation_timeout_s: float | None = None
     timeout_factory: TimeoutFactory | None = None
 
@@ -439,6 +438,7 @@ class SystemAdmission:
                 profile=stored,
                 profile_policy=self.profile_policy,
                 rootfs_validator=self.rootfs_validator,
+                jobs=self.jobs,
                 timeout=timeout,
                 label=request.label,
                 investigation_id=request.investigation_id,
@@ -525,7 +525,7 @@ _FAILED_SYSTEM_GUIDANCE = (
 
 
 async def _failed_system_retry_failure(
-    conn: AsyncConnection, alloc: Allocation, existing: System
+    conn: AsyncConnection, alloc: Allocation, existing: System, jobs: ProvisionJobPort
 ) -> AdmissionFailure:
     """Build the actionable retry failure for a ``failed`` System (ADR-0149).
 
@@ -536,7 +536,7 @@ async def _failed_system_retry_failure(
     """
     failure_message = _FAILED_SYSTEM_GUIDANCE
     failure_details: dict[str, object] = {}
-    job = await queue.get_by_dedup_key(conn, f"{alloc.id}:provision")
+    job = await jobs.find_by_dedup_key(conn, f"{alloc.id}:provision")
     # Only a *failed* provision job carries the reason. A System can also reach `failed` via
     # `reprovisioning->failed`, leaving the original provision job `succeeded`; never advertise a
     # non-failed job as the failing one.
@@ -627,6 +627,7 @@ async def _provision_create_response(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    jobs: ProvisionJobPort,
     timeout: PreMutationTimeout,
     label: str | None = None,
     investigation_id: UUID | None = None,
@@ -639,6 +640,7 @@ async def _provision_create_response(
             profile,
             profile_policy,
             rootfs_validator,
+            jobs,
             timeout,
             label,
             investigation_id=investigation_id,
@@ -651,9 +653,10 @@ async def _provision_create_response(
             project=alloc.project,
             allocation_id=alloc.id,
             system_id=existing.id,
+            jobs=jobs,
         )
     if existing.state is SystemState.FAILED:
-        return await _failed_system_retry_failure(conn, alloc, existing)
+        return await _failed_system_retry_failure(conn, alloc, existing, jobs)
     return AdmissionFailure(
         subject_id=existing.id,
         category=ErrorCategory.CONFIGURATION_ERROR,
@@ -671,18 +674,19 @@ async def _enqueue_provision_job(
     project: str,
     allocation_id: UUID,
     system_id: UUID,
+    jobs: ProvisionJobPort,
 ) -> ProvisionJobAdmitted:
-    job = await queue.enqueue(
+    job = await jobs.enqueue_provision(
         conn,
-        JobKind.PROVISION,
-        SystemPayload(system_id=str(system_id)),
-        job_authorizing(ctx, project),
-        f"{allocation_id}:provision",
+        ctx,
+        project=project,
+        allocation_id=allocation_id,
+        system_id=system_id,
     )
     return ProvisionJobAdmitted(job=job, system_id=system_id)
 
 
-async def _new_system_allowed(
+async def _new_system_admission_failure(
     conn: AsyncConnection,
     alloc: Allocation,
     profile: ProvisioningProfile,
@@ -782,6 +786,7 @@ async def _insert_provisioning_system(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    jobs: ProvisionJobPort,
     timeout: PreMutationTimeout,
     label: str | None = None,
     investigation_id: UUID | None = None,
@@ -794,7 +799,9 @@ async def _insert_provisioning_system(
         )
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
-    blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
+    blocked = await _new_system_admission_failure(
+        conn, alloc, profile, profile_policy, rootfs_validator
+    )
     if blocked is not None:
         return blocked
     timeout.reschedule(None)  # mutation boundary: the insert+enqueue runs unbounded (ADR-0126)
@@ -817,4 +824,5 @@ async def _insert_provisioning_system(
         project=alloc.project,
         allocation_id=alloc.id,
         system_id=system.id,
+        jobs=jobs,
     )

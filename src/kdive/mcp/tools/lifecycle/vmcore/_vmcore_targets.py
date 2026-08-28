@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.read_model import raw_vmcore_key
+from kdive.artifacts.catalog.read_model import raw_vmcore_key
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run

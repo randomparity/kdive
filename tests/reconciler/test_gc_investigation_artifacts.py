@@ -15,7 +15,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.artifact_retention import gc_investigation_artifacts
+from kdive.reconciler.cleanup.artifacts.artifact_retention import gc_investigation_artifacts
 from tests.reconciler.conftest import connect
 
 

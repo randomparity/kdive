@@ -35,7 +35,7 @@ deployment (the production-shaped path), see
   (`uv sync --group live`) and the system `guestfs` binding wired in; this is a one-time step
   documented in the
   [four-method runbook §4b](four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
-  `scripts/check-local-libvirt.sh` flags the gap with the fix.
+  `scripts/operations/check-local-libvirt.sh` flags the gap with the fix.
 - The fixed systemd worker contract must be installed. Persistent self-hosted runners get it from
   `deploy/ansible/roles/live_vm_host`; apply the runner playbook with the revision to install:
 

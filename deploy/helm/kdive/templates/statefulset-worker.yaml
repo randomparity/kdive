@@ -54,7 +54,7 @@ spec:
         - name: worker-credential
           image: {{ include "kdive.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "-m", "kdive.processes.lifecycle.kubernetes_credential_init"]
+          command: ["python", "-m", "kdive.processes.lifecycle.kubernetes.kubernetes_credential_init"]
           env:
             - name: KDIVE_POD_NAMESPACE
               valueFrom:

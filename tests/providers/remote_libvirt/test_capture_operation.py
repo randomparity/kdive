@@ -16,9 +16,9 @@ from kdive.providers.ports.traffic import RemoteCaptureConfiguration
 from kdive.providers.remote_libvirt import composition
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
-    RemoteCaptureExecutor,
     RemoteLibvirtCaptureQuiescence,
 )
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 
 _PCAP_HEADER = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00" + b"\x00" * 16
 
@@ -91,9 +91,10 @@ def test_remote_executor_faults_every_method_and_reclaims_without_descendants(
     before = children.read_text()
 
     with pytest.raises(CategorizedError, match=f"{method} failed"):
-        RemoteCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(
-            _request(), tmp_path
+        executor = CaptureExecutor(
+            capturer=capturer, provider_label="remote", sleep=lambda _seconds: None
         )
+        executor.execute(_request(), tmp_path)
 
     after = children.read_text()
     assert after == before
@@ -104,9 +105,10 @@ def test_remote_executor_faults_every_method_and_reclaims_without_descendants(
 def test_remote_executor_writes_bounded_result_and_reclaims(tmp_path: Path) -> None:
     capturer = _FakeCapturer()
 
-    result = RemoteCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(
-        _request(), tmp_path
+    executor = CaptureExecutor(
+        capturer=capturer, provider_label="remote", sleep=lambda _seconds: None
     )
+    result = executor.execute(_request(), tmp_path)
 
     assert result.size_bytes == len(_PCAP_HEADER)
     assert (tmp_path / "capture.pcap").read_bytes() == _PCAP_HEADER
@@ -118,9 +120,10 @@ def test_remote_executor_rejects_oversized_provider_result(tmp_path: Path) -> No
     capturer = _FakeCapturer(data=b"x" * (request.max_bytes + 1))
 
     with pytest.raises(CategorizedError) as excinfo:
-        RemoteCaptureExecutor(capturer=capturer, sleep=lambda _seconds: None).execute(
-            request, tmp_path
+        executor = CaptureExecutor(
+            capturer=capturer, provider_label="remote", sleep=lambda _seconds: None
         )
+        executor.execute(request, tmp_path)
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not (tmp_path / "capture.pcap").exists()
@@ -144,7 +147,8 @@ def test_remote_executor_observes_exact_bound_after_final_poll_interval(
 
     monkeypatch.setattr(capturer, "captured_size", captured_size)
 
-    result = RemoteCaptureExecutor(capturer=capturer, sleep=sleep).execute(request, tmp_path)
+    executor = CaptureExecutor(capturer=capturer, provider_label="remote", sleep=sleep)
+    result = executor.execute(request, tmp_path)
 
     assert result.truncated is True
     assert result.size_bytes == request.max_bytes

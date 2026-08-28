@@ -385,8 +385,6 @@ type ActivePayloadModel = (
     | DiagnosticsWorkerCheckPayload
     | ReclaimInvestigationRootfsPayload
 )
-type PayloadModel = ActivePayloadModel
-
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
     JobKind.REPROVISION: ReprovisionPayload,
@@ -413,7 +411,6 @@ _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
     JobKind.BUILD_INSTALL_BOOT: BuildInstallBootPayload,
 }
-_PAYLOAD_MODELS = _ACTIVE_PAYLOAD_MODELS
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,

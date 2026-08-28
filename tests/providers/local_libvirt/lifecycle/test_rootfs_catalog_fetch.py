@@ -32,7 +32,7 @@ def test_fetch_threads_ref_arch_roots_and_cache_to_registered_rootfs(monkeypatch
 
     monkeypatch.setattr(mod.psycopg, "connect", _connect)
     monkeypatch.setattr(mod.config, "require", _require)
-    monkeypatch.setattr(mod, "fetch_registered_rootfs_sync", _fetch_registered)
+    monkeypatch.setattr(mod, "fetch_public_provisioning_rootfs", _fetch_registered)
     monkeypatch.setattr(mod, "object_store_from_env", "store-factory-sentinel")
 
     roots = [Path("/srv/rootfs")]

@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 
-from kdive.artifacts.read_model import raw_pcap_key, raw_vmcore_key
+from kdive.artifacts.catalog.read_model import raw_pcap_key, raw_vmcore_key
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:

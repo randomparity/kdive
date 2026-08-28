@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.domain.catalog.artifacts import Artifact, Sensitivity
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,
@@ -33,7 +33,7 @@ from kdive.jobs.capture_operations.repository import (
     refresh_publication_operation,
 )
 from kdive.security.audit import AuditEvent
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.db_waits import wait_until_backend_waiting
 from tests.reconciler.conftest import connect
 

@@ -18,8 +18,9 @@ from kdive.processes.runtime import (
     POOL_OPEN_TIMEOUT_SECONDS,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    DockerWorkerIncarnation,
     WorkerIncarnation,
 )
 
@@ -86,7 +87,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     async def _authenticate(*args: object) -> WorkerIncarnation:
         events.append("authenticate")
-        return WorkerIncarnation(
+        return DockerWorkerIncarnation(
             incarnation="docker:nonce",
             authority_kind="docker",
             authority_binding={"container_id": "a" * 64},
@@ -99,18 +100,19 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     monkeypatch.setattr("kdive.processes.worker.install_stop", lambda: asyncio.Event())
     registry_credentials: list[SecretStr] = []
 
-    def _registry(**kwargs: object) -> object:
-        registry_credentials.append(cast(SecretStr, kwargs["incarnation_credential"]))
+    def _registry(handler_assembly: object) -> object:
+        assert handler_assembly is assembly
+        registry_credentials.append(credential)
         return object()
 
     monkeypatch.setattr("kdive.jobs.assembly.build_handler_registry", _registry)
     assembly = SimpleNamespace(
         resolver=object(),
         object_stores=SimpleNamespace(store=object()),
-        capture_supervisor=object(),
+        capture_supervisor=SimpleNamespace(dispose_recovery_spool=lambda operation_id: True),
     )
     monkeypatch.setattr(
-        "kdive.jobs.assembly.build_worker_handler_assembly", lambda **kwargs: assembly
+        "kdive.jobs.assembly.build_production_worker_handler_assembly", lambda **kwargs: assembly
     )
 
     async def _recover(*args: object) -> object:
@@ -118,7 +120,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
         return SimpleNamespace(pending=0)
 
     monkeypatch.setattr(
-        "kdive.jobs.capture_operations.supervisor.recover_capture_operations", _recover
+        "kdive.jobs.capture_operations.recovery.recover_capture_operations", _recover
     )
 
     class _FakeStore:
@@ -178,7 +180,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 def test_worker_startup_refuses_old_fence_protocol() -> None:
     from kdive.processes.worker import _validate_worker_incarnation
 
-    old = WorkerIncarnation(
+    old = DockerWorkerIncarnation(
         incarnation="docker:old",
         authority_kind="docker",
         authority_binding={"container_id": "b" * 64},

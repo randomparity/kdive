@@ -30,7 +30,6 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import (
     HeadResult,
     ObjectListing,
@@ -38,22 +37,23 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.config.core_settings import UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup import upload_orphans
-from kdive.reconciler.cleanup.upload_orphans import (
+from kdive.reconciler.cleanup.uploads import upload_orphans
+from kdive.reconciler.cleanup.uploads.upload_orphans import (
     MAX_RECLAIMS_PER_ROOT,
     MAX_VERSIONS_PER_KEY,
     UPLOAD_ORPHAN_ROOTS,
     UploadOrphanCandidate,
     reclaimable_upload_keys,
 )
-from kdive.reconciler.cleanup.upload_orphans import (
+from kdive.reconciler.cleanup.uploads.upload_orphans import (
     repair_leaked_upload_objects as _repair_leaked_upload_objects,
 )
-from kdive.reconciler.cleanup.uploads import (
+from kdive.reconciler.cleanup.uploads.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
 )
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
@@ -1017,7 +1017,10 @@ def test_a_root_whose_keys_are_all_unattributable_is_reported(
 
     async def _run() -> None:
         store = _FakeUploadStore({"local/runs/not-a-uuid/kernel": _GRACE * 2})
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.upload_orphans"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 assert await run_repair(pool, _sweep(store)) == 0
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -1037,7 +1040,10 @@ def test_a_clean_sweep_logs_no_drift_warning(
         async with await connect(migrated_url) as seed:
             await upload_manifest.delete_manifest(seed, "runs", run_id)
         store = _FakeUploadStore({f"{prefix}kernel": _GRACE * 2})
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.upload_orphans"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 assert await run_repair(pool, _sweep(store)) == 1
         assert caplog.records == []
@@ -1104,7 +1110,10 @@ def test_a_put_after_the_same_key_s_final_fence_survives_exact_delete(
             {vmcore: _GRACE * 2}, before_delete=_the_retried_capture_s_put_completes
         )
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
+            with caplog.at_level(
+                logging.INFO,
+                logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+            ):
                 assert await run_repair(pool, _sweep(store)) == 1
         assert store.deleted_versions == [(vmcore, "v1")]
         assert store.version_ids(vmcore) == {"v2"}
@@ -1391,7 +1400,10 @@ def test_complete_latest_failure_resumes_after_key_when_page_ends_inside_its_his
             page_size=3,
         )
         store.seed_versions(key, _data_history(store, key, 4))
-        with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
+        with caplog.at_level(
+            logging.INFO,
+            logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 with pytest.raises(CategorizedError) as caught:
                     await run_repair(pool, _sweep(store))
@@ -1564,7 +1576,10 @@ def test_the_reclaim_log_names_the_exact_version_identity_and_kind(
         key = f"{prefix}vmcore"
         store = _FakeUploadStore({key: _GRACE * 2})
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
+            with caplog.at_level(
+                logging.INFO,
+                logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+            ):
                 assert await run_repair(pool, _sweep(store)) == 1
         reclaims = [r.getMessage() for r in caplog.records if "deleted" in r.getMessage()]
         assert len(reclaims) == 1
@@ -1855,7 +1870,10 @@ def test_a_listing_failure_on_the_second_root_still_records_the_first_root_s_del
         store = _FailingListStore(
             {f"{prefix}orphan": _GRACE * 2}, fail_list_prefixes={"local/investigations/"}
         )
-        with caplog.at_level(logging.ERROR, logger="kdive.reconciler.cleanup.upload_orphans"):
+        with caplog.at_level(
+            logging.ERROR,
+            logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 with pytest.raises(CategorizedError):
                     await run_repair(pool, _sweep(store))

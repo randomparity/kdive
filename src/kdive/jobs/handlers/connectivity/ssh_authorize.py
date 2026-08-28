@@ -18,14 +18,10 @@ from psycopg import AsyncConnection
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.connectivity.ssh_reachable import ProbeFn, ReachResult, _real_probe
-from kdive.jobs.handlers.console.console_evidence import redacted_console_tail
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
-from kdive.prereqs.system_bootstrap_key import (
-    load_system_bootstrap_private_key,
-    materialized_private_key,
-)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.shared.console_evidence import redacted_console_tail
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.providers.shared.ssh_connect_retry import (
     SshFailureReason,
@@ -34,6 +30,10 @@ from kdive.providers.shared.ssh_connect_retry import (
     ssh_failure_details,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
+    load_system_bootstrap_private_key,
+    materialized_private_key,
+)
 
 type SshExec = Callable[[list[str], str], None]
 

@@ -176,7 +176,7 @@ async def fetch_registered_rootfs(
     )
 
 
-def fetch_registered_rootfs_sync(
+def fetch_public_provisioning_rootfs(
     conn: psycopg.Connection,
     store_factory: Callable[[], RootfsObjectStore],
     *,
@@ -188,9 +188,9 @@ def fetch_registered_rootfs_sync(
 ) -> Path:
     """Resolve a registered public rootfs and return a provider-readable local path (sync).
 
-    The synchronous twin of :func:`fetch_registered_rootfs` for the local-libvirt provision seam,
-    which runs off the event loop and owns no async pool (ADR-0228). Resolves the registered public
-    image of ``arch`` and branches on the source column:
+    This local-libvirt provisioning policy runs off the event loop and owns no async pool
+    (ADR-0228). It resolves the registered public image of ``arch`` and branches on the source
+    column:
 
     - a **staged-path** row resolves to its ``path`` validated against ``allowed_roots``
       (``validate_local_component_path`` re-checks absolute-ness, existence, containment incl.

@@ -132,11 +132,33 @@ class SystemsListRequest:
     """Filter payload for ``systems.list``."""
 
     allocation_id: str | None = None
-    state: str | None = None
+    state: SystemState | None = None
     shape: str | None = None
     pcie: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
     cursor: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FailureJobFound:
+    """A failing-job lookup found the job that attributed the failure."""
+
+    job: Job
+
+
+@dataclass(frozen=True, slots=True)
+class FailureJobNotFound:
+    """A failing-job lookup completed without finding an attributing job."""
+
+
+@dataclass(frozen=True, slots=True)
+class FailureJobNotLookedUp:
+    """The caller did not perform a failing-job lookup."""
+
+
+type FailureJobLookup = FailureJobFound | FailureJobNotFound | FailureJobNotLookedUp
+FAILURE_JOB_NOT_FOUND = FailureJobNotFound()
+FAILURE_JOB_NOT_LOOKED_UP = FailureJobNotLookedUp()
 
 
 def system_envelope(
@@ -148,8 +170,7 @@ def system_envelope(
     active_run: dict[str, JsonValue] | None = None,
     supports_snapshots: bool | None = None,
     supports_traffic_capture: bool | None = None,
-    failing_job: Job | None = None,
-    failure_attributed: bool = False,
+    failure_job: FailureJobLookup = FAILURE_JOB_NOT_LOOKED_UP,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
@@ -158,18 +179,8 @@ def system_envelope(
     come from the System row (no extra query, both paths). ``active_run`` and
     ``active_debug_session_ids`` are get-only (an N+1 on the list path), omitted otherwise.
 
-    ``failing_job`` is the job that put the System in ``failed`` (ADR-0454); the failure
-    envelope reports its category and reason instead of assuming one for every ``failed``
-    System. Like the other get-only arguments it is a per-row query, so ``systems.list`` passes
-    none — but the list path is no longer stuck on the default, because ``system.failure_category``
-    (ADR-0492) comes off the row both paths already read and needs no query at all.
-
-    ``failure_attributed`` says the caller **ran** the lookup, which is not the same as it
-    returning a job — and the difference is load-bearing. Every derived reason here is a positive
-    claim about a fact that was checked, so the list path (which never looks) must stay silent
-    rather than tell an agent no job recorded a reason. Without this flag a bare `failing_job=None`
-    is ambiguous between "looked, found none" and "never looked", and the list path would assert
-    the former.
+    ``failure_job`` explicitly distinguishes an unperformed lookup, no matching job, and a found
+    attributing job (ADR-0454). The list path uses the default unperformed variant.
     """
     data: dict[str, JsonValue] = {
         "project": system.project,
@@ -199,7 +210,13 @@ def system_envelope(
     if supports_traffic_capture is not None:
         data["supports_traffic_capture"] = supports_traffic_capture
     if system.state is SystemState.FAILED:
-        return _failed_system_envelope(system, failing_job, data, attributed=failure_attributed)
+        failing_job = failure_job.job if isinstance(failure_job, FailureJobFound) else None
+        return _failed_system_envelope(
+            system,
+            failing_job,
+            data,
+            attributed=not isinstance(failure_job, FailureJobNotLookedUp),
+        )
     return ToolResponse.success(
         str(system.id),
         system.state.value,
@@ -430,8 +447,13 @@ async def get_system(
             active_run=active_run,
             supports_snapshots=supports_snapshots,
             supports_traffic_capture=supports_traffic_capture,
-            failing_job=failing_job,
-            failure_attributed=system.state is SystemState.FAILED,
+            failure_job=(
+                FailureJobFound(failing_job)
+                if failing_job is not None
+                else FAILURE_JOB_NOT_FOUND
+                if system.state is SystemState.FAILED
+                else FAILURE_JOB_NOT_LOOKED_UP
+            ),
         )
 
 
@@ -513,10 +535,9 @@ def _pcie_clause(pcie: str, params: list[object]) -> Composable | ToolResponse:
 async def list_systems(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    request: SystemsListRequest | None = None,
+    request: SystemsListRequest,
 ) -> ToolResponse:
     """List the caller's Systems, filterable by allocation, state, shape, and PCIe match."""
-    request = request or SystemsListRequest()
     viewer_projects = _viewer_projects(ctx)
     filters = _build_filters(
         viewer_projects,

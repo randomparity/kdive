@@ -256,6 +256,49 @@ def test_jobs_list_filters_by_state(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_jobs_list_pages_without_hiding_overflow(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                seeded = [
+                    await queue.enqueue(
+                        conn,
+                        JobKind.INSTALL,
+                        _build_payload(),
+                        _authorizing("proj-a"),
+                        f"dk-{index}",
+                    )
+                    for index in range(3)
+                ]
+            first = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR), limit=2)
+            cursor = first.data["next_cursor"]
+            assert isinstance(cursor, str)
+            second = await ops_queue.jobs_list(
+                pool, _ctx(platform_roles=_OPERATOR), limit=2, cursor=cursor
+            )
+
+        assert first.data["truncated"] is True
+        assert second.data["truncated"] is False
+        assert second.data["next_cursor"] is None
+        returned = [item.object_id for item in [*first.items, *second.items]]
+        assert returned == [str(job.id) for job in reversed(seeded)]
+
+    asyncio.run(_run())
+
+
+def test_jobs_list_rejects_invalid_cursor(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            return await ops_queue.jobs_list(
+                pool, _ctx(platform_roles=_OPERATOR), cursor="not-a-cursor"
+            )
+
+    response = asyncio.run(_run())
+    assert response.status == "error"
+    assert response.error_category == "configuration_error"
+    assert response.data["reason"] == "invalid_cursor"
+
+
 def test_jobs_list_renders_failed_job_with_category(migrated_url: str) -> None:
     # A failed job carries an error_category; the per-job item must thread it so the
     # category-iff-failure envelope invariant (ADR-0019) renders instead of raising (#582).

@@ -488,21 +488,23 @@ def test_diagnostics_worker_check_payload_roundtrips() -> None:
     assert load_payload(job, DiagnosticsWorkerCheckPayload).provider == "remote-libvirt"
 
 
-def test_authorize_ssh_key_payload_roundtrips() -> None:
-    from kdive.jobs.payloads import _PAYLOAD_MODELS, AuthorizeSshKeyPayload
+def test_authorize_ssh_key_payload_serializes() -> None:
+    from kdive.jobs.payloads import AuthorizeSshKeyPayload
 
     payload = AuthorizeSshKeyPayload(
         system_id="11111111-2222-3333-4444-555555555555",
         public_key="ssh-ed25519 AAAAC3Nz agent@host",
     )
-    assert payload.system_id == "11111111-2222-3333-4444-555555555555"
-    assert payload.public_key == "ssh-ed25519 AAAAC3Nz agent@host"
-    assert _PAYLOAD_MODELS[JobKind.AUTHORIZE_SSH_KEY] is AuthorizeSshKeyPayload
+    assert dump_payload(JobKind.AUTHORIZE_SSH_KEY, payload) == {
+        "system_id": "11111111-2222-3333-4444-555555555555",
+        "public_key": "ssh-ed25519 AAAAC3Nz agent@host",
+    }
 
 
-def test_check_ssh_reachable_payload_roundtrips() -> None:
-    from kdive.jobs.payloads import _PAYLOAD_MODELS, CheckSshReachablePayload
+def test_check_ssh_reachable_payload_serializes() -> None:
+    from kdive.jobs.payloads import CheckSshReachablePayload
 
     payload = CheckSshReachablePayload(system_id="11111111-2222-3333-4444-555555555555")
-    assert payload.system_id == "11111111-2222-3333-4444-555555555555"
-    assert _PAYLOAD_MODELS[JobKind.CHECK_SSH_REACHABLE] is CheckSshReachablePayload
+    assert dump_payload(JobKind.CHECK_SSH_REACHABLE, payload) == {
+        "system_id": "11111111-2222-3333-4444-555555555555"
+    }

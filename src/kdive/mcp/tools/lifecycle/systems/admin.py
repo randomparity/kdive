@@ -44,7 +44,7 @@ from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
-from kdive.services.investigations.common import TERMINAL_INVESTIGATION
+from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.validation import (
     RootfsValidator,
@@ -180,7 +180,7 @@ async def _reprovision_in_lock(
         # lock is held to commit, covering the ready->reprovisioning transition, not only the read.
         async with advisory_xact_lock(conn, LockScope.INVESTIGATION, system.investigation_id):
             investigation = await INVESTIGATIONS.get(conn, system.investigation_id)
-        if investigation is None or investigation.state in TERMINAL_INVESTIGATION:
+        if investigation is None or investigation.state in TERMINAL_INVESTIGATION_STATES:
             state = investigation.state.value if investigation is not None else "missing"
             return _config_error(str(system_id), data={"investigation_state": state})
     digest = profile_digest(profile)

@@ -87,15 +87,7 @@ def _section_label(provider: object) -> str:
 
 
 def _entry(key: object, value: object) -> str:
-    """Render one ``provider`` entry as either its kind name or a `<kind>=<not-an-object>` row.
-
-    Takes ``key: object`` and narrows with ``isinstance(key, str)`` rather than ``key: str``,
-    because the obvious form does not type-check: ``isinstance(provider, dict)`` in
-    :func:`_section_label` narrows to ``dict[Unknown, Unknown]``, so the keys are ``object`` and
-    both a ``key: str`` signature and indexing ``provider[key]`` are rejected by ``ty``. A key
-    outside ``_KNOWN_KINDS`` — including one that is not even a ``str`` — renders
-    ``"<unrecognized>"`` so its bytes never reach the terminal.
-    """
+    """Render a closed-vocabulary label without exposing an unrecognized key."""
     name = key if isinstance(key, str) and key in _KNOWN_KINDS else "<unrecognized>"
     return name if isinstance(value, dict) else f"{name}=<not-an-object>"
 
@@ -124,25 +116,7 @@ ORDER BY s.created_at, s.id
 
 
 async def scan_profile_kinds(conn: AsyncConnection) -> list[ProfileKindMismatch]:
-    """Return every stored System whose provider section mismatches its Resource kind (ADR-0579).
-
-    One static statement, no parameters and no interpolation, issued on ``conn`` as given — the
-    caller owns the connection's lifecycle, so a test can drive this against a migrated fixture
-    database with no pool. Nothing here writes.
-
-    The predicate is total over the shapes a stored row can hold, so a System can only fall out
-    of the scan through the inner join to ``resources``: an Allocation carrying a NULL
-    ``resource_id`` would drop its System. That is unreachable today and an accepted residual
-    (ADR-0579) — a ``LEFT JOIN`` would add a NULL branch to ``resource_kind``, a reported field,
-    for a row no code path can construct.
-
-    Args:
-        conn: An open connection to the kdive database.
-
-    Returns:
-        The mismatches in report order — ``created_at``, then ``id`` to break ties — each
-        carrying the rendered :func:`_section_label` rather than the raw stored value.
-    """
+    """Return stored provider-kind mismatches in deterministic report order (ADR-0579)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_SCAN_QUERY)
         rows = await cur.fetchall()
@@ -181,31 +155,7 @@ async def verify_profile_kinds() -> list[ProfileKindMismatch]:
 
 
 def _project_token(project: str) -> str:
-    """Render ``project`` as a single whitespace-free token for the report line.
-
-    ``repr`` alone is not enough. It escapes every non-printable character and delimits the
-    value, but it *selects* its quote character rather than escaping quotes, and it leaves
-    ASCII space untouched because a space is printable. The report line is a whitespace-
-    delimited ``key=value`` sequence, so a stored project name carrying spaces contributes
-    extra ``key=value`` tokens — positioned ahead of the real fields, since ``project`` is the
-    second key on the line. A name of the form ``x' state=torn_down ... junk='y`` makes
-    ``state=torn_down`` the first ``state=`` token on that row. Whitespace-splitting or grepping
-    the report — the ordinary way to work one listing many rows — then reads the forged value as
-    the row's ``state``, whichever state the operator is selecting on, and the row is triaged as
-    something it is not.
-
-    ``systems.project`` is remotely plantable (an IdP ``projects`` claim, validated only as a
-    non-empty ``str``), so this is reachable without database access.
-
-    Both ``\\x20`` and ``=`` are escaped, and escaping only the space is not enough. That alone
-    fixes whitespace tokenization — the line splits into one ``state=`` token again — but leaves
-    the *substring* ``state=torn_down`` sitting in the line, so a plain
-    ``grep 'state=torn_down'`` still matches and still drops the live System. Escaping ``=`` as
-    well means the rendered token can hold no ``key=value`` lookalike at all, which is the
-    property the report actually needs. U+0020 is the only whitespace ``repr`` leaves intact —
-    every other separator is non-printable to ``str.isprintable`` and is already escaped — so
-    these two substitutions are complete, reversible, and keep ``repr``'s charset bound.
-    """
+    """Prevent an untrusted project name from forging whitespace-delimited report fields."""
     return repr(project).replace(" ", "\\x20").replace("=", "\\x3d")
 
 

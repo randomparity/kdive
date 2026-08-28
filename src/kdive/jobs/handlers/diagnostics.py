@@ -19,21 +19,11 @@ WorkerCheckBuilder = Callable[[], Sequence[Check]]
 WorkerCheckBuilders = Mapping[str, WorkerCheckBuilder]
 
 
-def _worker_check_builders() -> dict[str, WorkerCheckBuilder]:
-    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
-
-    return {
-        contribution.provider: contribution.worker_checks
-        for contribution in diagnostic_provider_contributions()
-        if contribution.enabled()
-    }
-
-
 async def diagnostics_worker_check_handler(
     conn: AsyncConnection | None,
     job: Job | None,
     *,
-    worker_check_builders: WorkerCheckBuilders | None = None,
+    worker_check_builders: WorkerCheckBuilders,
 ) -> str | None:
     """Run the worker-vantage checks and return their results inline as result_ref.
 
@@ -47,8 +37,7 @@ async def diagnostics_worker_check_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     payload = load_payload(job, DiagnosticsWorkerCheckPayload)
-    builders = worker_check_builders or _worker_check_builders()
-    builder = builders.get(payload.provider)
+    builder = worker_check_builders.get(payload.provider)
     if builder is None:
         raise CategorizedError(
             "no diagnostics worker checks are registered for provider",
@@ -60,9 +49,17 @@ async def diagnostics_worker_check_handler(
     return serialize_results(results)
 
 
-def register_handlers(registry: HandlerRegistry) -> None:
+def register_handlers(
+    registry: HandlerRegistry,
+    *,
+    worker_check_builders: WorkerCheckBuilders,
+) -> None:
     """Bind the diagnostics_worker_check job handler."""
     registry.register(
         JobKind.DIAGNOSTICS_WORKER_CHECK,
-        lambda conn, job: diagnostics_worker_check_handler(conn, job),
+        lambda conn, job: diagnostics_worker_check_handler(
+            conn,
+            job,
+            worker_check_builders=worker_check_builders,
+        ),
     )

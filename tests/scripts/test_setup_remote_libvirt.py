@@ -1,4 +1,4 @@
-"""Behavioral tests for scripts/setup-remote-libvirt.sh via PATH stubs."""
+"""Behavioral tests for scripts/operations/setup-remote-libvirt.sh via PATH stubs."""
 
 from __future__ import annotations
 
@@ -7,17 +7,18 @@ import stat
 import subprocess
 from pathlib import Path
 
-import scripts.kdive_set_accounting as acct
+import scripts.operations.kdive_set_accounting as acct
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "setup-remote-libvirt.sh"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "operations" / "setup-remote-libvirt.sh"
 BASH = shutil.which("bash")
 
 
 def _helper_argv(logged: str) -> list[str]:
     """Extract the argv the script handed the helper from the stub's `echo "$@"` log."""
-    line = next(line for line in logged.splitlines() if "scripts.kdive_set_accounting" in line)
+    helper = "scripts.operations.kdive_set_accounting"
+    line = next(line for line in logged.splitlines() if helper in line)
     tokens = line.split()
-    return tokens[tokens.index("scripts.kdive_set_accounting") + 1 :]
+    return tokens[tokens.index(helper) + 1 :]
 
 
 def _stub(bindir: Path, name: str, body: str) -> None:
@@ -93,9 +94,10 @@ def test_autodetects_repo_venv_over_system_python3(tmp_path: Path) -> None:
     """
     repo = tmp_path / "repo"
     scripts = repo / "scripts"
-    scripts.mkdir(parents=True)
-    shutil.copy(SCRIPT, scripts / "setup-remote-libvirt.sh")
-    _stub(scripts, "check-remote-libvirt.sh", "exit 0")  # preflight passes; not under test here
+    operations = scripts / "operations"
+    operations.mkdir(parents=True)
+    shutil.copy(SCRIPT, operations / "setup-remote-libvirt.sh")
+    _stub(operations, "check-remote-libvirt.sh", "exit 0")  # preflight passes; not under test here
     venv_bin = repo / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
     venv_log = tmp_path / "venv.log"
@@ -108,7 +110,7 @@ def test_autodetects_repo_venv_over_system_python3(tmp_path: Path) -> None:
     assert BASH is not None
     result = subprocess.run(
         # HOST arg required; KDIVE_TOKEN set so demo-token.sh is skipped; KDIVE_PYTHON unset.
-        [BASH, str(scripts / "setup-remote-libvirt.sh"), "target.example", "root"],
+        [BASH, str(operations / "setup-remote-libvirt.sh"), "target.example", "root"],
         env={
             "PATH": f"{bindir}:/usr/bin:/bin",
             "HOME": str(tmp_path),

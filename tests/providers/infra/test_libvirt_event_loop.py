@@ -10,8 +10,7 @@ import kdive.providers.infra.libvirt_event_loop as mod
 
 
 def _reset() -> None:
-    mod._STATE.registered = False  # test-only reset of the module guard
-    mod._STATE.started = False
+    mod.reset_libvirt_event_loop_for_tests()
 
 
 @pytest.fixture(autouse=True)

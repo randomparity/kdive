@@ -30,8 +30,8 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import ObjectVersion, VersionBatch
+from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind, JobState
@@ -42,8 +42,8 @@ from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
 )
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
-from kdive.reconciler.cleanup import investigation_rootfs
-from kdive.reconciler.cleanup.investigation_rootfs import (
+from kdive.reconciler.cleanup.artifacts import investigation_rootfs
+from kdive.reconciler.cleanup.artifacts.investigation_rootfs import (
     sweep_expired_investigation_rootfs_reclaim,
 )
 from tests.db_waits import wait_until_backend_waiting

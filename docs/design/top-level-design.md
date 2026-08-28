@@ -2,17 +2,14 @@
 
 ## Purpose
 
-Re-design `kdive` from a single-user, local, stdio proof-of-concept into a
-production, multi-user service that gives agentic coding environments (Claude
-Code, Codex) a complete Linux kernel development and debug lifecycle across
-heterogeneous resources: local VMs, remote libvirt hosts, remote bare metal
-(PXE/SoL/IPMI/Redfish), PowerVM LPARs on ppc64le, and cloud instances.
+KDIVE is a production, multi-user service that gives agentic coding environments
+(Claude Code, Codex) a complete Linux kernel development and debug lifecycle.
+Local VMs are the default provider. Remote libvirt is an operator-configured
+provider; remote bare metal, PowerVM, and cloud providers remain future work.
 
-This is a **greenfield rewrite**. The existing ~33k-LOC PoC is a reference and a
-source of portable modules (redaction, path safety, gdb-MI, drgn introspect,
-crash postmortem, run-readiness preflight), but the architecture starts clean.
-Implementation language remains **Python**, chosen for native access to the
-kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
+KDIVE was implemented as a greenfield Python rewrite of a single-user, local,
+stdio proof of concept. Python provides native access to the kernel-tooling
+ecosystem (drgn, libvirt bindings, crash, and the MCP SDK).
 
 ## What changes from the PoC
 
@@ -25,12 +22,12 @@ kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
 | Identity | implicit local user | OIDC/SSO + RBAC, with on-behalf-of agent attribution |
 | Accounting | none | metering ledger + enforced budgets/quotas (admission control) |
 | Long-running ops | inline | durable job queue + worker tier |
-| Resource scope | local x86_64 libvirt only | typed provider runtime now; multi-provider dispatch later |
+| Resource scope | local x86_64 libvirt only | typed multi-provider runtime selected by resource kind |
 
 ## Core decisions
 
-These were decided during brainstorming and are load-bearing for everything
-below. Each should become an [ADR](../adr/) before implementation.
+These decisions define the implemented architecture. Accepted decisions and
+their later amendments are recorded in the [ADR collection](../adr/).
 
 1. **Greenfield rewrite**, Python.
 2. **Multi-user service**; MCP over streamable HTTP.
@@ -43,14 +40,16 @@ below. Each should become an [ADR](../adr/) before implementation.
 7. **Metering + budgets/quotas** with an admission-control gate on allocation.
 8. **Async worker tier + durable job queue**; hard per-tenant sandboxing
    designed-for but deferred.
-9. **Typed provider runtime ports** across narrow per-plane interfaces for M0/M1; capability
-   dispatch is a future multi-provider option (ADR-0063).
+9. **Typed provider runtime ports** across narrow per-plane interfaces, with active
+   `ResourceKind`-based dispatch for local-libvirt, fault-inject, and configured remote-libvirt
+   providers; capability-registry dispatch and additional provider families remain future options
+   (ADR-0063).
 
 ## System topology
 
 ```
-                  agent (Claude Code / Codex)          human (CLI / future UI)
-                            │ MCP (streamable HTTP)              │ REST/gRPC
+                  agent (Claude Code / Codex)                human (CLI)
+                            │ MCP (streamable HTTP)              │ MCP (streamable HTTP)
                             ▼                                    ▼
         ┌───────────────────────────────────────────────────────────────┐
         │                    API / Orchestration Core                    │
@@ -67,9 +66,9 @@ below. Each should become an [ADR](../adr/) before implementation.
         └───────────┬──────────────┘    │  runs, reservations,         │
                     ▼                    │  accounting ledger, audit    │
         ┌──────────────────────────┐    └──────────────────────────────┘
-        │   Worker tier (pools)     │    ┌──────────────────────────────┐
+        │   Generic worker fleet    │    ┌──────────────────────────────┐
         │  run provider operations  │───▶│  Object store (S3-compatible)│
-        │  scoped per resource class│    │  vmcores, build outputs,     │
+        │  operation dispatch lanes │    │  vmcores, build outputs,     │
         └───────────┬──────────────┘    │  console/gdb transcripts     │
                     ▼                    └──────────────────────────────┘
    providers: local-libvirt │ fault-inject │ remote-libvirt │ cloud │ baremetal-bmc │ powervm …
@@ -80,13 +79,17 @@ below. Each should become an [ADR](../adr/) before implementation.
        projected Pod token; one credential delivered to tmpfs
 ```
 
+This is the live topology. A future UI may introduce another protocol only after its public
+surface is designed and implemented; it is not part of the current ingress contract.
+
 - **MCP over streamable HTTP** — the service is remote and multi-user; agents
   authenticate with scoped, on-behalf-of tokens.
 - **Thin, fast core** — owns state machines, authz, admission control; dispatches
   work and never blocks on a long provision.
-- **Worker tier** — pulls jobs from a durable queue; long-running ops are jobs
-  with pollable status. Pools are scoped per resource class so a flaky BMC pool
-  cannot starve local builds. Hard per-tenant sandboxing is deferred.
+- **Worker tier** — one generic fleet pulls jobs from a durable queue; long-running ops are jobs
+  with pollable status. Dispatch lanes separate default work from state-fenced lifecycle work.
+  Resource-class pools remain a future isolation option; production does not route or deploy
+  workers by resource class. Hard per-tenant sandboxing is deferred.
 - **Lifecycle witness** — a platform-optional, Kubernetes-specific authority process, separate
   from the server, worker, and reconciler. The shipped Helm chart always deploys it as a fourth
   singleton control-plane workload; the reference Compose deployment instead uses an operator-run
@@ -235,11 +238,12 @@ In M0/M1 the production seam is
 `ProviderRuntime`: startup builds typed ports for each configured provider
 (`Provisioner`, `Builder`, `Installer`, `Controller`, `Retriever`, debug and
 introspection ports) and passes those ports to MCP tool registrars and worker
-handlers. Production defaults to the local-libvirt runtime; fault-inject is also a
-concrete provider, enabled only by explicit profiles for test and failure-path coverage.
-Runtime selection flows through `ProviderResolver`, so tools and handlers resolve the
-provider attached to the Allocation or System instead of assuming local-libvirt. Future
-providers still extend this typed runtime seam. Composition is centralized in
+handlers. Production defaults to the local-libvirt runtime. Remote-libvirt is an implemented,
+operator-configured production provider that drives guests on separate libvirt hosts; fault-inject
+is another concrete provider, enabled only by explicit profiles for test and failure-path coverage.
+Runtime selection flows through `ProviderResolver`, so tools and handlers resolve the provider
+attached to the Allocation or System instead of assuming local-libvirt. Cloud, bare-metal, and
+PowerVM providers remain future work on this typed runtime seam. Composition is centralized in
 `src/kdive/providers/assembly/composition.py`.
 
 The capability registry from ADR-0009/ADR-0022 is historical design context, not an
@@ -250,17 +254,17 @@ serves requests.
 
 ## Lifecycle planes
 
-| Plane | Responsibility | Local-libvirt (slice 1) | Later providers |
+| Plane | Responsibility | Implemented providers | Future providers |
 |---|---|---|---|
-| Discovery | register resources, advertise capabilities, report health | enumerate local libvirt host | cloud regions, lab inventory, HMC frames |
-| Allocation | claim/lease/release; feeds admission control + accounting | always-yes lease (capacity-checked) | cloud reserve API, lab reservation, LPAR activate |
-| Provisioning | apply a provisioning profile → a ready System | libvirt XML + rootfs image | ISO+kickstart, golden/QCOW2 images, ansible, NIM/PXE |
-| Build | produce a kernel from source + profile | local `make` | remote build host, GitHub Actions workflow |
-| Install | deploy a built kernel onto a System | copy + direct-kernel boot | SSH push, image bake, netboot |
-| Connect | establish a debug/console transport | QEMU gdbstub, SSH/serial | SoL, KGDB-over-serial, BMC console |
-| Debug | constrained debug ops over a transport | gdb-MI + drgn | crash, KDB |
-| Control | power/reset/force-crash | virsh destroy/reset/`sysrq-c` | IPMI/Redfish power, HMC, NMI |
-| Retrieve | pull debug artifacts | vmcore via kdump path | remote vmcore fetch, BMC SOL capture |
+| Discovery | register resources, advertise capabilities, report health | local host enumeration; configured remote-libvirt hosts | cloud regions, lab inventory, HMC frames |
+| Allocation | claim/lease/release; feeds admission control + accounting | core capacity-checked allocation for local and remote resources | cloud reserve API, lab reservation, LPAR activate |
+| Provisioning | apply a provisioning profile → a ready System | local and remote libvirt domain + rootfs provisioning | ISO+kickstart, image bake, NIM/PXE |
+| Build | produce a kernel from source + profile | local build; remote-libvirt in-guest build helper | cloud builders, hosted CI workflows |
+| Install | deploy a built kernel onto a System | local direct-kernel install; remote-libvirt guest helper | image bake, netboot |
+| Connect | establish a debug/console transport | local and remote libvirt gdbstub, SSH, and console paths | SoL, KGDB-over-serial, BMC console |
+| Debug | constrained debug ops over a transport | gdb-MI and drgn for local and remote-libvirt Systems | crash, KDB |
+| Control | power/reset/force-crash | local and remote libvirt control paths | IPMI/Redfish power, HMC, NMI |
+| Retrieve | pull debug artifacts | local and remote-libvirt vmcore retrieval | BMC SOL capture, cloud-native artifact retrieval |
 
 **Ported from the PoC behind these interfaces:** redaction, path safety,
 constrained-debug allowlist, gdb-MI tier, drgn introspect/vmcore, crash
@@ -272,7 +276,10 @@ These packages are related but not interchangeable:
 
 | Package | Responsibility |
 |---|---|
-| `kdive.artifacts` | Artifact DTOs, keys, sensitivity, and upload metadata. |
+| `kdive.artifacts.storage` | Cross-cutting object-store request and result contracts. |
+| `kdive.artifacts.uploads` | Upload declarations, manifests, content addressing, reassembly, encoding, and write leases. |
+| `kdive.artifacts.catalog` | Artifact-row persistence, read models, discard, and etag repair. |
+| `kdive.artifacts.formats` | Format-specific artifact parsing, currently pcap packet counting. |
 | `kdive.store` | Object-store clients and environment-backed store assembly. |
 | `kdive.build_artifacts` | Build-output result shapes and build-id validation. |
 | `kdive.kernel_config` | Uploaded kernel-config parsing, effective-config fetch, and feature requirement gates. |
@@ -374,10 +381,10 @@ Applied across every plane.
   repositories, idempotency rows, audit rows, and ledger writes live in
   `kdive.services` (for example allocation admission, renewal, and accounting
   rollups), so persistence orchestration is not hidden inside domain modules.
-- **Destructive-op policy gate** — `control.power(off/cycle/reset)`,
-  `force_crash`, `teardown`, disk delete, and PCI passthrough are gated by two
-  independent, all-required checks: (a) RBAC role and (b) an explicit profile/flag
-  opt-in. ADR-0130 removed the former capability-scope check from the runtime gate.
+- **Destructive-op policy gate** — `force_crash` requires both the allocation
+  project's RBAC role and explicit profile opt-in. Power, teardown, and
+  reprovision use their own lifecycle and RBAC checks; they do not use the
+  force-crash profile gate (ADR-0130).
 - **Concurrency** — serialize per-Allocation and per-System via Postgres advisory
   locks; idempotent steps keyed by `run_id` + step. Admission control serializes
   on a **per-project (budget-scope) lock** — an advisory lock or `SELECT … FOR
@@ -435,200 +442,24 @@ in the distributed model: stale handles surface after a reprovision or reboot
 invalidates a System/DebugSession reference; transport conflicts surface when two
 attaches contend for one debug transport.
 
-## Decomposition into sub-projects
+## Delivery status
 
-Each gets its own spec → plan → implementation cycle.
+This document describes the live architecture. Historical milestone sequencing and exit criteria
+remain in the archived plans and designs rather than being repeated as future-tense requirements
+here.
 
-1. **Core platform** — domain model, Postgres schema + repository layer, object
-   store, job queue + worker tier, MCP/HTTP server skeleton, OIDC/RBAC, audit.
-   (Foundation; everything depends on it.)
-2. **Resource + Allocation plane** — discovery, resource capability metadata, admission
-   control, accounting ledger, quotas/budgets.
-3. **Provisioning plane** — provisioning-profile model + the libvirt provisioner.
-4. **Build + Install plane** — local build, kernel install onto a System.
-5. **Connect + Debug plane** — gdbstub/SSH transport, debug session lifecycle,
-   ported gdb-MI/drgn/crash.
-6. **Control + Retrieve plane** — virsh power/reset/force-crash, vmcore
-   capture/fetch.
+| Delivery band | Current status | Historical record |
+|---|---|---|
+| M0 walking skeleton | Implemented by the server, worker, reconciler, durable stores, and local-libvirt lifecycle | [M0 implementation plan](../archive/plans/m0-implementation.md) |
+| M1 platform depth | Implemented allocation, accounting, RBAC, scheduling, live-stack validation, and fault injection | [M1 implementation plan](../archive/plans/m1-implementation.md) |
+| M2 provider and operations | Implemented remote-libvirt, deployment packaging, `kdivectl`, observability, managed images, and remote capture paths | [M2 productionization design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md) |
 
-## Roadmap
+The provider-runtime hypothesis is now established by local-libvirt, fault-inject, and
+remote-libvirt: each provider supplies typed plane ports behind `ProviderRuntime`, while core
+lifecycle and MCP contracts remain provider-neutral. The current provider capabilities are listed
+in [Provider model](#provider-model) and [Lifecycle planes](#lifecycle-planes).
 
-Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
-
-- **M0 — Walking skeleton.** Core platform (#1) plus the thinnest path through
-  every plane for **local-libvirt only**: request always-yes allocation
-  (capacity-checked) → provision a libvirt System → build → install → boot → attach gdbstub → set
-  breakpoint / read memory → force-crash → fetch vmcore. One resource kind, real
-  end-to-end, on the new architecture. Proves the model and the seams.
-- **M1 — Allocation/accounting depth.** Real reservation/lease semantics,
-  admission control, ledger, quotas/budgets, OIDC/RBAC hardening. Still
-  local-libvirt, but the allocation plane becomes real.
-
-  *M1.1–M1.4 are the local-libvirt **feature-deepening band**: they harden and
-  extend the M1 platform on the single provider before the provider-expansion
-  milestones (M2+). M1.1 is foundational and lands first (M1.2 and M1.3 both
-  build on its seam); M1.4 may follow in either order, and M1.5 fault-injection
-  hardening still precedes the provider milestones.*
-
-- **M1.1 — Platform-scoped RBAC tier.**
-  ([ADR-0043](../adr/0043-platform-scoped-rbac-tier.md), contract
-  [`m1.1-platform-rbac-tier.md`](m1.1-platform-rbac-tier.md)) A `platform_roles`
-  claim tier (`platform_admin` / `platform_operator` / `platform_auditor`),
-  orthogonal to the per-project roles, for the cross-project and
-  shared-infrastructure authority the per-project model cannot express (the
-  cross-project role ADR-0006 deferred). First delivery: the role-model seam plus
-  `accounting.report` — a granted-set form managers reach under existing membership
-  (no platform grant) and an all-projects form gated `platform_auditor` — with a
-  `platform_audit_log` for read-access auditing. Foundational to M1.2 and M1.3.
-- **M1.2 — Live-stack end-to-end validation.**
-  ([ADR-0042](../adr/0042-live-stack-e2e-mcp-http.md), contract
-  [`m1.2-live-stack-e2e.md`](m1.2-live-stack-e2e.md)) An operator-run, real-libvirt
-  test that drives the full spine — allocate → provision → build → install → boot →
-  attach → force-crash → capture vmcore → release — over the **live MCP HTTP
-  stack** (server + worker + reconciler against Postgres + S3 + OIDC), under
-  per-project role tokens plus a `platform_auditor` token (which exercises M1.1's
-  `accounting.report` over the wire). Replaces the unimplemented M0
-  walking-skeleton stub; proves the model on real infrastructure end-to-end
-  (operator-run, not GitHub-CI).
-- **M1.3 — Platform operations.** The platform_operator/admin tooling: host
-  cordon / drain / maintenance status, force-reconcile and worker/queue control,
-  runtime capacity/cost tuning, and break-glass cross-project teardown /
-  force-release; the platform-auditor reads `audit.query` and `inventory.list`;
-  and the bare-`require_role` denial-audit retrofit. Builds on the M1.1 seam.
-- **M1.4 — System catalog, availability & scheduling.** Named system **shapes**
-  (small … max) over the provisioning profile plus **full custom** configuration
-  (CPU/memory/PCIe passthrough); a **fleet availability** view (which hosts/shapes
-  are free now); a **reservation/backlog scheduler** so scarce hardware is used
-  efficiently ("always work queued"); and **system reuse** plus a future system
-  list view.
-  Realizes latent domain-model concepts already named above — Resource
-  `capabilities` (PCIe), `cost_class`, the `draining` status, and reservations.
-- **M1.5 — Fault-injection provider.** A mock provider behind the real plane
-  interfaces that forces secret resolution and injects latency and failures
-  (provision timeout, lease expiry mid-job, worker death, transport drop). It
-  exercises reconciliation/teardown, the secret-registration contract, and
-  admission-control races **before** any real remote provider — validating the
-  seams while they are still cheap to change.
-- **M2 — Remote libvirt.** Second provider behind the same interfaces — proves
-  remote allocation/provision/install/transport with no core change.
-
-  *M2.1–M2.4 are the **productionization & operability band**: provider-agnostic
-  platform hardening that makes kdive deployable and operable by someone other
-  than its author, gating the M3 cloud expansion (where real cost, real tenants,
-  and a real secret backend raise the stakes). Unlike the M1.x band
-  (local-libvirt feature-deepening), these target the platform itself, not a
-  provider. They land in order: M2.1 defines the deployment surface the rest run
-  in; M2.2 (the CLI) precedes M2.3/M2.4 because both the `doctor` and the
-  image-management verbs are delivered as `kdivectl` commands; M2.3 (`doctor`) is
-  pulled ahead of the image lifecycle because the reachability self-diagnosis is
-  the highest-payoff piece and depends only on the CLI. M2.2–M2.4 act on the
-  service, so M2.1 may be developed in parallel (its image is still a prerequisite
-  of the band gate). See
-  [the design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
-
-- **M2.1 — Deployment & packaging.** Official container image(s) for the process
-  entrypoints (one image, matching `python -m kdive
-  {server|worker|reconciler|lifecycle-witness}`); a reference compose + Helm deployment that brings
-  the app tier up against the existing Postgres/MinIO/OIDC backends; and one
-  documented configuration surface (the `KDIVE_*` env contract) with a generated
-  config reference. `lifecycle-witness` is the optional Kubernetes authority described above; the
-  shipped Helm topology runs all four long-running processes, while the reference Compose topology
-  uses its own operator-run lifecycle gate. Replaces the hand-rolled bootstrap; the image is the
-  artifact M2.2–M2.4 run in.
-- **M2.2 — Admin CLI (`kdivectl`).** A supported administrative surface over
-  platform state for operators (`platform_admin` / `platform_operator`), not
-  agents, over the same service seams the MCP tools use (no second source of
-  truth). It authenticates as an **OIDC principal** under the same
-  per-project/platform-role RBAC the MCP surface enforces (not raw DB credentials)
-  and is audited. Read-only inspection lands first (resources, allocations, systems,
-  runs, jobs, the accounting ledger, object-store wiring, the rootfs/fixture
-  catalog, secret *presence* — never values); mutating/destructive administration
-  (cross-project teardown, force-release, cordon/drain) routes through the M1.3
-  platform-role break-glass path, **not** the per-allocation iteration gate.
-  Replaces ad-hoc `psql`/`mc` poking.
-- **M2.3 — Observability & doctor.** Operational visibility and self-diagnosis:
-  structured-log/metrics/trace emission across core and worker, health/readiness
-  endpoints for the M2.1 deployment, and a `doctor`/preflight (`kdivectl` verb)
-  that validates the contracts whose silent violation costs the most — provider
-  TLS chain, gdbstub-port ACL, secret-ref resolution, and guest→object-store
-  reachability — and names the exact fix instead of surfacing as a downstream job
-  failure. Pulled ahead of the image lifecycle: the reachability `doctor` is the
-  band's highest-payoff piece (the M2 faults that cost the most were undiagnosed
-  reachability) and depends only on the CLI (M2.2) that delivers it. The
-  metrics/tracing/health work targets the M2.1 deployment, settled by now.
-- **M2.4 — Image & rootfs lifecycle.** A managed subsystem for the base-OS/rootfs
-  images that are currently an unscripted "operator obligation": build (the
-  per-provider image scripts become first-class and reproducible), validate (the
-  guest carries its provider's contract — guest agent, kdump, drgn, the
-  allowlisted in-guest helpers), publish/version into the object store, and
-  register into the `FixtureCatalog`; the image-management `kdivectl` verbs are
-  added here against this subsystem. Adds **patch-applied verification** — the
-  build asserts the patch produced the expected source change (a post-apply
-  marker), which an input→output provenance hash alone would miss — so a "patched"
-  kernel is verifiably patched. (The narrower silent `git apply` patch-drop is a
-  confirmed shipped bug, fixed independently of and **before** the band's exit gate,
-  not deferred behind it.) Publish-then-register is a two-write: the catalog row is
-  visible only after the object's HEAD succeeds, and the reconciler sweeps orphaned
-  objects and dangling rows (the existing artifact drift-repair pattern).
-
-  The band is complete — and M3 may begin — only when a non-author operator stands
-  kdive up from the M2.1 image + config reference, drives `kdivectl` + a
-  patch-applied-verified build, and runs `doctor`, captured as an **independently
-  checkable** operator-run record (the raw per-probe results, patch-applied marker,
-  and a successful debug op — not "doctor says green," since doctor is built
-  in-band) and **signed off by a platform operator other than the author**. Each
-  milestone also carries its own exit check so a shortfall surfaces at the
-  milestone, not only at the band gate (see the design doc). Hard per-tenant
-  sandboxing (core decision #8) and a manager-backed secret backend are **not** in
-  this band — they fold into M3 as cloud-driven hardening.
-- **M2.5 — Remote-libvirt capture-method parity.**
-  ([milestone #12](https://github.com/randomparity/kdive/milestone/12),
-  blocks [#198](https://github.com/randomparity/kdive/issues/198)) A
-  provider-feature milestone, not part of the M2.1–M2.4 platform band: it deepens
-  the remote provider so the choice of provider does not constrain crash-capture
-  capability. At M2 close the two providers are **near-complementary, not
-  redundant** — local-libvirt advertises `{console, host_dump, gdbstub}`, remote
-  advertises `{kdump}` only — so local cannot be reclassified away from the
-  production default (the #198 question) until remote covers the capture surface
-  it owns. Per method on remote: **console** gains a realization (it provisions a
-  pty console today but tees no `<log file>`, so no console artifact is
-  registered — route via a host-side tee or the guest-agent/virtio-serial
-  channel, registered as the boot-plane console artifact, ADR-0049 Decision 4);
-  **gdbstub** is surfaced as a capture method (the Connect-plane transport is
-  already wired and was exercised on the first live remote run, just unadvertised);
-  **host_dump** is **realized** on remote (dump guest memory on the remote host and
-  ship the core out via a host-side retrieval channel mirroring kdump's two-phase
-  presigned-PUT pattern) — this **supersedes [ADR-0084](../adr/0084-remote-control-two-phase-vmcore-retrieve.md)'s
-  "host_dump not supported on remote" stance and earns its own ADR**; **kdump** is
-  already done (ADR-0084). Exit: remote advertises all four methods, each exercised
-  against the live remote spine and recorded operator-run. The provider-agnostic
-  capture vocabulary (ADR-0049) is unchanged — this is provider realization behind
-  the existing seam, so the zero-core-touch hypothesis below still applies.
-- **M3 — Cloud.** Cloud provider + QCOW2/cloud-image provisioning + chargeback
-  against real cost.
-- **M4 — Bare metal.** PXE/SoL/IPMI/Redfish — the control plane gets real
-  hardware power/crash.
-- **M5 — PowerVM/ppc64le.** LPAR activation + HMC; second architecture.
-
-Each milestone after M0 is intended to be "add a provider package + its
-provisioning profiles," with the core and tool surface unchanged — first through
-the typed `ProviderRuntime` ports, and later through a separately accepted
-multi-provider dispatch design if M2 needs one. **This is a falsifiable
-hypothesis, not a guarantee**: the test is that adding the M2 remote provider
-touches zero lines in `core/*` and the MCP tool-surface modules, measured by diff
-scope. M0 proves the happy-path wiring end-to-end; it does **not** prove the
-seams hold under real leasing, secret resolution, chargeback, or hardware failure
-— which is exactly what the M1.5 fault-injection provider exists to stress first.
-
-## Open follow-up decisions
-
-Deferred to implementation planning / ADRs:
-
-- Concrete job-queue technology (e.g. Postgres-backed queue vs Redis/Celery vs
-  Temporal) and worker deployment shape.
-- MCP Python server framework and streamable-HTTP auth integration specifics.
-- Provisioning-profile schema (how libvirt XML / kickstart / ansible / QCOW2 are
-  expressed under one model).
-- Secret backend (file refs for M0; manager integration later).
-- Object-store layout and retention policy for vmcores and transcripts.
-- Migration/port plan for the salvaged PoC modules.
+Cloud, bare-metal, and PowerVM are future provider families. Each should extend the typed runtime
+seam unless an accepted ADR establishes a different dispatch model. Hard per-tenant sandboxing and
+a manager-backed secret backend also remain future work; their contracts must be decided before
+implementation rather than inferred from the completed milestone plans.

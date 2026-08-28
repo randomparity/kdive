@@ -45,6 +45,7 @@ from kdive.providers.infra.console_hosting import (
     ConsoleHostingLoop,
     RunningSystems,
 )
+from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
 from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
@@ -71,7 +72,6 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtVmcoreIntrospect,
 )
 from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
-    RemoteCaptureExecutor,
     RemoteLibvirtCaptureQuiescence,
 )
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
@@ -89,13 +89,14 @@ from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraRea
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
-from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
+from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
+from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import (
@@ -151,7 +152,7 @@ def _capture_secret_backend(
 
 def build_capture_executor(
     configuration: RemoteCaptureConfiguration,
-) -> RemoteCaptureExecutor:
+) -> CaptureExecutor:
     """Reconstruct the remote executor from released exact Resource configuration."""
     registry = SecretRegistry()
     resolved = _capture_remote_config(configuration)
@@ -160,7 +161,7 @@ def build_capture_executor(
         config_factory=lambda: resolved,
         secret_backend_factory=lambda: _capture_secret_backend(configuration, registry),
     )
-    return RemoteCaptureExecutor(capturer=capturer)
+    return CaptureExecutor(capturer=capturer, provider_label="remote")
 
 
 def build_capture_quiescence(
@@ -271,6 +272,7 @@ async def build_console_hosting(
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     running_systems_factory: RunningSystemsFactory,
     console_telemetry: ConsoleTelemetry | None = None,
+    event_loop_start: Callable[[], None] = ensure_libvirt_event_loop,
 ) -> ConsoleHosting | None:
     """Build the single-leader remote console hosting loop, or ``None`` when unconfigured.
 
@@ -281,6 +283,9 @@ async def build_console_hosting(
     if not is_remote_libvirt_configured():
         return None
 
+    # Register before constructing an owner whose collectors can open stream-capable
+    # connections; libvirt does not service connections opened before registration (ADR-0182).
+    event_loop_start()
     conninfo = database_url()
     secret_backend = secret_backend_from_env(registry=secret_registry)
 
@@ -400,7 +405,7 @@ def build_runtime(
     installer = RemoteLibvirtInstall.from_env(
         secret_registry=secret_registry, store=store, config_factory=config_factory
     )
-    retriever = RemoteLibvirtRetriever.from_env(
+    retriever = RemoteLibvirtRetrieve.from_env(
         secret_registry=secret_registry, store=store, config_factory=config_factory
     )
     crash_postmortem = CrashPostmortemAdapter(

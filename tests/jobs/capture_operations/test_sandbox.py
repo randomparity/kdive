@@ -16,7 +16,7 @@ _SOURCE = _ROOT / "src"
 
 def _sandbox_probe(source: str) -> subprocess.CompletedProcess[str]:
     script = (
-        "from kdive.jobs.capture_operations.sandbox import install_capture_filter\n"
+        "from kdive.jobs.capture_operations.process.sandbox import install_capture_filter\n"
         "install_capture_filter()\n" + source
     )
     return subprocess.run(
@@ -122,7 +122,7 @@ def test_filter_enforces_complete_raw_clone_flag_matrix() -> None:
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="seccomp is Linux-only")
 def test_filter_refuses_unsupported_architecture(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kdive.jobs.capture_operations import sandbox
+    from kdive.jobs.capture_operations.process import sandbox
 
     monkeypatch.setattr(sandbox.platform, "machine", lambda: "s390x")
     with pytest.raises(RuntimeError, match="unsupported audit architecture"):

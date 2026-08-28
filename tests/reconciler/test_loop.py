@@ -17,13 +17,15 @@ from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunS
 from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.cleanup.artifact_retention import ArtifactObjectDeleter
-from kdive.reconciler.cleanup.provider_reaping import (
-    ReapLaneOutcome,
-    reap_console_collectors,
+from kdive.reconciler.cleanup.artifacts.artifact_retention import ArtifactObjectDeleter
+from kdive.reconciler.cleanup.provider_resources.console_reaping import reap_console_collectors
+from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
     reap_orphaned_dump_volumes,
+)
+from kdive.reconciler.cleanup.provider_resources.provider_domain_reaping import (
     repair_leaked_domains,
 )
+from kdive.reconciler.cleanup.provider_resources.reaping_common import ReapLaneOutcome
 from kdive.reconciler.loop import (
     Reconciler,
     ReconcileReport,
@@ -105,8 +107,11 @@ def test_reconcile_report_fields_are_catalog_backed() -> None:
             "dump_volumes_budget_unattempted",
         }
     }
-    assert set(loop._REPORT_FIELDS) == scalar_fields
-    assert set(loop._REPORT_FIELDS) <= set(loop._REPORT_FIELD_TO_REPAIR_KIND)
+    catalog_fields = {
+        entry.report_field for entry in loop._REPAIR_CATALOG if entry.report_field is not None
+    }
+    assert catalog_fields == scalar_fields
+    assert catalog_fields == set(loop._REPORT_FIELD_TO_REPAIR_KIND)
 
 
 def test_the_report_carries_the_lanes_budget_unattempted_counts() -> None:

@@ -1,7 +1,7 @@
 """Image-catalog object drift repair for the reconciler (M2.4/6, ADR-0092, ADR-0093).
 
 Two deadline-guarded sweeps, modeled on
-:func:`kdive.reconciler.cleanup.uploads.repair_abandoned_uploads` (a ``deadline < now()``
+:func:`kdive.reconciler.cleanup.uploads.uploads.repair_abandoned_uploads` (a ``deadline < now()``
 window + a table cross-check, never an eager delete), each isolated on a fresh pooled
 connection and each evaluating time in Postgres ``now()`` (never a Python clock):
 

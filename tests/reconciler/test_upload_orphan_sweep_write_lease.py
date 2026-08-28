@@ -31,7 +31,6 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import (
     HeadResult,
     ObjectListing,
@@ -39,13 +38,14 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
-from kdive.artifacts.upload_manifest import (
+from kdive.artifacts.uploads import upload_manifest
+from kdive.artifacts.uploads.upload_manifest import (
     INVESTIGATION_UPLOAD_OWNER,
     RUN_UPLOAD_OWNER,
     UPLOAD_TENANT,
     lock_scope_for,
 )
-from kdive.artifacts.write_lease import (
+from kdive.artifacts.uploads.write_lease import (
     hold_write_lease,
     reap_stale_write_leases,
     release_write_lease,
@@ -54,7 +54,7 @@ from kdive.db.locks import advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.lifecycle.records import Investigation
-from kdive.reconciler.cleanup.upload_orphans import (
+from kdive.reconciler.cleanup.uploads.upload_orphans import (
     UploadOrphanCandidate,
     reclaimable_upload_keys,
     repair_leaked_upload_objects,
@@ -423,7 +423,7 @@ def test_a_lease_minted_in_the_classify_delete_gap_cannot_be_missed(
                 AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
             ):
                 with caplog.at_level(
-                    logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"
+                    logging.INFO, logger="kdive.reconciler.cleanup.uploads.upload_orphans"
                 ):
                     assert await run_repair(pool, _sweep(store)) == 0
                 assert store.deleted == []

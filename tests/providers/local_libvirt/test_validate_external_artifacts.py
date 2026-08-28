@@ -9,7 +9,7 @@ import tarfile
 import pytest
 
 from kdive.artifacts.storage import HeadResult
-from kdive.artifacts.uploads import ManifestEntry
+from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.build_artifacts import validation
 from kdive.build_artifacts.validation import (
     extract_build_id_ranged,
@@ -785,8 +785,8 @@ def test_ppc64le_vmlinux_build_id_pairs() -> None:
 
 # --- Chunked artifacts (ADR-0104 §4) ----------------------------------------------------
 
-from kdive.artifacts.chunks import verify_chunks  # noqa: E402
-from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
+from kdive.artifacts.uploads.chunks import verify_chunks  # noqa: E402
+from kdive.artifacts.uploads.uploads import ChunkEntry  # noqa: E402
 from tests.clock import STORE_MTIME  # noqa: E402
 
 _PREFIX = "local/runs/rid/"

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kdive.artifacts.read_model import ArtifactReadRef
+from kdive.artifacts.catalog.read_model import ArtifactReadRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.sessions.registry import GdbMiSessionRegistry
 from kdive.providers.ports.debug import (

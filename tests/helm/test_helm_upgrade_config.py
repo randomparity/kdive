@@ -79,7 +79,7 @@ def _config_value(res: subprocess.CompletedProcess[str], key: str) -> str | None
 
 @pytest.mark.parametrize("proc", _APP_PROCS)
 def test_app_pods_carry_config_checksum_annotation(proc: str) -> None:
-    deploy = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")[proc]
+    deploy = _workloads()[proc]
     annotations = _pod_annotations(deploy)
     checksum = annotations.get("checksum/config")
     assert checksum, f"{proc} pod template has no checksum/config annotation"
@@ -89,10 +89,8 @@ def test_app_pods_carry_config_checksum_annotation(proc: str) -> None:
 
 
 def test_config_checksum_changes_when_a_config_value_changes() -> None:
-    a = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    b = _workloads(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "config.KDIVE_S3_BUCKET=other-bucket"
-    )
+    a = _workloads()
+    b = _workloads("config.KDIVE_S3_BUCKET=other-bucket")
     for proc in _APP_PROCS:
         ca = _pod_annotations(a[proc])["checksum/config"]
         cb = _pod_annotations(b[proc])["checksum/config"]
@@ -101,8 +99,8 @@ def test_config_checksum_changes_when_a_config_value_changes() -> None:
 
 def test_config_checksum_is_stable_across_renders() -> None:
     # Same inputs must hash the same, or every upgrade would needlessly roll the pods.
-    a = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    b = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    a = _workloads()
+    b = _workloads()
     for proc in _APP_PROCS:
         assert (
             _pod_annotations(a[proc])["checksum/config"]
@@ -158,9 +156,7 @@ def test_backend_pods_have_no_config_checksum_annotation() -> None:
 def test_local_libvirt_defaults_false_when_value_absent_external() -> None:
     # A bare --reuse-values upgrade can omit the key entirely; null clears it from the
     # merged value-set, modelling that drop. The rendered ConfigMap must still carry "false".
-    res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "config.KDIVE_LOCAL_LIBVIRT_ENABLED=null"
-    )
+    res = _template("config.KDIVE_LOCAL_LIBVIRT_ENABLED=null")
     assert res.returncode == 0, res.stderr
     assert _config_value(res, "KDIVE_LOCAL_LIBVIRT_ENABLED") == "false"
 
@@ -177,9 +173,7 @@ def test_local_libvirt_defaults_false_when_value_absent_bundled() -> None:
 
 def test_local_libvirt_honors_explicit_true() -> None:
     # A host that genuinely runs libvirtd opts back in; the defensive default must not clobber it.
-    res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "config.KDIVE_LOCAL_LIBVIRT_ENABLED=true"
-    )
+    res = _template("config.KDIVE_LOCAL_LIBVIRT_ENABLED=true")
     assert res.returncode == 0, res.stderr
     assert _config_value(res, "KDIVE_LOCAL_LIBVIRT_ENABLED") == "true"
 
@@ -188,9 +182,7 @@ def test_local_libvirt_emitted_once() -> None:
     # The key is excluded from the .Values.config range and emitted explicitly; a regression
     # that left it in the range too would emit a duplicate ConfigMap key (last-wins, silent).
     # An explicit value present in both the range and the explicit line would render twice.
-    res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "config.KDIVE_LOCAL_LIBVIRT_ENABLED=true"
-    )
+    res = _template("config.KDIVE_LOCAL_LIBVIRT_ENABLED=true")
     assert res.returncode == 0, res.stderr
     assert res.stdout.count("\n  KDIVE_LOCAL_LIBVIRT_ENABLED:") == 1, (
         "KDIVE_LOCAL_LIBVIRT_ENABLED rendered more than once (range + explicit?)"

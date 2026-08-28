@@ -20,6 +20,7 @@ from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Investigation
+from kdive.jobs.service_operations import JobOperations
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionResult,
@@ -51,7 +52,9 @@ _DT_PROJECT = "proj"
 
 
 def _admission() -> SystemAdmission:
-    return SystemAdmission(_TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, lambda _rootfs: None)
+    return SystemAdmission(
+        _TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, lambda _rootfs: None, JobOperations()
+    )
 
 
 async def _seed_investigation(

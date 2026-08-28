@@ -19,7 +19,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.pcap_count import count_pcap_packets
+from kdive.artifacts.formats.pcap import count_pcap_packets
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import (
     ALLOCATIONS,
@@ -32,8 +32,8 @@ from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.publication import CapturePublicationCoordinator
-from kdive.jobs.capture_operations.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.publication import CapturePublicationCoordinator
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation
 from kdive.jobs.capture_operations.supervisor import (
     CaptureOperationSupervisor,
     CaptureSnapshot,

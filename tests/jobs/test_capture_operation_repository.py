@@ -24,7 +24,7 @@ from kdive.jobs.capture_operations.launcher import (
     LaunchAbortEvidence,
 )
 from kdive.jobs.capture_operations.protocol import CaptureRequest
-from kdive.jobs.capture_operations.repository import (
+from kdive.jobs.capture_operations.storage.repository import (
     CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,

@@ -25,8 +25,6 @@ observability:
   uiPort: 9090
 
 config:
-  # Deprecated and intentionally not rendered. Database credentials are Secret refs below.
-  KDIVE_DATABASE_URL: ""
   KDIVE_OIDC_ISSUER: ""
   KDIVE_OIDC_JWKS_URI: ""
   KDIVE_OIDC_AUDIENCE: kdive
