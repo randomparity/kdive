@@ -52,22 +52,7 @@ def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> Prov
 def require_investigation_binding_for_upload(
     policy: ProfilePolicy, profile: ProvisioningProfile, investigation_id: UUID | None
 ) -> None:
-    """Require a bound investigation when the profile's rootfs is an ``upload`` (ADR-0441 §2).
-
-    An investigation-scoped uploaded rootfs is resolved by content checksum within the System's
-    own investigation, so a ``{"kind": "upload"}`` rootfs with no ``investigation_id`` is
-    unresolvable. Reject it at admission with an actionable ``configuration_error`` naming the
-    missing binding rather than letting it fail late at provision.
-
-    Args:
-        policy: The provider profile policy (to read the rootfs source).
-        profile: The parsed provisioning profile.
-        investigation_id: The System's effective investigation binding, or ``None``.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the rootfs is ``upload`` and
-            ``investigation_id`` is ``None``.
-    """
+    """Reject an uploaded rootfs without the investigation binding needed to resolve it."""
     rootfs = policy.rootfs_source(profile)
     if rootfs is not None and rootfs.kind == "upload" and investigation_id is None:
         raise CategorizedError(

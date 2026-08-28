@@ -437,26 +437,7 @@ SNAPSHOTS = StatefulRepository(Snapshot, "snapshots", SnapshotState)
 async def record_system_failure_category(
     conn: AsyncConnection, system_id: UUID, category: ErrorCategory
 ) -> None:
-    """Stamp ``systems.failure_category`` on a row the caller just drove to ``failed``.
-
-    The single writer of the column (ADR-0492, ADR-0513). Both failure paths — the worker's
-    job handler and the reconciler's stalled-`restoring` repair — call it from *inside* the
-    transaction that already holds the row and performed the ``FAILED`` transition, so the
-    System's state and the reason for it commit together or not at all. Calling it outside
-    such a transaction reintroduces the window ADR-0492 closed.
-
-    Deliberately unguarded on ``state``. The caller's transaction has already run
-    ``update_state``, whose ``SELECT … FOR UPDATE`` holds this row and whose ``UPDATE`` set it
-    to ``failed``; ``FAILED`` has an empty outbound transition set, so no concurrent writer can
-    move it. A ``WHERE state = 'failed'`` predicate could therefore never be false, and if it
-    somehow were it would fail *silently* — zero rows affected, no signal — which is worse than
-    the arrangement it claims to protect.
-
-    Args:
-        system_id: The System the caller transitioned to ``failed`` in this transaction.
-        category: The verdict to record. Must be admitted by ``systems_failure_category_check``,
-            which mirrors :class:`~kdive.domain.errors.ErrorCategory`.
-    """
+    """Record the failure category in the transaction that transitioned the System."""
     async with conn.cursor() as cur:
         await cur.execute(
             "UPDATE systems SET failure_category = %s WHERE id = %s",
