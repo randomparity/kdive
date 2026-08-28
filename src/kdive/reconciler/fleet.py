@@ -45,7 +45,7 @@ _INVENTORY: tuple[tuple[str, type[StrEnum]], ...] = (
 )
 
 #: Allocation states that occupy a host-cap slot (ADR-0069). A queued ``requested`` row holds
-#: only a queue position and is excluded. Mirrors admission's ``OCCUPYING``.
+#: only a queue position and is excluded. Mirrors ``OCCUPYING_ALLOCATION_STATES``.
 _OCCUPYING_VALUES: tuple[str, ...] = (
     AllocationState.GRANTED.value,
     AllocationState.ACTIVE.value,

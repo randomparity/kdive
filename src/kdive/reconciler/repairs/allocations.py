@@ -265,8 +265,9 @@ async def reap_orphaned_active_allocations(
     A failed/interrupted lifecycle run leaves an allocation `active` while its single System
     reached a terminal state (`torn_down`/`failed`) — the teardown job never releases the
     allocation — so it permanently holds its host-cap slot (`active` is in admission's
-    `OCCUPYING` set), wedging a `cap=1` host (ADR-0109, #371). A run that aborts *between*
-    crashing its System and releasing the allocation strands the slot the same way, except the
+    `OCCUPYING_ALLOCATION_STATES` set), wedging a `cap=1` host (ADR-0109, #371). A run that
+    aborts *between* crashing its System and releasing the allocation strands the slot the same
+    way, except the
     System sits in `crashed` (#1628): `crashed` is a live state, so the terminal-System
     predicate alone never reclaims it and only the 4h lease eventually does.
 

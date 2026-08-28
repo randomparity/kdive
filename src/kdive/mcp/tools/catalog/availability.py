@@ -6,7 +6,8 @@ the pending-queue depth. It is a **point-in-time hint, never a reservation** —
 free can be taken by a concurrent grant before the agent requests it; the admission/
 scheduler path stays the authority (ADR-0070).
 
-Headroom uses the **same occupancy predicate as admission** — :data:`OCCUPYING` (the
+Headroom uses the **same occupancy predicate as admission** —
+:data:`OCCUPYING_ALLOCATION_STATES` (the
 `GRANTED/ACTIVE/RELEASING` states, ADR-0069), imported from
 :mod:`kdive.services.allocation.admission.core` so the two reads can never disagree; a queued
 `requested` row holds only a queue position and is excluded. Availability is
@@ -52,7 +53,10 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
-from kdive.services.allocation.admission.core import OCCUPYING_VALUES, pcie_claim
+from kdive.services.allocation.admission.core import (
+    OCCUPYING_ALLOCATION_STATE_VALUES,
+    pcie_claim,
+)
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -129,7 +133,7 @@ def _resource_id(value: object) -> UUID:
 async def _occupancy_by_resource(conn: AsyncConnection) -> dict[UUID, int]:
     """Fleet-wide occupancy count per host (one query, no N+1).
 
-    Counts the host's allocations in the shared :data:`OCCUPYING` predicate
+    Counts the host's allocations in the shared :data:`OCCUPYING_ALLOCATION_STATES` predicate
     (GRANTED/ACTIVE/RELEASING), the same set admission's host-cap check counts; a queued
     ``requested`` row is excluded. Hosts with zero occupancy are simply absent from the map.
     """
@@ -137,7 +141,7 @@ async def _occupancy_by_resource(conn: AsyncConnection) -> dict[UUID, int]:
         await cur.execute(
             "SELECT resource_id, count(*) FROM allocations "
             "WHERE resource_id IS NOT NULL AND state = ANY(%s) GROUP BY resource_id",
-            (OCCUPYING_VALUES,),
+            (OCCUPYING_ALLOCATION_STATE_VALUES,),
         )
         rows = await cur.fetchall()
     return {_resource_id(row[0]): int(row[1]) for row in rows}
