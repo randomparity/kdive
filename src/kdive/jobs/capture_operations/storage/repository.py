@@ -20,6 +20,10 @@ from kdive.security.audit import AuditEvent, args_digest
 
 type CaptureOperationState = Literal["launching", "gated", "running", "cancel_requested", "exited"]
 type CaptureProviderKind = Literal["local-libvirt", "remote-libvirt"]
+type CaptureExitOutcome = Literal[
+    "completed", "canceled", "recovered", "aborted_before_spawn", "aborted_before_identity"
+]
+type LaunchAbortOutcome = Literal["aborted_before_spawn", "aborted_before_identity"]
 type CapturePublicationState = Literal[
     "pending", "publishing", "canceling", "published", "discarded"
 ]
@@ -52,7 +56,7 @@ class RecoveryEvidence:
 
     process_absent: bool
     provider_quiescence: Mapping[str, object]
-    exit_outcome: str
+    exit_outcome: CaptureExitOutcome
     exit_code: int | None
 
 
@@ -75,7 +79,7 @@ class CaptureOperation:
     pid: int | None
     start_ticks: int | None
     state: CaptureOperationState
-    exit_outcome: str | None
+    exit_outcome: CaptureExitOutcome | None
     exit_code: int | None
     process_absent: bool
     provider_quiescence: dict[str, Any]
@@ -134,7 +138,7 @@ def _record(row: Mapping[str, Any]) -> CaptureOperation:
         pid=cast(int | None, row["pid"]),
         start_ticks=cast(int | None, row["start_ticks"]),
         state=cast(CaptureOperationState, row["state"]),
-        exit_outcome=cast(str | None, row["exit_outcome"]),
+        exit_outcome=cast(CaptureExitOutcome | None, row["exit_outcome"]),
         exit_code=cast(int | None, row["exit_code"]),
         process_absent=cast(bool, row["process_absent"]),
         provider_quiescence=cast(dict[str, Any], row["provider_quiescence"]),

@@ -10,7 +10,6 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 from uuid import UUID
 
 from kdive.jobs.capture_operations.bootstrap.manifest_attestation import (
@@ -30,7 +29,7 @@ from kdive.jobs.capture_operations.process.process_fence import (
     _task_members,
 )
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
-from kdive.jobs.capture_operations.storage.repository import CaptureOperation
+from kdive.jobs.capture_operations.storage.repository import CaptureOperation, LaunchAbortOutcome
 from kdive.jobs.capture_operations.storage.spool import (
     _dispose_operation_spool,
     _read_capture,
@@ -53,7 +52,7 @@ class LaunchAbortEvidence:
     process_created: bool
     process_absent: bool
     provider_quiescence: Mapping[str, object]
-    exit_outcome: Literal["aborted_before_spawn", "aborted_before_identity"]
+    exit_outcome: LaunchAbortOutcome
     exit_code: int | None
 
 

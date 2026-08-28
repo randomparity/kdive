@@ -26,6 +26,7 @@ from kdive.jobs.capture_operations.launcher import (
 )
 from kdive.jobs.capture_operations.protocol import CaptureRequest
 from kdive.jobs.capture_operations.storage.repository import (
+    CaptureExitOutcome,
     CaptureOperation,
     CaptureOperationIdentity,
     CaptureOperationSnapshot,
@@ -539,7 +540,7 @@ class CaptureOperationSupervisor:
         snapshot: CaptureSnapshot,
         configuration: bytes,
         *,
-        exit_outcome: str,
+        exit_outcome: CaptureExitOutcome,
         exit_code: int | None,
     ) -> None:
         probe = snapshot.quiescence(configuration)
