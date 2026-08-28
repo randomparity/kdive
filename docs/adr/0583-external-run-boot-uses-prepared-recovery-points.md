@@ -45,30 +45,35 @@ compressed bundle is never itself a bootable kernel.
 The root specification is a versioned, closed data shape. Version 1 records the target architecture,
 one `root=` value, the ordered root-related arguments required by the image, and provenance with an
 authority class and immutable source identity. Build-produced facts and bounded stage inspection are
-verified authorities. Operator catalog data is accepted only through the existing attestation path.
+verified authorities. Operator catalog data extends the existing typed attestation path with the
+same root value, ordered arguments, architecture, schema version, and immutable image identity; the
+current attestation fields alone are insufficient. No second untyped declaration path is added.
 Unknown versions, missing facts, stale source identities, conflicting root arguments, and an
 architecture mismatch fail before materialization or activation and name the recovery action. A
 pre-schema image remains eligible for its existing GRUB boot but not external Run boot.
 
-Before changing boot state, the provider creates a durable recovery point representing the exact
-currently defined boot configuration and returns its provider-computed source-definition identity
-plus an opaque recovery reference. For remote-libvirt, that point contains the exact inactive
-disk/GRUB domain definition, stored behind the provider seam; the shared state never interprets its
-XML. Deterministic identifiers make repeated prepare calls for the same System, Run, plan identity,
-and current definition return the same point.
+Before changing boot state, the provider prepares both sides of the compare-and-set. It creates a
+durable recovery point representing the exact currently defined boot configuration, renders but does
+not apply the target definition, and returns provider-computed source- and target-definition
+identities plus an opaque recovery reference. For remote-libvirt, that point contains the exact
+inactive disk/GRUB domain definition, stored behind the provider seam; the shared state never
+interprets its XML. Deterministic identifiers make repeated prepare calls for the same System, Run,
+plan identity, and current definition return the same point and target identity.
 
-Core persists the plan identity, materialization reference, recovery reference, and activation state
-before calling activate. The state machine is `prepared -> activating -> active`, with
+Core persists the plan identity, materialization reference, recovery reference, both provider
+definition identities, and activation state before calling activate. The state machine is
+`prepared -> activating -> active`, with
 `activating -> recovering -> recovered`, `activating|recovering -> recovery_conflict`, and failure
 metadata on an operation attempt. Transitions and provider calls run under the existing per-System
 advisory lock. Activation is compare-and-set from the recovery point's source-definition identity:
 the provider refuses a changed definition or a materialization/recovery reference belonging to
 another System, Run, or plan. On an `activating` record after worker loss, reconciliation compares
-the provider-observed definition identity with both recorded identities. The desired plan identity
-completes `active`; the source-definition identity completes `recovered`. Recovery may replace only
-the desired plan identity with the recorded source definition. Any absent, unreadable, or third
-identity enters `recovery_conflict` for operator resolution instead of overwriting provider state.
-It never guesses from readiness alone.
+the provider-observed definition identity with both recorded provider identities. The target identity
+completes `active`; the source identity completes `recovered`. Recovery may replace only the target
+identity with the recorded source definition. Any absent, unreadable, or third identity enters
+`recovery_conflict` for operator resolution instead of overwriting provider state. The portable plan
+identity is never compared directly with provider definition bytes, and readiness is never used to
+guess which definition won.
 
 Recovery restores the recorded point before declaring the System usable. The recovery point remains
 until the Run is terminal and no recovery is in flight. Materialized artifacts remain while the Run
@@ -89,6 +94,9 @@ HTTP/iPXE.
 - External Run boot has one artifact-pair and command-line meaning across providers. Remote initial
   provisioning remains disk/GRUB boot, and existing images without root provenance remain usable on
   that path.
+- Catalog-attested root provenance requires a typed extension to the existing attestation model and
+  its serialized inventory shape. Old records remain readable but cannot authorize external boot
+  until restaged, rebuilt, or explicitly re-attested with the new versioned fields.
 - Recovery stores the exact state being replaced, so configuration drift cannot silently change the
   rollback target. Provider-specific recovery bytes require bounded storage, tenant ownership,
   redaction, retention, and reaping behind the provider seam.
@@ -105,6 +113,14 @@ HTTP/iPXE.
 
 ## Considered & rejected
 
+- **Keep provider-specific Run boot and defer a shared contract until a bare-metal provider exists.**
+  judgment: issue #2105 requires the same finalized external build to have one meaning across both
+  current libvirt providers and a non-libvirt boundary proof now; deferral leaves the existing
+  kernel/initrd divergence and root ambiguity intact.
+- **Add remote direct-kernel rendering but leave recovery implicit in disk/GRUB provisioning.**
+  judgment: a worker death between provider activation and its database commit leaves no durable
+  fact that distinguishes the intended external definition from the definition to restore, so this
+  narrower adapter cannot meet the required crash-consistent recovery behavior.
 - **Re-render disk/GRUB recovery state from the current profile and provider configuration.**
   verified: `src/kdive/providers/remote_libvirt/lifecycle/xml.py` renders network, machine, storage,
   gdbstub, SSH-forward, console, and guest-agent settings from live configuration, while teardown
