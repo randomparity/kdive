@@ -24,6 +24,7 @@ _BUILD_REF_RE = re.compile(
     r"(?P<generation>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
 _CANONICAL_DOCUMENT_VERSION = 1
+_EXTERNAL_BOOT_DOCUMENT_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ def canonical_build_document(
     heads: Mapping[str, HeadResult],
     *,
     verified_identities: Mapping[str, JsonValue] | None = None,
+    external_boot_evidence: Mapping[str, JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     """Build content identity from validator-backed checksums, including multipart evidence."""
     checksums: dict[str, JsonValue] = {}
@@ -51,7 +53,11 @@ def canonical_build_document(
             raise ValueError(f"validated HEAD checksum is required for {name}")
         checksums[name] = identity or {"checksum_sha256": checksum}
     document = {
-        "version": _CANONICAL_DOCUMENT_VERSION,
+        "version": (
+            _EXTERNAL_BOOT_DOCUMENT_VERSION
+            if external_boot_evidence is not None
+            else _CANONICAL_DOCUMENT_VERSION
+        ),
         "target_kind": run.target_kind.value,
         "build_profile": dict(run.build_profile),
         "artifacts": checksums,
@@ -59,6 +65,8 @@ def canonical_build_document(
         "cmdline": result.cmdline,
         "provenance": result.build_provenance,
     }
+    if external_boot_evidence is not None:
+        document["external_boot_evidence"] = dict(external_boot_evidence)
     return cast("dict[str, JsonValue]", ensure_json_value(document, path="canonical build"))
 
 
@@ -77,11 +85,16 @@ async def publish_or_reuse_build(
     result: BuildStepResult,
     heads: Mapping[str, HeadResult],
     verified_identities: Mapping[str, JsonValue] | None = None,
+    external_boot_evidence: Mapping[str, JsonValue] | None = None,
     retention: timedelta,
 ) -> BuildPublication:
     """Select or insert one immutable build generation under the caller's Investigation lock."""
     canonical_document = canonical_build_document(
-        run, result, heads, verified_identities=verified_identities
+        run,
+        result,
+        heads,
+        verified_identities=verified_identities,
+        external_boot_evidence=external_boot_evidence,
     )
     encoded_document = json.dumps(canonical_document, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded_document.encode("utf-8")).hexdigest()

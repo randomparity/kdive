@@ -90,6 +90,20 @@ def test_canonical_document_is_deterministic_and_head_order_independent() -> Non
     assert artifacts["kernel"] == {"checksum_sha256": "kernel-sha"}
 
 
+def test_external_boot_evidence_selects_immutable_document_version_two() -> None:
+    evidence = {
+        "schema": "external-boot-evidence-v1",
+        "bundle_sha256": "sha256:" + "a" * 64,
+    }
+    document = canonical_build_document(
+        _run(uuid4()), _result(), _heads(), external_boot_evidence=evidence
+    )
+
+    assert document["version"] == 2
+    assert document["external_boot_evidence"] == evidence
+    assert canonical_build_document(_run(uuid4()), _result(), _heads())["version"] == 1
+
+
 def test_chunked_identity_uses_ordered_validated_chunks_and_total_size() -> None:
     run = _run(uuid4())
     result = _result()

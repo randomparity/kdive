@@ -10,8 +10,6 @@ kernel that cannot mount its root filesystem is no longer *silently* completed.
 from __future__ import annotations
 
 import asyncio
-import io
-import tarfile
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -42,6 +40,7 @@ from tests.clock import STORE_MTIME
 from tests.mcp.complete_build_support import ctx as _ctx
 from tests.mcp.complete_build_support import pool as _pool
 from tests.mcp.complete_build_support import seed_run as _seed_run
+from tests.mcp.complete_build_support import valid_combined_kernel_tar as _combined_kernel_tar
 from tests.mcp.systems_support import provider_resolver
 
 # A real, non-degenerate config that still lacks the direct-kernel boot set: it enables an
@@ -58,20 +57,6 @@ def _patched_load(config: KernelConfig | None) -> Any:
         return config
 
     return patch("kdive.kernel_config.gate.load_effective_config", _fake_load)
-
-
-def _combined_kernel_tar() -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name, data in (
-            ("boot/vmlinuz", b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16),
-            ("lib/modules/6.9.0/modules.dep", b""),
-            ("lib/modules/6.9.0/kernel/drivers/foo.ko", b"\x7fELFmod"),
-        ):
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
 
 
 _KERNEL_TAR = _combined_kernel_tar()

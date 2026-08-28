@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import io
 import struct
 import tarfile
@@ -17,19 +19,60 @@ from kdive.build_artifacts.validation import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-_BZIMAGE_BODY = b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16  # bzImage magic at offset 0x202
 _EM_PPC64 = 21
 _EM_X86_64 = 62
+_BUILD_ID = bytes.fromhex("deadbeef")
 
 
-def _boot_elf(*, e_machine: int = _EM_PPC64, pad: int = 0) -> bytes:
+def _boot_elf(
+    *,
+    e_machine: int = _EM_PPC64,
+    pad: int = 0,
+    release: str = "6.9.0",
+    build_ids: tuple[bytes, ...] = (_BUILD_ID,),
+) -> bytes:
     """A minimal ELF64-LE boot member with the given ``e_machine`` at offset 0x12."""
     body = bytearray(0x40)
     body[0:4] = b"\x7fELF"
     body[4] = 2  # ELFCLASS64
     body[5] = 1  # ELFDATA2LSB
     struct.pack_into("<H", body, 0x12, e_machine)  # e_machine
-    return bytes(body) + b"\x00" * pad
+    struct.pack_into("<Q", body, 0x20, 64)  # e_phoff
+    struct.pack_into("<H", body, 0x36, 56)  # e_phentsize
+    struct.pack_into("<H", body, 0x38, 2)  # e_phnum
+    notes = b"".join(
+        struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id for build_id in build_ids
+    )
+    banner = f"Linux version {release} test\x00".encode() + b"\x00" * pad
+    note_offset = 64 + 2 * 56
+    banner_offset = note_offset + len(notes)
+    note_header = bytearray(56)
+    struct.pack_into("<I", note_header, 0, 4)  # PT_NOTE
+    struct.pack_into("<Q", note_header, 8, note_offset)
+    struct.pack_into("<Q", note_header, 32, len(notes))
+    load_header = bytearray(56)
+    struct.pack_into("<I", load_header, 0, 1)  # PT_LOAD
+    struct.pack_into("<Q", load_header, 8, banner_offset)
+    struct.pack_into("<Q", load_header, 32, len(banner))
+    return bytes(body) + bytes(note_header) + bytes(load_header) + notes + banner
+
+
+def _bzimage(
+    *,
+    header_release: str = "6.9.0",
+    decoded_release: str = "6.9.0",
+    build_ids: tuple[bytes, ...] = (_BUILD_ID,),
+) -> bytes:
+    header = bytearray(0x400)
+    header[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", header, 0x20E, 0x100)
+    encoded_release = header_release.encode() + b"\x00"
+    header[0x300 : 0x300 + len(encoded_release)] = encoded_release
+    kernel = _boot_elf(e_machine=_EM_X86_64, release=decoded_release, build_ids=build_ids)
+    return bytes(header) + gzip.compress(kernel)
+
+
+_BZIMAGE_BODY = _bzimage()
 
 
 def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -225,6 +268,192 @@ def _validate_kernel_blob(blob: bytes, *, arch: str = "x86_64") -> None:
     )
     assert store.range_calls
     assert {call[3] for call in store.range_calls} == {"test-version"}
+
+
+def test_validation_returns_server_owned_external_boot_evidence() -> None:
+    initrd = b"initrd-bytes"
+    blobs = {"k": _KERNEL_TAR, "i": initrd}
+    heads = {
+        key: HeadResult(len(blob), "csum", "e", STORE_MTIME, f"{key}-version")
+        for key, blob in blobs.items()
+    }
+    result = validate_external_artifacts(
+        _FakeStore(blobs, heads),
+        manifest=[
+            ManifestEntry("kernel", "csum", len(_KERNEL_TAR)),
+            ManifestEntry("initrd", "csum", len(initrd)),
+        ],
+        keys={"kernel": "k", "initrd": "i"},
+        declared_build_id=None,
+    )
+
+    evidence = result.external_boot_evidence
+    assert evidence is not None
+    assert evidence["schema"] == "external-boot-evidence-v1"
+    assert evidence["bundle_sha256"] == "sha256:" + hashlib.sha256(_KERNEL_TAR).hexdigest()
+    assert evidence["initrd"] == {
+        "sha256": "sha256:" + hashlib.sha256(initrd).hexdigest(),
+        "size_bytes": len(initrd),
+    }
+    assert evidence["release"] == "6.9.0"
+    assert evidence["vmlinuz_sha256"] == "sha256:" + hashlib.sha256(_BZIMAGE_BODY).hexdigest()
+    assert evidence["module_member_count"] == 2
+
+
+def test_external_boot_scan_rejects_normalized_boot_alias() -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "./boot/vmlinuz", _BZIMAGE_BODY)
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    with pytest.raises(CategorizedError, match="noncanonical member path"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_scan_accepts_canonical_parent_directories() -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name in ("lib", "lib/modules", "lib/modules/6.9.0"):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+        _tar_add(tar, "boot/vmlinuz", _BZIMAGE_BODY)
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_scan_rejects_empty_second_release_tree() -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "boot/vmlinuz", _BZIMAGE_BODY)
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+        info = tarfile.TarInfo("lib/modules/other")
+        info.type = tarfile.DIRTYPE
+        tar.addfile(info)
+
+    with pytest.raises(CategorizedError, match="exactly one lib/modules"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+@pytest.mark.parametrize(
+    ("boot", "message"),
+    [
+        (b"\x00" * 0x202 + b"HdrS" + b"\x00" * 32, "release is not canonical"),
+        (
+            _bzimage(build_ids=(bytes.fromhex("deadbeef"), bytes.fromhex("cafebabe"))),
+            "one unambiguous GNU build ID",
+        ),
+    ],
+)
+def test_external_boot_scan_rejects_unverified_kernel_metadata(boot: bytes, message: str) -> None:
+    with pytest.raises(CategorizedError, match=message):
+        _validate_kernel_blob(_combined_kernel_tar(boot=boot))
+
+
+def test_external_boot_scan_rejects_decoded_kernel_over_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES", 32)
+
+    with pytest.raises(CategorizedError, match="decoded boot/vmlinuz exceeds"):
+        _validate_kernel_blob(_KERNEL_TAR)
+
+
+def test_external_boot_scan_rejects_metadata_outside_read_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES", 64)
+
+    with pytest.raises(CategorizedError, match="ELF metadata read limit"):
+        _validate_kernel_blob(_KERNEL_TAR)
+
+
+def test_external_boot_scan_rejects_note_shaped_bytes_outside_elf_tables() -> None:
+    fake = bytearray(64)
+    fake[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", fake, 0x12, _EM_X86_64)
+    fake += struct.pack("<III", 4, 4, 3) + b"GNU\x00" + _BUILD_ID
+    fake += b"Linux version 6.9.0 forged\x00"
+    header = bytearray(0x400)
+    header[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", header, 0x20E, 0x100)
+    header[0x300:0x306] = b"6.9.0\x00"
+
+    with pytest.raises(CategorizedError, match="program header table"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=bytes(header) + gzip.compress(fake)))
+
+
+def test_external_boot_scan_rejects_truncated_later_elf_segment() -> None:
+    kernel = bytearray(_boot_elf(e_machine=_EM_X86_64, release="6.9.0"))
+    struct.pack_into("<Q", kernel, 64 + 56 + 32, len(kernel) * 2)
+    header = bytearray(0x400)
+    header[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", header, 0x20E, 0x100)
+    header[0x300:0x306] = b"6.9.0\x00"
+
+    with pytest.raises(CategorizedError, match="ELF segment extends past"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=bytes(header) + gzip.compress(kernel)))
+
+
+@pytest.mark.parametrize("symlink_first", [True, False])
+def test_external_boot_scan_rejects_children_below_symlinks(symlink_first: bool) -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "boot/vmlinuz", _BZIMAGE_BODY)
+        link = tarfile.TarInfo("lib/modules/6.9.0/kernel")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "real"
+        child = ("lib/modules/6.9.0/kernel/foo.ko", b"module")
+        if symlink_first:
+            tar.addfile(link)
+            _tar_add(tar, *child)
+        else:
+            _tar_add(tar, *child)
+            tar.addfile(link)
+
+    with pytest.raises(CategorizedError, match="non-directory ancestor"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_scan_bounds_compression_candidates() -> None:
+    with pytest.raises(CategorizedError, match="compression-candidate work limit"):
+        list(validation._magic_offsets(io.BytesIO(b"\x1f\x8b\x08" * 65), b"\x1f\x8b\x08"))
+
+
+def test_external_boot_scan_shares_decompression_budget_across_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES", 8)
+    budget = validation._DecodeBudget()
+    validation._copy_kernel_bounded(io.BytesIO(b"first"), io.BytesIO(), budget)
+
+    with pytest.raises(CategorizedError, match="aggregate decompression work limit"):
+        validation._copy_kernel_bounded(io.BytesIO(b"second"), io.BytesIO(), budget)
+
+
+def test_external_boot_scan_bounds_pax_metadata_before_tarfile_consumes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_EXTENSION_MAX_BYTES", 32)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        member = tarfile.TarInfo("boot/vmlinuz")
+        member.pax_headers = {"comment": "x" * 64}
+        member.size = len(_BZIMAGE_BODY)
+        tar.addfile(member, io.BytesIO(_BZIMAGE_BODY))
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    with pytest.raises(CategorizedError, match="extension metadata exceeds"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+@pytest.mark.parametrize("release", [".6.9.0", "6.9/0", "6.9.0-" + "x" * 59, "6.9.0é"])
+def test_external_boot_scan_enforces_release_grammar(release: str) -> None:
+    with pytest.raises(CategorizedError, match="release is not canonical"):
+        _validate_kernel_blob(
+            _combined_kernel_tar(boot=_bzimage(header_release=release, decoded_release=release))
+        )
 
 
 def test_non_gzip_kernel_is_build_failure() -> None:

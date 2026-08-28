@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from kdive.artifacts.storage import HeadResult
+from kdive.serialization import JsonValue
 
 
 class BuildOutput(NamedTuple):
@@ -30,3 +31,4 @@ class ValidatedUpload(NamedTuple):
 
     output: BuildOutput
     heads: dict[str, HeadResult]
+    external_boot_evidence: dict[str, JsonValue] | None = None
