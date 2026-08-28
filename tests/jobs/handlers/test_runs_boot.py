@@ -1332,6 +1332,50 @@ def test_expected_crash_inert_capture_threads_args(monkeypatch: pytest.MonkeyPat
     assert None not in profiles_seen  # the parsed profile threads into inert_capture
 
 
+def test_expected_crash_inert_capture_omits_invalid_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _get(_conn: object, _system_id: UUID) -> _FakeSystem:
+        return _FakeSystem(_PROFILE_DICT)
+
+    def _invalid(_data: object) -> ProvisioningProfile:
+        raise CategorizedError(
+            "invalid provisioning profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_invalid))
+
+    result = asyncio.run(
+        boot_evidence._expected_crash_inert_capture(
+            cast(AsyncConnection, object()), uuid4(), cast(ProfilePolicy, object())
+        )
+    )
+
+    assert result == []
+
+
+def test_expected_crash_inert_capture_propagates_unexpected_parser_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _get(_conn: object, _system_id: UUID) -> _FakeSystem:
+        return _FakeSystem(_PROFILE_DICT)
+
+    def _fault(_data: object) -> ProvisioningProfile:
+        raise RuntimeError("parser fault")
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(boot_evidence.ProvisioningProfile, "parse", staticmethod(_fault))
+
+    with pytest.raises(RuntimeError, match="parser fault"):
+        asyncio.run(
+            boot_evidence._expected_crash_inert_capture(
+                cast(AsyncConnection, object()), uuid4(), cast(ProfilePolicy, object())
+            )
+        )
+
+
 def test_evaluate_expected_failure_none_when_artifact_missing() -> None:
     run = _FakeRun({"kind": "console_crash", "pattern": "panic"})  # expectation declared
     out = asyncio.run(

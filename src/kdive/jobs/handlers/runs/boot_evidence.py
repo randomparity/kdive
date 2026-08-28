@@ -311,7 +311,7 @@ async def _expected_crash_inert_capture(
         return []
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
-    except Exception:
+    except CategorizedError:
         _log.warning(
             "could not parse provisioning profile for system %s; inert capture set omitted",
             system_id,
