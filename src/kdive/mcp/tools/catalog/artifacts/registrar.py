@@ -92,7 +92,13 @@ def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         manifest under `data.console_artifacts`.
         """
         return await artifact_reads.artifacts_list(
-            pool, current_context(), system_id=system_id, limit=limit, cursor=cursor
+            pool,
+            current_context(),
+            artifact_reads.ArtifactsListRequest(
+                system_id=system_id,
+                limit=limit,
+                cursor=cursor,
+            ),
         )
 
 

@@ -1516,6 +1516,7 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
             refs: list[str] = []
             from kdive.mcp.tools.catalog.artifacts.reads import (
                 ArtifactsGetRequest,
+                ArtifactsListRequest,
                 artifacts_get,
                 artifacts_list,
             )
@@ -1528,7 +1529,7 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
                 pool, _ctx(), request=ArtifactsGetRequest(artifact_id=core_id)
             )
             refs.extend(published.refs.values())
-            listed = await artifacts_list(pool, _ctx(), system_id=sys_id)
+            listed = await artifacts_list(pool, _ctx(), ArtifactsListRequest(system_id=sys_id))
             artifact_items = listed.items
             for r in artifact_items:
                 refs.extend(r.refs.values())

@@ -167,13 +167,19 @@ async def _authorized_redacted_artifact(
 _ARTIFACTS_LIST_TAG = "artifacts.list"
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactsListRequest:
+    """Transport-neutral redacted artifact list request."""
+
+    system_id: str
+    limit: int = _DEFAULT_LIST_LIMIT
+    cursor: str | None = None
+
+
 async def artifacts_list(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    system_id: str,
-    limit: int = _DEFAULT_LIST_LIMIT,
-    cursor: str | None = None,
+    request: ArtifactsListRequest,
 ) -> ToolResponse:
     """Return one keyset page of the System's `redacted` artifacts (ADR-0192, ADR-0374).
 
@@ -185,13 +191,17 @@ async def artifacts_list(
     ``configuration_error``, never a silent first page.
     """
     after = None
-    if cursor:
+    if request.cursor:
         try:
-            after = _decode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, cursor)
+            after = _decode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, request.cursor)
         except _InvalidCursor:
-            return _invalid_cursor_error(system_id)
+            return _invalid_cursor_error(request.system_id)
     page = await list_redacted_system_artifacts(
-        pool, ctx, system_id=system_id, limit=_clamp_list_limit(limit), after=after
+        pool,
+        ctx,
+        system_id=request.system_id,
+        limit=_clamp_list_limit(request.limit),
+        after=after,
     )
     next_cursor = (
         _encode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, page.next_key[0], page.next_key[1])
@@ -199,7 +209,7 @@ async def artifacts_list(
         else None
     )
     return ToolResponse.collection(
-        system_id,
+        request.system_id,
         "ok",
         _artifact_list_items(page.items),
         suggested_next_actions=["artifacts.get"],
