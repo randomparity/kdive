@@ -46,6 +46,13 @@ strings `run_id` and `build_generation`; `bundle` with NFC object-store `key` an
 `debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
 with `mode`, `release`, and `source_manifest`; and the closed `root` shape defined below. Unknown keys are
 rejected. An initrd is valid only as part of this set; it has no independent activation identity.
+External-build finalization streams the assembled bytes of each exact bundle and optional-initrd
+VersionId through server-owned SHA-256, persists those complete-byte digests in the
+InvestigationBuild artifact record, and includes them in its ADR-0531 canonical document and
+`content_digest`. Chunk manifests and their ordered verified chunk digests remain transfer-integrity
+evidence; their caller-supplied advisory whole-object hash is never copied into this plan. A valid
+chunk vector with an incorrect advisory whole hash therefore finalizes with the server-computed
+digest. Plan construction copies only those persisted trusted digests.
 Materialization must extract
 `boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
@@ -94,9 +101,11 @@ and suggests `jobs.wait` and `runs.get` while recovery runs.
 The first `recovering` commit likewise persists `server_time` and an absolute
 `recovery_readiness_deadline` from `recovery_readiness_timeout_seconds`, scoped to this recovery and
 never extended by worker retry. Failure to restore and reach fresh readiness by that instant records
-`READINESS_FAILURE`, transitions to `recovery_failed`, retains the recovery evidence and reservation,
-and suggests the administrator call `systems.teardown`. System teardown is the only exit from
-`recovery_failed`.
+`READINESS_FAILURE` as internal attempt metadata, transitions to `recovery_failed`, retains the
+recovery evidence and reservation, and exposes non-retryable `CONFLICT` with
+`suggested_next_actions=["systems.teardown"]`. The recovery job is terminal, so the queue does not
+redeliver it; `READINESS_FAILURE` is never used as this state’s agent-visible category. System
+teardown is the only exit from `recovery_failed`.
 
 An administrator resolving `recovery_conflict -> recovering` starts a new recovery attempt and
 records a new deadline from that operation's `server_time`; time parked in conflict consumes no
@@ -106,16 +115,16 @@ or interrupted recovery deadline. Ordinary job and worker retries never extend o
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"build","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"build"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:dd9a636c84d101bf5da572a1384e35c7083f3b08a4b5b13d586d3593dd0b47fc","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:3b78a444f6fbb4cb77089581ff02b91a1e7cfa5b8d0c3a4dbbdee7ddc8f43981","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
-`sha256:dd9a636c84d101bf5da572a1384e35c7083f3b08a4b5b13d586d3593dd0b47fc` and
-`sha256:b2ec655d5deaae794d8bde34c53493a3fef0a6b6950b630c3c25bfefe4db968c`.
+`sha256:3b78a444f6fbb4cb77089581ff02b91a1e7cfa5b8d0c3a4dbbdee7ddc8f43981` and
+`sha256:6f035e163ca8ce3e8ffbef406032aeb09254e656d861d46ef68660152f39f635`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
@@ -260,21 +269,20 @@ direct-kernel bytes one composition result while preserving currently admitted l
 
 The root specification is a versioned, closed data shape with exactly `schema`, `architecture`,
 `root`, `arguments`, `authority`, and `source`. Version 1 admits authority/source-kind pairs
-`build/build`, `stage-inspection/staged-image`, and `catalog-attestation/catalog-image`; no other pair
-is valid. `source` has exactly `kind` and an immutable lowercase `sha256:<64-hex>` `identity` copied
-from a persisted source field, never re-serialized from the root facts. For `build/build`, it is
-`sha256:` plus the selected ADR-0531 `InvestigationBuild.content_digest`, whose canonical document
-must contain these root facts. For `stage-inspection/staged-image`, it is the staged provenance row's
+`stage-inspection/staged-image` and `catalog-attestation/catalog-image`; no other pair is valid.
+External-build client or build-document facts are not a root authority. `source` has exactly `kind`
+and an immutable lowercase `sha256:<64-hex>` `identity` copied from a persisted source field, never
+re-serialized from the root facts. For `stage-inspection/staged-image`, it is the staged provenance row's
 new `staged_image_sha256`, computed over the complete image bytes before bounded inspection and stored
 with the inspection result. For `catalog-attestation/catalog-image`, it is the typed catalog
 attestation's new immutable `image_sha256`, computed over or supplied with the verified catalog image
 and stored with the attested root facts. Records lacking the required digest are ineligible rather
 than assigned a surrogate identity.
 
-Immediately before plan creation, core reloads the named build, staged-provenance, or catalog row and
+Immediately before plan creation, core reloads the named staged-provenance or catalog row and
 requires its persisted digest and root facts to equal the candidate source and root shape. Plan retry
-repeats that comparison; a changed/missing row is stale input. Build facts
-and bounded stage inspection are verified authorities. Catalog data extends the existing typed
+repeats that comparison; a changed/missing row is stale input. Bounded stage inspection is a verified
+authority. Catalog data extends the existing typed
 attestation path with the same root value, ordered arguments, architecture, schema version, and
 immutable image identity; the current attestation fields alone are insufficient. No second untyped
 declaration path is added.
@@ -476,15 +484,17 @@ Recovery restores a usable disk/GRUB baseline, not only persistent bytes. Run bu
 usage lease: current Runs are already `succeeded` before install and boot. A new contributor operation,
 `runs.release_external_boot`, is the explicit end-of-use event for an active external-boot activation.
 Under the System lock it refuses while that Run has a live DebugSession or another active lifecycle,
-capture, or debug job, then atomically records the release request and enqueues recovery. Repeating it
-is idempotent and returns the same recovery job. `debug_sessions.detach` does not release implicitly;
+capture, or debug job, then atomically records the release request, recovery deadline, generation and
+token, `active -> recovering` transition, and recovery job before observing provider state. Repeating
+it is idempotent and returns the same recovery job. `debug_sessions.detach` does not release implicitly;
 its response suggests `runs.release_external_boot` when it detached the last live session. Authorized
 System teardown bypasses release because destruction owns cleanup.
 
-On release, the provider first observes the complete recorded target state under the System lock.
-Only that state may take the normal `active -> recovering` edge. An
-absent or unreadable component remains retryable; any third component enters `recovery_conflict`
-without stopping or overwriting the System. After committing `recovering`, the provider stops the
+After that commit, the provider observes the recorded target. Complete target state proceeds.
+Confirmed absence or any third component enters `recovery_conflict` without stopping or overwriting
+the System. An unreadable component retries only until the persisted recovery deadline, then also
+enters `recovery_conflict` with its observation evidence; no preflight retry can remain unbounded.
+The provider then stops the
 domain through the control plane and verifies it is inactive. It then re-observes the complete target
 state immediately before the first restore write. An unreadable or third component at that point
 enters `recovery_conflict` without an overwrite. The provider then restores the prior module tree and persistent
