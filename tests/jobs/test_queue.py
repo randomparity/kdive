@@ -1421,13 +1421,13 @@ async def _seed_run_in_investigation(conn: psycopg.AsyncConnection, project: str
     return str(run_row[0])
 
 
-def test_recent_jobs_filters_by_status(migrated_url: str) -> None:
+def test_recent_jobs_filters_by_state(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await _enqueue_with_state(conn, JobKind.INSTALL, JobState.FAILED, "f1")
             await _enqueue_with_state(conn, JobKind.INSTALL, JobState.QUEUED, "q1")
             recent = await queue.recent_jobs(
-                conn, limit=10, projects=["proj"], status=JobState.FAILED
+                conn, limit=10, projects=["proj"], state=JobState.FAILED
             )
         assert [j.dedup_key for j in recent] == ["f1"]
 
@@ -1453,7 +1453,7 @@ def test_recent_jobs_filters_by_kind(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_recent_jobs_filters_by_status_and_kind_conjunction(migrated_url: str) -> None:
+def test_recent_jobs_filters_by_state_and_kind_conjunction(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             await _enqueue_with_state(conn, JobKind.INSTALL, JobState.FAILED, "fb")
@@ -1466,7 +1466,7 @@ def test_recent_jobs_filters_by_status_and_kind_conjunction(migrated_url: str) -
                 payload=_system_payload().model_dump(mode="json"),
             )
             recent = await queue.recent_jobs(
-                conn, limit=10, projects=["proj"], status=JobState.FAILED, kind=JobKind.INSTALL
+                conn, limit=10, projects=["proj"], state=JobState.FAILED, kind=JobKind.INSTALL
             )
         assert [j.dedup_key for j in recent] == ["fb"]
 

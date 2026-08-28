@@ -462,7 +462,7 @@ async def recent_jobs(
     projects: Sequence[str],
     *,
     after: tuple[datetime, UUID] | None = None,
-    status: JobState | None = None,
+    state: JobState | None = None,
     kind: JobKind | None = None,
     investigation_id: UUID | None = None,
     system_id: UUID | None = None,
@@ -484,7 +484,7 @@ async def recent_jobs(
     Optional filters (ADR-0197), applied before the keyset seek so the cursor stays a pure
     boundary across pages:
 
-    - ``status`` / ``kind`` are equality predicates on the ``state`` / ``kind`` columns.
+    - ``state`` / ``kind`` are equality predicates on the corresponding columns.
     - ``investigation_id`` filters to jobs whose Run belongs to that Investigation. The
       ``jobs`` table has no Run/Investigation column, so the query joins ``runs`` on
       ``jobs.payload->>'run_id'``; only run-bearing kinds (``build``/``install``/``boot``)
@@ -507,9 +507,9 @@ async def recent_jobs(
         join = sql.SQL(" JOIN runs r ON r.id::text = j.payload->>'run_id'")
         clauses.append(sql.SQL("r.investigation_id = %s"))
         params.append(investigation_id)
-    if status is not None:
+    if state is not None:
         clauses.append(sql.SQL("j.state = %s"))
-        params.append(status.value)
+        params.append(state.value)
     if kind is not None:
         clauses.append(sql.SQL("j.kind = %s"))
         params.append(kind.value)

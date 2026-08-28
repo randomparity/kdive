@@ -76,7 +76,7 @@ _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
 class _JobsListPayload(ToolPayload):
     """Public payload for ``jobs.list`` filters and pagination."""
 
-    status: JobState | None = Field(default=None, description="Only jobs in this lifecycle state.")
+    state: JobState | None = Field(default=None, description="Only jobs in this lifecycle state.")
     kind: JobKind | None = Field(default=None, description="Only active jobs of this kind.")
     investigation_id: str | None = Field(
         default=None,
@@ -113,7 +113,7 @@ class _JobsListPayload(ToolPayload):
 class JobsListRequest:
     """Filter payload for ``jobs.list``."""
 
-    status: JobState | None = None
+    state: JobState | None = None
     kind: JobKind | None = None
     investigation_id: str | None = None
     system_id: str | None = None
@@ -316,7 +316,7 @@ async def list_jobs(
     ``(created_at, id)``. A ``cursor`` from a prior page resumes strictly after it; a
     malformed or wrong-tool cursor is an ``invalid_cursor`` configuration error.
 
-    Optional server-side filters (ADR-0197, ADR-0376): ``status``/``kind`` narrow by
+    Optional server-side filters (ADR-0197, ADR-0376): ``state``/``kind`` narrow by
     lifecycle state / job kind; ``investigation_id`` narrows to the run-bearing jobs whose
     Run belongs to that Investigation; ``system_id`` narrows to the system-scoped jobs
     carrying that System in their payload — the ``authorize_ssh_key``/``check_ssh_reachable``
@@ -354,7 +354,7 @@ async def list_jobs(
                 capped + 1,
                 _readable_projects(ctx),
                 after=after,
-                status=request.status,
+                state=request.state,
                 kind=request.kind,
                 investigation_id=investigation_uid,
                 system_id=system_uid,
@@ -455,7 +455,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Jobs list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
-        """List the caller's jobs newest first, filterable by status/kind/investigation/system_id.
+        """List the caller's jobs newest first, filterable by state/kind/investigation/system_id.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``request.cursor`` to read the next page. Filters compose with the cursor. The ``kind``
@@ -470,7 +470,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             JobsListRequest(
                 limit=request.limit,
                 cursor=request.cursor,
-                status=request.status,
+                state=request.state,
                 kind=request.kind,
                 investigation_id=request.investigation_id,
                 system_id=request.system_id,
