@@ -156,7 +156,7 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
         "terminate",
         "kubernetes:kdive:kdive-worker-0:uid-1",
         {"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-1"},
-        "kubernetes_pod_failed",
+        "failed",
     )
     assert events[1][0:3] == ("patch", "kdive", "kdive-worker-0")
     assert events[1][3] == [

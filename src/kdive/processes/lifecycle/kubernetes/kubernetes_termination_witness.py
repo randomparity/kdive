@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kdive.worker_lifecycle.contracts import TerminationOutcome
+
 FINALIZER = "kdive.io/worker-termination-evidence"
 _log = logging.getLogger(__name__)
 _CONFLICT_RETRIES = 3
@@ -22,7 +24,7 @@ _MAX_PASS_COUNT = 1_000
 
 type ReadPod = Callable[[str, str], Mapping[str, Any] | None]
 type PatchFinalizers = Callable[[str, str, list[dict[str, object]]], Awaitable[None]]
-type TerminateIncarnation = Callable[[str, dict[str, str], str], Awaitable[bool]]
+type TerminateIncarnation = Callable[[str, dict[str, str], TerminationOutcome], Awaitable[bool]]
 
 _TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _CA = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
@@ -95,7 +97,9 @@ async def run_witness(
             await asyncio.wait_for(stop.wait(), timeout=interval)
 
 
-def _terminal_claim(pod: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
+def _terminal_claim(
+    pod: Mapping[str, Any],
+) -> tuple[str, str, TerminationOutcome, int] | None:
     metadata = pod.get("metadata")
     status = pod.get("status")
     if not isinstance(metadata, Mapping) or not isinstance(status, Mapping):
@@ -119,7 +123,8 @@ def _terminal_claim(pod: Mapping[str, Any]) -> tuple[str, str, str, int] | None:
         return None
     if not all(isinstance(value, str) for value in finalizers):
         return None
-    return uid, resource_version, str(phase).lower(), index
+    outcome: TerminationOutcome = "succeeded" if phase == "Succeeded" else "failed"
+    return uid, resource_version, outcome, index
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,10 +148,10 @@ class KubernetesTerminationWitness:
                 pod = self.read_pod(self.namespace, name)
                 if pod is None or (claim := _terminal_claim(pod)) is None:
                     break
-                uid, resource_version, phase, index = claim
+                uid, resource_version, outcome, index = claim
                 holder = f"kubernetes:{self.namespace}:{name}:{uid}"
                 binding = {"namespace": self.namespace, "name": name, "uid": uid}
-                if not await self.terminate(holder, binding, f"kubernetes_pod_{phase}"):
+                if not await self.terminate(holder, binding, outcome):
                     break
                 operations: list[dict[str, object]] = [
                     {"op": "test", "path": "/metadata/uid", "value": uid},

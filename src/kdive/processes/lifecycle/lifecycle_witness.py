@@ -24,6 +24,7 @@ from kdive.config.core_settings import (
 from kdive.db.pool import create_pool
 from kdive.health.probe import BackendCheck, HealthProbe
 from kdive.processes.runtime import install_stop, run_process_runtime
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -113,15 +114,18 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
     worker_name = config.require(KUBERNETES_WITNESS_WORKER_NAME)
     ceiling = config.require(KUBERNETES_WITNESS_ORDINAL_CEILING)
 
-    async def terminate(incarnation: str, authority_binding: dict[str, str], outcome: str) -> bool:
-        terminal_outcome = "succeeded" if outcome.endswith("succeeded") else "failed"
+    async def terminate(
+        incarnation: str,
+        authority_binding: dict[str, str],
+        outcome: TerminationOutcome,
+    ) -> bool:
         async with pool.connection() as connection:
             return await terminate_worker_incarnation(
                 connection,
                 incarnation,
                 "kubernetes",
                 authority_binding,
-                terminal_outcome,
+                outcome,
             )
 
     def incarnation(identity: PodIdentity) -> str:
