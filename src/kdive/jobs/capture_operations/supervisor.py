@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -48,6 +48,30 @@ _log = logging.getLogger(__name__)
 _CAPTURE_AUTHORITY_LOST: ContextVar[asyncio.Event | None] = ContextVar(
     "capture_authority_lost", default=None
 )
+
+
+async def _wait_with_capture_authority[T](conn: AsyncConnection, operation: Awaitable[T]) -> T:
+    """Return an operation result only while the lock session still holds authority."""
+    operation_task = asyncio.ensure_future(operation)
+    authority_task = asyncio.create_task(_monitor_lock_session(conn))
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, authority_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if authority_task in done:
+            await authority_task
+            raise AssertionError("lock monitor returned without losing authority")
+        await asyncio.sleep(0)
+        if authority_task.done():
+            await authority_task
+            raise AssertionError("lock monitor returned without losing authority")
+        await require_capture_authority()
+        return operation_task.result()
+    finally:
+        for task in (operation_task, authority_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(operation_task, authority_task, return_exceptions=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,26 +451,7 @@ class CaptureOperationSupervisor:
             )
 
     async def _wait_for_exit(self, conn: AsyncConnection, launched: LaunchedCapture) -> int:
-        process = asyncio.create_task(launched.wait_process())
-        authority = asyncio.create_task(_monitor_lock_session(conn))
-        try:
-            done, _pending = await asyncio.wait(
-                {process, authority}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if authority in done:
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await asyncio.sleep(0)
-            if authority.done():
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await require_capture_authority()
-            return process.result()
-        finally:
-            for task in (process, authority):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(process, authority, return_exceptions=True)
+        return await _wait_with_capture_authority(conn, launched.wait_process())
 
     async def _wait_for_publication(
         self,
@@ -458,28 +463,10 @@ class CaptureOperationSupervisor:
         data: bytes,
         publisher: CapturePublisher,
     ) -> UUID:
-        publication = asyncio.create_task(
-            self._publish_and_dispose(conn, job, operation, snapshot, launched, data, publisher)
+        return await _wait_with_capture_authority(
+            conn,
+            self._publish_and_dispose(conn, job, operation, snapshot, launched, data, publisher),
         )
-        authority = asyncio.create_task(_monitor_lock_session(conn))
-        try:
-            done, _pending = await asyncio.wait(
-                {publication, authority}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if authority in done:
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await asyncio.sleep(0)
-            if authority.done():
-                await authority
-                raise AssertionError("lock monitor returned without losing authority")
-            await require_capture_authority()
-            return publication.result()
-        finally:
-            for task in (publication, authority):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(publication, authority, return_exceptions=True)
 
     async def _publish_and_dispose(
         self,
