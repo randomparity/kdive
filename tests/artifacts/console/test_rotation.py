@@ -8,7 +8,7 @@ stored raw.
 
 from __future__ import annotations
 
-from kdive.providers.console_parts.rotation import (
+from kdive.artifacts.console.rotation import (
     ROTATION_THRESHOLD,
     SEAM_OVERLAP,
     RotationState,

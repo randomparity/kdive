@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.console.sidecar import sidecar_object_name
 from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     FetchedArtifact,
@@ -33,7 +34,6 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.console import console_rotate
-from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.adversarial.conftest import seed_allocation, seed_resource

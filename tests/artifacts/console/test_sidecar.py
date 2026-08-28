@@ -13,16 +13,16 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
-from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.console_parts.rotation import RotationState
-from kdive.providers.console_parts.sidecar import (
+from kdive.artifacts.console.rotation import RotationState
+from kdive.artifacts.console.sidecar import (
     ZERO,
     read_sidecar,
     sidecar_object_name,
     write_sidecar,
 )
+from kdive.artifacts.storage import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import ObjectStore
 
 

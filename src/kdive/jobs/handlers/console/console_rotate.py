@@ -1,7 +1,7 @@
 """Worker handler for the internal ``console_rotate`` job (local rotation, #892, ADR-0273).
 
 Reads a running System's growing console log, rotates the new bytes into redacted
-gzip-compressed part artifacts via the pure :func:`~kdive.providers.console_parts.rotation.rotate`
+gzip-compressed part artifacts via the pure :func:`~kdive.artifacts.console.rotation.rotate`
 core, and persists the rotation cursor in the object-store sidecar. The rotation is planned under
 the per-System advisory lock (ADR-0095) — cursor read, part derivation, insert-if-absent probe —
 and the part rows are registered under it again, but the part **objects** are PUT between those
@@ -31,6 +31,13 @@ from psycopg.rows import dict_row
 from kdive.artifacts.catalog.discard import discard_unregistered_objects
 from kdive.artifacts.catalog.etag_repair import reconcile_row_etag
 from kdive.artifacts.catalog.registration import register_artifact_row
+from kdive.artifacts.console.rotation import (
+    RotationResult,
+    SealedPart,
+    part_object_name,
+    rotate,
+)
+from kdive.artifacts.console.sidecar import read_sidecar, write_sidecar
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact, artifact_key
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, ArtifactClaimConflict
@@ -40,13 +47,6 @@ from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ConsoleRotatePayload, load_payload
-from kdive.providers.console_parts.rotation import (
-    RotationResult,
-    SealedPart,
-    part_object_name,
-    rotate,
-)
-from kdive.providers.console_parts.sidecar import read_sidecar, write_sidecar
 from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

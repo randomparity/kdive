@@ -30,7 +30,7 @@ import threading
 from typing import Protocol
 from uuid import UUID
 
-from kdive.providers.console_parts.rotation import ROTATION_THRESHOLD, SEAM_OVERLAP
+from kdive.artifacts.console.rotation import ROTATION_THRESHOLD, SEAM_OVERLAP
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

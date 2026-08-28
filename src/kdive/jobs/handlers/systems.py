@@ -13,6 +13,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.console.sidecar import sidecar_object_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import (
     SNAPSHOTS,
@@ -46,7 +47,6 @@ from kdive.prereqs.system_bootstrap_key import (
     ensure_system_bootstrap_key,
 )
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import Snapshotter

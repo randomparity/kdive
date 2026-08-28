@@ -1,7 +1,7 @@
 """Rotation-state sidecar: object-store persistence for one System's RotationState.
 
 The ``console_rotate`` worker job is stateless across invocations; this module
-persists a System's :class:`~kdive.providers.console_parts.rotation.RotationState`
+persists a System's :class:`~kdive.artifacts.console.rotation.RotationState`
 as a small JSON object in the object store so each job invocation can resume where
 the prior one left off.
 
@@ -25,6 +25,7 @@ import logging
 from typing import Protocol
 from uuid import UUID
 
+from kdive.artifacts.console.rotation import RotationState
 from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     FetchedArtifact,
@@ -33,7 +34,6 @@ from kdive.artifacts.storage import (
 )
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.console_parts.rotation import RotationState
 
 _log = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def read_sidecar(store: _StorePort, tenant: str, system_id: UUID) -> RotationSta
         system_id: The System whose sidecar to read.
 
     Returns:
-        The persisted :class:`~kdive.providers.console_parts.rotation.RotationState`,
+        The persisted :class:`~kdive.artifacts.console.rotation.RotationState`,
         or :data:`ZERO` if the sidecar is absent or corrupt.
 
     Raises:
@@ -142,7 +142,7 @@ def write_sidecar(store: _StorePort, tenant: str, system_id: UUID, state: Rotati
         store: Object store port exposing ``put_artifact`` and ``get_artifact``.
         tenant: The tenant key component (e.g. ``"remote-libvirt"``).
         system_id: The System whose sidecar to write.
-        state: The :class:`~kdive.providers.console_parts.rotation.RotationState` to persist.
+        state: The :class:`~kdive.artifacts.console.rotation.RotationState` to persist.
 
     Raises:
         CategorizedError: The object-store write fails
