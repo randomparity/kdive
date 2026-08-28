@@ -594,9 +594,13 @@ async def reserve_publish(
         request: The image identity, layout, digest, and scope.
         size_bytes: The size of the object about to be written — recorded on the row before the
             object exists, which is what makes the row a quota claim rather than a placeholder.
+        principal: Required owner for a private image. Ignored for public images.
 
     Returns:
         The :class:`PublishReservation` naming the committed row and its object keys.
+
+    Raises:
+        ValueError: The image is private and ``principal`` is missing.
     """
     if request.visibility is ImageVisibility.PRIVATE and principal is None:
         raise ValueError("private image reservation requires a principal")

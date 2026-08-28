@@ -50,6 +50,9 @@ def build_app_from_assembly(
             tracer. Injectable per ADR-0487 so telemetry can be observed for one app.
         meter: RED-metric emitter for ``TelemetryMiddleware``; defaults to the
             process-global meter, on the same terms as ``tracer``.
+        worker_death_verifier: Optional override for
+            ``process_assembly.worker_death_verifier``. When configured, build-use recovery tools
+            are registered with this verifier.
 
     Returns:
         The assembled FastMCP app.
