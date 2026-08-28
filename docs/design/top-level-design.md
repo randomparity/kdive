@@ -51,8 +51,8 @@ below. Each should become an [ADR](../adr/) before implementation.
 ## System topology
 
 ```
-                  agent (Claude Code / Codex)          human (CLI / future UI)
-                            │ MCP (streamable HTTP)              │ REST/gRPC
+                  agent (Claude Code / Codex)                human (CLI)
+                            │ MCP (streamable HTTP)              │ MCP (streamable HTTP)
                             ▼                                    ▼
         ┌───────────────────────────────────────────────────────────────┐
         │                    API / Orchestration Core                    │
@@ -81,6 +81,9 @@ below. Each should become an [ADR](../adr/) before implementation.
      worker init ────── mTLS credential broker ────────────▲
        projected Pod token; one credential delivered to tmpfs
 ```
+
+This is the live topology. A future UI may introduce another protocol only after its public
+surface is designed and implemented; it is not part of the current ingress contract.
 
 - **MCP over streamable HTTP** — the service is remote and multi-user; agents
   authenticate with scoped, on-behalf-of tokens.
