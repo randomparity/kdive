@@ -1,0 +1,118 @@
+# 0583 — External Run boot uses prepared recovery points
+
+## Status
+
+Proposed
+
+## Context
+
+`InstallRequest` carries a combined kernel/modules bundle, an optional initrd, a composed command
+line, and immutable object versions into every provider. The providers currently give those inputs
+different meanings. Local-libvirt extracts `boot/vmlinuz`, injects modules, stages an optional
+initrd, and writes direct-kernel domain XML. Remote-libvirt downloads the bundle inside the guest,
+regenerates an initrd, and selects a GRUB entry. That difference prevents a finalized external
+build's kernel/initrd pair from naming one portable Run boot.
+
+The remote System must continue to provision and recover through its disk image and GRUB, while an
+iterative Run may direct-kernel boot. Switching the domain definition is a durable state change: a
+worker can die after changing the provider but before recording success. Recovery therefore needs
+an exact pre-activation state and a reconciliation rule. The shared contract cannot carry libvirt
+XML, storage-volume names, host paths, presigned URLs, or network-boot concepts because later
+providers do not share them.
+
+PR #2104 proposed a standalone System-profile INITRD input and permanent remote rejection. That PR
+closed without merging and its decision is not part of the repository. This decision replaces
+that unpublished direction: external Run builds supply an optional initrd paired with their kernel
+bundle; System-baseline INITRD input remains absent.
+
+## Decision
+
+External Run boot is split into three provider-neutral operations: materialize a validated immutable
+`ExternalBootPlan`, prepare a recovery point, and activate the materialization. Cleanup is a fourth
+idempotent operation. Shared values contain only immutable artifact identities, architecture,
+kernel release, the complete ordered kernel argument set, a versioned root specification, a module
+installation obligation, and opaque provider references returned by those operations.
+
+The boot plan is one immutable set. Its identity hashes the schema version, Run/build ownership,
+architecture, kernel bundle object key and version, bundle digest, kernel release, optional initrd
+object key/version/digest, root specification, and ordered command line. An initrd is valid only as
+part of this set; it has no independent activation identity. Materialization must extract
+`boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
+compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
+compressed bundle is never itself a bootable kernel.
+
+The root specification is a versioned, closed data shape. Version 1 records the target architecture,
+one `root=` value, the ordered root-related arguments required by the image, and provenance with an
+authority class and immutable source identity. Build-produced facts and bounded stage inspection are
+verified authorities. Operator catalog data is accepted only through the existing attestation path.
+Unknown versions, missing facts, stale source identities, conflicting root arguments, and an
+architecture mismatch fail before materialization or activation and name the recovery action. A
+pre-schema image remains eligible for its existing GRUB boot but not external Run boot.
+
+Before changing boot state, the provider creates a durable recovery point representing the exact
+currently defined boot configuration and returns an opaque recovery reference. For remote-libvirt,
+that point contains the exact inactive disk/GRUB domain definition, stored behind the provider seam;
+the shared state never interprets its XML. Deterministic identifiers make repeated prepare calls for
+the same System, Run, plan identity, and current definition return the same point.
+
+Core persists the plan identity, materialization reference, recovery reference, and activation state
+before calling activate. The state machine is `prepared -> activating -> active`, with
+`activating -> recovering -> recovered` and failure metadata on an operation attempt. Transitions
+and provider calls run under the existing per-System advisory lock. Activation is compare-and-set:
+the provider refuses a materialization or recovery reference belonging to another System, Run, or
+plan. On an `activating` record after worker loss, reconciliation compares the provider-observed
+active identity with the desired plan identity. An exact match completes `active`; absence or a
+different identity restores the recorded recovery point and completes `recovered`. It never guesses
+from readiness alone.
+
+Recovery restores the recorded point before declaring the System usable. The recovery point remains
+until the Run is terminal and no recovery is in flight. Materialized artifacts remain while the Run
+can retry, are deleted idempotently on Run/System teardown, and are swept by deterministic ownership
+after worker death. A partial materialization is either atomically published under its final identity
+or discoverable as an owned partial and removed; it is never activated.
+
+Local-libvirt adapts its existing staging and direct-kernel XML behavior behind these operations.
+Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts, resolves provider-local
+paths internally, records its disk/GRUB recovery point, and activates direct-kernel XML without
+changing the disk overlay, networking, guest-agent channel, console, gdbstub, or capture devices. A
+test-only non-libvirt implementation consumes the shared value types and returns opaque references;
+it proves the boundary contains no libvirt type without claiming that the shape is sufficient for
+HTTP/iPXE.
+
+## Consequences
+
+- External Run boot has one artifact-pair and command-line meaning across providers. Remote initial
+  provisioning remains disk/GRUB boot, and existing images without root provenance remain usable on
+  that path.
+- Recovery stores the exact state being replaced, so configuration drift cannot silently change the
+  rollback target. Provider-specific recovery bytes require bounded storage, tenant ownership,
+  redaction, retention, and reaping behind the provider seam.
+- Core gains durable activation state and reconciliation work. This is necessary because provider
+  activation and database commits cannot share a transaction.
+- Retries compare immutable plan and materialization identities. A reused object key with another
+  version, digest, architecture, release, root specification, or initrd pairing is rejected rather
+  than overwritten.
+- ADR-0082's in-guest GRUB install remains the provisioning/recovery mechanism but no longer defines
+  iterative remote Run boot once this decision is implemented.
+
+## Considered & rejected
+
+- **Re-render disk/GRUB recovery state from the current profile and provider configuration.**
+  verified: `src/kdive/providers/remote_libvirt/lifecycle/xml.py` renders network, machine, storage,
+  gdbstub, SSH-forward, console, and guest-agent settings from live configuration, while teardown
+  already reads provider facts from domain XML to survive configuration drift. Re-rendering later
+  can therefore produce a different definition from the one activation replaced.
+- **Store libvirt XML in the shared boot contract.** judgment: this makes a provider-neutral seam
+  carry one provider's transport and prevents the non-libvirt boundary proof the issue requires.
+- **Treat the combined kernel/modules bundle as the bootable kernel.** verified:
+  `src/kdive/providers/local_libvirt/lifecycle/install.py` extracts `boot/vmlinuz` before assigning
+  the direct-kernel XML `<kernel>` path; the bundle is an archive, not executable kernel bytes.
+- **Give kernel and initrd independent activation identities.** judgment: independent identities
+  permit a valid artifact from one finalized build to be paired with another and cannot enforce the
+  issue's paired-artifact requirement.
+- **Keep remote iterative Run boot on the in-guest GRUB helper.** judgment: it regenerates caller
+  initrd bytes and preserves an implicit root command line, so the same finalized external build
+  cannot have one meaning across providers.
+- **Add a standalone System-profile INITRD input.** verified: closed PR #2104 demonstrates that
+  shape and rejects it for remote-libvirt; issue #2105 and epic #1423 explicitly exclude the surface
+  in favor of the existing external Run-build lane.
