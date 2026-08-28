@@ -191,28 +191,7 @@ def _flocked_partial(partial: Path) -> Iterator[int]:
 
 
 def _require_still_linked(fd: int, partial: Path, *, window: str) -> None:
-    """Raise if the partial behind ``fd`` has been unlinked, so the fault names the sweep.
-
-    Called twice, with a different ``window`` each time because the two mean different things to
-    an operator — nothing can take a partial "between its creation and its lock" minutes after
-    that lock succeeded. At creation it closes the two-syscall window ADR-0446 §3 describes.
-    After the download the cause is one, and it is not that window: the :func:`_flocked_partial`
-    degrade path, where the filesystem could not lock and so nothing kept a sweeper out for the
-    whole transfer — §5's symmetry argument (a sweeper there cannot lock either) is evaluated at one
-    instant and not maintained across minutes, and a recovering ``lockd`` falsifies it mid-download.
-    Either sweep can then take the partial: the reclaim-side backstop was a *second, independent*
-    cause until ADR-0452 (#1544) gave it the same ``flock`` gate, and it is now reachable only
-    through this same degrade.
-
-    The degrade path's outcome is then the pre-ADR-0446 one, which is the point of degrading rather
-    than failing. What this adds is the diagnosis: without it the fetcher streams on and dies at
-    ``os.replace`` with a bare ``ENOENT`` that :func:`_staging_fault` renders as "failed to stage",
-    pointing an operator at the object store over a purely local race — exactly the misattribution
-    §3 converts the ``EWOULDBLOCK`` interleaving away from.
-
-    Raises:
-        OSError: ``ENOENT`` when the partial no longer has a directory entry.
-    """
+    """Raise ``ENOENT`` with the affected window when a sweep unlinks the partial."""
     if os.fstat(fd).st_nlink == 0:
         raise _swept_partial_error(partial, window=window)
 

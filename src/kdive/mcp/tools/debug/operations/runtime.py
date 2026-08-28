@@ -103,23 +103,7 @@ def _op_audit(tool: str, transition: str | None = None, /, **args: object) -> _O
 
 
 def _gdbmi_maturity() -> dict[str, object]:
-    """The shared ADR-0175 maturity for the gdb-MI `debug.*` tools.
-
-    The seven original ops act over a live gdbstub-backed DebugSession whose full round-trip
-    (set_breakpoint -> continue -> read_registers) was proven live on real KVM (M2.8 B6 #680),
-    so they are ``implemented``. ``backtrace`` and ``read_frame`` (ADR-0275, PR#929) and
-    ``disassemble`` (ADR-0276, PR#932) ride that same transport and were each re-proven live
-    against a stopped ``schedule``, so they are in ``_LOCAL_PROVEN_DEBUG_TOOLS`` too.
-    ``resolve_symbol`` (ADR-0248) is unit-tested against the scripted controller only — its
-    ``-data-evaluate-expression`` form was not separately re-proven live — so it stays out of the
-    proven set until a live exercise lands. The three watchpoint ops (ADR-0277) were proven live on
-    real KVM against a stopped ``schedule`` (set on ``jiffies`` + an explicit address, list, clear,
-    and a ``continue`` that trapped on the watched write in ``tick_do_update_jiffies64``), so they
-    join ``_LOCAL_PROVEN_DEBUG_TOOLS``. ``list_modules`` and ``load_module_symbols`` (ADR-0278)
-    were proven live against a real kernel with a loaded ``.ko`` (walk found the module at its
-    ``mem[0].base``; ``add-symbol-file`` made a previously-unknown module symbol resolvable), so
-    they join the proven set too.
-    """
+    """Return the shared implemented maturity for the gdb-MI tools (ADR-0175)."""
     return _docmeta.maturity_meta("implemented")
 
 
