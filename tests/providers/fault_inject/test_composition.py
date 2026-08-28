@@ -27,6 +27,7 @@ from kdive.providers.fault_inject.faulting.engine import FaultEngine, FaultPlane
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect, synthetic_port
 from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvisioning
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
@@ -89,6 +90,7 @@ def test_build_runtime_wires_fault_inject_ports_and_capabilities() -> None:
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, FaultInjectDebugEngine)
     assert runtime.debug.attach_seam is fault_inject_attach_seam
+    assert isinstance(runtime.external_boot, FaultInjectExternalBoot)
     assert runtime.rootfs is None
     assert runtime.support.component_sources.provider == ResourceKind.FAULT_INJECT.value
     # ROOTFS only — the one kind with a caller entry point and an enforcement call site
