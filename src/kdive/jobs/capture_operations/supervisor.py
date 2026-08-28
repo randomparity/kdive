@@ -368,19 +368,16 @@ class CaptureOperationSupervisor:
         publication_recoverer: CapturePublicationRecoverer,
     ) -> None:
         if isinstance(state, _Acknowledged):
-            await _finish_owned_cleanup(
-                asyncio.create_task(
-                    self._cleanup_publication(
-                        conn, state.operation, state.capture, publication_recoverer
-                    )
-                )
+            cleanup = self._cleanup_publication(
+                conn, state.operation, state.capture, publication_recoverer
             )
+        elif isinstance(state, _Launched):
+            cleanup = self._cleanup_launched(conn, state, snapshot)
+        elif isinstance(state, _LaunchAborted):
+            cleanup = self._cleanup_launch_abort(conn, state)
+        else:
             return
-        if isinstance(state, _Launched):
-            await self._cleanup_launched(conn, state, snapshot)
-            return
-        if isinstance(state, _LaunchAborted):
-            await self._cleanup_launch_abort(conn, state)
+        await _finish_owned_cleanup(asyncio.create_task(cleanup))
 
     async def _cleanup_publication(
         self,

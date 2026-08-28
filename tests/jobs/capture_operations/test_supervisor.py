@@ -141,12 +141,14 @@ class _Launched:
         result: CaptureResult,
         *,
         wait_gate: asyncio.Event | None = None,
+        cancel_gate: asyncio.Event | None = None,
         cancel_result: bool = True,
         dispose_result: bool = True,
     ) -> None:
         self.events = events
         self.result = result
         self.wait_gate = wait_gate
+        self.cancel_gate = cancel_gate
         self.cancel_result = cancel_result
         self.dispose_result = dispose_result
         self.identity = SimpleNamespace(
@@ -171,6 +173,8 @@ class _Launched:
 
     async def cancel(self) -> bool:
         self.events.append("cancel")
+        if self.cancel_gate is not None:
+            await self.cancel_gate.wait()
         return self.cancel_result
 
     def read_result(self) -> CaptureResult:
@@ -833,6 +837,55 @@ def test_cancellation_waits_for_cleanup_and_reraises(
 
     events = asyncio.run(_run())
     assert events.index("cancel_requested") < events.index("cancel")
+
+
+def test_repeated_cancellation_waits_for_launched_process_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    launch_token: str,
+) -> None:
+    async def _run() -> list[str]:
+        events: list[str] = []
+        wait_gate = asyncio.Event()
+        cancel_gate = asyncio.Event()
+        job = _job()
+        request = _request(job)
+        operation = _operation(job, request, launch_token)
+        launched = _Launched(
+            events,
+            CaptureResult(outcome="success", size_bytes=4, truncated=False),
+            wait_gate=wait_gate,
+            cancel_gate=cancel_gate,
+        )
+        _patch_repository(monkeypatch, operation, events)
+        supervisor = CaptureOperationSupervisor(
+            launcher=_typed_launcher(launched),
+            credential=SecretStr("credential"),
+        )
+        task = asyncio.create_task(
+            supervisor.execute(
+                _typed_connection(events),
+                job,
+                _snapshot(request, events),
+                request,
+                publisher=_publisher(events),
+                publication_recoverer=_publication_recoverer(events),
+            )
+        )
+        while "release" not in events:
+            await asyncio.sleep(0)
+        task.cancel()
+        while "cancel" not in events:
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        cancel_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return events
+
+    events = asyncio.run(_run())
+    assert events.index("cancel_requested") < events.index("cancel") < events.index("ack")
     assert events.index("quiescence") < events.index("ack")
 
 
