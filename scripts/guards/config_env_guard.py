@@ -21,8 +21,6 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 _SRC = _ROOT / "src" / "kdive"
 _CONFIG_DIR = _SRC / "config"
-# Shrinking allowlist of files not yet migrated. Must reach empty before the guard gates.
-_NOT_YET_MIGRATED: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -178,9 +176,7 @@ def find_violations(files: list[Path], allowlist: set[Path]) -> list[Violation]:
 
 
 def _allowlist(files: list[Path]) -> set[Path]:
-    allow: set[Path] = {p for p in files if _CONFIG_DIR in p.parents}
-    allow.update(p for p in files if p.name in _NOT_YET_MIGRATED)
-    return allow
+    return {path for path in files if _CONFIG_DIR in path.parents}
 
 
 def main() -> int:
