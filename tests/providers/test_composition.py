@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts.storage import StoredArtifact
-from kdive.components.references import ROOTFS_COMPONENT
+from kdive.components.references import INITRD_COMPONENT, ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
@@ -240,10 +240,10 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
 
     assert isinstance(runtime.profile_policy, LocalLibvirtProfilePolicy)
     assert runtime.support.component_sources.provider == "local-libvirt"
-    # "Implemented" is now the literal claim: ROOTFS is the only kind a caller can supply and the
-    # only kind `reject_unsupported_component_source` is reached for (ADR-0563, #1942).
+    # "Implemented" is literal: both kinds have caller inputs and admission enforcement.
     assert runtime.support.component_sources.accepted_component_sources == {
         "rootfs": frozenset({"catalog", "local"}),
+        "initrd": frozenset({"local"}),
     }
 
 
@@ -1143,5 +1143,8 @@ def test_remote_runtime_accepts_a_supplied_local_rootfs_and_declares_nothing_els
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     accepted = runtime.support.component_sources.accepted_component_sources
-    assert accepted == {ROOTFS_COMPONENT: frozenset({"local"})}
+    assert accepted == {
+        ROOTFS_COMPONENT: frozenset({"local"}),
+        INITRD_COMPONENT: frozenset(),
+    }
     assert runtime.support.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value

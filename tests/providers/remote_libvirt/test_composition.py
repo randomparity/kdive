@@ -11,6 +11,7 @@ import pytest
 
 from kdive.components.references import (
     CONFIG_COMPONENT,
+    INITRD_COMPONENT,
     KERNEL_COMPONENT,
     PATCH_COMPONENT,
     ROOTFS_COMPONENT,
@@ -254,15 +255,15 @@ def test_build_runtime_validators_and_component_sources() -> None:
 
 
 def test_component_sources_map_directly() -> None:
-    # Exercise the module-level builder directly so its exact contents are pinned. ROOTFS is the
-    # only kind: it is the only one `reject_unsupported_component_source` is reached for, so it is
-    # the only one a declaration can promise anything about (ADR-0563, #1942).
+    # Exercise the exact map: remote accepts the supplied ROOTFS but deliberately rejects every
+    # INITRD source through an empty, enforced declaration (ADR-0563/0583).
     caps = composition._component_sources()
     assert caps.provider == ResourceKind.REMOTE_LIBVIRT.value
     assert caps.accepted_component_sources == {
         # ADR-0440 (#1433): a supplied ROOTFS base image from the worker-host `local` source kind;
         # NOT `catalog` (that role is the operator-staged base_image_volume) and NOT `upload`.
         ROOTFS_COMPONENT: frozenset({"local"}),
+        INITRD_COMPONENT: frozenset(),
     }
 
 
