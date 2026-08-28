@@ -244,8 +244,8 @@ Ordering is strict:
 4. Commit `activating`.
 5. Activate the module tree and persistent definition with compare-and-set against the recovery
    point's source state.
-6. Observe canonical persistent/inactive definition plus module-tree state and commit `active` only
-   on an exact target-state match.
+6. Observe the versioned persistent-definition projection plus module-tree state and commit `active`
+   only on an exact target-state match.
 7. Run readiness, then the separate running-kernel identity proof.
 
 A crash before step 3 leaves only provider-owned unreferenced state, which the deterministic reaper
@@ -257,12 +257,21 @@ activation-owned partial and moves to `recovering`. An absent, unreadable, or th
 remains retryable in `recovering` and never declares the System ready.
 
 Remote recovery records the exact persistent/inactive domain definition before external activation.
-Prepare, target rendering, observation, activation, and restore all canonicalize that same inactive
-XML mode; live XML is excluded from state identity. The provider validates that the source belongs to
-the System and represents disk/GRUB boot before storing it. Restore uses the recorded source with a
-compare-and-set against target or activation-owned partial state. Runtime readiness and the
-running-kernel proof remain separate. The record survives until cleanup, so configuration drift
-cannot rewrite the recovery target.
+Definition identity version 1 is canonical JSON over domain identity, machine/CPU/memory/vCPU, boot
+mode and kernel/initrd/cmdline, all disk and network identities, serial/console/guest-agent devices,
+gdbstub and SSH-forward arguments, and KDIVE metadata. Keys and devices use stable semantic order;
+argument order is retained. XML formatting, namespace prefixes, libvirt-added aliases/addresses, and
+runtime/default expansion are excluded. The renderer emits this projection directly and observation
+parses inactive XML into it; a field-set change requires a new version. Live XML is excluded. The
+provider validates that the source belongs to the System and represents disk/GRUB boot before
+storing it. Restore uses the recorded source with compare-and-set against target or activation-owned
+partial state.
+
+When a reusable System recovers from `active`, the provider stops the domain, verifies it inactive,
+restores the prior module tree and persistent definition, boots that definition, and proves both a
+fresh boot and the recorded baseline-kernel identity before committing `recovered`. A retry repeats
+the sequence. System teardown destroys without restore/reboot. The record survives until the ordered
+cleanup path completes, so configuration drift cannot rewrite the recovery target.
 
 ## Failure taxonomy
 
@@ -323,7 +332,8 @@ Those are existing deployment trust or excluded provider concerns.
   commits, including prepared abandonment, same-release module replacement/restoration, a running
   domain after worker loss, duplicate delivery, and concurrent retry under the System lock.
 - Provider tests prove local behavior remains unchanged and remote upload, path resolution, XML
-  preservation, compare-and-set activation, exact recovery, idempotent cleanup, and reaping.
+  preservation, semantic projection across libvirt normalization, compare-and-set activation, exact
+  offline module restoration, recovered-baseline boot proof, idempotent cleanup, and reaping.
 - Remote `live_vm` boots the exact paired artifacts, verifies extracted-kernel identity, exercises a
   forced activation failure, restores GRUB, and proves the System remains usable.
 
