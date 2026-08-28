@@ -44,7 +44,7 @@ these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowe
 strings `system_id`, `run_id`, and `build_generation`; `bundle` with NFC object-store `key` and
 `version`, complete-object `sha256`, extracted-kernel `vmlinuz_sha256`, `member_count`, and
 `uncompressed_bytes`;
-`initrd`, either null or the same key/version/digest shape; complete `cmdline` string;
+`initrd`, either null or the same key/version/digest shape plus `size_bytes`; complete `cmdline` string;
 `debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
 with `mode`, `release`, `source_manifest`, `member_count`, and `uncompressed_bytes`; and the closed
 `root` shape defined below. Unknown keys are
@@ -56,6 +56,15 @@ InvestigationBuild artifact record, and includes them in its ADR-0531 canonical 
 evidence; their caller-supplied advisory whole-object hash is never copied into this plan. A valid
 chunk vector with an incorrect advisory whole hash therefore finalizes with the server-computed
 digest. Plan construction copies only those persisted trusted digests.
+
+External-boot v1 admits an optional initrd of at most 536,870,912 bytes (512 MiB). Unit is bytes,
+scope is the one exact initrd VersionId in one plan, and there is no reference clock. Finalization
+counts the complete server-streamed bytes, persists `size_bytes` with the trusted digest, and on
+excess records terminal `BUILD_FAILURE`, publishes no generation, and directs the producer to remove
+unneeded content or rebuild a smaller initrd. Every provider advertising external-boot v1 guarantees
+that capacity. Each materializer counts and digest-verifies the exact VersionId before publication or
+provider mutation; a size or digest mismatch is terminal `INSTALL_FAILURE` and directs
+re-finalization. Caller-supplied sizes are never accepted.
 
 The same finalization pass streams the pinned bundle without filesystem extraction. It accepts
 exactly one member named byte-for-byte `boot/vmlinuz`, requires that member to be a regular file,
@@ -165,6 +174,21 @@ Their respective identities are
 `sha256:e37b8ee676bef2c4de7314d0279595e8ad6812b6ed385bbdcf0e6ffa52f1e064` and
 `sha256:42ed2ac335091cb0fb8c09b5fc3ba970ed185e54db0946058338b542201b9f6c`.
 
+The non-null boundary vectors use an initrd exactly at the v1 byte limit:
+
+```json
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","member_count":2,"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":2,"version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":{"key":"initrd/i.img","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size_bytes":536870912,"version":"v1"},"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
+```
+
+```json
+{"architecture":"x86_64","artifacts":{"initrd":{"ref":"initrd/ref"},"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:a236c2fce2c32abfdafaa3e6480ae13586cbae567fe5d5ce16a93e4c3ffe2f16","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+```
+
+Their respective identities are
+`sha256:a236c2fce2c32abfdafaa3e6480ae13586cbae567fe5d5ce16a93e4c3ffe2f16` and
+`sha256:1f021bf0d49a0b239e5b16a66d091bcf160b794fc58268cdce0c867fcc4e75f4`.
+Boundary tests accept that size and reject 536,870,913 bytes before publication.
+
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
 release is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._+-]{0,63}` and is neither `.`
@@ -273,16 +297,26 @@ preparation. “Preserve the disk overlay” below means keep the same attached 
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
 
-DebugSession attach and every lifecycle, control, force-crash, snapshot, traffic-capture,
-vmcore-capture, and debug-job admission use the same System lock and reject while an external
-activation is in `preparing`, `prepared`, `activating`, `recovering`, `recovery_conflict`, or
-`recovery_failed`. Consequently, committing `preparing` or `recovering` closes every reverse gate
-before the destination recheck, and no conflicting operation can appear between that recheck and its
-serialized power mutation. Existing operations remain on their current provider seams because the
-two-sided durable admission predicates make them mutually exclusive with external boot; external
-activation, recovery, conflict resolution, and teardown mutations alone use the destination executor.
-Interleaving tests cover power, force-crash, snapshot, traffic capture, vmcore capture, and debug
-admission immediately before and after the `preparing` commit and prove exactly one side proceeds.
+System-locked admission uses this closed matrix while an external activation is not fully cleaned:
+
+- `preparing`, `prepared`, `activating`, `recovering`, `recovery_conflict`, `recovery_failed`, and
+  terminal cleanup admit only activation-owned continuation, reconciliation, conflict resolution, or
+  authorized teardown; every new install, lifecycle, power/control, snapshot, capture, and debug
+  operation is rejected.
+- `active` admits read-only System/Run observation and owning-Run debug attach/detach, traffic capture,
+  force-crash, and vmcore capture. It rejects every install or restage, unrelated-Run operation,
+  generic power/control operation, snapshot, and mutation of definition, modules, attachments, or boot
+  selection. Every admitted active-state operation that mutates power or provider state uses the
+  activation's current generation/token through the destination executor; observation-only work may
+  remain on its existing read-only seam.
+- `recovered` or `abandoned` with `cleanup_complete=true` has no external-activation restriction.
+
+Every listed operation's reverse admission uses the same System lock, so committing `preparing` or
+`recovering` closes its gate before the destination recheck. Interleaving tests cover install/restage,
+power, force-crash, snapshot, traffic capture, vmcore capture, and debug admission immediately before
+and after `preparing`, during `active`, and against release. They include a different Run's install
+racing release and prove exactly one side proceeds; allowed active force-crash/capture paths prove
+their executor claim and cannot cross a takeover barrier.
 
 After the pending row exists, the provider creates a deterministic reservation owned by this
 System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
@@ -624,9 +658,10 @@ Thus corrupt recovery evidence cannot block destruction or authorize unsafe clea
 Recovery restores a usable disk/GRUB baseline, not only persistent bytes. Run build state is not its
 usage lease: current Runs are already `succeeded` before install and boot. A new contributor operation,
 `runs.release_external_boot`, is the explicit end-of-use event for an active external-boot activation.
-Under the System lock it refuses while that Run has another active lifecycle, capture, or debug job,
-and also refuses while any DebugSession for the System is attaching or live, regardless of owning Run
-or transport. It then atomically records the release request, recovery deadline, generation and token,
+Under the System lock it refuses while any lifecycle, control, force-crash, snapshot, capture, or
+debug job for the System is active, regardless of owning Run, and also refuses while any DebugSession
+for the System is attaching or live, regardless of owning Run or transport. It then atomically
+records the release request, recovery deadline, generation and token,
 `active -> recovering` transition, and recovery job before observing provider state. Repeating
 it is idempotent and returns the same recovery job. `debug_sessions.detach` does not release implicitly;
 its response suggests `runs.release_external_boot` when it detached the last live session. Authorized
