@@ -17,6 +17,7 @@ from kdive.processes.worker import run_worker
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    DockerWorkerIncarnation,
     WorkerIncarnation,
 )
 
@@ -170,7 +171,7 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
         async def authenticate(conn: object, credential: SecretStr) -> WorkerIncarnation:
             assert credential is incarnation_credential
             events.append("authenticate")
-            return WorkerIncarnation(
+            return DockerWorkerIncarnation(
                 incarnation="docker:nonce",
                 authority_kind="docker",
                 authority_binding={"container_id": "a" * 64},
@@ -223,7 +224,7 @@ def test_run_worker_store_admission_failure_prevents_recovery_and_job_claims(
 
     async def authenticate(conn: object, supplied: SecretStr) -> WorkerIncarnation:
         events.append("authenticate")
-        return WorkerIncarnation(
+        return DockerWorkerIncarnation(
             incarnation="docker:nonce",
             authority_kind="docker",
             authority_binding={"container_id": "a" * 64},
@@ -281,7 +282,7 @@ def test_run_worker_refuses_a_credential_bound_to_another_identity(
     monkeypatch.setattr("kdive.processes.worker.install_stop", asyncio.Event)
 
     async def authenticate(conn: object, supplied: SecretStr) -> WorkerIncarnation:
-        return WorkerIncarnation(
+        return DockerWorkerIncarnation(
             incarnation="docker:other",
             authority_kind="docker",
             authority_binding={"container_id": "b" * 64},

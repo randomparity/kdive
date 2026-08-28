@@ -48,13 +48,32 @@ class IncarnationAuthenticationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class WorkerIncarnation:
-    """Public immutable facts for one authority-registered incarnation."""
-
+class LocalWorkerIncarnation:
     incarnation: str
-    authority_kind: AuthorityKind
-    authority_binding: AuthorityBinding
+    authority_kind: Literal["local"]
+    authority_binding: LocalAuthorityBinding
     fence_protocol: int
+
+
+@dataclass(frozen=True, slots=True)
+class DockerWorkerIncarnation:
+    incarnation: str
+    authority_kind: Literal["docker"]
+    authority_binding: DockerAuthorityBinding
+    fence_protocol: int
+
+
+@dataclass(frozen=True, slots=True)
+class KubernetesWorkerIncarnation:
+    incarnation: str
+    authority_kind: Literal["kubernetes"]
+    authority_binding: KubernetesAuthorityBinding
+    fence_protocol: int
+
+
+type WorkerIncarnation = (
+    LocalWorkerIncarnation | DockerWorkerIncarnation | KubernetesWorkerIncarnation
+)
 
 
 _BINDING_KEYS: dict[AuthorityKind, frozenset[str]] = {
@@ -79,11 +98,30 @@ def _record(row: tuple[Any, ...]) -> WorkerIncarnation:
     authority_kind = cast(AuthorityKind, row[1])
     if authority_kind not in _BINDING_KEYS:
         raise RuntimeError("worker incarnation has invalid authority kind")
-    return WorkerIncarnation(
-        incarnation=cast(str, row[0]),
-        authority_kind=authority_kind,
-        authority_binding=_validated_binding(authority_kind, row[2]),
-        fence_protocol=cast(int, row[3]),
+    return _incarnation(
+        cast(str, row[0]),
+        authority_kind,
+        _validated_binding(authority_kind, row[2]),
+        cast(int, row[3]),
+    )
+
+
+def _incarnation(
+    incarnation: str,
+    authority_kind: AuthorityKind,
+    binding: AuthorityBinding,
+    fence_protocol: int,
+) -> WorkerIncarnation:
+    if authority_kind == "local":
+        return LocalWorkerIncarnation(
+            incarnation, authority_kind, cast(LocalAuthorityBinding, binding), fence_protocol
+        )
+    if authority_kind == "docker":
+        return DockerWorkerIncarnation(
+            incarnation, authority_kind, cast(DockerAuthorityBinding, binding), fence_protocol
+        )
+    return KubernetesWorkerIncarnation(
+        incarnation, authority_kind, cast(KubernetesAuthorityBinding, binding), fence_protocol
     )
 
 
@@ -95,7 +133,7 @@ async def register_worker_incarnation(
     binding: LocalAuthorityBinding,
     credential_hash: bytes,
     fence_protocol: int,
-) -> WorkerIncarnation: ...
+) -> LocalWorkerIncarnation: ...
 
 
 @overload
@@ -106,7 +144,7 @@ async def register_worker_incarnation(
     binding: DockerAuthorityBinding,
     credential_hash: bytes,
     fence_protocol: int,
-) -> WorkerIncarnation: ...
+) -> DockerWorkerIncarnation: ...
 
 
 @overload
@@ -117,7 +155,7 @@ async def register_worker_incarnation(
     binding: KubernetesAuthorityBinding,
     credential_hash: bytes,
     fence_protocol: int,
-) -> WorkerIncarnation: ...
+) -> KubernetesWorkerIncarnation: ...
 
 
 async def register_worker_incarnation(
@@ -147,12 +185,7 @@ async def register_worker_incarnation(
         raise IncarnationConflict(
             "worker incarnation registration conflicts with durable state"
         ) from exc
-    return WorkerIncarnation(
-        incarnation=incarnation,
-        authority_kind=authority_kind,
-        authority_binding=binding,
-        fence_protocol=fence_protocol,
-    )
+    return _incarnation(incarnation, authority_kind, binding, fence_protocol)
 
 
 async def authenticate_worker_incarnation(

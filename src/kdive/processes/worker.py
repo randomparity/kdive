@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -20,9 +20,6 @@ from kdive.processes.runtime import (
 )
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
-    DockerAuthorityBinding,
-    KubernetesAuthorityBinding,
-    LocalAuthorityBinding,
     WorkerIncarnation,
     authenticate_worker_incarnation,
 )
@@ -58,11 +55,11 @@ def _validate_worker_incarnation(
 
 def _capture_host_identity(incarnation: WorkerIncarnation) -> str:
     if incarnation.authority_kind == "local":
-        identity = cast(LocalAuthorityBinding, incarnation.authority_binding)["host"]
+        identity = incarnation.authority_binding["host"]
     elif incarnation.authority_kind == "docker":
-        identity = cast(DockerAuthorityBinding, incarnation.authority_binding)["container_id"]
+        identity = incarnation.authority_binding["container_id"]
     else:
-        identity = cast(KubernetesAuthorityBinding, incarnation.authority_binding)["uid"]
+        identity = incarnation.authority_binding["uid"]
     if not 1 <= len(identity.encode()) <= 512:
         raise RuntimeError("authenticated worker incarnation has no valid capture host identity")
     return identity

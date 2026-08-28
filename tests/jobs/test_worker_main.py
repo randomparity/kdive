@@ -20,6 +20,7 @@ from kdive.processes.runtime import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    DockerWorkerIncarnation,
     WorkerIncarnation,
 )
 
@@ -86,7 +87,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     async def _authenticate(*args: object) -> WorkerIncarnation:
         events.append("authenticate")
-        return WorkerIncarnation(
+        return DockerWorkerIncarnation(
             incarnation="docker:nonce",
             authority_kind="docker",
             authority_binding={"container_id": "a" * 64},
@@ -179,7 +180,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 def test_worker_startup_refuses_old_fence_protocol() -> None:
     from kdive.processes.worker import _validate_worker_incarnation
 
-    old = WorkerIncarnation(
+    old = DockerWorkerIncarnation(
         incarnation="docker:old",
         authority_kind="docker",
         authority_binding={"container_id": "b" * 64},
