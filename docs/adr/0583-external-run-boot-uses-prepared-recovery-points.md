@@ -243,8 +243,13 @@ against this manifest. Conventional release-root `build` and `source` absolute s
 represented exactly rather than omitted from recovery CAS.
 
 Materialization does not change the System. Core first commits `preparing` with reservation state
-`pending`; the provider then creates the reservation and core records it `ready`. No quiesce or other
-guest mutation is allowed before `ready`. A deterministic provider prepare journal records the source definition and prior power state,
+`pending` only while a System-locked query proves that no DebugSession for that System is attaching
+or live, regardless of owning Run or transport; otherwise the request returns `CONFLICT` before
+reservation or provider work. The provider then creates the reservation and core records it `ready`.
+No quiesce or other guest mutation is allowed before `ready`. Immediately before the first stop or
+other power mutation, the destination-side serialized lane rechecks the same System-wide session
+condition through core's authority-bound snapshot; a present or unreadable result performs no provider
+mutation and returns to conflict handling. A deterministic provider prepare journal records the source definition and prior power state,
 stops the domain, verifies it inactive, and only then records whether the release-qualified target is
 absent or saves its exact prior tree. The completed journal becomes the opaque recovery reference and
 allows core to commit `prepared`. A worker loss in `preparing` is resumed from that journal; abandoning
@@ -258,6 +263,11 @@ A provider unable to quiesce, stage, replace, verify, and restore the tree rejec
 preparation. “Preserve the disk overlay” below means keep the same attached overlay and device
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
+
+DebugSession attach admission uses the same System lock and rejects while an external activation is
+in `preparing`, `prepared`, `activating`, `recovering`, `recovery_conflict`, or `recovery_failed`.
+Consequently, committing `preparing` or `recovering` closes the attach gate before the destination
+recheck, and no new session can appear between that recheck and its serialized power mutation.
 
 After the pending row exists, the provider creates a deterministic reservation owned by this
 System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
@@ -340,7 +350,11 @@ Before changing boot state, the provider prepares both sides of the compare-and-
 durable recovery point representing the exact current persistent boot configuration and prior module
 tree, renders but does not apply the target configuration, and returns provider-computed source- and
 target-state identities plus an opaque recovery reference. A state identity covers both the boot
-definition and the release-qualified module-tree identity. Libvirt definition identity is a
+definition and the release-qualified module-tree identity. That component identity is the closed,
+hashable tagged value `{"state":"absent"}` or
+`{"manifest":"sha256:<lowercase-hex>","state":"present"}`. Recorded absence is therefore an exact
+source or target match, not missing evidence; absence conflicts only when the corresponding recorded
+component requires `present`. An unreadable observation remains distinct from both values. Libvirt definition identity is a
 versioned two-part comparison over persistent/inactive XML. The **preserved digest** canonicalizes
 the entire inactive definition after removing only the provider-owned external-boot fields
 `/domain/os/kernel`, `/domain/os/initrd`, and `/domain/os/cmdline`; no other subtree, attribute,
@@ -413,9 +427,10 @@ was running, fresh baseline readiness before core may commit `recovered`. When i
 verified inactive source state is the recovered condition. A mixed state whose every component equals its recorded source
 or target component may be restored to source only when the activation write-ahead journal recorded
 the expected identity before each target write and its result afterward, proving every target-valued
-component belongs to this activation. An unproven mixture enters `recovery_conflict`. Any absent,
-unreadable, or third component identity enters `recovery_conflict` for operator resolution instead
-of overwriting provider state. The portable plan identity is never compared directly with provider
+component belongs to this activation. An unproven mixture enters `recovery_conflict`. A recorded
+`absent` module component matches source or target according to its tagged identity; observed absence
+when that side requires `present`, unreadable evidence, or a third identity enters
+`recovery_conflict` for operator resolution instead of overwriting provider state. The portable plan identity is never compared directly with provider
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
 
@@ -449,9 +464,18 @@ System/activation/Run/plan identity and their content identities; takeover never
 them. The provider-durable per-System fence and each append-only mutation-journal entry additionally
 record the actor generation and claimant token.
 
-Every live execution attempt allocates a fresh System generation and a cryptographically random
-canonical UUID claimant token under the database System lock before provider work. The token belongs
-to that in-memory execution only and is never copied into a job payload for another worker. An actor
+Every live execution attempt requests a fresh System generation and a cryptographically random
+canonical UUID claimant token through a role-bounded database transition before provider work. For a
+worker, the security-definer transition authenticates its ADR-0533 incarnation credential, derives
+the holder from that credential, and atomically verifies the exact current job ID, charged attempt,
+active worker incarnation, activation state, and prior System generation before incrementing. The
+caller cannot supply or substitute those authority fields. Reconciler, server conflict-resolution,
+and teardown paths use separate role-specific transitions that verify their authorized durable
+operation identity and permitted activation edge; none can claim a worker attempt. The allocation row
+permanently records authority kind, holder or operation identity, job and attempt when applicable,
+activation identity, generation, and claimant-token hash. A stale worker whose job was reclaimed can
+therefore affect zero rows even if it resumes before its first allocation. The plaintext token belongs
+to that authenticated live execution only and is never copied into a job payload for another worker. An actor
 atomically claims `(activation identity, generation, claimant token)` in the provider fence.
 Idempotence requires the same triple and is permitted only for retries within that live execution;
 any replacement, redelivery, reconciliation pass, or restarted process allocates a higher generation
@@ -470,8 +494,10 @@ after the database increment but before the provider claim abandons that unused 
 execution allocates a higher one rather than sharing its authority. Missing, changed, or
 unowned evidence enters `recovery_conflict` and is never recaptured from the current System state.
 
-Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all allocate
-before claiming. Provider-local serialization makes a new claim wait for any bounded
+Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all use their
+corresponding authority transition before claiming. The destination executor authenticates the
+durable allocation and token hash through its fixed core channel before accepting a claim; a
+caller-chosen UUID or greater integer has no authority by itself. Provider-local serialization makes a new claim wait for any bounded
 publication critical section; long downloads, extraction, and helper execution write only private
 staging and are cancelable or discardable.
 
@@ -511,8 +537,9 @@ metadata update, failure/result write, recovery-job completion, and `cleanup_com
 under the database System lock and compare-and-sets the activation identity, current
 `operation_generation`, and claimant token stored for that live execution. Job-result persistence uses
 the same predicate in its transaction rather than committing independently. Allocating a replacement
-generation first compare-and-sets the prior row generation, so two replacements cannot both become
-current. A predicate mismatch returns an internal `superseded` outcome and performs no activation,
+generation verifies the role-specific current authority and compare-and-sets the prior row generation,
+so two replacements cannot both become current and a reclaimed attempt cannot allocate later. A
+predicate mismatch returns an internal `superseded` outcome and performs no activation,
 job, cleanup, or audit-result write; the current actor or reconciler owns durable completion. Merely
 re-observing the provider or holding the transaction-scoped lock never authorizes an old result.
 
@@ -525,8 +552,12 @@ and proves that an actor from the earlier Run can never reclaim authority.
 It separately loses a worker after `prepared` and after the first target-component write, claims the
 next generation, consumes the original activation-owned evidence, and proves safe resume without
 retagging or source recapture.
-The suite also pauses an actor before its first claim, lets another execution allocate and claim the
-next generation, resumes the old actor, and proves its different token/generation cannot mutate state.
+The suite also pauses a worker before generation allocation, reclaims its job, lets the new exact
+job attempt allocate and claim the next generation, then resumes the old worker with its still-valid
+incarnation credential and proves allocation affects zero rows and no executor claim is possible. It
+separately pauses an actor after allocation but before its first claim, lets another authorized
+execution allocate and claim the next generation, resumes the old actor, and proves its different
+token/generation cannot mutate state.
 It kills both an initial and replacement actor after the claim returns but before the first mutation;
 the next worker and authorized teardown must validate the zero-mutation header and take over without
 conflict, retagging, or source recapture.
@@ -559,19 +590,23 @@ Thus corrupt recovery evidence cannot block destruction or authorize unsafe clea
 Recovery restores a usable disk/GRUB baseline, not only persistent bytes. Run build state is not its
 usage lease: current Runs are already `succeeded` before install and boot. A new contributor operation,
 `runs.release_external_boot`, is the explicit end-of-use event for an active external-boot activation.
-Under the System lock it refuses while that Run has a live DebugSession or another active lifecycle,
-capture, or debug job, then atomically records the release request, recovery deadline, generation and
-token, `active -> recovering` transition, and recovery job before observing provider state. Repeating
+Under the System lock it refuses while that Run has another active lifecycle, capture, or debug job,
+and also refuses while any DebugSession for the System is attaching or live, regardless of owning Run
+or transport. It then atomically records the release request, recovery deadline, generation and token,
+`active -> recovering` transition, and recovery job before observing provider state. Repeating
 it is idempotent and returns the same recovery job. `debug_sessions.detach` does not release implicitly;
 its response suggests `runs.release_external_boot` when it detached the last live session. Authorized
 System teardown bypasses release because destruction owns cleanup.
 
-After that commit, the provider observes the recorded target. Complete target state proceeds.
-Confirmed absence or any third component enters `recovery_conflict` without stopping or overwriting
+After that commit, the provider observes the recorded target. Complete target state, including a
+tagged `absent` component when the target recorded absence, proceeds. Observed absence when the target
+requires `present`, or any third component, enters `recovery_conflict` without stopping or overwriting
 the System. An unreadable component retries only until the persisted recovery deadline, then also
 enters `recovery_conflict` with its observation evidence; no preflight retry can remain unbounded.
-The provider then stops the
-domain through the control plane and verifies it is inactive. It then re-observes the complete target
+Immediately before stopping, the destination-side serialized lane rechecks that the System has no
+attaching or live DebugSession; presence or an unreadable result performs no power mutation and
+returns the operation to conflict handling. The provider then stops the domain through the control
+plane and verifies it is inactive. It then re-observes the complete target
 state immediately before the first restore write. An unreadable or third component at that point
 enters `recovery_conflict` without an overwrite. The provider then restores the prior module tree and persistent
 definition, then restores the recorded prior power state. When it was running, the provider boots
@@ -598,6 +633,13 @@ Artifacts remain while the Run can retry, are deleted idempotently on those orde
 swept by deterministic ownership after worker death. A partial materialization is either atomically
 published under its final identity or discoverable as an owned partial and removed; it is never
 activated.
+
+Adversarial recovery tests record an initially absent release tree, lose the worker before target
+publication and after recovery removes the target tree, and prove both observations match the exact
+source `absent` value without conflict. Session races attach other-Run and other-transport sessions
+before initial prepare, between admission and its first stop, before release, and between release
+admission and its first stop; every race performs no boot-state mutation until the System-wide
+session is detached.
 
 `preparing -> abandoned` is the pre-preparation disposal path. The provider journal first restores
 the captured source definition and prior power state. Cancellation or reconciliation may take this
