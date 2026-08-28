@@ -54,17 +54,7 @@ def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | Non
 
 
 def require_fadump_supported(*, requested: bool, supported: bool) -> None:
-    """Reject a fadump-opted provision on a host that does not advertise pseries fadump (ADR-0349).
-
-    ``requested`` is the profile's fadump opt-in (``ProfilePolicy.fadump_provisioned``);
-    ``supported`` is the bound Resource's discovered ``pseries_fadump`` capability. Fail-closed:
-    when fadump is requested but the host does not support it, raises ``CONFIGURATION_ERROR``
-    naming the QEMU floor. The caller resolves ``supported`` to ``False`` for a missing resource or
-    a host not re-discovered since ADR-0349, so an unknown host denies fadump rather than hanging.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when ``requested`` and not ``supported``.
-    """
+    """Fail closed when a requested fadump host does not advertise support (ADR-0349)."""
     if not requested or supported:
         return
     raise CategorizedError(
@@ -79,23 +69,7 @@ def require_fadump_supported(*, requested: bool, supported: bool) -> None:
 def _require_profile_matches_resource_kind(
     profile: ProvisioningProfile, profile_policy: ProfilePolicy
 ) -> None:
-    """Reject a profile whose provider section is not the bound Resource's kind (ADR-0549).
-
-    The policy is resolved from the Resource — ``runtime_for_allocation`` on the create lane,
-    ``runtime_for_system`` on reprovision — so ``profile_policy.kind`` *is* that Resource's kind.
-    A profile carrying a different section makes the policy's section-reading members dereference
-    an absent ``ProviderSection`` attribute, which raises a bare ``AttributeError`` admission does
-    not catch — or, for fault-inject, whose admission-time members read no section at all, raises
-    nothing until long after the System is stored.
-
-    Runs before ``_reject_unknown_destructive_ops`` and before any provider dereference, so the
-    mismatch is what an agent is told rather than whatever the mismatched section trips over
-    first.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` naming both the profile's provider section and
-            the Resource kind, so the caller can tell which of the two to change.
-    """
+    """Reject a provider section that differs from the bound Resource kind (ADR-0549)."""
     declared = profile.provider.kind
     if declared is profile_policy.kind:
         return
