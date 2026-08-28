@@ -155,6 +155,28 @@ def test_plan_rejects_unknown_noncanonical_or_inconsistent_values(
         ExternalBootPlan.model_validate(data)
 
 
+@pytest.mark.parametrize("argument", ["=bad", "="])
+def test_plan_rejects_empty_platform_argument_keys(argument: str) -> None:
+    data = _plan_data()
+    data["platform_arguments"] = ["root=UUID=x", argument]
+    data["cmdline"] = f"root=UUID=x {argument}"
+
+    with pytest.raises(ValidationError, match="key must be nonempty"):
+        ExternalBootPlan.model_validate(data)
+
+
+@pytest.mark.parametrize("release", ["a" * 65, "café", "../evil", ".", ".."])
+def test_release_values_reject_noncanonical_or_traversal_like_text(release: str) -> None:
+    plan_data = _plan_data()
+    obligation = cast(dict[str, object], plan_data["module_obligation"])
+    plan_data["module_obligation"] = {**obligation, "release": release}
+
+    with pytest.raises(ValidationError, match="release"):
+        ExternalBootPlan.model_validate(plan_data)
+    with pytest.raises(ValidationError, match="release"):
+        RunningKernelObservation(architecture="x86_64", release=release, gnu_build_id="00" * 20)
+
+
 @pytest.mark.parametrize("value", ["", "/tmp/kernel", "https://host/k", "user:secret@host"])
 def test_opaque_provider_ref_rejects_empty_path_url_and_credentials(value: str) -> None:
     with pytest.raises(ValidationError):

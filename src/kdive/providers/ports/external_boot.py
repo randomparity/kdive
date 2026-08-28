@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 type Architecture = Literal["x86_64", "ppc64le"]
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+type KernelRelease = Annotated[
+    str,
+    Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"),
+]
 type CanonicalUuid = Annotated[
     str,
     Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"),
@@ -127,12 +131,10 @@ class RootSpecV1(_ClosedValue):
 
 class ModuleObligation(_ClosedValue):
     mode: Literal["system-root-tree"] = "system-root-tree"
-    release: Annotated[str, Field(min_length=1, max_length=255)]
+    release: KernelRelease
     source_manifest: Digest
     member_count: Annotated[int, Field(ge=1, le=200_000)]
     uncompressed_bytes: Annotated[int, Field(ge=0, le=8_589_934_592)]
-
-    _canonical_release = field_validator("release")(_nfc)
 
 
 def _validate_platform_argument(value: str) -> str:
@@ -140,6 +142,8 @@ def _validate_platform_argument(value: str) -> str:
         raise ValueError("platform argument must be 1 through 256 ASCII bytes")
     if "\0" in value or any(character.isspace() for character in value):
         raise ValueError("platform argument must not contain whitespace or NUL")
+    if value.startswith("="):
+        raise ValueError("platform argument key must be nonempty")
     return value
 
 
@@ -222,10 +226,8 @@ class MaterializedArtifacts(_ClosedValue):
 
 class RunningKernelObservation(_ClosedValue):
     architecture: Architecture
-    release: Annotated[str, Field(min_length=1, max_length=255)]
+    release: KernelRelease
     gnu_build_id: Annotated[str, Field(pattern=r"^(?:[0-9a-f]{2}){4,64}$")]
-
-    _canonical_release = field_validator("release")(_nfc)
 
 
 class ExternalBootMaterialization(_ClosedValue):
