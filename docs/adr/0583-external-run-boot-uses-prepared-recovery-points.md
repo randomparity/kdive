@@ -234,19 +234,23 @@ reservations in one provider instance's recovery store cannot exceed its
 envelope's `server_time`. Each store has a durable identity; compare-and-debit, idempotent lookup,
 and release serialize under a store-scoped advisory lock, independently of the System lock. The debit
 and reservation row commit atomically, and the deterministic ownership key makes retries find the
-same debit. Release deletes that row and credits its bytes exactly once. Reconciliation releases a reservation only when its
-durable activation row is terminal or absent; because the row precedes allocation, a live allocation
-cannot be mistaken for an orphan. A crash before `ready` resumes allocation or abandons the pending
+same debit. Release deletes that row and credits its bytes exactly once, but only after every owned
+recovery and materialization object has been deleted and verified absent. A terminal row with
+`cleanup_complete=false` remains fully charged. For an absent activation row, reconciliation first
+deletes and verifies absence of every object bearing its deterministic ownership key, then releases
+the orphan reservation under the store lock. Because the activation row precedes allocation, a live
+allocation cannot be mistaken for an orphan. A crash before `ready` resumes allocation or abandons the pending
 row without guest mutation. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
 guest state, and directs the operator to clean terminal artifacts or raise the cap before retry.
 
 The fixed reservation bounds the captured definition, prior module tree, journal, and verification
 metadata together. Offline capture cannot exceed it. An overrun restores the source definition,
 exact prior module tree, and recorded prior power state; a previously stopped System remains stopped.
-After verification it commits `abandoned`, releases the reservation, and reports
-`INSTALL_FAILURE` with the required minimum observed bytes so the operator can raise
+After verification it commits `abandoned` with cleanup pending; the common cleanup sequence deletes
+and verifies the owned objects, releases the reservation exactly once, commits cleanup complete, and
+reports `INSTALL_FAILURE` with the required minimum observed bytes so the operator can raise
 `recovery_reserve_bytes`. Prepared, recovery, and conflict states retain the reservation;
-abandonment, recovery, and System teardown release it idempotently.
+abandonment, recovery, and System teardown run that ordered release sequence idempotently.
 
 `platform_arguments` contains 1 through 32 nonempty ASCII tokens, each at most 256 bytes and without
 ASCII whitespace or NUL; their one-space join is at most 4096 bytes. Exactly one starts `root=`;
@@ -521,7 +525,8 @@ the write uses compare-and-set from that value and records its result. Any other
 value enters `recovery_conflict`. Concurrent terminalization
 serializes under the System lock. The recovery point and materialized artifacts cannot be deleted
 before `recovered`. Core commits `recovered` with `cleanup_complete=false`, then deletes those objects
-idempotently and commits `cleanup_complete=true`; reconciliation finishes an interrupted deletion.
+idempotently, verifies them absent, releases the reservation under the store lock, and commits
+`cleanup_complete=true`; reconciliation finishes any interrupted step in that order.
 System teardown instead destroys the domain before cleaning the recovery point
 and materialization, because a definition that will be destroyed need not be restored or rebooted.
 Artifacts remain while the Run can retry, are deleted idempotently on those ordered paths, and are
@@ -536,8 +541,9 @@ edge only after retries are no longer possible. Once `prepared`, cancellation in
 and cleanup rules as post-activation recovery; recovery evidence remains until those rules complete.
 After source verification in the preparing path, core commits
 `abandoned` with `cleanup_complete=false` while retaining deterministic cleanup ownership. Cleanup
-then removes the journal or recovery point and materialization idempotently and commits
-`cleanup_complete=true`; reconciliation resumes any interrupted deletion. Worker loss at a deletion
+then removes the journal or recovery point and materialization idempotently, verifies them absent,
+releases the reservation, and commits `cleanup_complete=true`;
+reconciliation resumes any interrupted step. Worker loss at a deletion
 boundary therefore retains the terminal proof, and admission remains blocked until cleanup completes.
 A target or third identity fails closed as
 `recovery_conflict`; absence or an unreadable identity remains retryable. The same per-System lock
