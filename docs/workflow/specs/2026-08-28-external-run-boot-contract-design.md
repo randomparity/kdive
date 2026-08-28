@@ -197,19 +197,24 @@ content, and publishes the final reference atomically. A retry reuses only a fin
 whose plan identity and extracted-kernel digest match; any mismatch is `INSTALL_FAILURE` and leaves
 the existing object untouched for investigation.
 
-`module-source-manifest-v1` recursively sorts relative UTF-8 paths by encoded bytes. It rejects
-absolute paths, `.`/`..`, duplicate normalized paths, hard links, devices, sockets, FIFOs, and
-symlinks escaping the tree. Each directory, regular file, or contained relative symlink records its
+`module-source-manifest-v1` first omits only absolute `build` and `source` symlinks at the release
+root, matching the existing safe extraction filter; every other absolute or escaping link is
+rejected. It then sorts relative UTF-8 paths by encoded bytes and rejects absolute paths, `.`/`..`,
+duplicate normalized paths, hard links, devices, sockets, and FIFOs. Each directory, regular file,
+or contained relative symlink records its
 normalized path, type, permission bits, and regular-file size/SHA-256 or symlink target; uid, gid,
 and timestamps are excluded. This digest covers validated bundle input.
 
 Materialization stages the module tree, runs required indexing, and computes
 `installed-module-tree-v1` with the same walker over the final tree. Generated files such as
 `modules.dep` are included only there. The returned installed digest enters target provider-state
-identity. Materialization does not change the System. Recovery preparation records
-the prior `/lib/modules/<kernel_release>` tree or its absence. Activation atomically publishes the
-exact staged tree only after stopping the domain and verifying it inactive, then applies and boots
-the target definition. Failure to quiesce leaves `prepared` and changes nothing. An exact tree may be
+identity. Materialization does not change the System. Core commits `preparing`; a deterministic
+provider journal records source definition and prior power state, stops and verifies the domain
+inactive, then captures the prior `/lib/modules/<kernel_release>` tree or its absence. Only that
+completed journal becomes `BootRecoveryPoint` and permits `prepared`. Reconciliation resumes an
+interrupted journal; abandonment restores source definition and prior power state first. Activation
+publishes the exact staged tree from `prepared`, then applies and boots the target definition.
+Failure to quiesce leaves `preparing` and changes nothing. An exact tree may be
 reused and a different same-release tree is replaced. Recovery performs the same offline boundary,
 then restores the prior tree or removes the Run's tree when none existed. Local-libvirt adapts its
 existing injection to this ordering. Remote-libvirt installs the same tree without rebuilding the
@@ -228,19 +233,21 @@ references, provider source/target state identities, state, attempt metadata, an
 failure. The state transitions are:
 
 ```text
-prepared -> activating -> active
-    |             |          |
-    v             v          v
-abandoned     recovering <---+
-                  |
-                  v
-              recovered
+preparing -> prepared -> activating -> active
+    |           |             |          |
+    +-----------+             v          v
+    v                     recovering <---+
+abandoned                     |
+                              v
+                          recovered
 
-activating | active | recovering -> recovery_conflict
+preparing | activating | active | recovering -> recovery_conflict
 ```
 
 An active terminal Run enters `recovering` before cleanup when its System remains reusable. A
-terminal `prepared` Run enters `abandoned` only while provider state still equals the recorded source.
+terminal `preparing` Run restores source definition and prior power state from its journal before
+`abandoned`; a terminal `prepared` Run enters `abandoned` only while provider state still equals the
+recorded source.
 System teardown destroys the domain before cleanup instead of restoring it. Materialization and
 recovery evidence cannot be removed before one of those ordered terminal paths completes. Illegal
 transitions are programming errors. Operation attempts remain idempotent by Run and step, and all
@@ -249,9 +256,10 @@ transitions plus provider calls retain the existing per-System lock.
 Ordering is strict:
 
 1. Materialize and verify the plan.
-2. Ask the provider to durably record the exact persistent boot definition and prior module tree,
-   render the target persistent definition, and compute canonical source/target state identities.
-3. Commit `prepared` with both opaque references and both state identities.
+2. Commit `preparing`, then ask the provider journal to record the persistent definition and prior
+   power state, quiesce the domain, capture the prior module tree, render the target definition, and
+   compute source/target identities.
+3. Commit `prepared` with the completed recovery reference and both state identities.
 4. Commit `activating`.
 5. Activate the module tree and persistent definition with compare-and-set against the recovery
    point's source state.
@@ -280,9 +288,11 @@ disk/GRUB boot before storing it. Restore uses the recorded source with compare-
 target or activation-owned partial state.
 
 Remote prepare accepts a disk/GRUB source only when its inactive boot projection has no kernel,
-initrd, or cmdline and KDIVE metadata binds it to the System. An external projection must be owned by
-a matching durable activation row and recovered under the System lock before another prepare. An
-unowned external projection enters `recovery_conflict`; it is never captured as the source point.
+initrd, or cmdline; KDIVE metadata binds it to the System; the sole boot disk uses the deterministic
+System overlay, configured pool, expected target and bus; disk is the only boot device; and
+loader/firmware/NVRAM match the provisioning profile. An external projection must be owned by a
+matching durable activation row and recovered under the System lock before another prepare. Any
+other mismatch or unowned external projection enters `recovery_conflict`.
 
 When a reusable System recovers from `active`, the provider stops the domain, verifies it inactive,
 restores the prior module tree and persistent definition, boots that definition, and proves both a
@@ -346,11 +356,13 @@ Those are existing deployment trust or excluded provider concerns.
 - Pure contract tests cover canonical identity, ordering sensitivity, optional initrd pairing,
   ownership, architecture/release/root conflicts, and a test-only non-libvirt runtime.
 - Archive tests cover duplicates, links, traversal, malformed headers, missing/multiple vmlinuz,
-  wrong modules release, expansion bounds, source-manifest normalization, generated-index installed
-  identity, digest mismatch, and partial cleanup.
+  wrong modules release, expansion bounds, deterministic `build`/`source` link omission,
+  source-manifest normalization, generated-index installed identity, digest mismatch, and partial
+  cleanup.
 - State-machine and adversarial tests fault every boundary before/after provider calls and database
-  commits, including prepared abandonment, same-release module replacement/restoration, a running
-  domain after worker loss, duplicate delivery, and concurrent retry under the System lock.
+  commits, including worker loss during offline prepare, restoration of prior power state,
+  prepared abandonment, same-release module replacement/restoration, a running domain after worker
+  loss, duplicate delivery, and concurrent retry under the System lock.
 - Provider tests prove local behavior remains unchanged and remote upload, path resolution, XML
   preservation, full preserved-definition comparison across XML syntax normalization,
   GRUB-source admission and unowned-external conflict, compare-and-set activation, exact offline
