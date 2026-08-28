@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import hashlib
 import io
 import json
+import lzma
 import posixpath
 import struct
 import tarfile
+import tempfile
 import unicodedata
 import zlib
 from collections.abc import Mapping, Sequence
+from compression import zstd
 from dataclasses import dataclass
 from typing import IO, Literal, Protocol, cast
 
@@ -53,6 +58,8 @@ _EXTERNAL_BOOT_INITRD_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
 _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
+_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 16 * 1024 * 1024
 _SHA256_PREFIX = "sha256:"
 
 
@@ -269,6 +276,10 @@ class ValidatorStore(HeadStore, Protocol):
     ) -> bytes: ...
 
 
+class _BinaryReader(Protocol):
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
 class _ObservedVersionStore:
     """Fence semantic reads to the immutable version returned by the first HEAD."""
 
@@ -387,7 +398,13 @@ def _external_boot_evidence(
 ) -> dict[str, JsonValue]:
     """Produce server-owned, version-pinned external-boot evidence (ADR-0583)."""
     bundle_head = heads["kernel"]
-    archive = _scan_external_boot_archive(store, keys["kernel"], bundle_head.size_bytes)
+    archive = _scan_external_boot_archive(store, keys["kernel"], bundle_head.size_bytes, arch)
+    if build_id and archive["gnu_build_id"] != build_id:
+        raise _build_failure(
+            "uploaded vmlinux build_id does not match boot/vmlinuz",
+            vmlinux_build_id=build_id,
+            boot_build_id=archive["gnu_build_id"],
+        )
     initrd: dict[str, JsonValue] | None = None
     initrd_head = heads.get("initrd")
     if initrd_head is not None:
@@ -409,12 +426,12 @@ def _external_boot_evidence(
         "archive_uncompressed_bytes": archive["archive_uncompressed_bytes"],
         "vmlinuz_sha256": archive["vmlinuz_sha256"],
         "vmlinuz_size_bytes": archive["vmlinuz_size_bytes"],
-        "decoded_kernel_size_bytes": archive["vmlinuz_size_bytes"],
-        "elf_metadata_bytes": 0,
-        "architecture": arch,
+        "decoded_kernel_size_bytes": archive["decoded_kernel_size_bytes"],
+        "elf_metadata_bytes": archive["elf_metadata_bytes"],
+        "architecture": archive["architecture"],
         "release": archive["release"],
-        "gnu_build_id": build_id,
-        "gnu_build_id_size_bytes": len(build_id) // 2,
+        "gnu_build_id": archive["gnu_build_id"],
+        "gnu_build_id_size_bytes": archive["gnu_build_id_size_bytes"],
         "module_source_manifest": archive["module_source_manifest"],
         "module_member_count": archive["module_member_count"],
         "module_uncompressed_bytes": archive["module_uncompressed_bytes"],
@@ -456,12 +473,13 @@ class _RangedReader:
 
 
 def _scan_external_boot_archive(
-    store: ValidatorStore, key: str, size_bytes: int
+    store: ValidatorStore, key: str, size_bytes: int, arch: str
 ) -> dict[str, JsonValue]:
     entries: list[dict[str, JsonValue]] = []
     releases: set[str] = set()
     names: set[str] = set()
     boot_digest: str | None = None
+    boot: dict[str, JsonValue] | None = None
     boot_size = 0
     archive_bytes = 0
     module_bytes = 0
@@ -495,7 +513,8 @@ def _scan_external_boot_archive(
                             "boot/vmlinuz exceeds the external-boot byte limit",
                             max_bytes=_EXTERNAL_BOOT_MEMBER_MAX_BYTES,
                         )
-                    boot_digest = _digest_tar_member(archive, member)
+                    boot = _inspect_boot_member(archive, member, arch)
+                    boot_digest = str(boot["vmlinuz_sha256"])
                     boot_size = member.size
                     continue
                 module_path = _module_member_path(path, member)
@@ -503,6 +522,8 @@ def _scan_external_boot_archive(
                     continue
                 release, relative = module_path
                 releases.add(release)
+                if not relative:
+                    continue
                 if member.isreg():
                     module_bytes += member.size
                 entry = _module_manifest_entry(archive, member, relative)
@@ -511,10 +532,17 @@ def _scan_external_boot_archive(
                     module_members += 1
     except (OSError, tarfile.TarError) as exc:
         raise _build_failure("kernel bundle is not a complete readable gzip tar") from exc
-    if boot_digest is None:
+    if boot_digest is None or boot is None:
         raise _build_failure("kernel bundle has no regular boot/vmlinuz member")
     if len(releases) != 1 or not entries:
         raise _build_failure("kernel bundle must contain exactly one lib/modules/<release> tree")
+    module_release = next(iter(releases))
+    if boot["release"] != module_release:
+        raise _build_failure(
+            "boot/vmlinuz release does not match its module tree",
+            kernel_release=boot["release"],
+            module_release=module_release,
+        )
     entries.sort(key=lambda entry: str(entry["path"]).encode())
     document = {"entries": entries, "schema": "module-source-manifest-v1"}
     encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -524,7 +552,13 @@ def _scan_external_boot_archive(
         "archive_uncompressed_bytes": archive_bytes,
         "vmlinuz_sha256": boot_digest,
         "vmlinuz_size_bytes": boot_size,
-        "release": next(iter(releases)),
+        "decoded_kernel_size_bytes": boot["decoded_kernel_size_bytes"],
+        "elf_metadata_bytes": boot["elf_metadata_bytes"],
+        "architecture": boot["architecture"],
+        "kernel_release": boot["release"],
+        "gnu_build_id": boot["gnu_build_id"],
+        "gnu_build_id_size_bytes": boot["gnu_build_id_size_bytes"],
+        "release": module_release,
         "module_source_manifest": _SHA256_PREFIX + manifest,
         "module_member_count": module_members,
         "module_uncompressed_bytes": module_bytes,
@@ -555,7 +589,7 @@ def _module_member_path(path: str, member: tarfile.TarInfo) -> tuple[str, str] |
     remainder = path[len(_MODULES_MEMBER_PREFIX) :]
     release, separator, relative = remainder.partition("/")
     if release and not separator and member.isdir():
-        return None
+        return release, ""
     if not release or not separator or not relative:
         raise _build_failure("kernel bundle has an invalid module-tree member", path=path)
     return release, relative
@@ -597,19 +631,203 @@ def _module_manifest_entry(
     raise _build_failure("kernel bundle contains an unsupported module member", path=relative)
 
 
-def _digest_tar_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+def _inspect_boot_member(
+    archive: tarfile.TarFile, member: tarfile.TarInfo, expected_arch: str
+) -> dict[str, JsonValue]:
     extracted = archive.extractfile(member)
     if extracted is None:
         raise _build_failure("boot/vmlinuz cannot be read")
     digest = hashlib.sha256()
     remaining = member.size
-    while remaining:
-        chunk = extracted.read(min(_RANGE_CHUNK_BYTES, remaining))
-        if not chunk:
-            raise _build_failure("boot/vmlinuz ended before its recorded size")
-        digest.update(chunk)
-        remaining -= len(chunk)
-    return _SHA256_PREFIX + digest.hexdigest()
+    with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as boot:
+        while remaining:
+            chunk = extracted.read(min(_RANGE_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise _build_failure("boot/vmlinuz ended before its recorded size")
+            digest.update(chunk)
+            boot.write(chunk)
+            remaining -= len(chunk)
+        boot.seek(0)
+        release = _boot_release(boot, expected_arch)
+        decoded = _decoded_kernel(boot, expected_arch)
+        with decoded:
+            metadata = _elf_kernel_metadata(decoded, expected_arch)
+        if metadata["release"] != release:
+            raise _build_failure(
+                "boot/vmlinuz release disagrees with its decoded kernel",
+                header_release=release,
+                decoded_release=metadata["release"],
+            )
+        return {
+            "vmlinuz_sha256": _SHA256_PREFIX + digest.hexdigest(),
+            "decoded_kernel_size_bytes": metadata["decoded_kernel_size_bytes"],
+            "elf_metadata_bytes": metadata["elf_metadata_bytes"],
+            "architecture": metadata["architecture"],
+            "release": release,
+            "gnu_build_id": metadata["gnu_build_id"],
+            "gnu_build_id_size_bytes": metadata["gnu_build_id_size_bytes"],
+        }
+
+
+def _boot_release(boot: IO[bytes], arch: str) -> str:
+    if arch == "x86_64":
+        boot.seek(0)
+        header = boot.read(0x300)
+        magic = header[_BZIMAGE_MAGIC_OFFSET : _BZIMAGE_MAGIC_OFFSET + 4]
+        if len(header) < 0x210 or magic != _BZIMAGE_MAGIC:
+            raise _build_failure("boot/vmlinuz has no usable x86 boot header")
+        version_offset = 0x200 + int.from_bytes(header[0x20E:0x210], "little")
+        boot.seek(version_offset)
+        release = boot.read(256).partition(b"\0")[0]
+        return _validated_release(release)
+    boot.seek(0)
+    return _release_from_linux_banner(boot.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES))
+
+
+def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile[bytes]:
+    # Ownership transfers to the caller, which closes the returned spool.
+    decoded = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)  # noqa: SIM115
+    if arch == "ppc64le":
+        boot.seek(0)
+        _copy_kernel_bounded(boot, decoded)
+        decoded.seek(0)
+        return decoded
+    candidates = (
+        (b"\x1f\x8b\x08", lambda source: gzip.GzipFile(fileobj=source, mode="rb")),
+        (b"BZh", lambda source: bz2.BZ2File(source)),
+        (b"\xfd7zXZ\x00", _open_lzma),
+        (b"\x28\xb5\x2f\xfd", _open_zstd),
+    )
+    for magic, opener in candidates:
+        for offset in _magic_offsets(boot, magic):
+            boot.seek(offset)
+            try:
+                with opener(boot) as source:
+                    _copy_kernel_bounded(source, decoded)
+            except EOFError, OSError, zlib.error, lzma.LZMAError, zstd.ZstdError:
+                decoded.seek(0)
+                decoded.truncate()
+                continue
+            decoded.seek(0)
+            if decoded.read(4) == _ELF_MAGIC:
+                decoded.seek(0)
+                return decoded
+            decoded.seek(0)
+            decoded.truncate()
+    decoded.close()
+    raise _build_failure(
+        "boot/vmlinuz does not contain a supported gzip, bzip2, xz, or zstd ELF kernel payload"
+    )
+
+
+def _magic_offsets(source: IO[bytes], magic: bytes) -> list[int]:
+    source.seek(0)
+    offsets: list[int] = []
+    overlap = b""
+    position = 0
+    while chunk := source.read(_RANGE_CHUNK_BYTES):
+        data = overlap + chunk
+        start = 0
+        while (index := data.find(magic, start)) >= 0:
+            offsets.append(position - len(overlap) + index)
+            start = index + 1
+        overlap = data[-(len(magic) - 1) :]
+        position += len(chunk)
+    return offsets
+
+
+def _copy_kernel_bounded(source: _BinaryReader, destination: IO[bytes]) -> int:
+    total = 0
+    while chunk := source.read(
+        min(_RANGE_CHUNK_BYTES, _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES - total + 1)
+    ):
+        total += len(chunk)
+        if total > _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES:
+            raise _build_failure(
+                "decoded boot/vmlinuz exceeds the external-boot byte limit",
+                max_bytes=_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES,
+            )
+        destination.write(chunk)
+    return total
+
+
+def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, JsonValue]:
+    kernel.seek(0, io.SEEK_END)
+    decoded_size = kernel.tell()
+    kernel.seek(0)
+    metadata = kernel.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES)
+    if len(metadata) < 64 or metadata[:6] != _ELF64LE_PREFIX:
+        raise _build_failure("decoded boot/vmlinuz is not a 64-bit little-endian ELF")
+    machine = int.from_bytes(metadata[0x12:0x14], "little")
+    expected_machine = 62 if expected_arch == "x86_64" else 21
+    if machine != expected_machine:
+        raise _build_failure(
+            "decoded boot/vmlinuz architecture does not match the build profile",
+            expected_arch=expected_arch,
+            e_machine=machine,
+        )
+    release = _release_from_linux_banner(metadata)
+    build_ids = _gnu_build_ids(metadata)
+    if len(build_ids) != 1:
+        raise _build_failure(
+            "decoded boot/vmlinuz must contain one unambiguous GNU build ID",
+            build_id_count=len(build_ids),
+        )
+    build_id = next(iter(build_ids))
+    if not 4 <= len(build_id) // 2 <= 64:
+        raise _build_failure("decoded boot/vmlinuz GNU build ID has an invalid byte length")
+    return {
+        "decoded_kernel_size_bytes": decoded_size,
+        "elf_metadata_bytes": len(metadata),
+        "architecture": expected_arch,
+        "release": release,
+        "gnu_build_id": build_id,
+        "gnu_build_id_size_bytes": len(build_id) // 2,
+    }
+
+
+def _release_from_linux_banner(data: bytes) -> str:
+    marker = b"Linux version "
+    start = data.find(marker)
+    if start < 0:
+        raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
+    release = data[start + len(marker) :].split(maxsplit=1)[0]
+    return _validated_release(release)
+
+
+def _validated_release(value: bytes) -> str:
+    try:
+        release = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _build_failure("boot/vmlinuz release is not UTF-8") from exc
+    canonical = unicodedata.normalize("NFC", release)
+    if not release or len(release.encode()) > 255 or canonical != release:
+        raise _build_failure("boot/vmlinuz release is not canonical")
+    return release
+
+
+def _open_lzma(source: IO[bytes]) -> lzma.LZMAFile:
+    return lzma.LZMAFile(source)  # noqa: SIM115
+
+
+def _open_zstd(source: IO[bytes]) -> zstd.ZstdFile:
+    return zstd.ZstdFile(source, mode="rb")  # noqa: SIM115
+
+
+def _gnu_build_ids(data: bytes) -> set[str]:
+    found: set[str] = set()
+    marker = b"GNU\0"
+    start = 0
+    while (name_offset := data.find(marker, start)) >= 0:
+        header_offset = name_offset - 12
+        if header_offset >= 0:
+            namesz, descsz, note_type = struct.unpack_from("<III", data, header_offset)
+            desc_offset = name_offset + (-namesz % 4) + namesz
+            desc_end = desc_offset + descsz
+            if namesz == 4 and note_type == _NT_GNU_BUILD_ID and desc_end <= len(data):
+                found.add(data[desc_offset:desc_end].hex())
+        start = name_offset + len(marker)
+    return found
 
 
 def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -> str:
