@@ -132,7 +132,7 @@ duplicates, hard links, devices, sockets, and FIFOs; and admits only directories
 contained relative symlinks. Each entry records normalized path, type, normalized permission bits,
 and regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
 Materialization validates that source manifest, stages the tree, runs required indexing, and computes
-`installed-module-tree-v1` with the same walker over the final tree. Generated indexes such as
+`module-installed-tree-v1` with the same walker over the final tree. Generated indexes such as
 `modules.dep` belong to installed identity, not source identity. The provider returns the installed
 digest, and target state identity binds it.
 
@@ -149,6 +149,11 @@ prefix `kdive-module-source-manifest-v1` plus NUL plus the JSON bytes. The insta
 schema/prefix `module-installed-tree-v1` / `kdive-module-installed-tree-v1` and additionally records
 uid, gid, `xattrs_supported`, and an xattrs object whose sorted names map to unpadded base64 values.
 An empty tree is an empty `entries` array, not absent input.
+
+Installed-tree vector with an unsupported-xattr directory:
+`{"entries":[{"gid":0,"mode":"0755","path":"kernel","type":"dir","uid":0,"xattrs":{},"xattrs_supported":false}],"schema":"module-installed-tree-v1"}`
+has domain-separated digest
+`sha256:a1af9de8164af0171acebef4b06cb74c512f06dac0613fd8c080cad794326e01`.
 
 A non-ASCII source-manifest vector is
 `{"entries":[{"mode":"0644","path":"kernel/café.ko","sha256":"sha256:` followed by 64 zero
@@ -313,9 +318,10 @@ both provider state identities when preparation completes. The state machine is
 `preparing|prepared|activating|active|recovering -> recovery_conflict`, and
 `recovery_conflict -> recovering`,
 failure metadata on an operation attempt.
-Core permits at most one external-boot activation that is not `recovered` or `abandoned` per System.
+Core permits at most one external-boot activation that is not fully cleaned per System.
 A partial unique database index enforces that invariant across `preparing`, `prepared`, `activating`,
-`active`, `recovering`, `recovery_conflict`, and `recovery_failed`; all providers use the same core
+`active`, `recovering`, `recovery_conflict`, and `recovery_failed`, plus `recovered` or `abandoned`
+rows whose `cleanup_complete` is false; all providers use the same core
 admission path. A second Run receives `CONFLICT` before reservation or provider work, with the existing
 activation identity and state plus `runs.get`; an active activation also suggests
 `runs.release_external_boot`, while a failed/conflicted activation suggests `systems.teardown` when
@@ -421,19 +427,24 @@ without stopping or overwriting the System. After committing `recovering`, the p
 domain through the control plane and verifies it is inactive. It then re-observes the complete target
 state immediately before the first restore write. An unreadable or third component at that point
 enters `recovery_conflict` without an overwrite. The provider then restores the prior module tree and persistent
-definition, boots that definition, and requires a fresh boot plus the existing System readiness
-contract before committing `recovered`. The exact GRUB-selected kernel is guest bootloader state and
+definition, then restores the recorded prior power state. When it was running, the provider boots
+that definition and requires a fresh boot plus the existing System readiness contract before
+committing `recovered`; when it was stopped, verified inactive complete source state commits
+`recovered` without boot or readiness. The exact GRUB-selected kernel is guest bootloader state and
 is not knowable from an inactive domain definition, so it is not an identity gate; a recovery that
 reaches its persisted recovery deadline without readiness transitions to `recovery_failed` and
 retains all evidence; it does not remain `recovering`. A recovery retry before that deadline
 re-observes each component: complete target resumes restoration,
-complete source resumes boot/readiness, and a source/target mixture may resume only when every
+complete source resumes restoration of the recorded power state and its conditional readiness rule,
+and a source/target mixture may resume only when every
 component matches one of those recorded identities and the journal proves the partial write belongs
 to this recovery. Before each subsequent write, that journal records the expected component identity;
 the write uses compare-and-set from that value and records its result. Any other mixture or third
 value enters `recovery_conflict`. Concurrent terminalization
 serializes under the System lock. The recovery point and materialized artifacts cannot be deleted
-before `recovered`. System teardown instead destroys the domain before cleaning the recovery point
+before `recovered`. Core commits `recovered` with `cleanup_complete=false`, then deletes those objects
+idempotently and commits `cleanup_complete=true`; reconciliation finishes an interrupted deletion.
+System teardown instead destroys the domain before cleaning the recovery point
 and materialization, because a definition that will be destroyed need not be restored or rebooted.
 Artifacts remain while the Run can retry, are deleted idempotently on those ordered paths, and are
 swept by deterministic ownership after worker death. A partial materialization is either atomically
@@ -442,9 +453,13 @@ activated.
 
 `preparing|prepared -> abandoned` is the pre-activation disposal path. From `preparing`, the provider
 journal first restores the captured source definition and prior power state; from `prepared`, provider
-observation must still equal recorded source state. Run terminalization or reconciliation may take
-either edge only after retries are no longer possible. Cleanup then removes the journal or recovery
-point and materialization and commits `abandoned`. A target or third identity fails closed as
+observation must still equal recorded source state. Cancellation of the activation or reconciliation may take
+either edge only after retries are no longer possible. After source verification, core commits
+`abandoned` with `cleanup_complete=false` while retaining deterministic cleanup ownership. Cleanup
+then removes the journal or recovery point and materialization idempotently and commits
+`cleanup_complete=true`; reconciliation resumes any interrupted deletion. Worker loss at a deletion
+boundary therefore retains the terminal proof, and admission remains blocked until cleanup completes.
+A target or third identity fails closed as
 `recovery_conflict`; absence or an unreadable identity remains retryable. The same per-System lock
 serializes abandonment with activation and teardown.
 
