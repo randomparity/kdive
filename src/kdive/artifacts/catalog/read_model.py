@@ -82,7 +82,7 @@ class ArtifactReadRef:
     version_id: str | None
 
 
-async def run_fetch_context(conn: AsyncConnection, run_id: UUID) -> RunFetchContext | None:
+async def fetch_context_for_run(conn: AsyncConnection, run_id: UUID) -> RunFetchContext | None:
     """Return Run-owned raw-fetch context, normalizing an empty vmlinux ref to ``None``."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_RUN_FETCH_CONTEXT_SQL, (run_id,))
