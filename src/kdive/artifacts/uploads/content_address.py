@@ -4,7 +4,7 @@ An investigation-scoped uploaded rootfs is content-addressed: its object name em
 path/key-safe rendering (unpadded base64url) of the declared SHA-256, so one checksum maps to
 exactly one object key. This module is the **single** derivation both the upload tool
 (``mcp.tools.catalog.artifacts.uploads``) and the provider fetch
-(``providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch``) share, so a System resolves the
+(``providers.local_libvirt.lifecycle.rootfs.upload_acquisition``) share, so a System resolves the
 exact key finalize committed. The provider layer must not import from ``kdive.mcp.tools``, so the
 derivation lives here in ``kdive.artifacts`` where both layers may depend on it.
 """

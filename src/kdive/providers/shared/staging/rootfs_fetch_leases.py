@@ -94,7 +94,7 @@ def acquire_fetch_lease(
     the reclaim holds).
 
     A fault degrades to an unleased fetch with a ``WARNING`` rather than failing the provision, on
-    :func:`~kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch._flocked_partial`'s
+    :func:`~kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition._flocked_partial`'s
     own ``ENOLCK`` precedent. The pin is advisory: without it the reclaim reverts to exactly its
     pre-ADR-0515 reach, which is a race that is rare and survivable, whereas failing here would turn
     any transient database blip into a total uploaded-rootfs provisioning outage. The caller must
@@ -162,7 +162,7 @@ def release_fetch_lease(conn: psycopg.Connection, lease_id: UUID) -> None:
     Runs from the fetch's ``finally``, so it must not raise: raising out of a ``finally`` replaces
     the in-flight exception and would demote an actionable ``CategorizedError`` — a checksum
     mismatch, a non-qcow2 upload — to ``__context__`` behind a Postgres message. That is the defect
-    :func:`~kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch._release_fetch_lock`
+    :func:`~kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition._release_fetch_lock`
     documents and fixes for the advisory lock one call away, and it arrives here for the same reason
     — the connection is frequently *already gone* by the time this runs, which is precisely the
     crash shape the fence exists to bound.

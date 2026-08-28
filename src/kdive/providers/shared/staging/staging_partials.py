@@ -2,7 +2,7 @@
 
 A ``<token>.<uuid>.partial`` is written by exactly one fetcher and is a SENSITIVE multi-GiB file no
 ``artifacts`` row owns. Three places ask about one: the opportunistic sweep on the next fetch of
-that base (``rootfs_upload_fetch._unlink_orphan_partials``), the reclaim-side backstop when the
+that base (``upload_staging._unlink_orphan_partials``), the reclaim-side backstop when the
 investigation drains (``jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir``),
 and the row-driven reclaim's per-checksum gate
 (``rootfs_reclaim._live_writer_holds_a_partial``). The first two **collect** the file; the third
@@ -19,7 +19,7 @@ reaped from under a live writer (ADR-0446), and both of the others rest on a cla
 ``PROVISIONING -> TORN_DOWN`` falsifies (ADR-0452, ADR-0495).
 
 So liveness is asked of the kernel instead. A live writer holds an exclusive ``flock`` on its own
-partial for the whole download-verify-publish window (``rootfs_upload_fetch._flocked_partial``), and
+partial for the whole download-verify-publish window (``upload_staging._flocked_partial``), and
 a candidate that cannot be locked is a download still in flight. :func:`_probed` is that test,
 shared rather than duplicated so the callers cannot drift on what the kernel's answers *mean*, and
 placed under ``providers.shared`` because one caller is a job handler and ``src/kdive/jobs/`` must

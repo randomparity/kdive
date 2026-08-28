@@ -33,7 +33,7 @@ from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.rootfs import (
-    rootfs_upload_fetch,
+    upload_acquisition,
     upload_contracts,
     upload_staging,
 )
@@ -41,7 +41,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsUploadContext,
     staged_rootfs_path,
 )
-from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition import (
     _fetch_lock_name,
     fetch_uploaded_rootfs,
     rootfs_upload_fetch_from_env,
@@ -857,7 +857,7 @@ def _pin_free_space(monkeypatch: pytest.MonkeyPatch, free: int) -> list[Path]:
     at.
 
     Patches the module's own ``disk_usage`` name, which is why the module imports the function
-    rather than ``shutil``: patching ``rootfs_upload_fetch.shutil.disk_usage`` would reach the
+    rather than ``shutil``: patching ``upload_acquisition.shutil.disk_usage`` would reach the
     stdlib module object itself and replace it for every importer in the process.
     """
     measured: list[Path] = []
@@ -1008,7 +1008,7 @@ def test_stage_precheck_logs_the_refusal_on_the_host_that_must_act_on_it(
     _pin_free_space(monkeypatch, free=0)
 
     with (
-        caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__),
+        caplog.at_level(logging.WARNING, logger=upload_acquisition.__name__),
         pytest.raises(CategorizedError),
     ):
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
@@ -1119,7 +1119,7 @@ def test_stage_precheck_stages_anyway_when_the_filesystem_cannot_be_measured(
     monkeypatch.setattr(upload_staging, "disk_usage", _raise)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
-    with caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__):
+    with caplog.at_level(logging.WARNING, logger=upload_acquisition.__name__):
         dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert dest.read_bytes() == _QCOW2
@@ -1223,7 +1223,7 @@ def test_unsupported_native_reservation_degrades_without_posix_fallocate(
     monkeypatch.setattr(os, "posix_fallocate", _forbidden_posix_fallocate)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
-    with caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__):
+    with caplog.at_level(logging.WARNING, logger=upload_acquisition.__name__):
         dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert dest.read_bytes() == _QCOW2
@@ -1705,7 +1705,7 @@ def _owned_key(inv: UUID) -> str:
 def test_from_env_fetch_closes_over_the_injected_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = cast("rootfs_upload_fetch.UploadObjectStore", object())
+    store = cast("upload_acquisition.UploadObjectStore", object())
     conn = object()
     expected = tmp_path / "staged-rootfs.qcow2"
     seen: list[tuple[object, object, RootfsUploadContext]] = []
@@ -1724,9 +1724,9 @@ def test_from_env_fetch_closes_over_the_injected_store(
         seen.append((received_conn, received_store, upload))
         return expected
 
-    monkeypatch.setattr(rootfs_upload_fetch.config, "require", lambda _setting: "postgresql://test")
-    monkeypatch.setattr(rootfs_upload_fetch.psycopg, "connect", fake_connect)
-    monkeypatch.setattr(rootfs_upload_fetch, "fetch_uploaded_rootfs", fake_fetch)
+    monkeypatch.setattr(upload_acquisition.config, "require", lambda _setting: "postgresql://test")
+    monkeypatch.setattr(upload_acquisition.psycopg, "connect", fake_connect)
+    monkeypatch.setattr(upload_acquisition, "fetch_uploaded_rootfs", fake_fetch)
     upload = _upload(tmp_path)
 
     assert rootfs_upload_fetch_from_env(store)(upload) == expected

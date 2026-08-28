@@ -63,7 +63,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import Ove
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_catalog_fetch import (
     rootfs_catalog_fetch_from_env,
 )
-from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+from kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition import (
     UploadObjectStore,
     rootfs_upload_fetch_from_env,
 )
