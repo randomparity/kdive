@@ -58,6 +58,18 @@ evidence; their caller-supplied advisory whole-object hash is never copied into 
 chunk vector with an incorrect advisory whole hash therefore finalizes with the server-computed
 digest. Plan construction copies only those persisted trusted digests.
 
+This decision refines ADR-0531 by introducing immutable InvestigationBuild canonical-document
+version 2. Version 2 retains every version-1 field unchanged and adds exactly one
+`external_boot_evidence` object with schema `external-boot-evidence-v1`. That closed object contains
+the server-produced bundle complete-object digest; optional-initrd digest and byte count or null;
+whole-archive member and uncompressed-byte totals; vmlinuz digest, member byte count, decoded-kernel
+byte count, ELF-metadata byte count, architecture, release, GNU build ID, and build-ID byte count;
+and module-source manifest, member count, and uncompressed-byte total. Unknown keys are rejected.
+The version number and complete evidence object participate in ADR-0531 `content_digest`, so identical
+artifacts finalized as version 1 and version 2 intentionally have different build references. A
+published generation's version, canonical bytes, digest, and evidence are never backfilled or
+rewritten.
+
 External-boot v1 admits an optional initrd of at most 536,870,912 bytes (512 MiB). Unit is bytes,
 scope is the one exact initrd VersionId in one plan, and there is no reference clock. Finalization
 counts the complete server-streamed bytes, persists `size_bytes` with the trusted digest, and on
@@ -140,6 +152,19 @@ kernel build ID represented separately as `kernel_observation.gnu_build_id`. Leg
 records without an InvestigationBuild generation are ineligible for external boot until published
 through the existing generation-backed external-build flow; their current install/boot path remains
 unchanged.
+
+InvestigationBuild canonical-document version-1 generations, including generations published before
+this decision, likewise remain readable and valid for every existing install, download, and debug
+path but are ineligible for `external-boot-plan-v1`. Plan construction rejects them before activation
+admission or provider work with `CONFIGURATION_ERROR` / `external_boot_evidence_required` and
+`suggested_next_actions=["runs.create","artifacts.create_run_upload","runs.complete_build"]`.
+The contributor creates an upload-backed Run without the old `build_ref`, uploads the same or rebuilt
+artifact set, and calls `runs.complete_build`; finalization scans the exact new uploads and publishes
+an immutable version-2 generation with a new `build_ref`. It never derives new evidence by changing
+the old generation or copying its advisory hashes. Contract tests reuse a valid version-1
+generation-backed `build_ref`, prove existing installation still resolves it, prove external boot
+returns that exact failure before reservation or provider work, then finalize the same bytes as
+version 2 and prove the new reference is eligible.
 
 When the selected generation's `BuildStepResult.build_id` is nonempty, core requires it to equal
 `materialization.kernel_observation.gnu_build_id` immediately after the immutable materialization is
