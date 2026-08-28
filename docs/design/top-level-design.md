@@ -2,17 +2,14 @@
 
 ## Purpose
 
-Re-design `kdive` from a single-user, local, stdio proof-of-concept into a
-production, multi-user service that gives agentic coding environments (Claude
-Code, Codex) a complete Linux kernel development and debug lifecycle across
-heterogeneous resources: local VMs, remote libvirt hosts, remote bare metal
-(PXE/SoL/IPMI/Redfish), PowerVM LPARs on ppc64le, and cloud instances.
+KDIVE is a production, multi-user service that gives agentic coding environments
+(Claude Code, Codex) a complete Linux kernel development and debug lifecycle.
+Local VMs are the default provider. Remote libvirt is an operator-configured
+provider; remote bare metal, PowerVM, and cloud providers remain future work.
 
-This is a **greenfield rewrite**. The existing ~33k-LOC PoC is a reference and a
-source of portable modules (redaction, path safety, gdb-MI, drgn introspect,
-crash postmortem, run-readiness preflight), but the architecture starts clean.
-Implementation language remains **Python**, chosen for native access to the
-kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
+KDIVE was implemented as a greenfield Python rewrite of a single-user, local,
+stdio proof of concept. Python provides native access to the kernel-tooling
+ecosystem (drgn, libvirt bindings, crash, and the MCP SDK).
 
 ## What changes from the PoC
 
@@ -29,8 +26,8 @@ kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
 
 ## Core decisions
 
-These were decided during brainstorming and are load-bearing for everything
-below. Each should become an [ADR](../adr/) before implementation.
+These decisions define the implemented architecture. Accepted decisions and
+their later amendments are recorded in the [ADR collection](../adr/).
 
 1. **Greenfield rewrite**, Python.
 2. **Multi-user service**; MCP over streamable HTTP.
@@ -384,10 +381,10 @@ Applied across every plane.
   repositories, idempotency rows, audit rows, and ledger writes live in
   `kdive.services` (for example allocation admission, renewal, and accounting
   rollups), so persistence orchestration is not hidden inside domain modules.
-- **Destructive-op policy gate** — `control.power(off/cycle/reset)`,
-  `force_crash`, `teardown`, disk delete, and PCI passthrough are gated by two
-  independent, all-required checks: (a) RBAC role and (b) an explicit profile/flag
-  opt-in. ADR-0130 removed the former capability-scope check from the runtime gate.
+- **Destructive-op policy gate** — `force_crash` requires both the allocation
+  project's RBAC role and explicit profile opt-in. Power, teardown, and
+  reprovision use their own lifecycle and RBAC checks; they do not use the
+  force-crash profile gate (ADR-0130).
 - **Concurrency** — serialize per-Allocation and per-System via Postgres advisory
   locks; idempotent steps keyed by `run_id` + step. Admission control serializes
   on a **per-project (budget-scope) lock** — an advisory lock or `SELECT … FOR
