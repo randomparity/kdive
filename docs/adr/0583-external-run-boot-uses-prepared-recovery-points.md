@@ -41,8 +41,9 @@ paths are unchanged.
 The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1`, serialized with
 the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
 these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
-strings `run_id` and `build_generation`; `bundle` with NFC object-store `key` and `version` plus
-complete-object `sha256` and extracted-kernel `vmlinuz_sha256`;
+strings `system_id`, `run_id`, and `build_generation`; `bundle` with NFC object-store `key` and
+`version`, complete-object `sha256`, extracted-kernel `vmlinuz_sha256`, `member_count`, and
+`uncompressed_bytes`;
 `initrd`, either null or the same key/version/digest shape; complete `cmdline` string;
 `debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
 with `mode`, `release`, `source_manifest`, `member_count`, and `uncompressed_bytes`; and the closed
@@ -59,20 +60,26 @@ digest. Plan construction copies only those persisted trusted digests.
 The same finalization pass streams the pinned bundle without filesystem extraction. It accepts
 exactly one member named byte-for-byte `boot/vmlinuz`, requires that member to be a regular file,
 and rejects duplicate names, normalized aliases such as `./boot/vmlinuz`, absolute names, links, and
-other noncanonical or nonregular representations of that path. It derives and persists that member's
+other noncanonical or nonregular representations of that path. Every other member must be a canonical
+member of the exact matching `lib/modules/<release>/` subtree; unrelated members and structural tar
+metadata entries are rejected. The 200,000-member ceiling below counts every tar header, including
+directories and rejected structural metadata, so zero-sized junk cannot evade the work bound. It derives and persists that member's
 SHA-256, architecture, release, and GNU build ID, applies the version-1 safe topology rules below to
 the matching release subtree, computes `module-source-manifest-v1`, and persists its digest, member
-count, and sum of regular-file sizes on the InvestigationBuild generation before publication. Schema version 1
-allows at most 200,000 module-subtree members and 8 GiB (8,589,934,592 bytes) of uncompressed regular
-file content per exact bundle VersionId; these are fixed per-bundle limits with no reference clock.
+count, and sum of regular-file sizes plus the whole-archive count and byte total on the
+InvestigationBuild generation before publication. Schema version 1
+allows at most 200,000 whole-archive members and 8 GiB (8,589,934,592 bytes) of uncompressed regular
+file content across the accepted kernel and module members per exact bundle VersionId; these are
+fixed per-bundle limits with no reference clock.
 Exceeding either records terminal `BUILD_FAILURE`, publishes no generation, and directs the producer
 to remove unnecessary files or split/rebuild the bundle. Retry for the same VersionId reuses the
 persisted completed scan or resumes its server-owned bounded stream; caller manifest values are never
-accepted. Plan construction copies the persisted kernel digest and all three module-obligation
-values.
+accepted. Plan construction copies the persisted kernel digest, both whole-archive totals, and all
+three module-obligation values.
 
-Every materializer streams and recomputes the same manifest before any write, enforcing those bounds
-before counting or buffering the next member. Digest, count, or byte-total mismatch is terminal
+Every materializer streams and recomputes the same whole-archive validation and manifest before any write, enforcing those bounds
+before counting or buffering the next member. Unexpected members, mismatch of either persisted
+whole-archive total, or mismatch of the module manifest, count, or byte total is terminal
 `INSTALL_FAILURE`, changes no System state, and directs re-finalization. Thus both planes reject a tar
 bomb at the same schema boundary while the expected value has one authoritative producer.
 Materialization must repeat the canonical-member and uniqueness checks, extract that one
@@ -147,16 +154,16 @@ or interrupted recovery deadline. Ordinary job and worker retries never extend o
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","member_count":2,"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":2,"version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:d8faa1e122cb37e8faa0ba67a2d3f524e016501ffc050c4433c4c67b1deca85b","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:e37b8ee676bef2c4de7314d0279595e8ad6812b6ed385bbdcf0e6ffa52f1e064","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
-`sha256:d8faa1e122cb37e8faa0ba67a2d3f524e016501ffc050c4433c4c67b1deca85b` and
-`sha256:00b5b29a67e57d39b224588a01a2213ea6a2481c30099eef425c0c4a2287884b`.
+`sha256:e37b8ee676bef2c4de7314d0279595e8ad6812b6ed385bbdcf0e6ffa52f1e064` and
+`sha256:42ed2ac335091cb0fb8c09b5fc3ba970ed185e54db0946058338b542201b9f6c`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
@@ -244,8 +251,10 @@ represented exactly rather than omitted from recovery CAS.
 
 Materialization does not change the System. Core first commits `preparing` with reservation state
 `pending` only while a System-locked query proves that no DebugSession for that System is attaching
-or live, regardless of owning Run or transport; otherwise the request returns `CONFLICT` before
-reservation or provider work. The provider then creates the reservation and core records it `ready`.
+or live, regardless of owning Run or transport, and that no active lifecycle, control, force-crash,
+snapshot, traffic-capture, vmcore-capture, or other debug job owns or depends on the System; otherwise
+the request returns `CONFLICT` before reservation or provider work. The provider then creates the
+reservation and core records it `ready`.
 No quiesce or other guest mutation is allowed before `ready`. Immediately before the first stop or
 other power mutation, the destination-side serialized lane rechecks the same System-wide session
 condition through core's authority-bound snapshot; a present or unreadable result performs no provider
@@ -264,10 +273,16 @@ preparation. “Preserve the disk overlay” below means keep the same attached 
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
 
-DebugSession attach admission uses the same System lock and rejects while an external activation is
-in `preparing`, `prepared`, `activating`, `recovering`, `recovery_conflict`, or `recovery_failed`.
-Consequently, committing `preparing` or `recovering` closes the attach gate before the destination
-recheck, and no new session can appear between that recheck and its serialized power mutation.
+DebugSession attach and every lifecycle, control, force-crash, snapshot, traffic-capture,
+vmcore-capture, and debug-job admission use the same System lock and reject while an external
+activation is in `preparing`, `prepared`, `activating`, `recovering`, `recovery_conflict`, or
+`recovery_failed`. Consequently, committing `preparing` or `recovering` closes every reverse gate
+before the destination recheck, and no conflicting operation can appear between that recheck and its
+serialized power mutation. Existing operations remain on their current provider seams because the
+two-sided durable admission predicates make them mutually exclusive with external boot; external
+activation, recovery, conflict resolution, and teardown mutations alone use the destination executor.
+Interleaving tests cover power, force-crash, snapshot, traffic capture, vmcore capture, and debug
+admission immediately before and after the `preparing` commit and prove exactly one side proceeds.
 
 After the pending row exists, the provider creates a deterministic reservation owned by this
 System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
@@ -295,7 +310,7 @@ reports `INSTALL_FAILURE` with the required minimum observed bytes so the operat
 abandonment, recovery, and System teardown run that ordered release sequence idempotently.
 
 `platform_arguments` contains 1 through 32 nonempty ASCII tokens, each at most 256 bytes and without
-ASCII whitespace or NUL; their one-space join is at most 4096 bytes. Exactly one starts `root=`;
+ASCII whitespace or NUL. Exactly one starts `root=`;
 `root.arguments` is a nonempty ordered array whose complete sequence occurs
 exactly once as a contiguous subsequence of `platform_arguments`. No other platform element may use a
 key present in `root.arguments`. Specifically, the sole root token equals ASCII `root=` concatenated
@@ -312,13 +327,22 @@ occurrence of `root=`, `console=`, `crashkernel=`, or `fadump=` anywhere in `deb
 not weakened to token parsing.
 It is null when no caller extra exists. This field and the derived `cmdline` are exempt from the
 serializer's NFC-input rule so the accepted scalar sequence is not rewritten. Core builds `cmdline` exactly as the one-space join of
-`platform_arguments`, followed by one space and `debug_cmdline` when non-null. The final UTF-8 encoding
-is bounded to 20,480 bytes. Providers pass this string directly to libvirt or a fixed argv parameter;
+`platform_arguments`, followed by one space and `debug_cmdline` when non-null. For external boot v1,
+the final UTF-8 encoding is at most 2,047 bytes so it plus the terminating NUL fits the conservative
+2,048-byte command-line buffer common to every supported v1 architecture; the broader legacy caller
+limit remains unchanged on non-external paths. Providers pass this string directly to libvirt or a fixed argv parameter;
 they do not tokenize, quote, normalize, or invoke a shell. This makes the provenance and rendered
 direct-kernel bytes one composition result while preserving currently admitted local inputs.
 Contract tests reject each platform-owned substring, including a later `root=/dev/evil`, and prove
 ordinary quoted, backslash-containing, whitespace-containing, and non-ASCII debug text remains
 byte-preserved.
+After fresh boot, the fixed guest observation reads the kernel's saved command line through
+`/proc/cmdline`, removes only its one trailing newline, and returns the remaining bytes. Core requires
+those bytes to equal the plan's UTF-8 `cmdline` exactly alongside the running-kernel identity proof.
+Unavailable evidence retries only to the activation readiness deadline; truncation or any changed
+byte records terminal-on-this-attempt `READINESS_FAILURE` and triggers recovery. Boundary tests cover
+2,047 accepted bytes, 2,048 rejected bytes, and multibyte text crossing that byte boundary on x86_64
+and ppc64le.
 They also reject a missing or repeated `boot/vmlinuz`, `./` and leading-slash aliases, links and
 other nonregular members, and two kernels with equal metadata but different bytes. The accepted case
 proves every materializer matches the server-produced `bundle.vmlinuz_sha256` before publication.
@@ -335,9 +359,17 @@ attestation's new immutable `image_sha256`, computed over or supplied with the v
 and stored with the attested root facts. Records lacking the required digest are ineligible rather
 than assigned a surrogate identity.
 
-Immediately before plan creation, core reloads the named staged-provenance or catalog row and
+The caller never selects the authority row. Under the System lock, plan construction derives it from
+the target System's immutable persisted provisioning provenance and verifies that the System,
+Allocation, Run, InvestigationBuild generation, and authority row belong to the same project and
+authorized Investigation. The System's recorded source kind and exact image identity must equal the
+authority row and `root.source`, and `ownership.system_id` binds that proof into the plan. A System
+without immutable provisioning provenance remains eligible for its existing disk/GRUB path but not
+external boot.
+
+Immediately before plan creation, core reloads that derived staged-provenance or catalog row and
 requires its persisted digest and root facts to equal the candidate source and root shape. Plan retry
-repeats that comparison; a changed/missing row is stale input. Bounded stage inspection is a verified
+repeats the System binding and comparison; a changed/missing row is stale input. Bounded stage inspection is a verified
 authority. Catalog data extends the existing typed
 attestation path with the same root value, ordered arguments, architecture, schema version, and
 immutable image identity; the current attestation fields alone are insufficient. No second untyped
@@ -345,6 +377,8 @@ declaration path is added.
 Unknown versions, missing facts, stale source identities, conflicting root arguments, and an
 architecture mismatch fail before materialization or activation and name the recovery action. A
 pre-schema image remains eligible for its existing GRUB boot but not external Run boot.
+Contract tests reject valid same-architecture root facts from another image, System, project, or
+Investigation and prove no caller-provided authority identifier participates in lookup.
 
 Before changing boot state, the provider prepares both sides of the compare-and-set. It creates a
 durable recovery point representing the exact current persistent boot configuration and prior module
