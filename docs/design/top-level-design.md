@@ -461,184 +461,24 @@ Each gets its own spec → plan → implementation cycle.
 6. **Control + Retrieve plane** — virsh power/reset/force-crash, vmcore
    capture/fetch.
 
-## Roadmap
+## Delivery status
 
-Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
+This document describes the live architecture. Historical milestone sequencing and exit criteria
+remain in the archived plans and designs rather than being repeated as future-tense requirements
+here.
 
-- **M0 — Walking skeleton.** Core platform (#1) plus the thinnest path through
-  every plane for **local-libvirt only**: request always-yes allocation
-  (capacity-checked) → provision a libvirt System → build → install → boot → attach gdbstub → set
-  breakpoint / read memory → force-crash → fetch vmcore. One resource kind, real
-  end-to-end, on the new architecture. Proves the model and the seams.
-- **M1 — Allocation/accounting depth.** Real reservation/lease semantics,
-  admission control, ledger, quotas/budgets, OIDC/RBAC hardening. Still
-  local-libvirt, but the allocation plane becomes real.
+| Delivery band | Current status | Historical record |
+|---|---|---|
+| M0 walking skeleton | Implemented by the server, worker, reconciler, durable stores, and local-libvirt lifecycle | [M0 implementation plan](../archive/plans/m0-implementation.md) |
+| M1 platform depth | Implemented allocation, accounting, RBAC, scheduling, live-stack validation, and fault injection | [M1 implementation plan](../archive/plans/m1-implementation.md) |
+| M2 provider and operations | Implemented remote-libvirt, deployment packaging, `kdivectl`, observability, managed images, and remote capture paths | [M2 productionization design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md) |
 
-  *M1.1–M1.4 are the local-libvirt **feature-deepening band**: they harden and
-  extend the M1 platform on the single provider before the provider-expansion
-  milestones (M2+). M1.1 is foundational and lands first (M1.2 and M1.3 both
-  build on its seam); M1.4 may follow in either order, and M1.5 fault-injection
-  hardening still precedes the provider milestones.*
+The provider-runtime hypothesis is now established by local-libvirt, fault-inject, and
+remote-libvirt: each provider supplies typed plane ports behind `ProviderRuntime`, while core
+lifecycle and MCP contracts remain provider-neutral. The current provider capabilities are listed
+in [Provider model](#provider-model) and [Lifecycle planes](#lifecycle-planes).
 
-- **M1.1 — Platform-scoped RBAC tier.**
-  ([ADR-0043](../adr/0043-platform-scoped-rbac-tier.md), contract
-  [`m1.1-platform-rbac-tier.md`](m1.1-platform-rbac-tier.md)) A `platform_roles`
-  claim tier (`platform_admin` / `platform_operator` / `platform_auditor`),
-  orthogonal to the per-project roles, for the cross-project and
-  shared-infrastructure authority the per-project model cannot express (the
-  cross-project role ADR-0006 deferred). First delivery: the role-model seam plus
-  `accounting.report` — a granted-set form managers reach under existing membership
-  (no platform grant) and an all-projects form gated `platform_auditor` — with a
-  `platform_audit_log` for read-access auditing. Foundational to M1.2 and M1.3.
-- **M1.2 — Live-stack end-to-end validation.**
-  ([ADR-0042](../adr/0042-live-stack-e2e-mcp-http.md), contract
-  [`m1.2-live-stack-e2e.md`](m1.2-live-stack-e2e.md)) An operator-run, real-libvirt
-  test that drives the full spine — allocate → provision → build → install → boot →
-  attach → force-crash → capture vmcore → release — over the **live MCP HTTP
-  stack** (server + worker + reconciler against Postgres + S3 + OIDC), under
-  per-project role tokens plus a `platform_auditor` token (which exercises M1.1's
-  `accounting.report` over the wire). Replaces the unimplemented M0
-  walking-skeleton stub; proves the model on real infrastructure end-to-end
-  (operator-run, not GitHub-CI).
-- **M1.3 — Platform operations.** The platform_operator/admin tooling: host
-  cordon / drain / maintenance status, force-reconcile and worker/queue control,
-  runtime capacity/cost tuning, and break-glass cross-project teardown /
-  force-release; the platform-auditor reads `audit.query` and `inventory.list`;
-  and the bare-`require_role` denial-audit retrofit. Builds on the M1.1 seam.
-- **M1.4 — System catalog, availability & scheduling.** Named system **shapes**
-  (small … max) over the provisioning profile plus **full custom** configuration
-  (CPU/memory/PCIe passthrough); a **fleet availability** view (which hosts/shapes
-  are free now); a **reservation/backlog scheduler** so scarce hardware is used
-  efficiently ("always work queued"); and **system reuse** plus a future system
-  list view.
-  Realizes latent domain-model concepts already named above — Resource
-  `capabilities` (PCIe), `cost_class`, the `draining` status, and reservations.
-- **M1.5 — Fault-injection provider.** A mock provider behind the real plane
-  interfaces that forces secret resolution and injects latency and failures
-  (provision timeout, lease expiry mid-job, worker death, transport drop). It
-  exercises reconciliation/teardown, the secret-registration contract, and
-  admission-control races **before** any real remote provider — validating the
-  seams while they are still cheap to change.
-- **M2 — Remote libvirt.** Second provider behind the same interfaces — proves
-  remote allocation/provision/install/transport with no core change.
-
-  *M2.1–M2.4 are the **productionization & operability band**: provider-agnostic
-  platform hardening that makes kdive deployable and operable by someone other
-  than its author, gating the M3 cloud expansion (where real cost, real tenants,
-  and a real secret backend raise the stakes). Unlike the M1.x band
-  (local-libvirt feature-deepening), these target the platform itself, not a
-  provider. They land in order: M2.1 defines the deployment surface the rest run
-  in; M2.2 (the CLI) precedes M2.3/M2.4 because both the `doctor` and the
-  image-management verbs are delivered as `kdivectl` commands; M2.3 (`doctor`) is
-  pulled ahead of the image lifecycle because the reachability self-diagnosis is
-  the highest-payoff piece and depends only on the CLI. M2.2–M2.4 act on the
-  service, so M2.1 may be developed in parallel (its image is still a prerequisite
-  of the band gate). See
-  [the design](../archive/superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
-
-- **M2.1 — Deployment & packaging.** Official container image(s) for the process
-  entrypoints (one image, matching `python -m kdive
-  {server|worker|reconciler|lifecycle-witness}`); a reference compose + Helm deployment that brings
-  the app tier up against the existing Postgres/MinIO/OIDC backends; and one
-  documented configuration surface (the `KDIVE_*` env contract) with a generated
-  config reference. `lifecycle-witness` is the optional Kubernetes authority described above; the
-  shipped Helm topology runs all four long-running processes, while the reference Compose topology
-  uses its own operator-run lifecycle gate. Replaces the hand-rolled bootstrap; the image is the
-  artifact M2.2–M2.4 run in.
-- **M2.2 — Admin CLI (`kdivectl`).** A supported administrative surface over
-  platform state for operators (`platform_admin` / `platform_operator`), not
-  agents, over the same service seams the MCP tools use (no second source of
-  truth). It authenticates as an **OIDC principal** under the same
-  per-project/platform-role RBAC the MCP surface enforces (not raw DB credentials)
-  and is audited. Read-only inspection lands first (resources, allocations, systems,
-  runs, jobs, the accounting ledger, object-store wiring, the rootfs/fixture
-  catalog, secret *presence* — never values); mutating/destructive administration
-  (cross-project teardown, force-release, cordon/drain) routes through the M1.3
-  platform-role break-glass path, **not** the per-allocation iteration gate.
-  Replaces ad-hoc `psql`/`mc` poking.
-- **M2.3 — Observability & doctor.** Operational visibility and self-diagnosis:
-  structured-log/metrics/trace emission across core and worker, health/readiness
-  endpoints for the M2.1 deployment, and a `doctor`/preflight (`kdivectl` verb)
-  that validates the contracts whose silent violation costs the most — provider
-  TLS chain, gdbstub-port ACL, secret-ref resolution, and guest→object-store
-  reachability — and names the exact fix instead of surfacing as a downstream job
-  failure. Pulled ahead of the image lifecycle: the reachability `doctor` is the
-  band's highest-payoff piece (the M2 faults that cost the most were undiagnosed
-  reachability) and depends only on the CLI (M2.2) that delivers it. The
-  metrics/tracing/health work targets the M2.1 deployment, settled by now.
-- **M2.4 — Image & rootfs lifecycle.** A managed subsystem for the base-OS/rootfs
-  images that are currently an unscripted "operator obligation": build (the
-  per-provider image scripts become first-class and reproducible), validate (the
-  guest carries its provider's contract — guest agent, kdump, drgn, the
-  allowlisted in-guest helpers), publish/version into the object store, and
-  register into the `FixtureCatalog`; the image-management `kdivectl` verbs are
-  added here against this subsystem. Adds **patch-applied verification** — the
-  build asserts the patch produced the expected source change (a post-apply
-  marker), which an input→output provenance hash alone would miss — so a "patched"
-  kernel is verifiably patched. (The narrower silent `git apply` patch-drop is a
-  confirmed shipped bug, fixed independently of and **before** the band's exit gate,
-  not deferred behind it.) Publish-then-register is a two-write: the catalog row is
-  visible only after the object's HEAD succeeds, and the reconciler sweeps orphaned
-  objects and dangling rows (the existing artifact drift-repair pattern).
-
-  The band is complete — and M3 may begin — only when a non-author operator stands
-  kdive up from the M2.1 image + config reference, drives `kdivectl` + a
-  patch-applied-verified build, and runs `doctor`, captured as an **independently
-  checkable** operator-run record (the raw per-probe results, patch-applied marker,
-  and a successful debug op — not "doctor says green," since doctor is built
-  in-band) and **signed off by a platform operator other than the author**. Each
-  milestone also carries its own exit check so a shortfall surfaces at the
-  milestone, not only at the band gate (see the design doc). Hard per-tenant
-  sandboxing (core decision #8) and a manager-backed secret backend are **not** in
-  this band — they fold into M3 as cloud-driven hardening.
-- **M2.5 — Remote-libvirt capture-method parity.**
-  ([milestone #12](https://github.com/randomparity/kdive/milestone/12),
-  blocks [#198](https://github.com/randomparity/kdive/issues/198)) A
-  provider-feature milestone, not part of the M2.1–M2.4 platform band: it deepens
-  the remote provider so the choice of provider does not constrain crash-capture
-  capability. At M2 close the two providers are **near-complementary, not
-  redundant** — local-libvirt advertises `{console, host_dump, gdbstub}`, remote
-  advertises `{kdump}` only — so local cannot be reclassified away from the
-  production default (the #198 question) until remote covers the capture surface
-  it owns. Per method on remote: **console** gains a realization (it provisions a
-  pty console today but tees no `<log file>`, so no console artifact is
-  registered — route via a host-side tee or the guest-agent/virtio-serial
-  channel, registered as the boot-plane console artifact, ADR-0049 Decision 4);
-  **gdbstub** is surfaced as a capture method (the Connect-plane transport is
-  already wired and was exercised on the first live remote run, just unadvertised);
-  **host_dump** is **realized** on remote (dump guest memory on the remote host and
-  ship the core out via a host-side retrieval channel mirroring kdump's two-phase
-  presigned-PUT pattern) — this **supersedes [ADR-0084](../adr/0084-remote-control-two-phase-vmcore-retrieve.md)'s
-  "host_dump not supported on remote" stance and earns its own ADR**; **kdump** is
-  already done (ADR-0084). Exit: remote advertises all four methods, each exercised
-  against the live remote spine and recorded operator-run. The provider-agnostic
-  capture vocabulary (ADR-0049) is unchanged — this is provider realization behind
-  the existing seam, so the zero-core-touch hypothesis below still applies.
-- **M3 — Cloud.** Cloud provider + QCOW2/cloud-image provisioning + chargeback
-  against real cost.
-- **M4 — Bare metal.** PXE/SoL/IPMI/Redfish — the control plane gets real
-  hardware power/crash.
-- **M5 — PowerVM/ppc64le.** LPAR activation + HMC; second architecture.
-
-Each milestone after M0 is intended to be "add a provider package + its
-provisioning profiles," with the core and tool surface unchanged — first through
-the typed `ProviderRuntime` ports, and later through a separately accepted
-multi-provider dispatch design if M2 needs one. **This is a falsifiable
-hypothesis, not a guarantee**: the test is that adding the M2 remote provider
-touches zero lines in `core/*` and the MCP tool-surface modules, measured by diff
-scope. M0 proves the happy-path wiring end-to-end; it does **not** prove the
-seams hold under real leasing, secret resolution, chargeback, or hardware failure
-— which is exactly what the M1.5 fault-injection provider exists to stress first.
-
-## Open follow-up decisions
-
-Deferred to implementation planning / ADRs:
-
-- Concrete job-queue technology (e.g. Postgres-backed queue vs Redis/Celery vs
-  Temporal) and worker deployment shape.
-- MCP Python server framework and streamable-HTTP auth integration specifics.
-- Provisioning-profile schema (how libvirt XML / kickstart / ansible / QCOW2 are
-  expressed under one model).
-- Secret backend (file refs for M0; manager integration later).
-- Object-store layout and retention policy for vmcores and transcripts.
-- Migration/port plan for the salvaged PoC modules.
+Cloud, bare-metal, and PowerVM are future provider families. Each should extend the typed runtime
+seam unless an accepted ADR establishes a different dispatch model. Hard per-tenant sandboxing and
+a manager-backed secret backend also remain future work; their contracts must be decided before
+implementation rather than inferred from the completed milestone plans.
