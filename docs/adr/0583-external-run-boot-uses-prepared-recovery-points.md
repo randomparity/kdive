@@ -260,12 +260,19 @@ with `root.root`. A token's key is the nonempty bytes before its first `=`, or t
 `debug_cmdline` preserves the current caller contract: core strips surrounding characters with
 Python 3.14 `str.strip`, then accepts 1 through 4096 printable Unicode scalar values, including
 non-ASCII, internal whitespace, quotes, and backslashes; NUL and non-printable values remain rejected.
+Before composition, core also retains the existing `platform_owned_cmdline_token` rejection: any
+occurrence of `root=`, `console=`, `crashkernel=`, or `fadump=` anywhere in `debug_cmdline` fails with
+`CONFIGURATION_ERROR` / `cmdline_overrides_platform_args`. This check runs before plan hashing and is
+not weakened to token parsing.
 It is null when no caller extra exists. This field and the derived `cmdline` are exempt from the
 serializer's NFC-input rule so the accepted scalar sequence is not rewritten. Core builds `cmdline` exactly as the one-space join of
 `platform_arguments`, followed by one space and `debug_cmdline` when non-null. The final UTF-8 encoding
 is bounded to 20,480 bytes. Providers pass this string directly to libvirt or a fixed argv parameter;
 they do not tokenize, quote, normalize, or invoke a shell. This makes the provenance and rendered
 direct-kernel bytes one composition result while preserving currently admitted local inputs.
+Contract tests reject each platform-owned substring, including a later `root=/dev/evil`, and prove
+ordinary quoted, backslash-containing, whitespace-containing, and non-ASCII debug text remains
+byte-preserved.
 
 The root specification is a versioned, closed data shape with exactly `schema`, `architecture`,
 `root`, `arguments`, `authority`, and `source`. Version 1 admits authority/source-kind pairs
