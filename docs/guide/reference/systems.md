@@ -165,6 +165,23 @@ rejected the same way, naming both; the section must match the resource you allo
 - `disk_gb` (`integer (nullable)`, optional)
 - `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods.  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model); ``direct-kernel`` stays the local-libvirt/fault-inject method.
 - `kernel_source_ref` (`string (nullable)`, optional) — An arbitrary provenance label the operator/agent chooses for the baseline kernel this System is provisioned against (e.g. 'linux-6.9'), for A/B legibility across Systems — it is not matched against any warm-tree or inventory list, has no valid-value set to discover, and is never read by provisioning or job code: any non-empty string is accepted. Required for boot_method 'direct-kernel' (the System must reach 'ready' on a baseline kernel before its Runs iterate kernels, so the lane needs one named here); it is an opaque label only, not a URL or fetchable reference. Omit it for boot_method 'disk-image': that lane boots the operator-staged base image's own kernel and never reads this field.
+- `initrd` (`object(kind=local) \| object(kind=artifact) \| object(kind=component-upload) \| object(kind=catalog) (nullable)`, optional) — Optional discriminated INITRD component reference. local-libvirt and fault-inject accept only kind 'local', an absolute worker-host path; remote-libvirt rejects every supplied INITRD because its disk-image lane generates a guest-specific initramfs in-guest. Omit this field to use the provider's existing initrd behavior.
+  - _variant object(kind=local):_
+    - `kind` (``=local``, required)
+    - `path` (`string`, required)
+    - `sha256` (`string (nullable)`, optional)
+  - _variant object(kind=artifact):_
+    - `kind` (``=artifact``, required)
+    - `artifact_id` (`string`, required)
+    - `sha256` (`string (nullable)`, optional)
+  - _variant object(kind=component-upload):_
+    - `kind` (``=component-upload``, required)
+    - `upload_id` (`string`, required)
+    - `sha256` (`string (nullable)`, optional)
+  - _variant object(kind=catalog):_
+    - `kind` (``=catalog``, required)
+    - `provider` (`string`, required)
+    - `name` (`string`, required)
 - `provider` (`object`, required) — The provider-specific section, keyed by provider name.  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
   - `local-libvirt` (`object (nullable)`, optional)
     - `domain_xml_params` (`map<string, string>`, optional)
@@ -235,6 +252,23 @@ leaves `ready`, naming both; keep the section the System was provisioned with.
 - `disk_gb` (`integer (nullable)`, optional)
 - `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods.  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model); ``direct-kernel`` stays the local-libvirt/fault-inject method.
 - `kernel_source_ref` (`string (nullable)`, optional) — An arbitrary provenance label the operator/agent chooses for the baseline kernel this System is provisioned against (e.g. 'linux-6.9'), for A/B legibility across Systems — it is not matched against any warm-tree or inventory list, has no valid-value set to discover, and is never read by provisioning or job code: any non-empty string is accepted. Required for boot_method 'direct-kernel' (the System must reach 'ready' on a baseline kernel before its Runs iterate kernels, so the lane needs one named here); it is an opaque label only, not a URL or fetchable reference. Omit it for boot_method 'disk-image': that lane boots the operator-staged base image's own kernel and never reads this field.
+- `initrd` (`object(kind=local) \| object(kind=artifact) \| object(kind=component-upload) \| object(kind=catalog) (nullable)`, optional) — Optional discriminated INITRD component reference. local-libvirt and fault-inject accept only kind 'local', an absolute worker-host path; remote-libvirt rejects every supplied INITRD because its disk-image lane generates a guest-specific initramfs in-guest. Omit this field to use the provider's existing initrd behavior.
+  - _variant object(kind=local):_
+    - `kind` (``=local``, required)
+    - `path` (`string`, required)
+    - `sha256` (`string (nullable)`, optional)
+  - _variant object(kind=artifact):_
+    - `kind` (``=artifact``, required)
+    - `artifact_id` (`string`, required)
+    - `sha256` (`string (nullable)`, optional)
+  - _variant object(kind=component-upload):_
+    - `kind` (``=component-upload``, required)
+    - `upload_id` (`string`, required)
+    - `sha256` (`string (nullable)`, optional)
+  - _variant object(kind=catalog):_
+    - `kind` (``=catalog``, required)
+    - `provider` (`string`, required)
+    - `name` (`string`, required)
 - `provider` (`object`, required) — The provider-specific section, keyed by provider name.  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
   - `local-libvirt` (`object (nullable)`, optional)
     - `domain_xml_params` (`map<string, string>`, optional)
