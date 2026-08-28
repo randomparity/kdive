@@ -66,6 +66,19 @@ schema/prefix `module-installed-tree-v1` / `kdive-module-installed-tree-v1` and 
 uid, gid, `xattrs_supported`, and an xattrs object whose sorted names map to unpadded base64 values.
 An empty tree is an empty `entries` array, not absent input.
 
+Source entries have exactly one of these shapes (shown in their sorted-key byte order):
+
+```json
+{"mode":"0755","path":"kernel","type":"dir"}
+{"mode":"0644","path":"kernel/a.ko","sha256":"sha256:<64-hex>","size":1,"type":"file"}
+{"mode":"0777","path":"weak-updates/a.ko","target":"../kernel/a.ko","type":"symlink"}
+```
+
+Installed entries add `gid`, `uid`, `xattrs`, and `xattrs_supported` to the corresponding source
+shape; those keys are per entry. `xattrs` is always an object and is empty when support is false.
+Xattr names must be UTF-8 NFC or observation is a third state; values are unpadded standard base64.
+No displayed key is optional, no other key is admitted, and `size` is any non-negative JSON integer.
+
 Before staging, providers normalize source metadata: uid/gid become `0`, directories `0755`, regular
 files `0755` when any execute bit was present and `0644` otherwise, and symlinks `0777`; ACL and
 xattr inputs are discarded. After publication the provider applies its configured filesystem label
@@ -92,6 +105,14 @@ preparation. “Preserve the disk overlay” below means keep the same attached 
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
 
+Before committing `preparing`, the provider reserves operator-configured `recovery_max_bytes` in its
+durable recovery store for this System/Run activation. Unit and scope are bytes per activation;
+availability is read at the response envelope's `server_time`. Exhaustion is retryable
+`CAPACITY_EXHAUSTED`, changes no guest state, and directs the operator to clean terminal artifacts or
+raise the cap before retry. Offline capture cannot exceed the reservation; an overrun restarts the
+prior source and fails `INSTALL_FAILURE`. Prepared, recovery, and conflict states retain the
+reservation; abandonment, recovery, and System teardown release it idempotently.
+
 The root specification is a versioned, closed data shape. Version 1 records the target architecture,
 one `root=` value, the ordered root-related arguments required by the image, and provenance with an
 authority class and immutable source identity. Build-produced facts and bounded stage inspection are
@@ -112,8 +133,12 @@ the entire inactive definition after removing only the provider-owned external-b
 `/domain/os/kernel`, `/domain/os/initrd`, and `/domain/os/cmdline`; no other subtree, attribute,
 alias, address, device, firmware field, backing/auth/encryption field, or QEMU argument is excluded.
 The **boot projection** is canonical JSON for those three fields, distinguishing absence from an
-empty value. XML canonicalization removes syntax-only whitespace, attribute order, and namespace
-prefix choices but preserves element order and content. Preparation reads the source inactive XML,
+empty value. Safe defused parsing forbids DTDs and entities. Before canonicalization, whitespace-only
+`.text` on elements with children and every whitespace-only `.tail` are removed; other character data
+is unchanged and must already be NFC. The result is W3C Canonical XML 2.0 as implemented by Python
+3.14 `xml.etree.ElementTree.canonicalize`, with `with_comments=False`, `strip_text=False`, and
+`rewrite_prefixes=True`, encoded UTF-8 without a trailing newline. The preserved hash input is ASCII
+`kdive-libvirt-preserved-v1`, NUL, then those bytes. Preparation reads the source inactive XML,
 computes its preserved digest, clones it, changes only the three boot fields, and computes the target
 boot projection. Observation repeats the same split. A changed preserved digest is always a third
 state; source or target requires both the shared preserved digest and the matching boot projection.
@@ -121,6 +146,15 @@ Live XML is never an identity input. Remote's recovery point stores the exact in
 definition behind the provider seam, so shared state never interprets its XML. Deterministic
 identifiers make repeated prepare calls for the same System, Run, plan identity, and source state
 return the same point and target identity.
+
+The boot projection is compact sorted-key UTF-8 JSON with exact shape
+`{"cmdline":null|string,"initrd":null|string,"kernel":null|string,"schema":"libvirt-boot-projection-v1"}`
+and the manifest JSON rules. Its hash prefix is `kdive-libvirt-boot-projection-v1` plus NUL. Golden
+vector: `<domain><os><type arch="x86_64">hvm</type></os></domain>` preserves to
+`<n0:domain xmlns:n0=""><n0:os><n0:type arch="x86_64">hvm</n0:type></n0:os></n0:domain>`;
+its digest is `sha256:3e3cde0b5115867e991160f1d361fef3ec0734e8a87e2ab003d62cc0f8af4eea`.
+The all-null boot projection digest is
+`sha256:c48b5e5a6e9ac64b1129c1d468ce0de305288a86a6575467fb15f71d3c14b925`.
 
 Remote preparation also proves that the source is an owned disk/GRUB baseline. Its inactive boot
 projection has no kernel, initrd, or cmdline; KDIVE metadata binds it to this System; its sole boot

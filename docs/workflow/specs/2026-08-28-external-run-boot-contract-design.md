@@ -211,6 +211,13 @@ entries in encoded-path order, standard JSON escaping, no whitespace or trailing
 integer sizes, four-character lowercase octal modes, and lowercase `sha256:<hex>` digests. Strings
 must already be NFC; non-NFC and invalid UTF-8 are rejected. Empty input uses an empty entries array.
 
+Source entries are exactly `{"mode":"0755","path":str,"type":"dir"}`;
+`{"mode":"0644|0755","path":str,"sha256":"sha256:<64-hex>","size":int,"type":"file"}`;
+or `{"mode":"0777","path":str,"target":str,"type":"symlink"}`. Installed entries add required
+per-entry `gid:int`, `uid:int`, `xattrs:object`, and `xattrs_supported:bool`; no other key is allowed.
+The xattrs object is empty when unsupported, otherwise its UTF-8 NFC names map to unpadded standard
+base64. A non-UTF-8/non-NFC xattr name makes observation a third state.
+
 Source metadata is normalized before staging to uid/gid `0`; `0755` directories; `0755` regular
 files with any source execute bit and `0644` otherwise; and `0777` symlinks. Source ACLs and xattrs
 are discarded. After the provider applies its configured label policy, `module-installed-tree-v1`
@@ -234,6 +241,13 @@ then restores the prior tree or removes the Run's tree when none existed. Local-
 existing injection to this ordering. Remote-libvirt installs the same tree without rebuilding the
 initrd. A provider unable to quiesce, stage, replace, verify, and restore it rejects before recovery
 preparation.
+
+Before `preparing`, the provider reserves operator-configured `recovery_max_bytes` in its durable
+store for this System/Run activation. Unit and scope are bytes per activation; availability is read
+at the response envelope's `server_time`. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
+guest state, and directs cleanup of terminal artifacts or a cap increase before retry. Capture cannot
+exceed the reservation; overrun restarts the source and fails `INSTALL_FAILURE`. Prepared, recovery,
+and conflict states retain the reservation; abandonment, recovery, and teardown release it.
 
 Remote artifacts use deterministic per-System/per-Run names in an operator-configured directory
 pool. The provider resolves host paths internally after upload; no path crosses the shared seam.
@@ -294,8 +308,11 @@ Definition identity version 1 splits that XML into a preserved digest and boot p
 preserved digest is canonical XML of the entire definition after removing only `/domain/os/kernel`,
 `/domain/os/initrd`, and `/domain/os/cmdline`; aliases, addresses, devices, controllers, firmware,
 storage attributes, and QEMU arguments remain. The boot projection is canonical JSON for those three
-fields and distinguishes absent from empty. Canonicalization removes only syntax-level whitespace,
-attribute order, and namespace-prefix choice while preserving element order and content. Prepare
+fields and distinguishes absent from empty. Defused parsing forbids DTDs/entities, removes
+whitespace-only child-bearing `.text` and all whitespace-only `.tail`, rejects non-NFC character
+data, then uses Python 3.14 Canonical XML 2.0 with comments off, text stripping off, and prefix
+rewriting on. UTF-8 output has no newline and is hashed after `kdive-libvirt-preserved-v1` plus NUL.
+Prepare
 clones the observed source and changes only those fields; observation repeats the same split. Live
 XML is excluded. The provider validates that the source belongs to the System and represents
 disk/GRUB boot before storing it. Restore uses the recorded source with compare-and-set against
@@ -307,6 +324,10 @@ System overlay, configured pool, expected target and bus; disk is the only boot 
 loader/firmware/NVRAM match the provisioning profile. An external projection must be owned by a
 matching durable activation row and recovered under the System lock before another prepare. Any
 other mismatch or unowned external projection enters `recovery_conflict`.
+
+Boot projection is compact sorted-key JSON with schema, kernel, initrd, and cmdline keys (the latter
+three nullable), hashed after `kdive-libvirt-boot-projection-v1` plus NUL. The ADR's preserved-XML and
+all-null projection digests are mandatory golden vectors.
 
 When a reusable System recovers from `active`, the provider stops the domain, verifies it inactive,
 restores the prior module tree and persistent definition, boots that definition, and proves both a
@@ -368,15 +389,17 @@ Those are existing deployment trust or excluded provider concerns.
 ## Verification
 
 - Pure contract tests cover canonical identity, ordering sensitivity, optional initrd pairing,
-  ownership, architecture/release/root conflicts, and a test-only non-libvirt runtime.
+  ownership, architecture/release/root conflicts, JSON/XML golden vectors, and a test-only
+  non-libvirt runtime.
 - Archive tests cover duplicates, links, traversal, malformed headers, missing/multiple vmlinuz,
   wrong modules release, expansion bounds, deterministic `build`/`source` link omission,
   NFC rejection, canonical-byte test vectors, metadata normalization, ACL/xattr drift,
   generated-index installed identity, digest mismatch, and partial cleanup.
 - State-machine and adversarial tests fault every boundary before/after provider calls and database
   commits, including worker loss during offline prepare, restoration of prior power state,
-  prepared abandonment, same-release module replacement/restoration, a running domain after worker
-  loss, duplicate delivery, and concurrent retry under the System lock.
+  capacity reservation/exhaustion/overrun, prepared abandonment, same-release module
+  replacement/restoration, a running domain after worker loss, duplicate delivery, and concurrent
+  retry under the System lock.
 - Provider tests prove local behavior remains unchanged and remote upload, path resolution, XML
   preservation, full preserved-definition comparison across XML syntax normalization,
   GRUB-source admission and unowned-external conflict, compare-and-set activation, exact offline
