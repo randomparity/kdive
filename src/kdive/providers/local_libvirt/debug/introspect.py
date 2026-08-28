@@ -165,20 +165,6 @@ class LocalLibvirtVmcoreIntrospect:
         )
 
 
-def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
-    from kdive.store.objectstore import object_store_from_env
-
-    # The ref is a key the system itself produced; there is no client etag handle, so the
-    # read is unconditional (ADR-0054). An empty etag would 412 here, not skip the check.
-    return object_store_from_env().get_artifact(ref, None).data
-
-
-def _real_fetch_versioned_object(ref: str, version_id: str) -> bytes:  # pragma: no cover
-    from kdive.store.objectstore import object_store_from_env
-
-    return object_store_from_env().get_artifact(ref, None, version_id=version_id).data
-
-
 __all__ = [
     "IntrospectOutput",
     "LocalLibvirtVmcoreIntrospect",
