@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg.abc import Params, QueryNoTemplate
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
@@ -158,14 +159,14 @@ def _record(row: Mapping[str, Any]) -> CaptureOperation:
 
 async def _operation(
     conn: AsyncConnection,
-    query: str,
-    parameters: tuple[object, ...],
+    query: QueryNoTemplate,
+    parameters: Params,
     *,
     refused: str,
     error: type[ValueError] | type[PermissionError],
 ) -> CaptureOperation:
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cursor:
-        await cursor.execute(query, parameters)  # ty: ignore[invalid-argument-type]
+        await cursor.execute(query, parameters)
         row = await cursor.fetchone()
     if row is None:
         raise error(refused)
