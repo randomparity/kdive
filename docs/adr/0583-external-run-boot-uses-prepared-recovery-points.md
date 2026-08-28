@@ -356,9 +356,16 @@ to that in-memory execution only and is never copied into a job payload for anot
 atomically claims `(activation identity, generation, claimant token)` in the provider fence.
 Idempotence requires the same triple and is permitted only for retries within that live execution;
 any replacement, redelivery, reconciliation pass, or restarted process allocates a higher generation
-and new token. Under the provider-local System lock, takeover validates the stable ownership and content
+and new token. A claim appends a zero-mutation header containing that triple and compare-and-sets the
+fence in one provider-durable transaction before returning. Implementations without a transactional
+store use one fsynced write-ahead record and commit marker: recovery exposes either the prior fence or
+the new fence plus header, never a new fence without its header. A partial uncommitted claim is rolled
+back to the prior fence under the provider-local lock.
+
+The atomic claim holds that lock and first validates the stable ownership and content
 digests of every existing recovery object, then validates the mutation journal as an unbroken sequence
-ending at the prior claimed generation before compare-and-setting the fence to the new generation.
+ending with the prior generation's claim header and any mutations before atomically appending the new
+header and fence value.
 Existing journal entries remain immutable; new work appends with the new generation and token. A crash
 after the database increment but before the provider claim abandons that unused generation; the next
 execution allocates a higher one rather than sharing its authority. Missing, changed, or
@@ -383,6 +390,9 @@ next generation, consumes the original activation-owned evidence, and proves saf
 retagging or source recapture.
 The suite also pauses an actor before its first claim, lets another execution allocate and claim the
 next generation, resumes the old actor, and proves its different token/generation cannot mutate state.
+It kills both an initial and replacement actor after the claim returns but before the first mutation;
+the next worker and authorized teardown must validate the zero-mutation header and take over without
+conflict, retagging, or source recapture.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
