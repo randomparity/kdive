@@ -54,7 +54,9 @@ operations, stages the replacement beside the destination, runs only its built-i
 validated release, and computes `module-installed-tree-v1`. It never executes a binary from the
 System disk or source volume. `depmod` reads foreign-architecture module metadata as data, so the
 appliance executable matches the remote hypervisor architecture, not the installed kernel's
-architecture.
+architecture. The cross-architecture ppc64le live proof in
+`docs/design/2026-07-13-ppc64le-kdump-proof-record-1148.md` records host-side `depmod` indexing a
+ppc64le module tree under an x86_64 appliance.
 
 ### Durable capture and identity
 
@@ -78,22 +80,31 @@ operations and is retained until recovery or successful baseline commitment make
 Operation identity is `(system_id, run_id, plan_identity, operation_nonce, phase)`. Mutation uses
 three nonce-qualified names on the root filesystem: destination `D`, staged replacement `N`, and
 displaced destination `O`. `N`, `D`, and `O` are on the same filesystem. The appliance makes the
-capture and its manifest durable on scratch and writes durable `captured`; makes `N` and its
-contents durable and writes durable `replacement-ready`; renames `D` to `O` when the capture is not
-absent and syncs the parent; renames `N` to `D`, syncs the parent, and verifies the installed
-manifest; then writes durable `installed`. Only after `installed` is durable may a retry remove
-`O`. Every phase write is followed by flush, appliance shutdown, and libvirt volume-flush success
-before the worker persists the result. A failure to obtain positive flush evidence is incomplete,
-never success.
+capture and its manifest durable on scratch and writes durable `captured`; writes durable
+`staging-intent`; creates `N`, makes its contents durable, and writes durable
+`replacement-ready`; renames `D` to `O` when the capture is not absent and syncs the parent;
+renames `N` to `D`, syncs the parent, and verifies the installed manifest; then writes durable
+`installed`. Only after `installed` is durable may a retry remove `O`.
+
+Inside the appliance, making data or a phase durable means fsyncing each changed file, fsyncing its
+changed directories, and issuing `syncfs` for the root and scratch filesystems. Intermediate phase
+checkpoints do not shut down the appliance. Before the worker persists a terminal result, the
+appliance repeats `syncfs`, unmounts both filesystems, powers off cleanly, and the worker observes
+the transient domain shut off and all three volumes detached. Libvirt has no storage-volume flush
+operation, so this decision does not require one. Failure of any appliance flush, unmount, clean
+shutdown, or detach observation is incomplete, never success; retry trusts only phases and
+manifests that survived reopening the volumes.
 
 A retry reads the durable scratch phase and the manifests of every present `D`, `N`, and `O` before
-writing. `captured` permits only the original `D` plus no `O`; `replacement-ready` permits the
-original `D` plus staged `N`, absent `D` plus original `O` and staged `N`, or installed `D` plus
-original `O`. Those states respectively restart the rename sequence, finish `N` to `D`, or verify
-and record `installed`. The absent-capture form follows the same states without `O`. `installed`
-requires installed `D` and permits only removal of a matching `O`. Any other name, phase, or
-manifest combination is a recovery conflict; the appliance performs no further write and core
-parks the System on the ADR-0583 conflict path.
+writing. `captured` permits only the original `D` and no `N` or `O`. `staging-intent` permits the
+original `D`, no `O`, and either absent `N` or a nonce-owned partial `N`; it removes that `N`, syncs
+the parent, and rebuilds it from the already verified source. `replacement-ready` permits the
+original `D` plus complete staged `N`, absent `D` plus original `O` and complete `N`, or installed
+`D` plus original `O`. Those states respectively restart the rename sequence, finish `N` to `D`,
+or verify and record `installed`. The absent-capture form follows the same states without `O`.
+`installed` requires installed `D` and permits only removal of a matching `O`. Any other name,
+phase, or manifest combination is a recovery conflict; the appliance performs no further write and
+core parks the System on the ADR-0583 conflict path.
 
 Restoration uses the same appliance, names, ordering, and retry table with captured and installed
 roles reversed. It first verifies all identity fields, the root volume, and the captured manifest;
