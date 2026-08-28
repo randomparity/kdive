@@ -63,7 +63,7 @@ Phase 1 narrows that window; it does not close it. Two attempts of one job can r
 naming the double-run it cannot rule out — and both can pass phase 1 before either writes.
 Whichever PUT lands last leaves the other's committed row describing bytes that are gone. So when
 an attempt wrote and then found a peer's row, it **repairs** that row, in
-`kdive.artifacts.catalog.etag_repair.reconcile_row_etag`.
+`kdive.artifacts.etag_repair.reconcile_row_etag`.
 
 The repair stats the object and writes the etag it *observes*. It must not write the etag this
 attempt wrote, which is the obvious form and is wrong: which PUT landed last and which attempt
@@ -82,7 +82,7 @@ repair written inside that block would be rolled back on exactly the path that n
 
 When phase 3 refuses to register — the job was canceled, or the System left its live state while
 the object was in flight — the handler deletes the objects this attempt wrote, through
-`kdive.artifacts.catalog.discard.discard_unregistered_objects`, **after** the lock is released.
+`kdive.artifacts.discard.discard_unregistered_objects`, **after** the lock is released.
 
 Because the lock is released by then, the row probe phase 3 made is stale, and a delete decided
 on a stale probe is worse than the orphan it prevents: it would leave a committed row pointing at

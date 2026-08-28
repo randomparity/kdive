@@ -43,7 +43,7 @@ force one lane to import the other's, so the shared thing has to be a **neutral 
 
 ## Decision
 
-Hoist exactly two things into `kdive.artifacts.uploads.upload_manifest`, beside `ManifestStamp` and
+Hoist exactly two things into `kdive.artifacts.upload_manifest`, beside `ManifestStamp` and
 `deadline_stamp` that both lanes already import:
 
 1. **`ManifestStamp.expired`**, a property returning `self.deadline < self.server_time`. A bare
@@ -83,7 +83,7 @@ guard's own docstring so it is not read as a proof.
   before and after; the behavior tests that assert them were not modified.
 - `services/runs/complete_build.py` no longer exports `UPLOAD_WINDOW_EXPIRED`. An importer of
   the old path fails at import, loudly, rather than reading a stale copy.
-- `kdive.artifacts.uploads.upload_manifest` now holds one agent-facing reason string. That is a small
+- `kdive.artifacts.upload_manifest` now holds one agent-facing reason string. That is a small
   widening of a storage module's remit, consistent with the module's existing role as the place
   where facts several mechanisms must agree on live (`UPLOAD_TENANT`, `_LOCK_SCOPES`), and it is
   the only layer both an `artifacts`-layer service and an `mcp`-layer tool can import without one

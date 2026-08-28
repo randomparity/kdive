@@ -243,7 +243,7 @@ lock:
 
   > *Amended (#1544 / [ADR-0452](0452-flock-guarded-reclaim-staging-sweep.md)).* The reclaim-side
   > backstop no longer unlinks unconditionally either: it runs the same `flock` gate, through the
-  > shared `providers.shared.staging.staging_partials.unlink_partial_if_unheld`, so neither of this
+  > shared `providers.shared.staging_partials.unlink_partial_if_unheld`, so neither of this
   > decision's two collection paths derives its safety from state it happens to hold. Its reach
   > narrows the same way the fetch side's did, and with no backstop behind it — so a skipped
   > candidate is a `WARNING` and, when the skip is a *held* `flock`, `rootfs_cleanup_pending_at` is
