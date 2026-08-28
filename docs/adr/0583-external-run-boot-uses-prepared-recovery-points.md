@@ -313,6 +313,15 @@ both provider state identities when preparation completes. The state machine is
 `preparing|prepared|activating|active|recovering -> recovery_conflict`, and
 `recovery_conflict -> recovering`,
 failure metadata on an operation attempt.
+Core permits at most one external-boot activation that is not `recovered` or `abandoned` per System.
+A partial unique database index enforces that invariant across `preparing`, `prepared`, `activating`,
+`active`, `recovering`, `recovery_conflict`, and `recovery_failed`; all providers use the same core
+admission path. A second Run receives `CONFLICT` before reservation or provider work, with the existing
+activation identity and state plus `runs.get`; an active activation also suggests
+`runs.release_external_boot`, while a failed/conflicted activation suggests `systems.teardown` when
+its authorized recovery action is unavailable. No provider may capture another Run's external target
+as a source baseline, and external activations never form a rollback stack. Adversarial admission
+tests race two Runs against one System through local, remote, and non-libvirt runtimes.
 Each transition is committed under the existing per-System advisory lock; provider calls use the
 cross-transaction epoch fence defined below. Activation is
 compare-and-set from the recovery point's source-state identity: the provider refuses changed state
@@ -332,22 +341,27 @@ definition bytes. Runtime readiness and running-kernel identity are separate obs
 decide which persistent definition won.
 
 The existing transaction-scoped System advisory lock protects each database transition only; it
-cannot fence provider work across those commits. Each activation row therefore owns a monotonically
-increasing `operation_epoch`, and every recovery point, provider journal, staged artifact, maintenance
-domain, and externally visible target component records it. Before provider work, an actor atomically
-claims that epoch in a provider-durable per-System fence. Replacement workers, reconciliation,
-conflict resolution, and teardown first increment the database epoch under the System lock, then
-claim the higher provider epoch. Provider-local serialization makes a new claim wait for any bounded
+cannot fence provider work across those commits. The System owns a durable monotonically increasing
+`operation_generation` allocated under that lock; it never resets when an activation terminates.
+Each new activation and every takeover increments the System value and copies the resulting generation
+plus activation identity into the activation row. Every recovery point, provider journal, staged
+artifact, maintenance domain, and externally visible target component records both values. Before
+provider work, an actor atomically claims that ordered pair in a provider-durable per-System fence.
+An idempotent claim requires the same pair; any different claim must have a strictly greater System
+generation. Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all
+allocate before claiming. Provider-local serialization makes a new claim wait for any bounded
 publication critical section; long downloads, extraction, and helper execution write only private
 staging and are cancelable or discardable.
 
 Immediately before every definition, module-tree, attachment, power, or cleanup mutation, and again
-before recording its result, the provider holds that local fence and rejects an epoch other than the
+before recording its result, the provider holds that local fence and rejects a generation other than the
 current claimed value. A stale actor can finish private work but cannot publish, boot, restore, or
 delete after takeover. Teardown claims the newest epoch before destroying anything. Connection loss
 does not release authority to an older epoch; only a durable higher claim supersedes it. Tests pause
 an old actor before publication and boot, claim a replacement or teardown epoch, and prove the stale
 write is refused.
+The stale-actor suite also completes one activation, starts a later Run with a greater generation,
+and proves that an actor from the earlier Run can never reclaim authority.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
