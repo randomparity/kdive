@@ -220,19 +220,30 @@ def _publish_baseline(
     allowed_roots: list[Path] | None,
 ) -> None:
     """Install an optional validated override, then atomically publish the baseline directory."""
-    if initrd_override is not None:
-        if allowed_roots is None:
-            raise CategorizedError(
-                "local INITRD materialization has no configured allowed roots",
-                category=ErrorCategory.CONFIGURATION_ERROR,
+    try:
+        if initrd_override is not None:
+            if allowed_roots is None:
+                raise CategorizedError(
+                    "local INITRD materialization has no configured allowed roots",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            source = validate_local_component_path(
+                initrd_override.path,
+                allowed_roots=allowed_roots,
+                sha256=initrd_override.sha256,
             )
-        source = validate_local_component_path(
-            initrd_override.path,
-            allowed_roots=allowed_roots,
-            sha256=initrd_override.sha256,
-        )
-        shutil.copyfile(source, partial / "initrd")
-    os.rename(partial, destination)
+            shutil.copyfile(source, partial / "initrd")
+        os.rename(partial, destination)
+    except CategorizedError:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+    except OSError as exc:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise CategorizedError(
+            "failed to publish the local-libvirt baseline kernel and initrd",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"error": type(exc).__name__},
+        ) from exc
 
 
 def _reset_dir(path: Path) -> None:  # pragma: no cover - live_vm

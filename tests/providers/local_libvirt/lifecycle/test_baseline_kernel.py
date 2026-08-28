@@ -6,6 +6,7 @@ import pytest
 
 from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.rootfs import baseline_kernel as baseline_module
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     _publish_baseline,
     baseline_kernel_names,
@@ -51,6 +52,37 @@ def test_publish_baseline_validation_failure_keeps_destination_absent(tmp_path: 
         )
 
     assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert not destination.exists()
+    assert not partial.exists()
+
+
+def test_publish_baseline_copy_failure_is_categorized_and_removes_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "allowed" / "custom.img"
+    source.parent.mkdir()
+    source.write_bytes(b"custom initrd")
+    partial = tmp_path / "baseline.part"
+    partial.mkdir()
+    (partial / "kernel").write_bytes(b"kernel")
+    destination = tmp_path / "baseline"
+
+    def fail_copy(_source: Path, _destination: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(baseline_module.shutil, "copyfile", fail_copy)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _publish_baseline(
+            partial,
+            destination,
+            initrd_override=LocalComponentRef(kind="local", path=str(source)),
+            allowed_roots=[source.parent],
+        )
+
+    assert exc_info.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(exc_info.value) == "failed to publish the local-libvirt baseline kernel and initrd"
+    assert not partial.exists()
     assert not destination.exists()
 
 
