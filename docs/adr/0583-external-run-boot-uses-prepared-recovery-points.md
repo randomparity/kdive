@@ -42,13 +42,28 @@ Materialization must extract
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
 compressed bundle is never itself a bootable kernel.
 
+Successful materialization produces an immutable `external-boot-materialization-v1` record. Its
+identity uses the manifest JSON serializer and domain prefix
+`kdive-external-boot-materialization-v1`, and binds System and Run ownership, provider kind, plan
+identity, architecture, extracted-vmlinuz SHA-256, source- and installed-module-tree digests, the
+paired initrd object key/version/digest or explicit absence, and deterministic opaque provider
+references for every boot and module artifact. Core persists the complete record, not only the
+references. Repeated materialization for a plan must reproduce every field; an absent, unreadable,
+or different field fails closed and is neither reused nor activated. Running-kernel observation
+compares against the persisted extracted-vmlinuz digest rather than recomputing an expectation from
+the compressed bundle.
+
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
 manifest applies one shared extraction normalization first: absolute symlinks named exactly
 `build` or `source` at the release root are omitted, while every other absolute or escaping link is
 rejected. This exact-name rule intentionally tightens the current local filter, which omits every
 absolute symlink: #2107 must move local and remote materialization onto the shared validator before
-either computes this manifest. It then sorts relative UTF-8 paths by encoded bytes; rejects absolute paths, `.`/`..`,
+either computes this manifest. Validation covers the complete topology before any write: every
+ancestor of an entry must be a declared or implicit directory, no entry path may traverse a symlink,
+and no two entries may resolve to the same destination. Extraction uses no-follow, directory-relative
+operations so archive order cannot change the result. The manifest then sorts relative UTF-8 paths
+by encoded bytes; rejects absolute paths, `.`/`..`,
 duplicates, hard links, devices, sockets, and FIFOs; and admits only directories, regular files, and
 contained relative symlinks. Each entry records normalized path, type, normalized permission bits,
 and regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
@@ -116,13 +131,21 @@ preparation. “Preserve the disk overlay” below means keep the same attached 
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
 
-Before committing `preparing`, the provider reserves operator-configured `recovery_max_bytes` in its
-durable recovery store for this System/Run activation. Unit and scope are bytes per activation;
-availability is read at the response envelope's `server_time`. Exhaustion is retryable
-`CAPACITY_EXHAUSTED`, changes no guest state, and directs the operator to clean terminal artifacts or
-raise the cap before retry. Offline capture cannot exceed the reservation; an overrun restarts the
-prior source and fails `INSTALL_FAILURE`. Prepared, recovery, and conflict states retain the
-reservation; abandonment, recovery, and System teardown release it idempotently.
+Before committing `preparing`, the provider creates a deterministic reservation owned by this
+System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
+reservations in one provider instance's recovery store cannot exceed its
+`recovery_max_bytes`; both values are byte counts, and availability is observed at the response
+envelope's `server_time`. Creation is idempotent, and a provider sweeper removes an orphan whose
+matching activation row was never committed. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
+guest state, and directs the operator to clean terminal artifacts or raise the cap before retry.
+
+The fixed reservation bounds the captured definition, prior module tree, journal, and verification
+metadata together. Offline capture cannot exceed it. An overrun restores the source definition,
+exact prior module tree, and recorded prior power state; a previously stopped System remains stopped.
+After verification it commits `abandoned`, releases the reservation, and reports
+`INSTALL_FAILURE` with the required minimum observed bytes so the operator can raise
+`recovery_reserve_bytes`. Prepared, recovery, and conflict states retain the reservation;
+abandonment, recovery, and System teardown release it idempotently.
 
 The root specification is a versioned, closed data shape. Version 1 records the target architecture,
 one `root=` value, the ordered root-related arguments required by the image, and provenance with an
@@ -197,14 +220,20 @@ of overwriting provider state. The portable plan identity is never compared dire
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
 
-Recovery restores a usable disk/GRUB baseline, not only persistent bytes. When an active Run becomes terminal
-and the System remains reusable, terminalization enters `recovering`, stops the domain through the
-provider control plane, verifies it is inactive, restores the prior module tree and persistent
+Recovery restores a usable disk/GRUB baseline, not only persistent bytes. When an active Run becomes
+terminal and the System remains reusable, the provider first observes the complete recorded target
+state under the System lock. Only that state may take the normal `active -> recovering` edge. An
+absent or unreadable component remains retryable; any third component enters `recovery_conflict`
+without stopping or overwriting the System. After committing `recovering`, the provider stops the
+domain through the control plane, verifies it is inactive, restores the prior module tree and persistent
 definition, boots that definition, and requires a fresh boot plus the existing System readiness
 contract before committing `recovered`. The exact GRUB-selected kernel is guest bootloader state and
 is not knowable from an inactive domain definition, so it is not an identity gate; a recovery that
 cannot reach readiness after bounded retries remains `recovering` for operator action and retains
-all evidence. A recovery retry repeats the sequence idempotently; concurrent terminalization
+all evidence. A recovery retry re-observes each component: complete target resumes restoration,
+complete source resumes boot/readiness, and a source/target mixture may resume only when every
+component matches one of those recorded identities and the journal proves the partial write belongs
+to this recovery. Any other mixture or third value enters `recovery_conflict`. Concurrent terminalization
 serializes under the System lock. The recovery point and materialized artifacts cannot be deleted
 before `recovered`. System teardown instead destroys the domain before cleaning the recovery point
 and materialization, because a definition that will be destroyed need not be restored or rebooted.
