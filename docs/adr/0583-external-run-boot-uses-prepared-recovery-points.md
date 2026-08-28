@@ -43,14 +43,17 @@ compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-insta
 compressed bundle is never itself a bootable kernel.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and
-the manifest digest of the bundle's exact `lib/modules/<release>/` tree. Before activation, the
-provider must prove that tree is installed at `/lib/modules/<release>` in the System root, reusing an
-exact existing tree or publishing the extracted tree atomically. A mismatched existing tree or a
-provider unable to install and verify it rejects before recovery preparation. The release-qualified
-tree is System content, like local-libvirt's current injected modules and remote-libvirt's current
-in-guest installation, not a per-Run boot artifact removed during recovery. “Preserve the disk
-overlay” below means keep the same attached overlay and device definition; it does not promise that
-the guest filesystem is byte-immutable. The optional initrd never substitutes for this obligation.
+the manifest digest of the bundle's exact `lib/modules/<release>/` tree. Materialization stages that
+tree without changing the System. Recovery preparation records whether the release-qualified target
+is absent or saves its exact prior tree behind the opaque recovery reference. Activation atomically
+publishes the staged tree at `/lib/modules/<release>` before booting it. An exact existing tree may
+be reused; a different tree for the same release is replaced, not rejected. Recovery restores the
+saved tree or removes the new tree when the target was previously absent. This preserves same-release
+kernel iteration and prevents a terminal Run from leaving its modules selected by a later GRUB boot.
+A provider unable to stage, replace, verify, and restore the tree rejects before recovery
+preparation. “Preserve the disk overlay” below means keep the same attached overlay and device
+definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
+never substitutes for this obligation.
 
 The root specification is a versioned, closed data shape. Version 1 records the target architecture,
 one `root=` value, the ordered root-related arguments required by the image, and provenance with an
@@ -63,29 +66,33 @@ architecture mismatch fail before materialization or activation and name the rec
 pre-schema image remains eligible for its existing GRUB boot but not external Run boot.
 
 Before changing boot state, the provider prepares both sides of the compare-and-set. It creates a
-durable recovery point representing the exact currently defined boot configuration, renders but does
-not apply the target definition, and returns provider-computed source- and target-definition
-identities plus an opaque recovery reference. For remote-libvirt, that point contains the exact
-inactive disk/GRUB domain definition, stored behind the provider seam; the shared state never
-interprets its XML. Deterministic identifiers make repeated prepare calls for the same System, Run,
-plan identity, and current definition return the same point and target identity.
+durable recovery point representing the exact current persistent boot configuration and prior module
+tree, renders but does not apply the target configuration, and returns provider-computed source- and
+target-state identities plus an opaque recovery reference. A state identity covers both the boot
+definition and the release-qualified module-tree identity. For libvirt providers, every definition
+identity is computed from the same canonicalized persistent/inactive XML observation; live XML is
+never an identity input. Remote's recovery point stores that exact inactive disk/GRUB definition
+behind the provider seam, so shared state never interprets its XML. Deterministic identifiers make
+repeated prepare calls for the same System, Run, plan identity, and source state return the same
+point and target identity.
 
-Core persists the plan identity, materialization reference, recovery reference, both provider
-definition identities, and activation state before calling activate. The state machine is
+Core persists the plan identity, materialization reference, recovery reference, both provider state
+identities, and activation state before calling activate. The state machine is
 `prepared -> activating -> active`, with
 `activating|active -> recovering -> recovered`,
 `prepared -> abandoned`, `activating|active|recovering -> recovery_conflict`, and failure metadata
 on an operation attempt.
 Transitions and provider calls run under the existing per-System advisory lock. Activation is
-compare-and-set from the recovery point's source-definition identity:
-the provider refuses a changed definition or a materialization/recovery reference belonging to
-another System, Run, or plan. On an `activating` record after worker loss, reconciliation compares
-the provider-observed definition identity with both recorded provider identities. The target identity
-completes `active`; the source identity completes `recovered`. Recovery may replace only the target
-identity with the recorded source definition. Any absent, unreadable, or third identity enters
-`recovery_conflict` for operator resolution instead of overwriting provider state. The portable plan
-identity is never compared directly with provider definition bytes, and readiness is never used to
-guess which definition won.
+compare-and-set from the recovery point's source-state identity: the provider refuses changed state
+or materialization/recovery references belonging to another System, Run, or plan. On an `activating`
+record after worker loss, reconciliation compares the persistent definition and module-tree
+identities with both recorded states. The complete target state completes `active`; the complete
+source state completes `recovered`. A mixed state whose every component equals its recorded source
+or target component is an activation-owned partial and may be restored to source. Any absent,
+unreadable, or third component identity enters `recovery_conflict` for operator resolution instead
+of overwriting provider state. The portable plan identity is never compared directly with provider
+definition bytes. Runtime readiness and running-kernel identity are separate observations and never
+decide which persistent definition won.
 
 Recovery restores the recorded point before declaring the System usable. The recovery point remains
 until recovery or System teardown is complete. When an active Run becomes terminal and the System
@@ -100,7 +107,7 @@ partial and removed; it is never activated.
 
 `prepared -> abandoned` is the pre-activation disposal path. Run terminalization or reconciliation
 may take it only after retries are no longer possible and provider observation still equals the
-recorded source-definition identity. Cleanup then removes the unused recovery point and
+recorded source-state identity. Cleanup then removes the unused recovery point and
 materialization and commits `abandoned`. A target or third identity fails closed as
 `recovery_conflict`; absence or an unreadable identity remains retryable. The same per-System lock
 serializes abandonment with activation and teardown.
@@ -121,9 +128,10 @@ HTTP/iPXE.
 - Catalog-attested root provenance requires a typed extension to the existing attestation model and
   its serialized inventory shape. Old records remain readable but cannot authorize external boot
   until restaged, rebuilt, or explicitly re-attested with the new versioned fields.
-- Recovery stores the exact state being replaced, so configuration drift cannot silently change the
-  rollback target. Provider-specific recovery bytes require bounded storage, tenant ownership,
-  redaction, retention, and reaping behind the provider seam.
+- Recovery stores the exact state being replaced, including a same-release module tree, so
+  configuration drift cannot silently change the rollback target. Provider-specific recovery bytes
+  require bounded storage, tenant ownership, redaction, retention, and reaping behind the provider
+  seam.
 - Core gains durable activation state and reconciliation work. This is necessary because provider
   activation and database commits cannot share a transaction.
 - Retries compare immutable plan and materialization identities. A reused object key with another
@@ -132,6 +140,9 @@ HTTP/iPXE.
 - A provider-side change outside KDIVE's System lock is preserved as `recovery_conflict`. Recovery
   is therefore fail-closed and may require an operator to choose between the recorded point and the
   newly observed definition.
+- Libvirt state identity describes canonical persistent/inactive XML plus module-tree content, not
+  live XML. Separate readiness and kernel-identity proofs remain required after starting the domain;
+  persistent state equality proves configuration, not a successful boot.
 - ADR-0082's in-guest GRUB install remains the provisioning/recovery mechanism but no longer defines
   iterative remote Run boot once this decision is implemented.
 

@@ -65,6 +65,7 @@ class RootSpecV1:
 
 @dataclass(frozen=True, slots=True)
 class ModuleInstallObligation:
+    mode: Literal["system-root-tree"]
     kernel_release: str
     modules_tree_sha256: str
 
@@ -93,6 +94,12 @@ class BootMaterialization:
 class BootRecoveryPoint:
     plan_identity: str
     provider_ref: str
+    source_state_identity: str
+    target_state_identity: str
+
+@dataclass(frozen=True, slots=True)
+class BootObservedState:
+    status: Literal["source", "target", "owned-partial", "conflict", "unreadable"]
 
 class ExternalBootRuntime(Protocol):
     def materialize(self, plan: ExternalBootPlan) -> BootMaterialization: ...
@@ -105,7 +112,9 @@ class ExternalBootRuntime(Protocol):
         materialization: BootMaterialization,
         recovery: BootRecoveryPoint,
     ) -> None: ...
-    def observed_plan_identity(self, system_id: UUID) -> str | None: ...
+    def observe_state(
+        self, system_id: UUID, recovery: BootRecoveryPoint
+    ) -> BootObservedState: ...
     def recover(self, system_id: UUID, recovery: BootRecoveryPoint) -> None: ...
     def cleanup(
         self,
@@ -169,8 +178,10 @@ Root provenance authority is closed:
 
 - `build-verified`: the KDIVE rootfs build measured the booted image layout and emitted the record;
 - `stage-inspected`: a bounded, verified inspection of the exact staged image emitted it; or
-- `catalog-attested`: existing catalog attestation binds an operator declaration to the exact image
-  digest/version.
+- `catalog-attested`: a typed extension to the existing catalog attestation binds the root value,
+  ordered root arguments, architecture, schema version, and operator declaration to the exact image
+  digest/version. The current two-field attestation is insufficient and does not authorize external
+  boot.
 
 `source_identity` and `source_version` must match the System's persisted base-image provenance.
 Unknown schema or authority values, a mismatch, or absent provenance yields
@@ -186,9 +197,13 @@ content, and publishes the final reference atomically. A retry reuses only a fin
 whose plan identity and extracted-kernel digest match; any mismatch is `INSTALL_FAILURE` and leaves
 the existing object untouched for investigation.
 
-The module obligation is satisfied before publication. Local-libvirt retains its existing guest
-injection. Remote-libvirt installs the exact `lib/modules/<kernel_release>/` tree without rebuilding
-the initrd. A failure cannot publish the materialization or reach activation.
+Materialization stages the module tree but does not change the System. Recovery preparation records
+the prior `/lib/modules/<kernel_release>` tree or its absence. Activation atomically publishes the
+exact staged tree before booting; an exact tree may be reused and a different same-release tree is
+replaced. Recovery restores the prior tree or removes the Run's tree when none existed. Local-libvirt
+adapts its existing injection to this ordering. Remote-libvirt installs the same tree without
+rebuilding the initrd. A provider unable to stage, replace, verify, and restore it rejects before
+recovery preparation.
 
 Remote artifacts use deterministic per-System/per-Run names in an operator-configured directory
 pool. The provider resolves host paths internally after upload; no path crosses the shared seam.
@@ -198,43 +213,56 @@ ownership from System/Run identities plus KDIVE metadata, not filename alone.
 ## Activation, crash consistency, and recovery
 
 Core persists one activation row per Run with the plan identity, opaque materialization and recovery
-references, state, attempt metadata, and last categorized failure. The state transitions are:
+references, provider source/target state identities, state, attempt metadata, and last categorized
+failure. The state transitions are:
 
 ```text
 prepared -> activating -> active
-                  |          |
-                  v          v
-              recovering <- recovery_requested
+    |             |          |
+    v             v          v
+abandoned     recovering <---+
                   |
                   v
-               recovered
+              recovered
+
+activating | active | recovering -> recovery_conflict
 ```
 
-Terminal cleanup follows `active` or `recovered` only when the Run is terminal and no recovery call
-is in flight. Illegal transitions are programming errors. Operation attempts remain idempotent by
-Run and step, and all transitions plus provider calls retain the existing per-System lock.
+An active terminal Run enters `recovering` before cleanup when its System remains reusable. A
+terminal `prepared` Run enters `abandoned` only while provider state still equals the recorded source.
+System teardown destroys the domain before cleanup instead of restoring it. Materialization and
+recovery evidence cannot be removed before one of those ordered terminal paths completes. Illegal
+transitions are programming errors. Operation attempts remain idempotent by Run and step, and all
+transitions plus provider calls retain the existing per-System lock.
 
 Ordering is strict:
 
 1. Materialize and verify the plan.
-2. Ask the provider to durably record the exact current boot definition.
-3. Commit `prepared` with both opaque references.
+2. Ask the provider to durably record the exact persistent boot definition and prior module tree,
+   render the target persistent definition, and compute canonical source/target state identities.
+3. Commit `prepared` with both opaque references and both state identities.
 4. Commit `activating`.
-5. Activate with compare-and-set against the recovery point's source definition.
-6. Observe the provider's active plan identity and commit `active` only on an exact match.
+5. Activate the module tree and persistent definition with compare-and-set against the recovery
+   point's source state.
+6. Observe canonical persistent/inactive definition plus module-tree state and commit `active` only
+   on an exact target-state match.
 7. Run readiness, then the separate running-kernel identity proof.
 
 A crash before step 3 leaves only provider-owned unreferenced state, which the deterministic reaper
-removes. A crash after step 3 is recoverable from the row. For `activating`, reconciliation reads the
-provider-observed identity: exact desired identity completes `active`; `None` or another identity
-moves to `recovering`, restores the recovery point, verifies the restored identity, and commits
-`recovered`. An unreadable observation or failed restore remains retryable in `recovering`; it never
-declares the System ready or deletes evidence.
+removes. A crash after step 3 is recoverable from the row. For `activating`, reconciliation observes
+both persistent definition and module-tree identities. Exact target completes `active`; exact source
+completes `recovered`; a mixed state composed only of recorded source and target components is an
+activation-owned partial and moves to `recovering`. An absent, unreadable, or third component enters
+`recovery_conflict` and preserves evidence for an operator; it is never overwritten. A failed restore
+remains retryable in `recovering` and never declares the System ready.
 
-Remote recovery records the exact inactive domain definition before external activation. The
-provider validates that it belongs to the System and represents disk/GRUB boot before storing it.
-Restore uses the same definition with a compare-and-set against the external plan identity. The
-record survives until cleanup, so configuration drift cannot rewrite the recovery target.
+Remote recovery records the exact persistent/inactive domain definition before external activation.
+Prepare, target rendering, observation, activation, and restore all canonicalize that same inactive
+XML mode; live XML is excluded from state identity. The provider validates that the source belongs to
+the System and represents disk/GRUB boot before storing it. Restore uses the recorded source with a
+compare-and-set against target or activation-owned partial state. Runtime readiness and the
+running-kernel proof remain separate. The record survives until cleanup, so configuration drift
+cannot rewrite the recovery target.
 
 ## Failure taxonomy
 
@@ -277,8 +305,9 @@ state.
   and never returned through MCP. Providers reject cross-owner or mismatched references.
 - Worker to remote libvirt: existing mutual TLS, URI validation, timeouts, size bounds, and provider
   configuration apply. Remote paths and XML remain internal and are removed from errors.
-- Provider state to reconciliation: observed identity is compared with the persisted desired identity;
-  absence or ambiguity fails toward recovery, never toward acceptance.
+- Provider state to reconciliation: canonical persistent definition and module identities are
+  compared with both persisted states; owned partials recover, while absence, ambiguity, or a third
+  identity enters conflict and is never overwritten.
 
 This design does not protect a host administrator from the host they control, make uploaded kernels
 safe to execute, introduce stronger tenant sandboxing, or define bare-metal network-boot security.
@@ -291,7 +320,8 @@ Those are existing deployment trust or excluded provider concerns.
 - Archive tests cover duplicates, links, traversal, malformed headers, missing/multiple vmlinuz,
   wrong modules release, expansion bounds, digest mismatch, and partial cleanup.
 - State-machine and adversarial tests fault every boundary before/after provider calls and database
-  commits, including duplicate delivery and concurrent retry under the System lock.
+  commits, including prepared abandonment, same-release module replacement/restoration, a running
+  domain after worker loss, duplicate delivery, and concurrent retry under the System lock.
 - Provider tests prove local behavior remains unchanged and remote upload, path resolution, XML
   preservation, compare-and-set activation, exact recovery, idempotent cleanup, and reaping.
 - Remote `live_vm` boots the exact paired artifacts, verifies extracted-kernel identity, exercises a
