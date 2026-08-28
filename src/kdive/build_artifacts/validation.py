@@ -693,6 +693,12 @@ def _module_manifest_entry(
         }
     if member.issym():
         target = member.linkname
+        try:
+            target.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _build_failure("module symlink target is not UTF-8", path=relative) from exc
+        if unicodedata.normalize("NFC", target) != target:
+            raise _build_failure("module symlink target must be NFC", path=relative)
         if relative in {"build", "source"} and target.startswith("/"):
             return None
         resolved = posixpath.normpath(posixpath.join(posixpath.dirname(relative), target))
@@ -924,6 +930,20 @@ def _elf_kernel_metadata(
             raise _build_failure("decoded boot/vmlinuz ELF segment extends past the object")
         if segment_type == 4:  # PT_NOTE
             build_ids.update(_gnu_build_ids_from_notes(reader.read(offset, size)))
+    decoded_release: str | None = None
+    for segment_type, offset, size in program_headers:
+        if segment_type != 1 or decoded_release is not None:  # PT_LOAD
+            continue
+        remaining = _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES - reader.measured_bytes
+        if remaining <= 0:
+            break
+        decoded_release = _optional_linux_release(reader.read(offset, min(size, remaining)))
+    if decoded_release is not None and decoded_release != expected_release:
+        raise _build_failure(
+            "boot/vmlinuz release disagrees with its decoded kernel",
+            header_release=expected_release,
+            decoded_release=decoded_release,
+        )
     if len(build_ids) != 1:
         raise _build_failure(
             "decoded boot/vmlinuz must contain one unambiguous GNU build ID",
