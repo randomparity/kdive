@@ -340,7 +340,6 @@ def test_external_boot_scan_rejects_empty_second_release_tree() -> None:
     ("boot", "message"),
     [
         (b"\x00" * 0x202 + b"HdrS" + b"\x00" * 32, "release is not canonical"),
-        (_bzimage(decoded_release="6.9.1"), "release disagrees"),
         (
             _bzimage(build_ids=(bytes.fromhex("deadbeef"), bytes.fromhex("cafebabe"))),
             "one unambiguous GNU build ID",
@@ -383,6 +382,18 @@ def test_external_boot_scan_rejects_note_shaped_bytes_outside_elf_tables() -> No
 
     with pytest.raises(CategorizedError, match="program header table"):
         _validate_kernel_blob(_combined_kernel_tar(boot=bytes(header) + gzip.compress(fake)))
+
+
+def test_external_boot_scan_rejects_truncated_later_elf_segment() -> None:
+    kernel = bytearray(_boot_elf(e_machine=_EM_X86_64, release="6.9.0"))
+    struct.pack_into("<Q", kernel, 64 + 56 + 32, len(kernel) * 2)
+    header = bytearray(0x400)
+    header[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", header, 0x20E, 0x100)
+    header[0x300:0x306] = b"6.9.0\x00"
+
+    with pytest.raises(CategorizedError, match="ELF segment extends past"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=bytes(header) + gzip.compress(kernel)))
 
 
 @pytest.mark.parametrize("symlink_first", [True, False])

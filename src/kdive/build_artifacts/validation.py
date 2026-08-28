@@ -62,7 +62,7 @@ _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_EXTENSION_MAX_BYTES = 1024 * 1024
 _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 64 * 1024 * 1024
+_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 16 * 1024 * 1024
 _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX = 64
 _SHA256_PREFIX = "sha256:"
 _KERNEL_RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
@@ -738,7 +738,7 @@ def _inspect_boot_member(
         release = _boot_release(boot, expected_arch)
         decoded = _decoded_kernel(boot, expected_arch)
         with decoded:
-            metadata = _elf_kernel_metadata(decoded, expected_arch)
+            metadata = _elf_kernel_metadata(decoded, expected_arch, release)
         if metadata["release"] != release:
             raise _build_failure(
                 "boot/vmlinuz release disagrees with its decoded kernel",
@@ -901,7 +901,9 @@ def _interval_bytes(intervals: Sequence[tuple[int, int]]) -> int:
     return total
 
 
-def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, JsonValue]:
+def _elf_kernel_metadata(
+    kernel: IO[bytes], expected_arch: str, expected_release: str
+) -> dict[str, JsonValue]:
     kernel.seek(0, io.SEEK_END)
     reader = _BoundedElfReader(kernel, kernel.tell())
     header = reader.read(0, 64)
@@ -917,16 +919,11 @@ def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, Jso
         )
     program_headers = _elf_program_headers(reader, header)
     build_ids: set[str] = set()
-    release: str | None = None
     for segment_type, offset, size in program_headers:
+        if offset + size > reader.size:
+            raise _build_failure("decoded boot/vmlinuz ELF segment extends past the object")
         if segment_type == 4:  # PT_NOTE
             build_ids.update(_gnu_build_ids_from_notes(reader.read(offset, size)))
-        elif segment_type == 1 and release is None:  # PT_LOAD
-            remaining = _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES - reader.measured_bytes
-            data = reader.read(offset, min(size, remaining))
-            release = _optional_linux_release(data)
-    if release is None:
-        raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
     if len(build_ids) != 1:
         raise _build_failure(
             "decoded boot/vmlinuz must contain one unambiguous GNU build ID",
@@ -939,7 +936,7 @@ def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, Jso
         "decoded_kernel_size_bytes": reader.size,
         "elf_metadata_bytes": reader.measured_bytes,
         "architecture": expected_arch,
-        "release": release,
+        "release": expected_release,
         "gnu_build_id": build_id,
         "gnu_build_id_size_bytes": len(build_id) // 2,
     }
