@@ -81,8 +81,8 @@ purpose, provider kind, and authority instance to match. Caller commands, paths,
 provider-native definitions are not accepted through the shared protocol.
 
 The authority database role may read authority bindings and append authority acknowledgements and
-journal checkpoints. It cannot allocate generations or advance Run, System, activation, job, or
-accounting state. The core role may allocate generations and commit lifecycle truth but cannot
+journal-head checkpoints. It cannot allocate generations or advance Run, System, activation, job,
+or accounting state. The core role may allocate generations and commit lifecycle truth but cannot
 forge a provider acknowledgement. Provider credentials and mutation-capable sockets are available
 only to the authority process.
 
@@ -124,7 +124,23 @@ System, activation, generation, operation identity, attempt, purpose, request di
 source identity, intended target identity, recovery-object identities, phase, provider observation,
 and previous-record digest. Phases are `admitted`, `mutation-started`, `provider-returned`,
 `observed`, and `terminal`. Journal sequence and digest prevent deletion, replacement, or reordering
-from being accepted as continuity.
+within the retained sequence from being accepted as continuity.
+
+Postgres separately stores the exact trusted journal head for each authority lane: authority
+instance, System, sequence, record digest, phase, and operation identity. The authority fsyncs a
+record, then advances that head with a monotonic compare-and-set whose expected value is the
+record's previous sequence and digest. It must anchor `admitted` and `mutation-started` before any
+provider access. Later phases are likewise anchored before their evidence can authorize another
+provider commit, a takeover acknowledgement, or a core lifecycle result. The database head is not
+a substitute journal and carries no provider definitions or output.
+
+On restart, the local journal must end at exactly the trusted database head. A shorter journal,
+including a valid-prefix truncation, a longer uncommitted suffix, or any sequence/digest/identity
+divergence refuses service and cannot acknowledge takeover. This availability cost closes the case
+where a surviving provider call appears only in a lost suffix: its `mutation-started` record and
+trusted head were committed before the call began, so losing that record is observable. Repair is
+an audited platform-operator action that restores the exact retained journal bytes; it never moves
+the trusted head backward, declares an operation absent, or authorizes provider access.
 
 Preparation may create only private, discardable objects before current authority is checked.
 Publishing a module tree, recovery object, persistent definition, attachment, power transition, or
@@ -200,7 +216,8 @@ The implementation must provide provider-neutral contract tests and live provide
   recovery ownership or capturing a new baseline;
 - deny a stale actor from an earlier completed Run after a later Run obtains authority;
 - reject missing, reordered, truncated, corrupted, or foreign journal records and authority
-  acknowledgements; and
+  acknowledgements, including a journal truncated to a valid prefix after `mutation-started` while
+  its provider call survives, and withhold takeover until the exact trusted head is restored; and
 - prove deployment ACLs deny workers and reconcilers direct provider mutation while the authority
   can perform only its configured provider scope.
 
