@@ -177,15 +177,26 @@ The declared `arch` and the payload must agree: an x86 bzImage under `arch: ppc6
 `resource://kdive/contracts/external-build`
 (`upload_contracts.run.contracts.kernel.layout[boot/vmlinuz].formats_by_arch`).
 
+Finalization validates the entire exact object version before publishing a reusable build. It
+requires canonical member names, exactly one regular `boot/vmlinuz`, and exactly one
+`lib/modules/<release>/` tree. Absolute paths, `./` aliases, traversal, duplicate names, hard
+links, devices, FIFOs, sockets, unrelated members, and escaping symlinks are rejected. The
+release-root `build` and `source` absolute symlinks are omitted from the source manifest.
+
+The full scan is bounded to 200,000 tar headers, 8,589,934,592 uncompressed regular-file bytes,
+and 536,870,912 bytes for `boot/vmlinuz`. These units are bytes, scoped to one exact uploaded
+kernel object version; there is no reference clock. Crossing a bound fails the build before a
+generation is published. Remove unneeded content or rebuild a smaller bundle, then upload and
+finalize again. An optional `initrd` is paired with this exact generation and is limited to
+536,870,912 bytes under the same failure and recovery contract.
+
 Two further rules come from how the artifact is validated and consumed:
 
 - **gzip specifically** — a plain `.tar`, `.tar.xz`, or `.tar.zst` is rejected
   (`kernel artifact is not a gzip-compressed combined tar`).
-- **put `boot/vmlinuz` first** — validation scans at most the first 128 MiB of *decompressed*
-  output (a gzip-bomb guard), so the `lib/modules` header must appear within that window. The
-  boot image is small and listed first in the recipe below, so the module tree is reached
-  immediately; a tar that front-loads a very large file before `lib/modules` can fail with
-  `kernel combined tar has no lib/modules member within the scan bound`.
+- **put `boot/vmlinuz` first** — the format preflight scans at most the first 128 MiB of
+  decompressed output, so the first `lib/modules` header must appear within that window. The full
+  evidence pass still validates and bounds the entire archive before publishing the generation.
 - **drop the back-reference symlinks** — `make modules_install` plants `build` and `source`
   symlinks under `lib/modules/<release>/` that point at absolute paths in your build tree.
   Exclude them; left in, they become dangling links inside the guest.
