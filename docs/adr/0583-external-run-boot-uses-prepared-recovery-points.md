@@ -46,11 +46,13 @@ The version-1 module obligation has one mode: `system-root-tree`. It names the k
 the manifest digest of the bundle's exact `lib/modules/<release>/` tree. Materialization stages that
 tree without changing the System. Recovery preparation records whether the release-qualified target
 is absent or saves its exact prior tree behind the opaque recovery reference. Activation atomically
-publishes the staged tree at `/lib/modules/<release>` before booting it. An exact existing tree may
-be reused; a different tree for the same release is replaced, not rejected. Recovery restores the
-saved tree or removes the new tree when the target was previously absent. This preserves same-release
-kernel iteration and prevents a terminal Run from leaving its modules selected by a later GRUB boot.
-A provider unable to stage, replace, verify, and restore the tree rejects before recovery
+stops the domain through the provider control plane, verifies it inactive, then publishes the staged
+tree at `/lib/modules/<release>` before applying and booting the target definition. Failure to reach
+inactive leaves `prepared` unchanged and mutates neither tree nor definition. An exact existing tree
+may be reused; a different tree for the same release is replaced, not rejected. Recovery restores
+the saved tree or removes the new tree when the target was previously absent. This preserves
+same-release kernel iteration and prevents either running kernel from observing the other's modules.
+A provider unable to quiesce, stage, replace, verify, and restore the tree rejects before recovery
 preparation. “Preserve the disk overlay” below means keep the same attached overlay and device
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
@@ -69,19 +71,21 @@ Before changing boot state, the provider prepares both sides of the compare-and-
 durable recovery point representing the exact current persistent boot configuration and prior module
 tree, renders but does not apply the target configuration, and returns provider-computed source- and
 target-state identities plus an opaque recovery reference. A state identity covers both the boot
-definition and the release-qualified module-tree identity. Libvirt definition identity is not a hash
-of XML bytes. Version 1 is canonical JSON over a closed semantic projection of persistent/inactive
-XML: domain identity, machine/CPU/memory/vCPU, boot mode and kernel/initrd/cmdline, every disk source
-and target, every interface source/model/MAC, serial/console/guest-agent devices, gdbstub and SSH
-forward arguments, and KDIVE ownership metadata. Object keys sort, device order follows stable
-device identity, and argument order is preserved. Namespace prefixes, formatting, libvirt-added
-aliases/addresses, and other runtime/default expansion are excluded; adding or excluding another
-field requires a new projection version. The renderer produces the target projection directly, and
-observation parses the inactive XML into the same shape, so libvirt byte normalization cannot change
-identity while every boot-relevant field remains compared. Live XML is never an identity input.
-Remote's recovery point stores the exact inactive disk/GRUB definition behind the provider seam, so
-shared state never interprets its XML. Deterministic identifiers make repeated prepare calls for the
-same System, Run, plan identity, and source state return the same point and target identity.
+definition and the release-qualified module-tree identity. Libvirt definition identity is a
+versioned two-part comparison over persistent/inactive XML. The **preserved digest** canonicalizes
+the entire inactive definition after removing only the provider-owned external-boot fields
+`/domain/os/kernel`, `/domain/os/initrd`, and `/domain/os/cmdline`; no other subtree, attribute,
+alias, address, device, firmware field, backing/auth/encryption field, or QEMU argument is excluded.
+The **boot projection** is canonical JSON for those three fields, distinguishing absence from an
+empty value. XML canonicalization removes syntax-only whitespace, attribute order, and namespace
+prefix choices but preserves element order and content. Preparation reads the source inactive XML,
+computes its preserved digest, clones it, changes only the three boot fields, and computes the target
+boot projection. Observation repeats the same split. A changed preserved digest is always a third
+state; source or target requires both the shared preserved digest and the matching boot projection.
+Live XML is never an identity input. Remote's recovery point stores the exact inactive disk/GRUB
+definition behind the provider seam, so shared state never interprets its XML. Deterministic
+identifiers make repeated prepare calls for the same System, Run, plan identity, and source state
+return the same point and target identity.
 
 Core persists the plan identity, materialization reference, recovery reference, both provider state
 identities, and activation state before calling activate. The state machine is
@@ -101,18 +105,21 @@ of overwriting provider state. The portable plan identity is never compared dire
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
 
-Recovery restores a usable baseline, not only persistent bytes. When an active Run becomes terminal
+Recovery restores a usable disk/GRUB baseline, not only persistent bytes. When an active Run becomes terminal
 and the System remains reusable, terminalization enters `recovering`, stops the domain through the
 provider control plane, verifies it is inactive, restores the prior module tree and persistent
-definition, boots that definition, and requires a fresh-boot readiness check plus the recorded
-baseline-kernel identity before committing `recovered`. A recovery retry repeats that sequence
-idempotently; concurrent terminalization serializes under the System lock. The recovery point and
-materialized artifacts cannot be deleted before `recovered`. System teardown instead destroys the
-domain before cleaning the recovery point and materialization, because a definition that will be
-destroyed need not be restored or rebooted. Artifacts remain while the Run can retry, are deleted
-idempotently on those ordered paths, and are swept by deterministic ownership after worker death. A
-partial materialization is either atomically published under its final identity or discoverable as
-an owned partial and removed; it is never activated.
+definition, boots that definition, and requires a fresh boot plus the existing System readiness
+contract before committing `recovered`. The exact GRUB-selected kernel is guest bootloader state and
+is not knowable from an inactive domain definition, so it is not an identity gate; a recovery that
+cannot reach readiness after bounded retries remains `recovering` for operator action and retains
+all evidence. A recovery retry repeats the sequence idempotently; concurrent terminalization
+serializes under the System lock. The recovery point and materialized artifacts cannot be deleted
+before `recovered`. System teardown instead destroys the domain before cleaning the recovery point
+and materialization, because a definition that will be destroyed need not be restored or rebooted.
+Artifacts remain while the Run can retry, are deleted idempotently on those ordered paths, and are
+swept by deterministic ownership after worker death. A partial materialization is either atomically
+published under its final identity or discoverable as an owned partial and removed; it is never
+activated.
 
 `prepared -> abandoned` is the pre-activation disposal path. Run terminalization or reconciliation
 may take it only after retries are no longer possible and provider observation still equals the
@@ -149,10 +156,10 @@ HTTP/iPXE.
 - A provider-side change outside KDIVE's System lock is preserved as `recovery_conflict`. Recovery
   is therefore fail-closed and may require an operator to choose between the recorded point and the
   newly observed definition.
-- Libvirt state identity describes a versioned semantic projection of persistent/inactive XML plus
-  module-tree content, not XML bytes or live XML. Separate readiness and kernel-identity proofs remain
-  required after starting either target; persistent state equality proves configuration, not a
-  successful boot.
+- Libvirt state identity compares the canonical full preserved inactive definition plus the three
+  external-boot fields and module-tree content, never live XML. External boot still requires the
+  running-kernel identity proof; GRUB recovery requires fresh-boot readiness because its bootloader
+  selection is not part of the inactive definition.
 - ADR-0082's in-guest GRUB install remains the provisioning/recovery mechanism but no longer defines
   iterative remote Run boot once this decision is implemented.
 

@@ -199,11 +199,13 @@ the existing object untouched for investigation.
 
 Materialization stages the module tree but does not change the System. Recovery preparation records
 the prior `/lib/modules/<kernel_release>` tree or its absence. Activation atomically publishes the
-exact staged tree before booting; an exact tree may be reused and a different same-release tree is
-replaced. Recovery restores the prior tree or removes the Run's tree when none existed. Local-libvirt
-adapts its existing injection to this ordering. Remote-libvirt installs the same tree without
-rebuilding the initrd. A provider unable to stage, replace, verify, and restore it rejects before
-recovery preparation.
+exact staged tree only after stopping the domain and verifying it inactive, then applies and boots
+the target definition. Failure to quiesce leaves `prepared` and changes nothing. An exact tree may be
+reused and a different same-release tree is replaced. Recovery performs the same offline boundary,
+then restores the prior tree or removes the Run's tree when none existed. Local-libvirt adapts its
+existing injection to this ordering. Remote-libvirt installs the same tree without rebuilding the
+initrd. A provider unable to quiesce, stage, replace, verify, and restore it rejects before recovery
+preparation.
 
 Remote artifacts use deterministic per-System/per-Run names in an operator-configured directory
 pool. The provider resolves host paths internally after upload; no path crosses the shared seam.
@@ -257,21 +259,24 @@ activation-owned partial and moves to `recovering`. An absent, unreadable, or th
 remains retryable in `recovering` and never declares the System ready.
 
 Remote recovery records the exact persistent/inactive domain definition before external activation.
-Definition identity version 1 is canonical JSON over domain identity, machine/CPU/memory/vCPU, boot
-mode and kernel/initrd/cmdline, all disk and network identities, serial/console/guest-agent devices,
-gdbstub and SSH-forward arguments, and KDIVE metadata. Keys and devices use stable semantic order;
-argument order is retained. XML formatting, namespace prefixes, libvirt-added aliases/addresses, and
-runtime/default expansion are excluded. The renderer emits this projection directly and observation
-parses inactive XML into it; a field-set change requires a new version. Live XML is excluded. The
-provider validates that the source belongs to the System and represents disk/GRUB boot before
-storing it. Restore uses the recorded source with compare-and-set against target or activation-owned
-partial state.
+Definition identity version 1 splits that XML into a preserved digest and boot projection. The
+preserved digest is canonical XML of the entire definition after removing only `/domain/os/kernel`,
+`/domain/os/initrd`, and `/domain/os/cmdline`; aliases, addresses, devices, controllers, firmware,
+storage attributes, and QEMU arguments remain. The boot projection is canonical JSON for those three
+fields and distinguishes absent from empty. Canonicalization removes only syntax-level whitespace,
+attribute order, and namespace-prefix choice while preserving element order and content. Prepare
+clones the observed source and changes only those fields; observation repeats the same split. Live
+XML is excluded. The provider validates that the source belongs to the System and represents
+disk/GRUB boot before storing it. Restore uses the recorded source with compare-and-set against
+target or activation-owned partial state.
 
 When a reusable System recovers from `active`, the provider stops the domain, verifies it inactive,
 restores the prior module tree and persistent definition, boots that definition, and proves both a
-fresh boot and the recorded baseline-kernel identity before committing `recovered`. A retry repeats
-the sequence. System teardown destroys without restore/reboot. The record survives until the ordered
-cleanup path completes, so configuration drift cannot rewrite the recovery target.
+fresh boot and the existing System readiness contract before committing `recovered`. GRUB's selected
+kernel is not derivable from inactive domain XML and is not an identity gate. Failure to reach
+readiness after bounded retries remains `recovering` for operator action with evidence retained. A
+retry repeats the sequence. System teardown destroys without restore/reboot. The record survives
+until the ordered cleanup path completes, so configuration drift cannot rewrite the recovery target.
 
 ## Failure taxonomy
 
@@ -332,8 +337,9 @@ Those are existing deployment trust or excluded provider concerns.
   commits, including prepared abandonment, same-release module replacement/restoration, a running
   domain after worker loss, duplicate delivery, and concurrent retry under the System lock.
 - Provider tests prove local behavior remains unchanged and remote upload, path resolution, XML
-  preservation, semantic projection across libvirt normalization, compare-and-set activation, exact
-  offline module restoration, recovered-baseline boot proof, idempotent cleanup, and reaping.
+  preservation, full preserved-definition comparison across XML syntax normalization,
+  compare-and-set activation, exact offline module restoration, recovered GRUB readiness,
+  idempotent cleanup, and reaping.
 - Remote `live_vm` boots the exact paired artifacts, verifies extracted-kernel identity, exercises a
   forced activation failure, restores GRUB, and proves the System remains usable.
 
