@@ -31,7 +31,9 @@ from kdive.services.runs.admission import RunCreateRequest, create_run
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
     CompleteBuildExpiredWindowError,
-    CompleteBuildFinalizer,
+)
+from kdive.services.runs.complete_build import (
+    CompleteBuildFinalizer as _CompleteBuildFinalizer,
 )
 from kdive.services.runs.steps import BuildStepResult
 from tests.clock import STORE_MTIME
@@ -51,6 +53,15 @@ from tests.mcp.systems_support import provider_resolver
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))
 )
+
+
+def _unexpected_store() -> NoReturn:
+    raise AssertionError("this test did not inject an object store")
+
+
+def CompleteBuildFinalizer(**kwargs: Any) -> _CompleteBuildFinalizer:
+    kwargs.setdefault("object_store_factory", _unexpected_store)
+    return _CompleteBuildFinalizer(**kwargs)
 
 
 def test_chunked_content_identity_ignores_advisory_whole_hash_but_pins_ordered_chunks() -> None:
@@ -225,7 +236,7 @@ async def _record_build_step(
 async def _complete_config_error(
     pool: AsyncConnectionPool,
     run_id: Any,
-    finalizer: CompleteBuildFinalizer,
+    finalizer: _CompleteBuildFinalizer,
 ) -> CompleteBuildConfigurationError:
     run = await run_by_id(pool, run_id)
     async with pool.connection() as conn:
@@ -239,7 +250,7 @@ async def _complete_config_error(
 async def _complete_expired_window_error(
     pool: AsyncConnectionPool,
     run_id: Any,
-    finalizer: CompleteBuildFinalizer,
+    finalizer: _CompleteBuildFinalizer,
 ) -> CompleteBuildExpiredWindowError:
     run = await run_by_id(pool, run_id)
     async with pool.connection() as conn:
@@ -529,7 +540,7 @@ def test_complete_build_finalizer_returns_recorded_success_after_reassembly_fail
 async def _complete_swallowing_failure(
     pool: AsyncConnectionPool,
     run_id: Any,
-    finalizer: CompleteBuildFinalizer,
+    finalizer: _CompleteBuildFinalizer,
 ) -> None:
     """Finalize, swallowing the failure *inside* the connection block as the MCP handler does.
 

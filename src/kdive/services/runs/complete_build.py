@@ -39,7 +39,6 @@ from kdive.serialization import JsonValue
 from kdive.services.runs.build_catalog import BuildPublication, publish_or_reuse_build
 from kdive.services.runs.steps import BuildStepResult
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
-from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
@@ -140,8 +139,8 @@ class _CompleteBuildAlreadyRecorded(Exception):
 class CompleteBuildFinalizer:
     """Finalize validated external-build uploads for a Run."""
 
+    object_store_factory: ObjectStoreFactory
     validate_complete_build: CompleteBuildValidation | None = None
-    object_store_factory: ObjectStoreFactory = object_store_from_env
 
     async def complete(
         self,
