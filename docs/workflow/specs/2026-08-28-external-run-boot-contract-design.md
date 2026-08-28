@@ -202,8 +202,22 @@ root, matching the existing safe extraction filter; every other absolute or esca
 rejected. It then sorts relative UTF-8 paths by encoded bytes and rejects absolute paths, `.`/`..`,
 duplicate normalized paths, hard links, devices, sockets, and FIFOs. Each directory, regular file,
 or contained relative symlink records its
-normalized path, type, permission bits, and regular-file size/SHA-256 or symlink target; uid, gid,
-and timestamps are excluded. This digest covers validated bundle input.
+normalized path, type, normalized permission bits, and regular-file size/SHA-256 or symlink target;
+uid, gid, and timestamps are excluded. This digest covers validated bundle input.
+
+The source hash input is ASCII `kdive-module-source-manifest-v1`, NUL, then compact UTF-8 JSON
+`{"entries":[...],"schema":"module-source-manifest-v1"}` with keys sorted by Unicode code point,
+entries in encoded-path order, standard JSON escaping, no whitespace or trailing newline, JSON
+integer sizes, four-character lowercase octal modes, and lowercase `sha256:<hex>` digests. Strings
+must already be NFC; non-NFC and invalid UTF-8 are rejected. Empty input uses an empty entries array.
+
+Source metadata is normalized before staging to uid/gid `0`; `0755` directories; `0755` regular
+files with any source execute bit and `0644` otherwise; and `0777` symlinks. Source ACLs and xattrs
+are discarded. After the provider applies its configured label policy, `module-installed-tree-v1`
+uses prefix `kdive-module-installed-tree-v1` and the same JSON rules, adding observed uid/gid and a
+boolean `xattrs_supported` plus a sorted xattrs object with unpadded-base64 values. It includes POSIX
+ACL and `security.*` xattrs; absence and unsupported-xattr filesystems are distinct values. Recovery
+preserves and verifies this installed metadata.
 
 Materialization stages the module tree, runs required indexing, and computes
 `installed-module-tree-v1` with the same walker over the final tree. Generated files such as
@@ -357,8 +371,8 @@ Those are existing deployment trust or excluded provider concerns.
   ownership, architecture/release/root conflicts, and a test-only non-libvirt runtime.
 - Archive tests cover duplicates, links, traversal, malformed headers, missing/multiple vmlinuz,
   wrong modules release, expansion bounds, deterministic `build`/`source` link omission,
-  source-manifest normalization, generated-index installed identity, digest mismatch, and partial
-  cleanup.
+  NFC rejection, canonical-byte test vectors, metadata normalization, ACL/xattr drift,
+  generated-index installed identity, digest mismatch, and partial cleanup.
 - State-machine and adversarial tests fault every boundary before/after provider calls and database
   commits, including worker loss during offline prepare, restoration of prior power state,
   prepared abandonment, same-release module replacement/restoration, a running domain after worker

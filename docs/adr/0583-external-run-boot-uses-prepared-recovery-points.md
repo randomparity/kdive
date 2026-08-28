@@ -48,12 +48,33 @@ manifest applies the existing safe extraction normalization first: absolute syml
 `build` or `source` at the release root are omitted, while every other absolute or escaping link is
 rejected. It then sorts relative UTF-8 paths by encoded bytes; rejects absolute paths, `.`/`..`,
 duplicates, hard links, devices, sockets, and FIFOs; and admits only directories, regular files, and
-contained relative symlinks. Each entry records normalized path, type, permission bits, and
-regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
+contained relative symlinks. Each entry records normalized path, type, normalized permission bits,
+and regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
 Materialization validates that source manifest, stages the tree, runs required indexing, and computes
 `installed-module-tree-v1` with the same walker over the final tree. Generated indexes such as
 `modules.dep` belong to installed identity, not source identity. The provider returns the installed
 digest, and target state identity binds it.
+
+Both manifest hashes have exact bytes. The envelope is compact JSON with UTF-8 NFC strings, keys
+sorted by Unicode code point, arrays in the path order above, JSON integers for sizes and uid/gid,
+four-character lowercase octal strings for modes, lowercase `sha256:<hex>` content digests, standard
+JSON escaping, no insignificant whitespace, and no trailing newline. Paths and symlink targets that
+are not already NFC are rejected rather than normalized into another filename. The source envelope
+is `{"entries":[...],"schema":"module-source-manifest-v1"}` and its hash input is the ASCII
+prefix `kdive-module-source-manifest-v1` plus NUL plus the JSON bytes. The installed envelope uses
+schema/prefix `module-installed-tree-v1` / `kdive-module-installed-tree-v1` and additionally records
+uid, gid, `xattrs_supported`, and an xattrs object whose sorted names map to unpadded base64 values.
+An empty tree is an empty `entries` array, not absent input.
+
+Before staging, providers normalize source metadata: uid/gid become `0`, directories `0755`, regular
+files `0755` when any execute bit was present and `0644` otherwise, and symlinks `0777`; ACL and
+xattr inputs are discarded. After publication the provider applies its configured filesystem label
+policy, then computes installed identity from lstat ownership/mode and every resulting xattr,
+including POSIX ACL and `security.*` values; absence and unsupported-xattr filesystems are distinct
+recorded states through `xattrs_supported`. Recovery copies preserve those installed fields and
+verifies the same installed manifest after restore. Thus portable source identity ignores host
+metadata while provider-state CAS
+detects metadata drift that can change module usability.
 
 Materialization does not change the System. Core commits `preparing` before the provider quiesces the
 domain. A deterministic provider prepare journal records the source definition and prior power state,
