@@ -904,6 +904,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Complete internal boundary arguments
 - Align authoritative architecture status
 - Preserve accepted ADR text
+- Refresh project landing page
 
 ### Fixed
 
