@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 import tarfile
@@ -225,6 +226,59 @@ def _validate_kernel_blob(blob: bytes, *, arch: str = "x86_64") -> None:
     )
     assert store.range_calls
     assert {call[3] for call in store.range_calls} == {"test-version"}
+
+
+def test_validation_returns_server_owned_external_boot_evidence() -> None:
+    initrd = b"initrd-bytes"
+    blobs = {"k": _KERNEL_TAR, "i": initrd}
+    heads = {
+        key: HeadResult(len(blob), "csum", "e", STORE_MTIME, f"{key}-version")
+        for key, blob in blobs.items()
+    }
+    result = validate_external_artifacts(
+        _FakeStore(blobs, heads),
+        manifest=[
+            ManifestEntry("kernel", "csum", len(_KERNEL_TAR)),
+            ManifestEntry("initrd", "csum", len(initrd)),
+        ],
+        keys={"kernel": "k", "initrd": "i"},
+        declared_build_id=None,
+    )
+
+    evidence = result.external_boot_evidence
+    assert evidence is not None
+    assert evidence["schema"] == "external-boot-evidence-v1"
+    assert evidence["bundle_sha256"] == "sha256:" + hashlib.sha256(_KERNEL_TAR).hexdigest()
+    assert evidence["initrd"] == {
+        "sha256": "sha256:" + hashlib.sha256(initrd).hexdigest(),
+        "size_bytes": len(initrd),
+    }
+    assert evidence["release"] == "6.9.0"
+    assert evidence["vmlinuz_sha256"] == "sha256:" + hashlib.sha256(_BZIMAGE_BODY).hexdigest()
+    assert evidence["module_member_count"] == 2
+
+
+def test_external_boot_scan_rejects_normalized_boot_alias() -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "./boot/vmlinuz", _BZIMAGE_BODY)
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    with pytest.raises(CategorizedError, match="noncanonical member path"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_scan_accepts_canonical_parent_directories() -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name in ("lib", "lib/modules", "lib/modules/6.9.0"):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+        _tar_add(tar, "boot/vmlinuz", _BZIMAGE_BODY)
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    _validate_kernel_blob(buf.getvalue())
 
 
 def test_non_gzip_kernel_is_build_failure() -> None:

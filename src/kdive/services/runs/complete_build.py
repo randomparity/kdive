@@ -238,6 +238,7 @@ class CompleteBuildFinalizer:
             chunked=prepared.has_chunks,
             chunk_heads=chunk_heads,
             window_deadline=window_deadline,
+            external_boot_evidence=validated.external_boot_evidence,
         )
 
     def _validate_complete_build(
@@ -304,6 +305,7 @@ class _ExternalBuildFinalization:
     chunked: bool
     chunk_heads: dict[str, HeadResult]
     window_deadline: datetime
+    external_boot_evidence: dict[str, JsonValue] | None
     """The deadline of the manifest these artifacts were validated against — the window's identity.
 
     A manifest row carrying a different deadline at commit time is one a concurrent re-mint
@@ -512,6 +514,7 @@ async def _finalize_external_build(
             result=candidate,
             heads=heads,
             verified_identities=finalization.verified_identities,
+            external_boot_evidence=finalization.external_boot_evidence,
             retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
         )
         result = _published_result(publication)

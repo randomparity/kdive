@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
+import posixpath
 import struct
 import tarfile
+import unicodedata
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import IO, Literal, Protocol, cast
 
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads.chunks import HeadStore
@@ -45,6 +49,11 @@ _MODULE_SUFFIXES = (".ko", ".ko.xz", ".ko.gz", ".ko.zst")
 # gigabytes of tar) is stopped here rather than decompressing unbounded.
 _KERNEL_TAR_SCAN_MAX_BYTES = 128 * 1024 * 1024
 _RANGE_CHUNK_BYTES = 4 * 1024 * 1024
+_EXTERNAL_BOOT_INITRD_MAX_BYTES = 512 * 1024 * 1024
+_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
+_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
+_EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
+_SHA256_PREFIX = "sha256:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +363,241 @@ def validate_external_artifacts(
         debuginfo_ref=keys.get("vmlinux", ""),
         build_id=build_id,
     )
-    return ValidatedUpload(output=output, heads=heads)
+    evidence = _external_boot_evidence(store, keys=keys, heads=heads, arch=arch, build_id=build_id)
+    return ValidatedUpload(output=output, heads=heads, external_boot_evidence=evidence)
+
+
+def _external_boot_evidence(
+    store: ValidatorStore,
+    *,
+    keys: Mapping[str, str],
+    heads: Mapping[str, HeadResult],
+    arch: str,
+    build_id: str,
+) -> dict[str, JsonValue]:
+    """Produce server-owned, version-pinned external-boot evidence (ADR-0583)."""
+    bundle_head = heads["kernel"]
+    archive = _scan_external_boot_archive(store, keys["kernel"], bundle_head.size_bytes)
+    initrd: dict[str, JsonValue] | None = None
+    initrd_head = heads.get("initrd")
+    if initrd_head is not None:
+        if initrd_head.size_bytes > _EXTERNAL_BOOT_INITRD_MAX_BYTES:
+            raise _build_failure(
+                "initrd exceeds the external-boot byte limit; rebuild a smaller initrd",
+                name="initrd",
+                max_bytes=_EXTERNAL_BOOT_INITRD_MAX_BYTES,
+            )
+        initrd = {
+            "sha256": _digest_object(store, keys["initrd"], initrd_head.size_bytes),
+            "size_bytes": initrd_head.size_bytes,
+        }
+    return {
+        "schema": "external-boot-evidence-v1",
+        "bundle_sha256": _digest_object(store, keys["kernel"], bundle_head.size_bytes),
+        "initrd": initrd,
+        "archive_member_count": archive["archive_member_count"],
+        "archive_uncompressed_bytes": archive["archive_uncompressed_bytes"],
+        "vmlinuz_sha256": archive["vmlinuz_sha256"],
+        "vmlinuz_size_bytes": archive["vmlinuz_size_bytes"],
+        "decoded_kernel_size_bytes": archive["vmlinuz_size_bytes"],
+        "elf_metadata_bytes": 0,
+        "architecture": arch,
+        "release": archive["release"],
+        "gnu_build_id": build_id,
+        "gnu_build_id_size_bytes": len(build_id) // 2,
+        "module_source_manifest": archive["module_source_manifest"],
+        "module_member_count": archive["module_member_count"],
+        "module_uncompressed_bytes": archive["module_uncompressed_bytes"],
+    }
+
+
+def _digest_object(store: ValidatorStore, key: str, size_bytes: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size_bytes:
+        chunk = store.get_range(
+            key, start=offset, length=min(_RANGE_CHUNK_BYTES, size_bytes - offset)
+        )
+        if not chunk:
+            raise _build_failure("artifact ended before its recorded size", key=key)
+        digest.update(chunk)
+        offset += len(chunk)
+    return _SHA256_PREFIX + digest.hexdigest()
+
+
+class _RangedReader:
+    def __init__(self, store: ValidatorStore, key: str, size: int) -> None:
+        self._store = store
+        self._key = key
+        self._size = size
+        self._offset = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self._offset >= self._size:
+            return b""
+        length = self._size - self._offset if size < 0 else min(size, self._size - self._offset)
+        data = self._store.get_range(self._key, start=self._offset, length=length)
+        if not data:
+            return b""
+        self._offset += len(data)
+        return data
+
+
+def _scan_external_boot_archive(
+    store: ValidatorStore, key: str, size_bytes: int
+) -> dict[str, JsonValue]:
+    entries: list[dict[str, JsonValue]] = []
+    releases: set[str] = set()
+    names: set[str] = set()
+    boot_digest: str | None = None
+    boot_size = 0
+    archive_bytes = 0
+    module_bytes = 0
+    module_members = 0
+    member_count = 0
+    reader = _RangedReader(store, key, size_bytes)
+    try:
+        with tarfile.open(fileobj=cast("IO[bytes]", reader), mode="r|gz") as archive:
+            for member_count, member in enumerate(archive, start=1):
+                if member_count > _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS:
+                    raise _build_failure(
+                        "kernel bundle exceeds the external-boot member limit",
+                        max_members=_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS,
+                    )
+                path = _canonical_tar_path(member)
+                if path in names:
+                    raise _build_failure("kernel bundle contains a duplicate member", path=path)
+                names.add(path)
+                if member.isreg():
+                    archive_bytes += member.size
+                    if archive_bytes > _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES:
+                        raise _build_failure(
+                            "kernel bundle exceeds the external-boot uncompressed byte limit",
+                            max_bytes=_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES,
+                        )
+                if path == _KERNEL_BOOT_MEMBER:
+                    if not member.isreg() or boot_digest is not None:
+                        raise _build_failure("boot/vmlinuz must be exactly one regular file")
+                    if member.size > _EXTERNAL_BOOT_MEMBER_MAX_BYTES:
+                        raise _build_failure(
+                            "boot/vmlinuz exceeds the external-boot byte limit",
+                            max_bytes=_EXTERNAL_BOOT_MEMBER_MAX_BYTES,
+                        )
+                    boot_digest = _digest_tar_member(archive, member)
+                    boot_size = member.size
+                    continue
+                module_path = _module_member_path(path, member)
+                if module_path is None:
+                    continue
+                release, relative = module_path
+                releases.add(release)
+                if member.isreg():
+                    module_bytes += member.size
+                entry = _module_manifest_entry(archive, member, relative)
+                if entry is not None:
+                    entries.append(entry)
+                    module_members += 1
+    except (OSError, tarfile.TarError) as exc:
+        raise _build_failure("kernel bundle is not a complete readable gzip tar") from exc
+    if boot_digest is None:
+        raise _build_failure("kernel bundle has no regular boot/vmlinuz member")
+    if len(releases) != 1 or not entries:
+        raise _build_failure("kernel bundle must contain exactly one lib/modules/<release> tree")
+    entries.sort(key=lambda entry: str(entry["path"]).encode())
+    document = {"entries": entries, "schema": "module-source-manifest-v1"}
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    manifest = hashlib.sha256(b"kdive-module-source-manifest-v1\0" + encoded.encode()).hexdigest()
+    return {
+        "archive_member_count": member_count,
+        "archive_uncompressed_bytes": archive_bytes,
+        "vmlinuz_sha256": boot_digest,
+        "vmlinuz_size_bytes": boot_size,
+        "release": next(iter(releases)),
+        "module_source_manifest": _SHA256_PREFIX + manifest,
+        "module_member_count": module_members,
+        "module_uncompressed_bytes": module_bytes,
+    }
+
+
+def _canonical_tar_path(member: tarfile.TarInfo) -> str:
+    value = member.name
+    if member.isdir() and value.endswith("/"):
+        value = value[:-1]
+    if not value or value.startswith(("/", "./")) or "\\" in value:
+        raise _build_failure("kernel bundle contains a noncanonical member path", path=value)
+    normalized = posixpath.normpath(value)
+    if normalized != value or normalized in {".", ".."} or normalized.startswith("../"):
+        raise _build_failure("kernel bundle contains a noncanonical member path", path=value)
+    if unicodedata.normalize("NFC", value) != value:
+        raise _build_failure("kernel bundle member paths must be NFC", path=value)
+    return value
+
+
+def _module_member_path(path: str, member: tarfile.TarInfo) -> tuple[str, str] | None:
+    if path in {"lib", "lib/modules"}:
+        if member.isdir():
+            return None
+        raise _build_failure("kernel bundle module ancestors must be directories", path=path)
+    if not path.startswith(_MODULES_MEMBER_PREFIX):
+        raise _build_failure("kernel bundle contains an unrelated member", path=path)
+    remainder = path[len(_MODULES_MEMBER_PREFIX) :]
+    release, separator, relative = remainder.partition("/")
+    if release and not separator and member.isdir():
+        return None
+    if not release or not separator or not relative:
+        raise _build_failure("kernel bundle has an invalid module-tree member", path=path)
+    return release, relative
+
+
+def _module_manifest_entry(
+    archive: tarfile.TarFile, member: tarfile.TarInfo, relative: str
+) -> dict[str, JsonValue] | None:
+    mode = member.mode & 0o777
+    if member.isdir():
+        return {"mode": "0755", "path": relative, "type": "dir"}
+    if member.isreg():
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise _build_failure("module file cannot be read", path=relative)
+        digest = hashlib.sha256()
+        remaining = member.size
+        while remaining:
+            chunk = extracted.read(min(_RANGE_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise _build_failure("module file ended before its recorded size", path=relative)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        return {
+            "mode": "0755" if mode & 0o111 else "0644",
+            "path": relative,
+            "sha256": _SHA256_PREFIX + digest.hexdigest(),
+            "size": member.size,
+            "type": "file",
+        }
+    if member.issym():
+        target = member.linkname
+        if relative in {"build", "source"} and target.startswith("/"):
+            return None
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(relative), target))
+        if target.startswith("/") or resolved == ".." or resolved.startswith("../"):
+            raise _build_failure("module symlink escapes its release tree", path=relative)
+        return {"mode": "0777", "path": relative, "target": target, "type": "symlink"}
+    raise _build_failure("kernel bundle contains an unsupported module member", path=relative)
+
+
+def _digest_tar_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+    extracted = archive.extractfile(member)
+    if extracted is None:
+        raise _build_failure("boot/vmlinuz cannot be read")
+    digest = hashlib.sha256()
+    remaining = member.size
+    while remaining:
+        chunk = extracted.read(min(_RANGE_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise _build_failure("boot/vmlinuz ended before its recorded size")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return _SHA256_PREFIX + digest.hexdigest()
 
 
 def extract_build_id_ranged(store: ValidatorStore, key: str, *, max_size: int) -> str:
