@@ -48,17 +48,22 @@ rejected. An initrd is valid only as part of this set; it has no independent act
 Materialization must extract
 `boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
+provider fetches the exact recorded object versions and stream-verifies the complete bundle and
+optional initrd bytes against their plan digests before extraction, publication, or reuse. The
 compressed bundle is never itself a bootable kernel.
 
 Successful materialization produces an immutable `external-boot-materialization-v1` record. It uses
 the same serializer and ASCII domain prefix `kdive-external-boot-materialization-v1` plus NUL. It has
 exactly: `schema`; `architecture`; NFC `provider_kind`; `ownership` with canonical UUID `system_id`
 and `run_id`; `plan_identity`; `extracted_vmlinuz_sha256`; `source_module_manifest`;
-`installed_module_tree`; `kernel_observation` with architecture, release, and lowercase even-length
+`installed_module_tree`; `verified_bundle_sha256`; `verified_initrd_sha256`, null exactly when the
+plan initrd is null; `kernel_observation` with architecture, release, and lowercase even-length
 GNU `build_id` hex; and `artifacts`, whose `kernel` and `modules` each contain one deterministic
 NFC opaque `ref` and whose `initrd` is null or contains one such `ref`. Core persists the complete
 record, not only the references. Repeated materialization for a plan must reproduce every field; an
-absent, unreadable, or different field fails closed and is neither reused nor activated.
+absent, unreadable, or different field fails closed and is neither reused nor activated. Observation
+of a deterministic reference re-hashes its stored bytes; a same reference with different bytes is a
+conflict, not a cache hit.
 
 The materializer also extracts the kernel's architecture, release, and GNU build ID from the
 extracted vmlinuz and binds that tuple to its byte digest in the materialization record. Missing or
@@ -69,6 +74,20 @@ non-libvirt test provider returns the same value type. Unavailable evidence is r
 readiness deadline; a mismatch is `BOOT_FAILURE` and triggers recovery. Readiness, boot ID, and
 persistent definition identity cannot substitute for this comparison.
 
+When core commits `activating`, it also persists `server_time` and an absolute UTC RFC 3339
+`activation_readiness_deadline`, computed once from operator-configured
+`activation_readiness_timeout_seconds`. Unit is seconds and scope is this System/Run activation.
+Every worker retry reuses that deadline. Unavailable running-kernel evidence or readiness before it
+is retryable; reaching it without both proofs records `BOOT_FAILURE`, transitions to `recovering`,
+and suggests `jobs.wait` and `runs.get` while recovery runs.
+
+The first `recovering` commit likewise persists `server_time` and an absolute
+`recovery_readiness_deadline` from `recovery_readiness_timeout_seconds`, scoped to this recovery and
+never extended by worker retry. Failure to restore and reach fresh readiness by that instant records
+`READINESS_FAILURE`, transitions to `recovery_failed`, retains the recovery evidence and reservation,
+and suggests the administrator call `systems.teardown`. System teardown is the only exit from
+`recovery_failed`.
+
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
@@ -76,12 +95,12 @@ These normative all-zero vectors also pin every key and absence representation:
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
 `sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44` and
-`sha256:3d0cef743bc2b4614944cfc38e8aac7710ac50ebf74dab339d3c31dce05d5c4d`.
+`sha256:219a1a50c28e3423e11c8da1444000e38e0e3dacdef974b575d754d1c3a2f918`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
@@ -263,6 +282,7 @@ Core persists the plan identity and materialization before prepare, then the rec
 both provider state identities when preparation completes. The state machine is
 `preparing -> prepared -> activating -> active`, with
 `activating|active -> recovering -> recovered`,
+`recovering -> recovery_failed`,
 `preparing|prepared -> abandoned`,
 `preparing|prepared|activating|active|recovering -> recovery_conflict`, and
 `recovery_conflict -> recovering`,
@@ -273,7 +293,9 @@ or materialization/recovery references belonging to another System, Run, or plan
 record after worker loss, reconciliation compares the persistent definition and module-tree
 identities with both recorded states. The complete target state completes `active`; the complete
 source state completes `recovered`. A mixed state whose every component equals its recorded source
-or target component is an activation-owned partial and may be restored to source. Any absent,
+or target component may be restored to source only when the activation write-ahead journal recorded
+the expected identity before each target write and its result afterward, proving every target-valued
+component belongs to this activation. An unproven mixture enters `recovery_conflict`. Any absent,
 unreadable, or third component identity enters `recovery_conflict` for operator resolution instead
 of overwriting provider state. The portable plan identity is never compared directly with provider
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
