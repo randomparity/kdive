@@ -941,6 +941,10 @@ def test_install_refuses_unprivileged_user(tmp_path: Path) -> None:
 
 def test_docker_and_ansible_generate_after_final_interpreter() -> None:
     dockerfile = (_ROOT / "Dockerfile").read_text()
+    assert (
+        "COPY --from=builder /app/scripts/generate/build-capture-bootstrap-manifest.py "
+        "/usr/local/libexec/build-capture-bootstrap-manifest.py"
+    ) in dockerfile
     build = dockerfile.index("build-capture-bootstrap-manifest.py build")
     final = dockerfile.index("FROM python:3.14.6-slim-bookworm", dockerfile.index("AS builder") + 1)
     user = dockerfile.index("USER kdive")
