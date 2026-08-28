@@ -19,7 +19,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
 
-TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
+TERMINAL_INVESTIGATION_STATES = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 TITLE_MAX = 200
 DESCRIPTION_MAX = 4096
 SUMMARY_MAX = 4096
@@ -182,7 +182,7 @@ async def get_mutable_investigation_locked(
             reason=InvestigationErrorReason.NOT_FOUND,
             detail="Investigation no longer exists",
         )
-    if current.state in TERMINAL_INVESTIGATION:
+    if current.state in TERMINAL_INVESTIGATION_STATES:
         raise InvestigationServiceError(
             object_id=str(investigation_id),
             reason=InvestigationErrorReason.NON_MUTABLE,

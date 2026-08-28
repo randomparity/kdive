@@ -6,11 +6,11 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.domain.capacity.state import InvestigationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Investigation
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
+from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.investigations.view import (
     InvestigationAttachments,
     InvestigationRowError,
@@ -19,14 +19,12 @@ from kdive.services.investigations.view import (
     investigation_list_item,
 )
 
-_TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
-
 
 def investigation_envelope(
     inv: Investigation, attachments: InvestigationAttachments
 ) -> ToolResponse:
     """Render an Investigation; every state is a non-failure status."""
-    if inv.state in _TERMINAL_INVESTIGATION:
+    if inv.state in TERMINAL_INVESTIGATION_STATES:
         actions = ["investigations.get"]
     else:
         actions = ["investigations.get", "investigations.close", "runs.create"]
