@@ -42,6 +42,16 @@ Materialization must extract
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
 compressed bundle is never itself a bootable kernel.
 
+The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and
+the manifest digest of the bundle's exact `lib/modules/<release>/` tree. Before activation, the
+provider must prove that tree is installed at `/lib/modules/<release>` in the System root, reusing an
+exact existing tree or publishing the extracted tree atomically. A mismatched existing tree or a
+provider unable to install and verify it rejects before recovery preparation. The release-qualified
+tree is System content, like local-libvirt's current injected modules and remote-libvirt's current
+in-guest installation, not a per-Run boot artifact removed during recovery. “Preserve the disk
+overlay” below means keep the same attached overlay and device definition; it does not promise that
+the guest filesystem is byte-immutable. The optional initrd never substitutes for this obligation.
+
 The root specification is a versioned, closed data shape. Version 1 records the target architecture,
 one `root=` value, the ordered root-related arguments required by the image, and provenance with an
 authority class and immutable source identity. Build-produced facts and bounded stage inspection are
@@ -64,7 +74,8 @@ Core persists the plan identity, materialization reference, recovery reference, 
 definition identities, and activation state before calling activate. The state machine is
 `prepared -> activating -> active`, with
 `activating|active -> recovering -> recovered`,
-`activating|active|recovering -> recovery_conflict`, and failure metadata on an operation attempt.
+`prepared -> abandoned`, `activating|active|recovering -> recovery_conflict`, and failure metadata
+on an operation attempt.
 Transitions and provider calls run under the existing per-System advisory lock. Activation is
 compare-and-set from the recovery point's source-definition identity:
 the provider refuses a changed definition or a materialization/recovery reference belonging to
@@ -86,6 +97,13 @@ destroyed need not be restored. Artifacts remain while the Run can retry, are de
 on those ordered paths, and are swept by deterministic ownership after worker death. A partial
 materialization is either atomically published under its final identity or discoverable as an owned
 partial and removed; it is never activated.
+
+`prepared -> abandoned` is the pre-activation disposal path. Run terminalization or reconciliation
+may take it only after retries are no longer possible and provider observation still equals the
+recorded source-definition identity. Cleanup then removes the unused recovery point and
+materialization and commits `abandoned`. A target or third identity fails closed as
+`recovery_conflict`; absence or an unreadable identity remains retryable. The same per-System lock
+serializes abandonment with activation and teardown.
 
 Local-libvirt adapts its existing staging and direct-kernel XML behavior behind these operations.
 Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts, resolves provider-local
