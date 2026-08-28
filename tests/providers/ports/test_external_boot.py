@@ -183,6 +183,22 @@ def test_opaque_provider_ref_rejects_empty_path_url_and_credentials(value: str) 
         OpaqueProviderRef(ref=value)
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["kernel/a/../../secret", "kernel/../secret", "kernel\\secret", "C:secret", "ref\nforged"],
+)
+def test_opaque_provider_ref_rejects_destination_significant_syntax(value: str) -> None:
+    with pytest.raises(ValidationError):
+        OpaqueProviderRef(ref=value)
+
+
+def test_canonical_deserialization_rejects_oversized_bytes_before_json_parsing() -> None:
+    oversized = b"{" + b" " * 65_536 + b"not-json"
+
+    with pytest.raises(ValueError, match="exceeds 65536 bytes"):
+        ExternalBootPlan.from_canonical_json(oversized)
+
+
 class _ContractConsumer:
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef

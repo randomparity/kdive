@@ -23,6 +23,7 @@ type CanonicalUuid = Annotated[
 _INITRD_MAX_BYTES = 536_870_912
 _PLATFORM_ARGUMENT_MAX_BYTES = 256
 _CMDLINE_MAX_BYTES = 2_047
+_CANONICAL_VALUE_MAX_BYTES = 65_536
 
 
 class _ClosedValue(BaseModel):
@@ -40,6 +41,8 @@ class _ClosedValue(BaseModel):
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         """Parse a closed canonical value, rejecting alternate byte encodings."""
+        if len(data) > _CANONICAL_VALUE_MAX_BYTES:
+            raise ValueError("external-boot canonical value exceeds 65536 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
             raise ValueError("external-boot value is not canonical JSON")
@@ -213,7 +216,13 @@ class OpaqueProviderRef(_ClosedValue):
     @classmethod
     def _opaque(cls, value: str) -> str:
         value = _nfc(value)
-        if value.startswith(("/", "./", "../")) or "://" in value or "@" in value:
+        segments = value.split("/")
+        if (
+            value.startswith("/")
+            or any(segment in {"", ".", ".."} for segment in segments)
+            or not value.isprintable()
+            or any(character in value for character in ("\\", ":", "@"))
+        ):
             raise ValueError("provider reference must be opaque")
         return value
 
