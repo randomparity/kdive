@@ -14,7 +14,10 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
+from kdive.components.local_paths import validate_local_component_path
+from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.rootfs.baseline import VMLINUZ_PREFIX as _VMLINUZ_PREFIX
 from kdive.images.rootfs.baseline import baseline_kernel_names
@@ -36,6 +39,20 @@ type ExtractBaselineKernel = Callable[[Path, Path, str | None], BaselineKernel]
 The third argument is the optional ``baseline_kernel`` hint (ADR-0310) that disambiguates a
 multi-kernel ``/boot``; ``None`` keeps fail-closed selection.
 """
+
+
+class ExtractBaselineKernelWithInitrd(Protocol):
+    """Fresh-baseline extractor that replaces the rootfs initramfs before publication."""
+
+    def __call__(
+        self,
+        base: Path,
+        dest_dir: Path,
+        hint: str | None,
+        *,
+        initrd_override: LocalComponentRef,
+        allowed_roots: list[Path],
+    ) -> BaselineKernel: ...
 
 
 def select_kernel_and_initrd(
@@ -120,6 +137,34 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
             ``INFRASTRUCTURE_FAILURE`` on a libguestfs fault; ``CONFIGURATION_ERROR`` from
             :func:`select_kernel_and_initrd`.
     """
+    return _extract_baseline_kernel(base, dest_dir, hint)
+
+
+def _real_extract_baseline_kernel_with_initrd(  # pragma: no cover - live_vm (libguestfs)
+    base: Path,
+    dest_dir: Path,
+    hint: str | None,
+    *,
+    initrd_override: LocalComponentRef,
+    allowed_roots: list[Path],
+) -> BaselineKernel:
+    return _extract_baseline_kernel(
+        base,
+        dest_dir,
+        hint,
+        initrd_override=initrd_override,
+        allowed_roots=allowed_roots,
+    )
+
+
+def _extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
+    base: Path,
+    dest_dir: Path,
+    hint: str | None,
+    *,
+    initrd_override: LocalComponentRef | None = None,
+    allowed_roots: list[Path] | None = None,
+) -> BaselineKernel:
     try:
         import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
     except ImportError as exc:
@@ -155,10 +200,39 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
         ) from exc
     finally:
         _shutdown(guest)
-    os.rename(tmp, dest_dir)
-    return BaselineKernel(
-        kernel=dest_dir / "kernel", initrd=(dest_dir / "initrd") if initrd_name else None
+    _publish_baseline(
+        tmp,
+        dest_dir,
+        initrd_override=initrd_override,
+        allowed_roots=allowed_roots,
     )
+    return BaselineKernel(
+        kernel=dest_dir / "kernel",
+        initrd=(dest_dir / "initrd") if initrd_name or initrd_override is not None else None,
+    )
+
+
+def _publish_baseline(
+    partial: Path,
+    destination: Path,
+    *,
+    initrd_override: LocalComponentRef | None,
+    allowed_roots: list[Path] | None,
+) -> None:
+    """Install an optional validated override, then atomically publish the baseline directory."""
+    if initrd_override is not None:
+        if allowed_roots is None:
+            raise CategorizedError(
+                "local INITRD materialization has no configured allowed roots",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        source = validate_local_component_path(
+            initrd_override.path,
+            allowed_roots=allowed_roots,
+            sha256=initrd_override.sha256,
+        )
+        shutil.copyfile(source, partial / "initrd")
+    os.rename(partial, destination)
 
 
 def _reset_dir(path: Path) -> None:  # pragma: no cover - live_vm

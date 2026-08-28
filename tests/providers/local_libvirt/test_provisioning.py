@@ -19,6 +19,7 @@ import libvirt
 import pytest
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
@@ -786,6 +787,7 @@ def _prov(
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
     extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
+    extract_baseline_kernel_with_initrd: Callable[..., BaselineKernel] | None = None,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
     resize_overlay: Callable[[str, int], None] = lambda _overlay, _gb: None,
@@ -814,6 +816,7 @@ def _prov(
         ),
         free_port=free_port,
         extract_baseline_kernel=extract_baseline_kernel,
+        extract_baseline_kernel_with_initrd=extract_baseline_kernel_with_initrd,
         guest_egress=guest_egress,
     )
 
@@ -1015,6 +1018,63 @@ def test_provision_extracts_baseline_and_renders_kernel() -> None:
     assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
     assert root.findtext("os/initrd") == f"{storage_module.baseline_dir(_SYS)}/initrd"
     assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw crashkernel=256M"
+
+
+def test_provision_threads_supplied_initrd_to_atomic_override_seam() -> None:
+    conn = _ProvConn()
+    data = copy.deepcopy(_VALID)
+    data["initrd"] = {
+        "kind": "local",
+        "path": "/var/lib/kdive/rootfs/custom-initramfs.img",
+        "sha256": "sha256:" + "a" * 64,
+    }
+    profile = ProvisioningProfile.parse(data)
+    seen: list[tuple[Path, Path, str | None, str, list[Path]]] = []
+
+    def extract_with_initrd(
+        base: Path,
+        dest: Path,
+        hint: str | None,
+        *,
+        initrd_override: LocalComponentRef,
+        allowed_roots: list[Path],
+    ) -> BaselineKernel:
+        seen.append((base, dest, hint, initrd_override.path, allowed_roots))
+        return BaselineKernel(kernel=dest / "kernel", initrd=dest / "initrd")
+
+    _prov(conn, extract_baseline_kernel_with_initrd=extract_with_initrd).provision(_SYS, profile)
+
+    assert seen == [
+        (
+            Path("/var/lib/kdive/rootfs/fedora-40.qcow2"),
+            Path(storage_module.baseline_dir(_SYS)),
+            None,
+            "/var/lib/kdive/rootfs/custom-initramfs.img",
+            [Path("/var/lib/kdive/rootfs")],
+        )
+    ]
+    assert _safe_fromstring(conn.recorded_xml[-1]).findtext("os/initrd") == (
+        f"{storage_module.baseline_dir(_SYS)}/initrd"
+    )
+
+
+def test_provision_reuses_visible_baseline_without_reading_supplied_initrd() -> None:
+    data = copy.deepcopy(_VALID)
+    data["initrd"] = {"kind": "local", "path": "/var/lib/kdive/rootfs/custom.img"}
+
+    def fail_override(*_args: object, **_kwargs: object) -> BaselineKernel:
+        raise AssertionError("visible baseline must be reused without resolving the supplied path")
+
+    conn = _ProvConn()
+    _prov(
+        conn,
+        baseline_exists=lambda _path: True,
+        extract_baseline_kernel_with_initrd=fail_override,
+    ).provision(_SYS, ProvisioningProfile.parse(data))
+
+    assert _safe_fromstring(conn.recorded_xml[-1]).findtext("os/initrd") == (
+        f"{storage_module.baseline_dir(_SYS)}/initrd"
+    )
 
 
 def test_provision_threads_baseline_kernel_hint_to_extractor() -> None:

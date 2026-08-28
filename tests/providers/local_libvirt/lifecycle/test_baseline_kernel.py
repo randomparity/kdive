@@ -1,14 +1,57 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
+    _publish_baseline,
     baseline_kernel_names,
     select_kernel_and_initrd,
 )
 
 _V = "6.19.10-300.fc44.x86_64"
+
+
+def test_publish_baseline_replaces_extracted_initrd_before_rename(tmp_path: Path) -> None:
+    source = tmp_path / "allowed" / "custom.img"
+    source.parent.mkdir()
+    source.write_bytes(b"custom initrd")
+    partial = tmp_path / "baseline.part"
+    partial.mkdir()
+    (partial / "kernel").write_bytes(b"kernel")
+    (partial / "initrd").write_bytes(b"extracted")
+    destination = tmp_path / "baseline"
+
+    _publish_baseline(
+        partial,
+        destination,
+        initrd_override=LocalComponentRef(kind="local", path=str(source)),
+        allowed_roots=[source.parent],
+    )
+
+    assert not partial.exists()
+    assert (destination / "initrd").read_bytes() == b"custom initrd"
+
+
+def test_publish_baseline_validation_failure_keeps_destination_absent(tmp_path: Path) -> None:
+    partial = tmp_path / "baseline.part"
+    partial.mkdir()
+    (partial / "kernel").write_bytes(b"kernel")
+    destination = tmp_path / "baseline"
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _publish_baseline(
+            partial,
+            destination,
+            initrd_override=LocalComponentRef(kind="local", path="/outside/initrd"),
+            allowed_roots=[tmp_path],
+        )
+
+    assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert not destination.exists()
 
 
 def test_fedora_kernel_pairs_with_initramfs() -> None:

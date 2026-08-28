@@ -30,6 +30,7 @@ import kdive.config as config
 from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
+    ComponentRef,
     LocalComponentRef,
 )
 from kdive.domain.catalog.resource_capabilities import (
@@ -48,7 +49,9 @@ from kdive.profiles.provisioning import (
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     BaselineKernel,
     ExtractBaselineKernel,
+    ExtractBaselineKernelWithInitrd,
     _real_extract_baseline_kernel,
+    _real_extract_baseline_kernel_with_initrd,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     CatalogFetch,
@@ -204,6 +207,7 @@ class LocalLibvirtProvisioning:
         upload_fetch: UploadFetch | None = None,
         free_port: FreePort | None = None,
         extract_baseline_kernel: ExtractBaselineKernel | None = None,
+        extract_baseline_kernel_with_initrd: ExtractBaselineKernelWithInitrd | None = None,
         guest_egress: bool = False,
     ) -> None:
         self._connect = connect
@@ -214,6 +218,9 @@ class LocalLibvirtProvisioning:
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
         self._free_port = free_port or _bind_probe_free_port
         self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
+        self._extract_baseline_kernel_with_initrd = (
+            extract_baseline_kernel_with_initrd or _real_extract_baseline_kernel_with_initrd
+        )
         # Operator-resolved egress policy for the SSH-forward NIC (ADR-0313, #1031). Default False
         # keeps restrict=on; composition binds the per-Resource value via rebind_for_resource.
         self._guest_egress = guest_egress
@@ -298,7 +305,9 @@ class LocalLibvirtProvisioning:
         try:
             base = self._materialize_rootfs(section.rootfs, system_id, profile.arch, job_id=job_id)
             baseline_created = not pre_existing.baseline
-            baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
+            baseline = self._prepare_baseline_kernel(
+                system_id, base, section.baseline_kernel, profile.initrd
+            )
             overlay_created = not pre_existing.overlay
             overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
             gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
@@ -385,7 +394,11 @@ class LocalLibvirtProvisioning:
             )
 
     def _prepare_baseline_kernel(
-        self, system_id: UUID, base: str, baseline_kernel: str | None
+        self,
+        system_id: UUID,
+        base: str,
+        baseline_kernel: str | None,
+        initrd_override: ComponentRef | None,
     ) -> BaselineKernel:
         """Extract the rootfs's baseline kernel once; reuse an already-extracted directory.
 
@@ -403,6 +416,19 @@ class LocalLibvirtProvisioning:
             initrd = dest / "initrd"
             present_initrd = initrd if self._files.baseline_exists(str(initrd)) else None
             return BaselineKernel(kernel=dest / "kernel", initrd=present_initrd)
+        if initrd_override is not None:
+            if not isinstance(initrd_override, LocalComponentRef):
+                raise CategorizedError(
+                    "local-libvirt received a non-local INITRD after admission",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            return self._extract_baseline_kernel_with_initrd(
+                Path(base),
+                dest,
+                baseline_kernel,
+                initrd_override=initrd_override,
+                allowed_roots=self._allowed_roots,
+            )
         return self._extract_baseline_kernel(Path(base), dest, baseline_kernel)
 
     def _gdb_port_for(self, system_id: UUID) -> int:
