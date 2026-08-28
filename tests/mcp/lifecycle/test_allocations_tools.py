@@ -1094,17 +1094,20 @@ def test_list_allocations_without_project_no_viewer_grants_is_empty(migrated_url
     asyncio.run(_run())
 
 
-def test_list_allocations_requires_viewer_role(migrated_url: str) -> None:
+def test_list_allocations_unreadable_project_is_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=1)
             await _request(pool, _ctx())
-            with pytest.raises(AuthorizationError):
-                await list_allocations(
-                    pool,
-                    _ctx(role=None),
-                    AllocationsListRequest(project="proj", limit=50),
-                )
+            response = await list_allocations(
+                pool,
+                _ctx(role=None),
+                AllocationsListRequest(project="proj", limit=50),
+            )
+
+        assert response.status == "ok"
+        assert response.items == []
+        assert response.data["project"] == "proj"
 
     asyncio.run(_run())
 

@@ -40,7 +40,7 @@ from kdive.mcp.tools.lifecycle.allocations.common import (
     envelope_for_allocation,
     queue_position,
 )
-from kdive.security.authz.context import RequestContext, require_project
+from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 
 _log = logging.getLogger(__name__)
@@ -110,11 +110,8 @@ def _viewer_projects(ctx: RequestContext) -> list[str]:
 
 
 def _project_filter(ctx: RequestContext, project: str | None) -> list[str]:
-    if project is not None:
-        require_project(ctx, project)
-        require_role(ctx, project, Role.VIEWER)
-        return [project]
-    return _viewer_projects(ctx)
+    readable = _viewer_projects(ctx)
+    return readable if project is None else [project] if project in readable else []
 
 
 async def list_allocations(
@@ -128,9 +125,8 @@ async def list_allocations(
     from the last kept allocation's ``(created_at, id)``. A ``cursor`` resumes strictly
     after a prior page; a malformed/wrong-tool cursor is an ``invalid_cursor`` config error.
 
-    Omit ``project`` to list allocations across every project where the caller has at least
-    viewer access. Supplying ``project`` preserves the stricter single-project authorization
-    errors used by the previous contract.
+    Omit ``project`` to list every readable project. A supplied project narrows within that set;
+    an unreadable project returns an empty collection without revealing whether it exists.
 
     Optional ``state`` filter (ADR-0197) narrows by lifecycle state, applied before the
     keyset seek so the cursor stays a pure boundary and following ``next_cursor`` drains

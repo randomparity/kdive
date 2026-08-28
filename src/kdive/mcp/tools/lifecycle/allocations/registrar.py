@@ -58,7 +58,10 @@ class _AllocationsListPayload(ToolPayload):
 
     project: str | None = Field(
         default=None,
-        description="Optional project whose allocations to list; omitted lists readable projects.",
+        description=(
+            "Optional project to narrow within the caller's readable projects; an unreadable "
+            "project returns an empty collection. Omitted lists all readable projects."
+        ),
     )
     state: AllocationState | None = Field(
         default=None, description="Only allocations in this lifecycle state."
@@ -296,7 +299,8 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         """List allocations visible to the caller, newest first, filterable by project and state.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``request.cursor`` for the next page. The ``state`` filter composes with the cursor.
+        ``request.cursor`` for the next page. Filters never reveal an unreadable project's
+        existence; they compose with the cursor.
         """
         request = request or _AllocationsListPayload()
         return await _list_allocations(
