@@ -90,6 +90,15 @@ records without an InvestigationBuild generation are ineligible for external boo
 through the existing generation-backed external-build flow; their current install/boot path remains
 unchanged.
 
+When the selected generation's `BuildStepResult.build_id` is nonempty, core requires it to equal
+`materialization.kernel_observation.gnu_build_id` before `preparing`. A mismatch is terminal
+`INSTALL_FAILURE`, performs no System or recovery-store mutation, and names re-finalization with a
+matching kernel bundle/vmlinux pair as the recovery action. When no persisted debug build ID exists,
+the materializer-observed GNU ID still binds running-kernel proof, but debuginfo-dependent consumers
+remain unavailable until their existing provenance contract is satisfied. Contract tests finalize
+individually valid K1 bundle and K2 vmlinux inputs and prove the mismatch cannot reach preparation or
+activation.
+
 When core commits `activating`, it also persists `server_time` and an absolute UTC RFC 3339
 `activation_readiness_deadline`, computed once from operator-configured
 `activation_readiness_timeout_seconds`. Unit is seconds and scope is this System/Run activation.
