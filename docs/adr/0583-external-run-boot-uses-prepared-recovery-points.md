@@ -63,9 +63,10 @@ plan identity, and current definition return the same point and target identity.
 Core persists the plan identity, materialization reference, recovery reference, both provider
 definition identities, and activation state before calling activate. The state machine is
 `prepared -> activating -> active`, with
-`activating -> recovering -> recovered`, `activating|recovering -> recovery_conflict`, and failure
-metadata on an operation attempt. Transitions and provider calls run under the existing per-System
-advisory lock. Activation is compare-and-set from the recovery point's source-definition identity:
+`activating|active -> recovering -> recovered`,
+`activating|active|recovering -> recovery_conflict`, and failure metadata on an operation attempt.
+Transitions and provider calls run under the existing per-System advisory lock. Activation is
+compare-and-set from the recovery point's source-definition identity:
 the provider refuses a changed definition or a materialization/recovery reference belonging to
 another System, Run, or plan. On an `activating` record after worker loss, reconciliation compares
 the provider-observed definition identity with both recorded provider identities. The target identity
@@ -76,10 +77,15 @@ identity is never compared directly with provider definition bytes, and readines
 guess which definition won.
 
 Recovery restores the recorded point before declaring the System usable. The recovery point remains
-until the Run is terminal and no recovery is in flight. Materialized artifacts remain while the Run
-can retry, are deleted idempotently on Run/System teardown, and are swept by deterministic ownership
-after worker death. A partial materialization is either atomically published under its final identity
-or discoverable as an owned partial and removed; it is never activated.
+until recovery or System teardown is complete. When an active Run becomes terminal and the System
+will remain reusable, terminalization enters `recovering`, restores and verifies the recorded point,
+then commits `recovered`; retries and concurrent terminalization serialize under the System lock.
+Materialized artifacts cannot be deleted before `recovered`. System teardown instead destroys the
+domain before cleaning the recovery point and materialization, because a definition that will be
+destroyed need not be restored. Artifacts remain while the Run can retry, are deleted idempotently
+on those ordered paths, and are swept by deterministic ownership after worker death. A partial
+materialization is either atomically published under its final identity or discoverable as an owned
+partial and removed; it is never activated.
 
 Local-libvirt adapts its existing staging and direct-kernel XML behavior behind these operations.
 Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts, resolves provider-local
