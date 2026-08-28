@@ -348,15 +348,20 @@ plus activation identity into the activation row. Recovery points, staged artifa
 domains, and externally visible target components bind only the stable
 System/activation/Run/plan identity and their content identities; takeover never retags or recreates
 them. The provider-durable per-System fence and each append-only mutation-journal entry additionally
-record the actor generation.
+record the actor generation and claimant token.
 
-Before provider work, an actor atomically claims `(activation identity, generation)` in that fence.
-An idempotent claim requires the same pair; any different claim must have a strictly greater System
-generation. Under the provider-local System lock, takeover validates the stable ownership and content
+Every live execution attempt allocates a fresh System generation and a cryptographically random
+canonical UUID claimant token under the database System lock before provider work. The token belongs
+to that in-memory execution only and is never copied into a job payload for another worker. An actor
+atomically claims `(activation identity, generation, claimant token)` in the provider fence.
+Idempotence requires the same triple and is permitted only for retries within that live execution;
+any replacement, redelivery, reconciliation pass, or restarted process allocates a higher generation
+and new token. Under the provider-local System lock, takeover validates the stable ownership and content
 digests of every existing recovery object, then validates the mutation journal as an unbroken sequence
 ending at the prior claimed generation before compare-and-setting the fence to the new generation.
-Existing journal entries remain immutable; new work appends with the new generation. A crash after the
-database increment but before the provider claim retries the same generation. Missing, changed, or
+Existing journal entries remain immutable; new work appends with the new generation and token. A crash
+after the database increment but before the provider claim abandons that unused generation; the next
+execution allocates a higher one rather than sharing its authority. Missing, changed, or
 unowned evidence enters `recovery_conflict` and is never recaptured from the current System state.
 
 Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all allocate
@@ -367,15 +372,17 @@ staging and are cancelable or discardable.
 Immediately before every definition, module-tree, attachment, power, or cleanup mutation, and again
 before recording its result, the provider holds that local fence and rejects a generation other than the
 current claimed value. A stale actor can finish private work but cannot publish, boot, restore, or
-delete after takeover. Teardown claims the newest epoch before destroying anything. Connection loss
-does not release authority to an older epoch; only a durable higher claim supersedes it. Tests pause
-an old actor before publication and boot, claim a replacement or teardown epoch, and prove the stale
+delete after takeover. Teardown claims the newest generation before destroying anything. Connection loss
+does not release authority to an older generation; only a durable higher claim supersedes it. Tests pause
+an old actor before publication and boot, claim a replacement or teardown generation, and prove the stale
 write is refused.
 The stale-actor suite also completes one activation, starts a later Run with a greater generation,
 and proves that an actor from the earlier Run can never reclaim authority.
 It separately loses a worker after `prepared` and after the first target-component write, claims the
 next generation, consumes the original activation-owned evidence, and proves safe resume without
 retagging or source recapture.
+The suite also pauses an actor before its first claim, lets another execution allocate and claim the
+next generation, resumes the old actor, and proves its different token/generation cannot mutate state.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
