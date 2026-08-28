@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -140,7 +140,7 @@ The materializer also extracts the kernel's architecture, release, and GNU build
 extracted vmlinuz and binds that tuple to its byte digest in the materialization record. Missing or
 ambiguous build notes reject external boot. The provider-neutral running-kernel observation returns
 architecture, `uname` release, and the GNU build ID from the running kernel's notes. Local observes
-it through its existing guest connection, remote through its fixed guest-agent helper, and the
+it through a provider-owned observation path, and the
 non-libvirt test provider returns the same value type. Unavailable evidence is retryable before the
 readiness deadline; a mismatch records terminal-on-this-attempt `READINESS_FAILURE` and triggers
 recovery. Readiness, boot ID, and
@@ -326,11 +326,12 @@ cancellation follows `preparing -> abandoned` and the common verified cleanup/re
 No quiesce or other guest mutation is allowed before materialization succeeds. Immediately before the first stop or
 other power mutation, the destination-side serialized lane rechecks the same System-wide session
 condition through core's authority-bound snapshot; a present or unreadable result performs no provider
-mutation and returns to conflict handling. A deterministic provider prepare journal records the source definition and prior power state,
-stops the domain, verifies it inactive, and only then records whether the release-qualified target is
-absent or saves its exact prior tree. The completed journal becomes the opaque recovery reference and
-allows core to commit `prepared`. A worker loss in `preparing` is resumed from that journal; abandoning
-it restores the source definition and prior running state before removing staged data. Activation
+mutation and returns to conflict handling. Provider-owned durable recovery evidence binds the source
+definition and prior power state, proves the domain inactive, and captures whether the
+release-qualified target is absent or its exact prior tree. Complete evidence yields the opaque
+recovery reference and allows core to commit `prepared`. A worker loss in `preparing` resumes or
+safely abandons from that evidence without recapturing a baseline; abandonment restores the source
+definition and prior running state before removing staged data. Activation
 from `prepared` publishes the staged tree at `/lib/modules/<release>`, applies the target definition,
 and boots it. Failure to quiesce leaves `preparing` and mutates neither tree nor definition. An exact
 existing tree may be reused; a different tree for the same release is replaced, not rejected. Recovery restores
@@ -351,7 +352,7 @@ System-locked admission uses this closed matrix while an external activation is 
   force-crash, and vmcore capture. It rejects every install or restage, unrelated-Run operation,
   generic power/control operation, snapshot, and mutation of definition, modules, attachments, or boot
   selection. Every admitted active-state operation that mutates power or provider state uses the
-  activation's current generation/token through the destination executor; observation-only work may
+  activation's current authority through the provider's selected fencing mechanism; observation-only work may
   remain on its existing read-only seam.
 - `recovered` or `abandoned` with `cleanup_complete=true` has no external-activation restriction.
 
@@ -360,7 +361,7 @@ Every listed operation's reverse admission uses the same System lock, so committ
 power, force-crash, snapshot, traffic capture, vmcore capture, and debug admission immediately before
 and after `preparing`, during `active`, and against release. They include a different Run's install
 racing release and prove exactly one side proceeds; allowed active force-crash/capture paths prove
-their executor claim and cannot cross a takeover barrier.
+their authority claim and cannot cross a takeover barrier.
 
 After the pending row exists, the provider creates a deterministic reservation owned by this
 System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
@@ -379,7 +380,7 @@ row without guest mutation. Exhaustion is retryable `CAPACITY_EXHAUSTED`, change
 guest state, and directs the operator to clean terminal artifacts or raise the cap before retry.
 
 The fixed reservation bounds materialized kernel/modules/initrd artifacts, the captured definition,
-prior module tree, journal, and verification metadata together. Materialization and offline capture
+prior module tree, durable recovery evidence, and verification metadata together. Materialization and offline capture
 cannot exceed it. An overrun before guest mutation abandons and cleans the activation; an overrun
 after preparation restores the source definition,
 exact prior module tree, and recorded prior power state; a previously stopped System remains stopped.
@@ -540,8 +541,8 @@ running-kernel identity proof before core may commit `active`; persistent equali
 A complete source state resumes restoration of the recorded prior power state and, when that state
 was running, fresh baseline readiness before core may commit `recovered`. When it was stopped,
 verified inactive source state is the recovered condition. A mixed state whose every component equals its recorded source
-or target component may be restored to source only when the activation write-ahead journal recorded
-the expected identity before each target write and its result afterward, proving every target-valued
+or target component may be restored to source only when durable activation evidence proves the
+expected identity before each target write and its result afterward, proving every target-valued
 component belongs to this activation. An unproven mixture enters `recovery_conflict`. A recorded
 `absent` module component matches source or target according to its tagged identity; observed absence
 when that side requires `present`, unreadable evidence, or a third identity enters
@@ -549,141 +550,65 @@ when that side requires `present`, unreadable evidence, or a third identity ente
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
 
-Immediately before activation's first target module-tree or definition write, the destination-side
-executor holds the current System fence and serialized mutation lane, observes power, and requires
-the domain to be inactive. It then re-observes the complete source definition/module identity in that
-same lane before the write-ahead CAS entry. An active or unreadable power result, or a non-source
-component, performs no provider write and transitions to `recovery_conflict` with the observations
-retained. No observation made at `prepared` is fresh enough to satisfy this gate. The adversarial
-suite pauses after `prepared`, starts the domain out of band, resumes activation, and proves that
-neither modules nor definition are changed.
+Immediately before activation's first target module-tree or definition write, the provider must
+prove that it holds current, exclusive mutation authority for the System, observe the domain inactive,
+and re-observe the complete source definition/module identity. An active or unreadable power result,
+a non-source component, or authority that cannot exclude an older actor performs no provider write
+and enters `recovery_conflict` with the observations retained. No observation made at `prepared` is
+fresh enough to satisfy this gate. Issue #2113 decides the fencing and quiescence mechanism. Its ADR
+must preserve the outcome that an acknowledged replacement prevents every older actor from publishing,
+booting, restoring, or deleting, including after a lost response or process restart.
 
-This guarantee covers provider-mediated actors. Deployment ACLs grant mutation of KDIVE-owned domains
-and their volumes only to the fenced executor credential; worker, reconciler, and other service
-credentials are read-only and cannot bypass its lane. A privileged host administrator can bypass
-libvirt ACLs and mutate during the bounded interval between the final observation and commit. That
-concurrent break-glass action is unsupported: KDIVE preserves changes observed before the interval
-and detects drift afterward, but does not claim compare-and-set against root-equivalent interference
-inside a libvirt call. The executor audit marks the interval and runbooks require administrators first
-quiesce it. Tests inject ordinary-client start/redefine attempts after the final check and prove ACL
-denial; a privileged-interference test records the documented unsupported outcome rather than claiming
-recovery-conflict preservation.
+This guarantee covers provider-mediated actors. A privileged host administrator remains outside the
+contract and can interfere with the provider directly. Tests must prove the selected mechanism denies
+or detects ordinary competing mutations and must document the bounded unsupported outcome for
+root-equivalent interference rather than claiming preservation it cannot provide.
 
-The existing transaction-scoped System advisory lock protects each database transition only; it
-cannot fence provider work across those commits. The System owns a durable monotonically increasing
-`operation_generation` allocated under that lock; it never resets when an activation terminates.
-Each new activation and every takeover increments the System value and copies the resulting generation
-plus activation identity into the activation row. Recovery points, staged artifacts, maintenance
-domains, and externally visible target components bind only the stable
-System/activation/Run/plan identity and their content identities; takeover never retags or recreates
-them. The provider-durable per-System fence and each append-only mutation-journal entry additionally
-record the actor generation and claimant token.
+The existing transaction-scoped System advisory lock is insufficient by itself because it does not
+span provider work between database commits. Issue #2113 must select a durable authority and
+positive-quiescence protocol that binds the exact System, activation, Run, plan, authenticated actor,
+and operation attempt. It must make takeover monotonic, prevent a reclaimed or disconnected actor
+from publishing any later mutation, preserve stable recovery-object ownership across takeover, and
+fail closed when authority or recovery evidence is missing, changed, unreadable, or unowned.
 
-Every live execution attempt requests a fresh System generation and a cryptographically random
-canonical UUID claimant token through a role-bounded database transition before provider work. For a
-worker, the security-definer transition authenticates its ADR-0533 incarnation credential, derives
-the holder from that credential, and atomically verifies the exact current job ID, charged attempt,
-active worker incarnation, activation state, and prior System generation before incrementing. The
-caller cannot supply or substitute those authority fields. Reconciler, server conflict-resolution,
-and teardown paths use separate role-specific transitions that verify their authorized durable
-operation identity and permitted activation edge; none can claim a worker attempt. The allocation row
-permanently records authority kind, holder or operation identity, job and attempt when applicable,
-activation identity, generation, and claimant-token hash. A stale worker whose job was reclaimed can
-therefore affect zero rows even if it resumes before its first allocation. The plaintext token belongs
-to that authenticated live execution only and is never copied into a job payload for another worker. An actor
-atomically claims `(activation identity, generation, claimant token)` in the provider fence.
-Idempotence requires the same triple and is permitted only for retries within that live execution;
-any replacement, redelivery, reconciliation pass, or restarted process allocates a higher generation
-and new token. A claim appends a zero-mutation header containing that triple and compare-and-sets the
-fence in one provider-durable transaction before returning. Implementations without a transactional
-store use one fsynced write-ahead record and commit marker: recovery exposes either the prior fence or
-the new fence plus header, never a new fence without its header. A partial uncommitted claim is rolled
-back to the prior fence under the provider-local lock.
+Every definition, module-tree, attachment, power, and cleanup mutation validates current authority at
+its actual commit point. Idempotent retry of the same authorized operation is allowed; redelivery,
+replacement, reconciliation, conflict resolution, teardown, and later Runs must obtain distinct newer
+authority. A caller-chosen token or sequence value is never authority by itself. Long preparation may
+produce only private, discardable state until that validation succeeds. The shared provider seam
+carries an opaque bounded authority reference and immutable operation/artifact identities, never a
+caller command or provider-specific type. This ADR does not select its encoding, allocation scheme,
+storage transaction, daemon, credential, lock, journal, or transport.
 
-The atomic claim holds that lock and first validates the stable ownership and content
-digests of every existing recovery object, then validates the mutation journal as an unbroken sequence
-ending with the prior generation's claim header and any mutations before atomically appending the new
-header and fence value.
-Existing journal entries remain immutable; new work appends with the new generation and token. A crash
-after the database increment but before the provider claim abandons that unused generation; the next
-execution allocates a higher one rather than sharing its authority. Missing, changed, or
-unowned evidence enters `recovery_conflict` and is never recaptured from the current System state.
+Tests pause an actor at each database/provider boundary, lose every mutation response, transfer
+authority to replacement and teardown actors, and prove no older actor can publish, boot, restore,
+delete, or commit stale core truth after takeover. A selected mechanism that cannot prove these
+outcomes cannot advertise external boot.
 
-Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all use their
-corresponding authority transition before claiming. The destination executor authenticates the
-durable allocation and token hash through its fixed core channel before accepting a claim; a
-caller-chosen UUID or greater integer has no authority by itself. Provider-local serialization makes a new claim wait for any bounded
-publication critical section; long downloads, extraction, and helper execution write only private
-staging and are cancelable or discardable.
-
-All definition, module-tree, attachment, power, and cleanup mutations execute through a
-provider-private destination-side fenced executor, not directly from the queue worker. Local-libvirt
-runs it as a separately supervised host service; remote-libvirt runs the same fixed-operation service
-beside its libvirt host. Its typed requests contain only the stable operation identity, generation,
-claimant token, expected component identity, and immutable artifact references—never caller commands
-or shared libvirt types. The non-libvirt test implementation exercises the same protocol. Deployment
-provisioning owns the service and external boot is not advertised until its health and durable store
-are verified.
-
-The executor serializes each System at the destination and validates the generation/token immediately
-before the actual commit point. A higher-generation claim queues behind an executing mutation and is
-acknowledged only after that operation has completed and its result identity is durably journaled;
-that acknowledgement is the positive-quiescence barrier for replacement writes. A lost client
-response is resolved by the stable operation identity at the executor, never by redispatching the
-side effect. Module publication and maintenance-helper commits perform the token check inside the
-helper immediately before rename. Libvirt mutations remain inside the executor's serialized lane; if
-the executor itself restarts with an operation lacking a completion record, it accepts no new claim
-until a domain-scoped libvirt barrier has waited for the old connection to close, acquired the same
-domain mutation lock, and recorded the resulting persistent definition, attachment, job, and power
-observations. An unreadable or non-quiescent result remains unresolved and permits only observation
-through the executor; replacement and teardown writes remain barred until positive quiescence, with
-out-of-band operator repair required if the barrier cannot complete.
-
-The worker checks the fence before dispatch and after the result, but those checks are diagnostic;
-destination serialization and commit-point validation carry the safety guarantee. A stale actor can
-finish private work but cannot publish, boot, restore, or delete after takeover. Teardown claims the
-newest generation and passes through the same quiescence barrier before destroying anything.
-Connection loss does not release authority to an older generation; only a durable higher claim
-supersedes it. Tests lose responses during every mutation, pause an old actor before publication and
-boot, claim replacement and teardown generations, and prove no late completion crosses the barrier.
-
-The same triple fences core truth. Every actor-originated activation transition, deadline or attempt
-metadata update, failure/result write, recovery-job completion, and `cleanup_complete` commit runs
-under the database System lock and compare-and-sets the activation identity, current
-`operation_generation`, and claimant token stored for that live execution. Job-result persistence uses
-the same predicate in its transaction rather than committing independently. Allocating a replacement
-generation verifies the role-specific current authority and compare-and-sets the prior row generation,
-so two replacements cannot both become current and a reclaimed attempt cannot allocate later. A
-predicate mismatch returns an internal `superseded` outcome and performs no activation,
-job, cleanup, or audit-result write; the current actor or reconciler owns durable completion. Merely
-re-observing the provider or holding the transaction-scoped lock never authorizes an old result.
+The same current-authority decision fences core truth. Every actor-originated activation transition,
+deadline or attempt-metadata update, failure/result write, recovery-job completion, and
+`cleanup_complete` commit runs under the database System lock and verifies the activation plus the
+current actor authority selected by #2113. Job-result persistence uses the same predicate in its
+transaction rather than committing independently. A mismatch returns an internal `superseded`
+outcome and performs no activation, job, cleanup, or audit-result write. Merely re-observing the
+provider or holding the transaction-scoped lock never authorizes an old result.
 
 Adversarial tests pause an actor after each representative provider/readiness result and immediately
 before `prepared`, `active`, `recovered`, `recovery_failed`, attempt-failure, job-result, and
-cleanup-complete commits. Replacement and teardown actors claim a higher generation, after which each
-old commit must affect zero rows and leave current lifecycle truth unchanged.
-The stale-actor suite also completes one activation, starts a later Run with a greater generation,
-and proves that an actor from the earlier Run can never reclaim authority.
-It separately loses a worker after `prepared` and after the first target-component write, claims the
-next generation, consumes the original activation-owned evidence, and proves safe resume without
-retagging or source recapture.
-The suite also pauses a worker before generation allocation, reclaims its job, lets the new exact
-job attempt allocate and claim the next generation, then resumes the old worker with its still-valid
-incarnation credential and proves allocation affects zero rows and no executor claim is possible. It
-separately pauses an actor after allocation but before its first claim, lets another authorized
-execution allocate and claim the next generation, resumes the old actor, and proves its different
-token/generation cannot mutate state.
-It kills both an initial and replacement actor after the claim returns but before the first mutation;
-the next worker and authorized teardown must validate the zero-mutation header and take over without
-conflict, retagging, or source recapture.
+cleanup-complete commits. Once replacement or teardown authority is acknowledged, each old commit must
+affect zero rows and leave current lifecycle truth unchanged. The stale-actor suite also completes one
+activation, starts a later Run, and proves an actor from the earlier Run cannot reclaim authority. It
+loses workers before first authority, after `prepared`, after the first target-component write, and
+after replacement authority but before mutation; every successor safely resumes from the original
+activation-owned evidence without retagging or source recapture.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
 observed composite state identity and an idempotency key. Under the System lock, core repeats the
 read-only observation, then durably records the acknowledged identity, resolution operation identity,
-new generation/token, recovery deadline, and `recovery_conflict -> recovering` transition before any
+new current authority, recovery deadline, and `recovery_conflict -> recovering` transition before any
 provider write. A changed or unreadable value leaves the conflict untouched. Provider restoration
-then uses the normal per-component write-ahead CAS journal from the acknowledged identity. A crash
+then uses durable per-component compare-and-set evidence from the acknowledged identity. A crash
 before the transition changes no provider state; a crash after it resumes the same recovering
 operation, and a CAS mismatch returns to `recovery_conflict` with evidence retained. Alternatively,
 ordinary authorized System teardown follows the limited claim and quarantine path below. There is no adopt-current-state,
@@ -691,9 +616,9 @@ force-overwrite, or automatic timeout edge, because a mixed external definition 
 trusted reusable baseline by declaration. Reconciliation preserves evidence and performs no provider
 write while the state remains `recovery_conflict`.
 
-Teardown uses a distinct destination-fence claim. It waits for the same positive executor-quiescence
+Teardown uses distinct mutation authority. It waits for the same positive-quiescence
 barrier and proves the domain's KDIVE System/Allocation ownership from core plus persistent domain
-metadata, but it does not require the recovery journal, manifests, or artifact digests to validate.
+metadata, but it does not require the recovery evidence, manifests, or artifact digests to validate.
 Its authority is limited to stopping/destroying that domain, deleting its deterministic overlay, and
 deleting recovery objects whose individual stable activation ownership remains provable. Missing or
 corrupt ownership evidence is quarantined, never guessed: teardown completes the System destruction,
@@ -708,7 +633,7 @@ usage lease: current Runs are already `succeeded` before install and boot. A new
 Under the System lock it refuses while any lifecycle, control, force-crash, snapshot, capture, or
 debug job for the System is active, regardless of owning Run, and also refuses while any DebugSession
 for the System is attaching or live, regardless of owning Run or transport. It then atomically
-records the release request, recovery deadline, generation and token,
+records the release request, recovery deadline, and new current authority,
 `active -> recovering` transition, and recovery job before observing provider state. Repeating
 it is idempotent and returns the same recovery job. `debug_sessions.detach` does not release implicitly;
 its response suggests `runs.release_external_boot` when it detached the last live session. Authorized
@@ -735,9 +660,9 @@ retains all evidence; it does not remain `recovering`. A recovery retry before t
 re-observes each component: complete target resumes restoration,
 complete source resumes restoration of the recorded power state and its conditional readiness rule,
 and a source/target mixture may resume only when every
-component matches one of those recorded identities and the journal proves the partial write belongs
-to this recovery. Before each subsequent write, that journal records the expected component identity;
-the write uses compare-and-set from that value and records its result. Any other mixture or third
+component matches one of those recorded identities and durable evidence proves the partial write
+belongs to this recovery. Before each subsequent write, the provider proves the expected component
+identity, uses compare-and-set from that value, and durably proves its result. Any other mixture or third
 value enters `recovery_conflict`. Concurrent terminalization
 serializes under the System lock. The recovery point and materialized artifacts cannot be deleted
 before `recovered`. Core commits `recovered` with `cleanup_complete=false`, then deletes those objects
@@ -757,14 +682,14 @@ before initial prepare, between admission and its first stop, before release, an
 admission and its first stop; every race performs no boot-state mutation until the System-wide
 session is detached.
 
-`preparing -> abandoned` is the pre-preparation disposal path. The provider journal first restores
+`preparing -> abandoned` is the pre-preparation disposal path. Provider-owned recovery evidence first restores
 the captured source definition and prior power state. Cancellation or reconciliation may take this
 edge only after retries are no longer possible. Once `prepared`, cancellation instead takes
 `prepared -> recovering` and uses the same recorded-power-state, deadline, readiness, terminalization,
 and cleanup rules as post-activation recovery; recovery evidence remains until those rules complete.
 After source verification in the preparing path, core commits
 `abandoned` with `cleanup_complete=false` while retaining deterministic cleanup ownership. Cleanup
-then removes the journal or recovery point and materialization idempotently, verifies them absent,
+then removes the recovery evidence or recovery point and materialization idempotently, verifies them absent,
 releases the reservation, and commits `cleanup_complete=true`;
 reconciliation resumes any interrupted step. Worker loss at a deletion
 boundary therefore retains the terminal proof, and admission remains blocked until cleanup completes.
@@ -774,31 +699,16 @@ serializes abandonment with activation and teardown.
 
 Local-libvirt adapts its existing staging and direct-kernel XML behavior behind these operations.
 Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts and resolves
-provider-local paths internally. It cannot mount the remote overlay from the worker, and its existing
-guest-agent seam exists only while the System guest runs, so it gains one provider-private offline
-disk-editor operation. After stopping the System domain, the provider attaches that same overlay,
-plus one deterministic reservation-backed recovery volume, to a transient maintenance domain on the
-remote libvirt host; no other disk is writable. The recovery volume capacity equals the activation's
-remaining reserved bytes and is never attached to the System domain. The maintenance domain boots an operator-staged, architecture-matched immutable appliance,
-has no network interface, and exposes only a guest-agent command whose fixed helper can capture,
-stage, atomically publish, verify, or restore the release-qualified module tree. The helper receives
-content through a provider-owned read-only libvirt volume, never a presigned URL or caller-composed
-command. Capture writes a no-follow recovery archive and manifest to the recovery volume, hashes it
-incrementally against the reservation, fsyncs its data, and atomically writes a committed footer
-containing its length and digest. Retry accepts only that complete footer, resumes an owned incomplete
-archive from its journaled chunk boundary or recreates it, and never treats guest-agent stdout or
-worker memory as the durable copy. The provider verifies the System domain inactive and the maintenance domain destroyed before
-each attachment or System boot; both domains cannot hold the overlay concurrently.
-
-The prepare journal records the appliance, content-volume, and recovery-volume immutable identities,
-reserved byte debit, maintenance-domain identity, overlay target identity, requested helper
-operation, archive length/digest/footer, and helper result before advancing.
-Retry observes those identities and either resumes the same operation or fails closed; an unknown
-domain, attachment, volume, or helper result enters `recovery_conflict`. Recovery uses the same
-editor and saved tree. The appliance and helper are a remote-libvirt deployment prerequisite owned
-by its provisioning role, not a Profile initrd or part of the external boot plan. #2107 must unit-test
-the injected editor seam and live-prove capture, replacement, worker-loss retry, restore, and teardown
-against a remote libvirt host before remote external boot is enabled.
+provider-local paths internally. Before advertising external boot, each provider must demonstrate a
+bounded, crash-consistent way to capture, replace, verify, and restore the release-qualified module
+tree while the System is positively quiescent. Recovery evidence must survive worker loss, remain
+owned by the exact System/Run/activation, consume reserved capacity, reject partial or ambiguous
+state, and never expose a provider path, credential, presigned URL, or caller-composed command through
+the shared seam. Issue #2114 compares and selects the remote offline-restoration mechanism; this ADR
+does not preselect an appliance, maintenance domain, helper, attachment layout, archive protocol, or
+editor. Its implementation children must unit-test the selected port and live-prove capture,
+replacement, worker-loss retry, restore, teardown, and provisioning parity before remote external
+boot is enabled.
 
 After offline module publication, remote-libvirt records its disk/GRUB recovery point and activates
 direct-kernel XML without changing the disk overlay, networking, guest-agent channel, console,
@@ -827,7 +737,7 @@ HTTP/iPXE.
 - Module source identity and installed identity are distinct. The portable source digest covers
   validated bundle input; the installed digest includes provider-generated indexes and is what
   activation and recovery compare.
-- A provider-side change observed outside a fenced executor commit interval is preserved as
+- A provider-side change observed outside the selected fenced commit interval is preserved as
   `recovery_conflict`. Managed service identities cannot mutate inside that interval; privileged host
   interference during it is an audited, unsupported break-glass race. Recovery otherwise remains
   fail-closed and requires an administrator either to compare-and-set restoration of the recorded

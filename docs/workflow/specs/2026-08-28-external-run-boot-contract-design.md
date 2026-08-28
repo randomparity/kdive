@@ -2,10 +2,13 @@
 
 ## Scope
 
-Issue #2105 defines the design contract used by follow-up issues #2106–#2110. This change records
-the contract; it does not implement provider ports, persistence, uploads, activation, reaping, or a
-bare-metal provider. [ADR-0583](../../adr/0583-external-run-boot-uses-prepared-recovery-points.md)
-settles recovery ownership and crash consistency.
+Issue #2105 defines the epic contract decomposed into #2112, adopted issues #2106–#2110, and
+implementation issues #2113–#2121. This change records the contract; it does not implement provider
+ports, persistence, uploads, activation, reaping, or a bare-metal provider.
+[ADR-0583](../../adr/0583-external-run-boot-uses-prepared-recovery-points.md) is the normative schema,
+identity-vector, state-machine, and ordering definition incorporated into this specification without
+variation. Issues #2113 and #2114 separately choose the fencing/quiescence and remote offline
+restoration mechanisms; this specification states only their required outcomes.
 
 The design replaces the unpublished System-profile INITRD direction in closed PR #2104. Initial
 remote System provisioning continues to boot the operator-provided disk image through GRUB. An
@@ -39,100 +42,25 @@ The implementation is complete when:
 
 ## Contract model
 
-The names below are normative. Follow-up implementation may split their modules without changing
-their fields or meanings.
+The exact closed envelopes and golden vectors in ADR-0583 are normative and are incorporated here
+without variation. Follow-up implementation must use every ADR field and identity rule and may split
+modules without changing those meanings.
 
-```python
-@dataclass(frozen=True, slots=True)
-class ArtifactIdentity:
-    object_ref: str
-    version_id: str
-    sha256: str
-
-@dataclass(frozen=True, slots=True)
-class RootProvenanceV1:
-    authority: Literal["build-verified", "stage-inspected", "catalog-attested"]
-    source_identity: str
-    source_version: str
-
-@dataclass(frozen=True, slots=True)
-class RootSpecV1:
-    schema_version: Literal[1]
-    arch: str
-    root: str
-    arguments: tuple[str, ...]
-    provenance: RootProvenanceV1
-
-@dataclass(frozen=True, slots=True)
-class ModuleInstallObligation:
-    mode: Literal["system-root-tree"]
-    kernel_release: str
-    source_manifest_sha256: str
-
-@dataclass(frozen=True, slots=True)
-class ExternalBootPlan:
-    schema_version: Literal[1]
-    system_id: UUID
-    run_id: UUID
-    build_id: UUID
-    arch: str
-    kernel_release: str
-    kernel_bundle: ArtifactIdentity
-    initrd: ArtifactIdentity | None
-    root: RootSpecV1
-    command_line: tuple[str, ...]
-    modules: ModuleInstallObligation
-    identity: str
-
-@dataclass(frozen=True, slots=True)
-class BootMaterialization:
-    plan_identity: str
-    provider_ref: str
-    extracted_kernel_sha256: str
-
-@dataclass(frozen=True, slots=True)
-class BootRecoveryPoint:
-    plan_identity: str
-    provider_ref: str
-    source_state_identity: str
-    target_state_identity: str
-
-@dataclass(frozen=True, slots=True)
-class BootObservedState:
-    status: Literal["source", "target", "owned-partial", "conflict", "unreadable"]
-
-class ExternalBootRuntime(Protocol):
-    def materialize(self, plan: ExternalBootPlan) -> BootMaterialization: ...
-    def prepare_recovery(
-        self, plan: ExternalBootPlan, materialization: BootMaterialization
-    ) -> BootRecoveryPoint: ...
-    def activate(
-        self,
-        plan: ExternalBootPlan,
-        materialization: BootMaterialization,
-        recovery: BootRecoveryPoint,
-    ) -> None: ...
-    def observe_state(
-        self, system_id: UUID, recovery: BootRecoveryPoint
-    ) -> BootObservedState: ...
-    def recover(self, system_id: UUID, recovery: BootRecoveryPoint) -> None: ...
-    def cleanup(
-        self,
-        plan: ExternalBootPlan,
-        materialization: BootMaterialization,
-        recovery: BootRecoveryPoint,
-    ) -> None: ...
-```
+The shared runtime exposes six typed operations over the ADR-exact values: materialize the plan,
+prepare recovery, activate, observe provider state, recover, and clean up. Preparation returns an
+opaque recovery reference plus exact source and target state identities; observation returns one of
+`source`, `target`, `owned-partial`, `conflict`, or `unreadable`. This specification deliberately does
+not repeat shortened dataclass fields: the ADR's closed envelopes and golden vectors are the only data
+model, so a consumer cannot conform to one document while failing the other.
 
 `provider_ref` is an opaque, bounded, non-secret identifier. Core stores it and returns it only to
 the same provider runtime; it does not parse, log, or expose it through MCP. A provider may resolve
 the reference to provider-owned state, but the reference itself must not be a path, URL, credential,
 or serialized XML.
 
-Every SHA-256 value uses lowercase hexadecimal with a `sha256:` prefix. `identity` is the SHA-256 of
-canonical JSON containing every preceding `ExternalBootPlan` field except `identity`, using sorted
-object keys, UTF-8, no insignificant whitespace, and array order preserved. It therefore binds the
-ordered command line and all artifact versions. UUIDs serialize as lowercase hyphenated strings.
+Every SHA-256 value uses lowercase hexadecimal with a `sha256:` prefix. Identity uses the ADR's
+canonical JSON and domain-separation rules and binds the ordered command line and all artifact
+versions. UUIDs serialize as lowercase hyphenated strings.
 
 ## Paired artifacts and build ownership
 
@@ -151,8 +79,9 @@ Plan construction rejects:
 - a modules-tree digest that differs from the finalized manifest; and
 - a plan identity that does not recompute from the canonical fields.
 
-The extracted `boot/vmlinuz` digest is a materialization result because it identifies derived bytes.
-The provider compares it with the finalized bundle manifest before publishing. The running-kernel
+External-build finalization extracts and persists the exact `boot/vmlinuz` digest and measured kernel
+evidence; plan construction copies that trusted evidence. Materialization recomputes and requires an
+exact match before publishing. The running-kernel
 proof compares the guest-visible build identity or version plus the measured boot artifact against
 that digest through the provider's live proof; a changed `boot_id` alone is readiness, not identity.
 
@@ -170,20 +99,23 @@ The final command line is composed once in core in this order:
 2. `RootSpecV1.arguments` in recorded order;
 3. the existing platform-independent Run and capture arguments.
 
-The final tuple is stored in `ExternalBootPlan.command_line`. Providers render it without adding,
+The complete rendered string is stored in `ExternalBootPlan.cmdline`; `debug_cmdline` preserves the
+nullable caller extra and `platform_arguments` preserves the ordered platform-owned tokens. Providers
+render `cmdline` without adding,
 removing, or reordering tokens. A caller cannot supply raw root tokens through the Run argument
 surface; a collision fails plan construction.
 
 Root provenance authority is closed:
 
-- `build-verified`: the KDIVE rootfs build measured the booted image layout and emitted the record;
-- `stage-inspected`: a bounded, verified inspection of the exact staged image emitted it; or
-- `catalog-attested`: a typed extension to the existing catalog attestation binds the root value,
-  ordered root arguments, architecture, schema version, and operator declaration to the exact image
-  digest/version. The current two-field attestation is insufficient and does not authorize external
+- `stage-inspection` with source kind `staged-image`: bounded verified inspection of the exact staged
+  image emitted the record; or
+- `catalog-attestation` with source kind `catalog-image`: a typed catalog attestation binds the root
+  value, ordered root arguments, architecture, schema version, and operator declaration to the exact
+  image identity. The current two-field attestation is insufficient and does not authorize external
   boot.
 
-`source_identity` and `source_version` must match the System's persisted base-image provenance.
+The closed `source` object contains only `kind` and immutable `identity`; both must match the System's
+persisted base-image provenance.
 Unknown schema or authority values, a mismatch, or absent provenance yields
 `CONFIGURATION_ERROR` before materialization, naming the invalid fact and the recovery action:
 reinspect/rebuild the image or use the existing GRUB boot path. Pre-schema images are not backfilled
@@ -229,11 +161,12 @@ preserves and verifies this installed metadata.
 Materialization stages the module tree, runs required indexing, and computes
 `installed-module-tree-v1` with the same walker over the final tree. Generated files such as
 `modules.dep` are included only there. The returned installed digest enters target provider-state
-identity. Materialization does not change the System. Core commits `preparing`; a deterministic
-provider journal records source definition and prior power state, stops and verifies the domain
-inactive, then captures the prior `/lib/modules/<kernel_release>` tree or its absence. Only that
-completed journal becomes `BootRecoveryPoint` and permits `prepared`. Reconciliation resumes an
-interrupted journal; abandonment restores source definition and prior power state first. Activation
+identity. Materialization does not change the System. Core commits `preparing`; the provider durably
+records the exact source definition, prior power state, and prior
+`/lib/modules/<kernel_release>` tree or its absence while proving the domain inactive. Only complete,
+ownership-bound recovery evidence permits `prepared`. Reconciliation resumes or safely abandons an
+interrupted preparation without recapturing a new baseline; abandonment restores source definition
+and prior power state first. Activation
 publishes the exact staged tree from `prepared`, then applies and boots the target definition.
 Failure to quiesce leaves `preparing` and changes nothing. An exact tree may be
 reused and a different same-release tree is replaced. Recovery performs the same offline boundary,
@@ -242,8 +175,10 @@ existing injection to this ordering. Remote-libvirt installs the same tree witho
 initrd. A provider unable to quiesce, stage, replace, verify, and restore it rejects before recovery
 preparation.
 
-Before `preparing`, the provider reserves operator-configured `recovery_max_bytes` in its durable
-store for this System/Run activation. Unit and scope are bytes per activation; availability is read
+Core commits `preparing` with reservation state `pending` before provider allocation. The provider
+then reserves operator-configured `recovery_max_bytes` in its durable store for this System/Run
+activation, and core records reservation state `ready` before materialization. Unit and scope are
+bytes per activation; availability is read
 at the response envelope's `server_time`. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
 guest state, and directs cleanup of terminal artifacts or a cap increase before retry. Capture cannot
 exceed the reservation; overrun restarts the source and fails `INSTALL_FAILURE`. Prepared, recovery,
@@ -263,19 +198,21 @@ failure. The state transitions are:
 ```text
 preparing -> prepared -> activating -> active
     |           |             |          |
-    +-----------+             v          v
-    v                     recovering <---+
-abandoned                     |
+    v           +-------------+----------+
+abandoned                     v
+                          recovering -> recovered
+                              |
                               v
-                          recovered
+                       recovery_failed
 
-preparing | activating | active | recovering -> recovery_conflict
+preparing | prepared | activating | active | recovering -> recovery_conflict
+recovery_conflict -> recovering
 ```
 
 An active terminal Run enters `recovering` before cleanup when its System remains reusable. A
-terminal `preparing` Run restores source definition and prior power state from its journal before
-`abandoned`; a terminal `prepared` Run enters `abandoned` only while provider state still equals the
-recorded source.
+terminal `preparing` Run restores source definition and prior power state from its recovery evidence
+before `abandoned`; a terminal `prepared` Run enters `recovering` and uses that evidence even while
+provider state still equals the recorded source.
 System teardown destroys the domain before cleanup instead of restoring it. Materialization and
 recovery evidence cannot be removed before one of those ordered terminal paths completes. Illegal
 transitions are programming errors. Operation attempts remain idempotent by Run and step, and all
@@ -283,25 +220,31 @@ transitions plus provider calls retain the existing per-System lock.
 
 Ordering is strict:
 
-1. Materialize and verify the plan.
-2. Commit `preparing`, then ask the provider journal to record the persistent definition and prior
-   power state, quiesce the domain, capture the prior module tree, render the target definition, and
-   compute source/target identities.
-3. Commit `prepared` with the completed recovery reference and both state identities.
-4. Commit `activating`.
-5. Activate the module tree and persistent definition with compare-and-set against the recovery
+1. Commit the activation row in `preparing` with reservation state `pending`.
+2. Create the provider reservation and commit reservation state `ready`.
+3. Materialize and verify the plan without changing the System.
+4. Require provider-owned durable recovery evidence for the persistent
+   definition, prior power state, prior module tree, and source/target identities while satisfying
+   #2113's positive-quiescence outcome. #2114 chooses the remote capture/restore mechanism.
+5. Commit `prepared` with the completed recovery reference and both state identities.
+6. Commit `activating`.
+7. Activate the module tree and persistent definition with compare-and-set against the recovery
    point's source state.
-6. Observe the versioned persistent-definition projection plus module-tree state and commit `active`
-   only on an exact target-state match.
-7. Run readiness, then the separate running-kernel identity proof.
+8. Observe the versioned persistent-definition projection plus module-tree state.
+9. Prove fresh readiness, running-kernel identity, and the effective command line before committing
+   externally usable `active`; persistent target equality alone never authorizes `active`.
 
-A crash before step 3 leaves only provider-owned unreferenced state, which the deterministic reaper
-removes. A crash after step 3 is recoverable from the row. For `activating`, reconciliation observes
-both persistent definition and module-tree identities. Exact target completes `active`; exact source
+A crash during materialization leaves owned state referenced by the pending activation and
+reservation; reconciliation resumes or removes it deterministically. A crash after `prepared` is
+recoverable from the row. For `activating`, reconciliation observes
+both persistent definition and module-tree identities. Exact target resumes the remaining readiness,
+kernel-identity, and command-line proofs before `active`; exact source
 completes `recovered`; a mixed state composed only of recorded source and target components is an
 activation-owned partial and moves to `recovering`. An absent, unreadable, or third component enters
 `recovery_conflict` and preserves evidence for an operator; it is never overwritten. A failed restore
-remains retryable in `recovering` and never declares the System ready.
+remains retryable only until its persisted recovery deadline and never declares the System ready.
+Expiry transitions to terminal `recovery_failed`, retains the evidence and reservation, exposes
+non-retryable `CONFLICT`, and permits only authorized System teardown.
 
 Remote recovery records the exact persistent/inactive domain definition before external activation.
 Definition identity version 1 splits that XML into a preserved digest and boot projection. The
@@ -333,8 +276,9 @@ When a reusable System recovers from `active`, the provider stops the domain, ve
 restores the prior module tree and persistent definition, boots that definition, and proves both a
 fresh boot and the existing System readiness contract before committing `recovered`. GRUB's selected
 kernel is not derivable from inactive domain XML and is not an identity gate. Failure to reach
-readiness after bounded retries remains `recovering` for operator action with evidence retained. A
-retry repeats the sequence. System teardown destroys without restore/reboot. The record survives
+readiness before the persisted deadline transitions to `recovery_failed` with evidence and
+reservation retained; retries before that deadline repeat the sequence. System teardown destroys
+without restore/reboot. The record survives
 until the ordered cleanup path completes, so configuration drift cannot rewrite the recovery target.
 
 ## Failure taxonomy
@@ -368,8 +312,9 @@ state.
 - Tenant upload to build finalization: existing Run/build ownership, size limits, archive-member
   validation, immutable object versions, digests, and retention apply. Pairing is checked against
   the same finalized build identity.
-- Image provenance to plan construction: accept only the three authority classes and exact persisted
-  source identity/version; reject unknown schema and architecture before provider work.
+- Image provenance to plan construction: accept only `stage-inspection`/`staged-image` and
+  `catalog-attestation`/`catalog-image`, matching the exact persisted source kind and immutable
+  identity; reject unknown schema and architecture before provider work.
 - Run arguments to kernel command line: tokenize in core, reject root-key collisions and control
   characters, and pass argument arrays rather than shell text.
 - Object store to worker/provider: use immutable versions, bounded streaming and extraction, digest
