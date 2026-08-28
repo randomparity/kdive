@@ -808,10 +808,6 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
                     _copy_kernel_bounded(source, decoded, budget)
             except EOFError, OSError, zlib.error, lzma.LZMAError, zstd.ZstdError:
                 decoded.seek(0)
-                if decoded.read(4) == _ELF_MAGIC:
-                    decoded.seek(0)
-                    return decoded
-                decoded.seek(0)
                 decoded.truncate()
                 continue
             decoded.seek(0)
