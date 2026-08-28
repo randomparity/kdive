@@ -32,10 +32,12 @@ operator-provisioned image selected for the System architecture. It exposes only
 protocol; it is not a shell, package manager, arbitrary file editor, or user-script executor.
 KDIVE communicates through libvirt-owned console and block-device operations, not SSH.
 
-Before starting the appliance, the worker proves that the System domain is shut off, holds the
-System mutation fence defined by ADR-0584, and verifies that the root volume is not attached to any
-other active domain. It creates one attempt-scoped transient appliance with auto-destroy semantics
-and attaches:
+Before starting the appliance, the worker proves that the System domain is shut off and holds the
+provider-neutral mutation authority selected by #2113. This mechanism cannot be implemented until
+that decision is accepted. Every KDIVE lifecycle path must honor that authority through verified
+appliance teardown. Under it, the worker enumerates active and inactive domain definitions and
+requires the root volume to be referenced only by its owning, shut-off System. It then creates one
+attempt-scoped transient appliance with auto-destroy semantics and attaches:
 
 - the exact System root volume read-write, as the sole mutable guest disk;
 - a read-only, content-addressed module-source volume built from the validated ADR-0583 module
@@ -49,11 +51,10 @@ from the caller. The only mutable destination is the no-follow
 already passed ADR-0583 topology and manifest validation; the appliance repeats the manifest,
 member-count, and uncompressed-byte checks before mutation. It uses directory-relative no-follow
 operations, stages the replacement beside the destination, runs only its built-in `depmod` for the
-validated release, computes `module-installed-tree-v1`, and exchanges the directories with an
-atomic rename sequence. It then syncs and unmounts the filesystem before reporting success. It
-never executes a binary from the System disk or source volume. `depmod` reads foreign-architecture
-module metadata as data, so the appliance executable matches the remote hypervisor architecture,
-not the installed kernel's architecture.
+validated release, and computes `module-installed-tree-v1`. It never executes a binary from the
+System disk or source volume. `depmod` reads foreign-architecture module metadata as data, so the
+appliance executable matches the remote hypervisor architecture, not the installed kernel's
+architecture.
 
 ### Durable capture and identity
 
@@ -74,19 +75,34 @@ operations and is retained until recovery or successful baseline commitment make
 
 ### Retry and restoration
 
-Operation identity is `(system_id, run_id, plan_identity, operation_nonce, phase)`. A retry first
-reads the durable result from the scratch volume and observes the destination manifest. Matching
-completed evidence returns the prior result. A staged but uncommitted replacement is removed and
-restarted. A destination equal to neither the captured nor installed manifest is a recovery
-conflict; the appliance performs no further write and core parks the System on the ADR-0583
-conflict path.
+Operation identity is `(system_id, run_id, plan_identity, operation_nonce, phase)`. Mutation uses
+three nonce-qualified names on the root filesystem: destination `D`, staged replacement `N`, and
+displaced destination `O`. `N`, `D`, and `O` are on the same filesystem. The appliance makes the
+capture and its manifest durable on scratch and writes durable `captured`; makes `N` and its
+contents durable and writes durable `replacement-ready`; renames `D` to `O` when the capture is not
+absent and syncs the parent; renames `N` to `D`, syncs the parent, and verifies the installed
+manifest; then writes durable `installed`. Only after `installed` is durable may a retry remove
+`O`. Every phase write is followed by flush, appliance shutdown, and libvirt volume-flush success
+before the worker persists the result. A failure to obtain positive flush evidence is incomplete,
+never success.
 
-Restoration uses the same appliance and recovery point. It verifies all identity fields, the root
-volume, and the captured manifest before replacing the installed release directory with the exact
-capture or removing it when the absent marker was recorded. It syncs, unmounts, and reports the
-restored manifest. Only a verified restore permits teardown of the scratch volume. Missing,
-unreadable, mismatched, or over-limit recovery material fails closed and retains the scratch volume
-for diagnosis; System teardown remains the terminal escape described by ADR-0583.
+A retry reads the durable scratch phase and the manifests of every present `D`, `N`, and `O` before
+writing. `captured` permits only the original `D` plus no `O`; `replacement-ready` permits the
+original `D` plus staged `N`, absent `D` plus original `O` and staged `N`, or installed `D` plus
+original `O`. Those states respectively restart the rename sequence, finish `N` to `D`, or verify
+and record `installed`. The absent-capture form follows the same states without `O`. `installed`
+requires installed `D` and permits only removal of a matching `O`. Any other name, phase, or
+manifest combination is a recovery conflict; the appliance performs no further write and core
+parks the System on the ADR-0583 conflict path.
+
+Restoration uses the same appliance, names, ordering, and retry table with captured and installed
+roles reversed. It first verifies all identity fields, the root volume, and the captured manifest;
+stages the captured tree as `N`, or records the absent-capture removal operation; and writes durable
+`restore-ready` before renaming. Durable `restored` requires the exact captured `D` or verified
+absence, a synced parent, and no unclassified name. Only that result permits teardown of the
+scratch volume. Missing, unreadable, mismatched, or over-limit recovery material fails closed and
+retains the scratch volume for diagnosis; System teardown remains the terminal escape described by
+ADR-0583.
 
 ### Isolation, teardown, and redaction
 
@@ -94,10 +110,15 @@ The appliance has no network interface, host filesystem share, graphics device, 
 definition, or device beyond its three allowlisted volumes and a bounded console. Its libvirt
 domain name, disk aliases, operation nonce, and volume references are deterministic from durable
 identities. The worker rejects any pre-existing domain or attachment whose immutable definition
-does not match. Normal completion destroys the appliance, verifies it absent, detaches all volumes,
-and then deletes only attempt-scoped staging volumes whose durable owner and digest match. Reaper
-logic applies the same identity checks after worker death; it never detaches a root disk from an
-active System or deletes an unowned volume.
+does not match. The #2113 authority serializes all KDIVE attachment and System-start paths across
+the check and mutation window. A libvirt administrator can bypass KDIVE and race attachment; that
+privileged operator interference is outside the trust boundary, as established by #2105, and is
+not reported as an ordinary recoverable conflict.
+
+Normal completion destroys the appliance, verifies it absent, detaches all volumes, and then
+deletes only attempt-scoped staging volumes whose durable owner and digest match. Reaper logic
+applies the same identity checks after worker death; it never detaches a root disk from an active
+System or deletes an unowned volume.
 
 Object-store credentials, libvirt credentials, and presigned URLs never enter the appliance. The
 worker streams bounded source and result volumes through existing libvirt storage operations and
