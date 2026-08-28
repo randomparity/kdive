@@ -384,6 +384,15 @@ of overwriting provider state. The portable plan identity is never compared dire
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
 
+Immediately before activation's first target module-tree or definition write, the destination-side
+executor holds the current System fence and serialized mutation lane, observes power, and requires
+the domain to be inactive. It then re-observes the complete source definition/module identity in that
+same lane before the write-ahead CAS entry. An active or unreadable power result, or a non-source
+component, performs no provider write and transitions to `recovery_conflict` with the observations
+retained. No observation made at `prepared` is fresh enough to satisfy this gate. The adversarial
+suite pauses after `prepared`, starts the domain out of band, resumes activation, and proves that
+neither modules nor definition are changed.
+
 The existing transaction-scoped System advisory lock protects each database transition only; it
 cannot fence provider work across those commits. The System owns a durable monotonically increasing
 `operation_generation` allocated under that lock; it never resets when an activation terminates.
