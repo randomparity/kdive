@@ -41,7 +41,9 @@ def test_grid_generation_injects_an_offline_object_store(
         captured.update(kwargs)
         return _App()
 
-    monkeypatch.setattr(gridgen, "build_app", _build_app)
+    monkeypatch.setattr(gridgen, "build_app_from_assembly", _build_app)
 
     assert gridgen._build_tools() == []
-    assert isinstance(captured["object_store_assembly"], ObjectStoreAssembly)
+    process = captured["process_assembly"]
+    assert isinstance(process.object_stores, ObjectStoreAssembly)
+    assert process.object_stores.store is not None
