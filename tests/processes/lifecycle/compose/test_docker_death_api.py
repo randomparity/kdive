@@ -11,7 +11,7 @@ from kdive.processes.lifecycle.compose.docker_death_api import (
     WorkerLifecycleGate,
     permitted_inspect_path,
 )
-from kdive.services.runs.worker_incarnations import DockerAuthorityBinding
+from kdive.worker_lifecycle.authority_store import DockerAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _CREDENTIAL = "c" * 64  # pragma: allowlist secret

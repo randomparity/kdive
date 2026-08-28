@@ -24,7 +24,7 @@ from kdive.config.core_settings import (
 from kdive.db.pool import create_pool
 from kdive.health.probe import BackendCheck, HealthProbe
 from kdive.processes.runtime import install_stop, run_process_runtime
-from kdive.services.runs.worker_incarnations import KubernetesAuthorityBinding
+from kdive.worker_lifecycle.authority_store import KubernetesAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 if TYPE_CHECKING:
@@ -103,7 +103,7 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
         read_pod,
         run_witness,
     )
-    from kdive.services.runs.worker_incarnations import (
+    from kdive.worker_lifecycle.authority_store import (
         CURRENT_WORKER_FENCE_PROTOCOL,
         acknowledge_kubernetes_credential_envelope,
         read_kubernetes_credential_envelope,

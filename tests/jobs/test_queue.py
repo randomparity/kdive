@@ -35,7 +35,7 @@ from kdive.jobs.payloads import (
     SnapshotPayload,
     SystemPayload,
 )
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 

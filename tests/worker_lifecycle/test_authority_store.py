@@ -10,8 +10,8 @@ import pytest
 from psycopg import AsyncConnection, errors, sql
 from pydantic import SecretStr
 
-import kdive.services.runs.worker_incarnations as incarnations
-from kdive.services.runs.worker_incarnations import (
+import kdive.worker_lifecycle.authority_store as incarnations
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     DockerAuthorityBinding,
     IncarnationConflict,

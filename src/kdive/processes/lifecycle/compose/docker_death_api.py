@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
-from kdive.services.runs.worker_incarnations import DockerAuthorityBinding
+from kdive.worker_lifecycle.authority_store import DockerAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _INSPECT_PATH = re.compile(r"/containers/[0-9a-f]{64}/json")

@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.services.runs.build_use import acquire_build_use, release_build_use
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
 )

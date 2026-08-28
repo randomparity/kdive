@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.worker import DEFAULT_ACCEPTED_LANES
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 
 
 def incarnation_credential(worker_id: str) -> SecretStr:

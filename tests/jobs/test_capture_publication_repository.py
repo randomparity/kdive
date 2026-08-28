@@ -33,7 +33,7 @@ from kdive.jobs.capture_operations.storage.repository import (
     refresh_publication_operation,
 )
 from kdive.security.audit import AuditEvent
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.db_waits import wait_until_backend_waiting
 from tests.reconciler.conftest import connect
 

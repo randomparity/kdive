@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kdive.services.runs.worker_incarnations import KubernetesAuthorityBinding
+from kdive.worker_lifecycle.authority_store import KubernetesAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 FINALIZER = "kdive.io/worker-termination-evidence"

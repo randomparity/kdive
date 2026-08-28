@@ -19,7 +19,7 @@ from kdive.processes.lifecycle.kubernetes.kubernetes_termination_witness import 
     KubernetesTerminationWitness,
     run_witness,
 )
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     KubernetesAuthorityBinding,
     register_worker_incarnation,

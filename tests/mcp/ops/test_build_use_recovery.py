@@ -14,7 +14,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.ops import build_uses
 from kdive.security.authz.rbac import PlatformRole, Role
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     LocalAuthorityBinding,
     register_worker_incarnation,

@@ -18,7 +18,7 @@ from kdive.processes.runtime import (
     readiness,
     run_process_runtime,
 )
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     DockerAuthorityBinding,
     KubernetesAuthorityBinding,

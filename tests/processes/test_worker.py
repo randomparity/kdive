@@ -15,7 +15,7 @@ from kdive.jobs.worker import WorkerConfig
 from kdive.observability.facade import Telemetry
 from kdive.processes.worker import run_worker
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     WorkerIncarnation,
 )

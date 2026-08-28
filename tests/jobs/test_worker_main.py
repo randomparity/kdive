@@ -18,7 +18,7 @@ from kdive.processes.runtime import (
     POOL_OPEN_TIMEOUT_SECONDS,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     WorkerIncarnation,
 )

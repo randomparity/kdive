@@ -35,7 +35,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_state import (
     SlotState,
     StateConflict,
 )
-from kdive.services.runs.worker_incarnations import (
+from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     register_worker_incarnation,
     terminate_worker_incarnation,

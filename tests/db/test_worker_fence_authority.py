@@ -34,7 +34,7 @@ from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifac
 from kdive.security import audit
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.worker_incarnations import CURRENT_WORKER_FENCE_PROTOCOL
+from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.db import conftest as db_conftest
 from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
 
