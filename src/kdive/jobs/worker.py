@@ -194,8 +194,12 @@ class Worker:
         """Build a worker.
 
         Args:
+            pool: Shared database pool sized for every accepted dispatch lane.
+            registry: Job-kind to handler registry used for dispatch.
+            worker_id: Stable identifier recorded on claimed jobs.
             incarnation_credential: Authority-minted credential for ``worker_id``. Every claim
                 authenticates it at the database boundary.
+            secret_registry: Per-operation secret redaction registry passed to handlers.
             config: Lease timing plus optional ``/livez`` heartbeat, readiness gate, and
                 per-job telemetry. ``None`` values in the config disable the optional
                 collaborators (always ready, no background liveness ticker, no-op telemetry).

@@ -188,6 +188,13 @@ async def _record_system_failure(
     failure to record the reason must never displace the provider error the caller re-raises.
 
     Args:
+        conn: Connection owning the failure-recording transaction.
+        job: Provision or teardown job whose authorization is audited.
+        system_id: System to transition to ``failed``.
+        project: Owning project written to the audit record.
+        transition: Audit transition name for the failed operation.
+        tool: Agent-facing tool name that initiated the operation.
+        operation: Human-readable operation name used in fallback logs.
         category: The provider error's category — the System's own verdict, independent of
             whatever the job row later comes to say.
     """

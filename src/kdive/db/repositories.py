@@ -280,7 +280,10 @@ class StatefulRepository[M: DomainModel, S: StrEnum](Repository[M]):
         post-provision live read and this write — so a stale value can never land on a terminal row.
 
         Args:
+            conn: Database connection used for the guarded update.
+            obj_id: Row identifier to update.
             column: The jsonb column to write. Serialized with ``Jsonb`` (``None`` writes SQL NULL).
+            value: JSON-compatible payload, or ``None`` to write SQL NULL.
             allowed_states: The row states in which the write is permitted.
 
         Returns:
