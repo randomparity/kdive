@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 from typing import Any, cast
 from uuid import uuid4
 
@@ -23,6 +24,10 @@ from kdive.worker_lifecycle.authority_store import (
 from tests.reconciler.conftest import connect
 
 _PROTOCOL = CURRENT_WORKER_FENCE_PROTOCOL
+
+
+def test_authority_store_has_no_legacy_run_service_facade() -> None:
+    assert importlib.util.find_spec("kdive.services.runs.worker_incarnations") is None
 
 
 def test_public_authority_apis_reject_mismatched_binding_shapes_before_database_access() -> None:
