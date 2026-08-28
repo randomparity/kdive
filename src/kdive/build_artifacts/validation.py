@@ -9,14 +9,15 @@ import io
 import json
 import lzma
 import posixpath
+import re
 import struct
 import tarfile
 import tempfile
 import unicodedata
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from compression import zstd
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import IO, Literal, Protocol, cast
 
 from kdive.artifacts.storage import HeadResult
@@ -60,7 +61,9 @@ _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 16 * 1024 * 1024
+_EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX = 64
 _SHA256_PREFIX = "sha256:"
+_KERNEL_RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +539,7 @@ def _scan_external_boot_archive(
         raise _build_failure("kernel bundle has no regular boot/vmlinuz member")
     if len(releases) != 1 or not entries:
         raise _build_failure("kernel bundle must contain exactly one lib/modules/<release> tree")
+    _validate_module_topology(entries)
     module_release = next(iter(releases))
     if boot["release"] != module_release:
         raise _build_failure(
@@ -631,6 +635,22 @@ def _module_manifest_entry(
     raise _build_failure("kernel bundle contains an unsupported module member", path=relative)
 
 
+def _validate_module_topology(entries: Sequence[Mapping[str, JsonValue]]) -> None:
+    types = {str(entry["path"]): str(entry["type"]) for entry in entries}
+    for path in types:
+        parts = path.split("/")
+        for end in range(1, len(parts)):
+            ancestor = "/".join(parts[:end])
+            ancestor_type = types.get(ancestor)
+            if ancestor_type is not None and ancestor_type != "dir":
+                raise _build_failure(
+                    "module-tree member has a non-directory ancestor",
+                    path=path,
+                    ancestor=ancestor,
+                    ancestor_type=ancestor_type,
+                )
+
+
 def _inspect_boot_member(
     archive: tarfile.TarFile, member: tarfile.TarInfo, expected_arch: str
 ) -> dict[str, JsonValue]:
@@ -720,20 +740,25 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
     )
 
 
-def _magic_offsets(source: IO[bytes], magic: bytes) -> list[int]:
+def _magic_offsets(source: IO[bytes], magic: bytes) -> Iterator[int]:
     source.seek(0)
-    offsets: list[int] = []
     overlap = b""
     position = 0
+    count = 0
     while chunk := source.read(_RANGE_CHUNK_BYTES):
         data = overlap + chunk
         start = 0
         while (index := data.find(magic, start)) >= 0:
-            offsets.append(position - len(overlap) + index)
+            count += 1
+            if count > _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX:
+                raise _build_failure(
+                    "boot/vmlinuz exceeds the compression-candidate work limit",
+                    max_candidates=_EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX,
+                )
+            yield position - len(overlap) + index
             start = index + 1
         overlap = data[-(len(magic) - 1) :]
         position += len(chunk)
-    return offsets
 
 
 def _copy_kernel_bounded(source: _BinaryReader, destination: IO[bytes]) -> int:
@@ -751,14 +776,52 @@ def _copy_kernel_bounded(source: _BinaryReader, destination: IO[bytes]) -> int:
     return total
 
 
+@dataclass(slots=True)
+class _BoundedElfReader:
+    source: IO[bytes]
+    size: int
+    intervals: list[tuple[int, int]] = field(default_factory=list)
+
+    def read(self, offset: int, length: int) -> bytes:
+        if offset < 0 or length < 0 or offset + length > self.size:
+            raise _build_failure("decoded boot/vmlinuz ELF metadata extends past the object")
+        intervals = [*self.intervals, (offset, offset + length)]
+        measured = _interval_bytes(intervals)
+        if measured > _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES:
+            raise _build_failure(
+                "decoded boot/vmlinuz exceeds the ELF metadata read limit",
+                max_bytes=_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES,
+            )
+        self.source.seek(offset)
+        data = self.source.read(length)
+        if len(data) != length:
+            raise _build_failure("decoded boot/vmlinuz ELF metadata is truncated")
+        self.intervals = intervals
+        return data
+
+    @property
+    def measured_bytes(self) -> int:
+        return _interval_bytes(self.intervals)
+
+
+def _interval_bytes(intervals: Sequence[tuple[int, int]]) -> int:
+    total = 0
+    end = 0
+    for start, stop in sorted(intervals):
+        if stop <= end:
+            continue
+        total += stop - max(start, end)
+        end = stop
+    return total
+
+
 def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, JsonValue]:
     kernel.seek(0, io.SEEK_END)
-    decoded_size = kernel.tell()
-    kernel.seek(0)
-    metadata = kernel.read(_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES)
-    if len(metadata) < 64 or metadata[:6] != _ELF64LE_PREFIX:
+    reader = _BoundedElfReader(kernel, kernel.tell())
+    header = reader.read(0, 64)
+    if header[:6] != _ELF64LE_PREFIX:
         raise _build_failure("decoded boot/vmlinuz is not a 64-bit little-endian ELF")
-    machine = int.from_bytes(metadata[0x12:0x14], "little")
+    machine = int.from_bytes(header[0x12:0x14], "little")
     expected_machine = 62 if expected_arch == "x86_64" else 21
     if machine != expected_machine:
         raise _build_failure(
@@ -766,8 +829,17 @@ def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, Jso
             expected_arch=expected_arch,
             e_machine=machine,
         )
-    release = _release_from_linux_banner(metadata)
-    build_ids = _gnu_build_ids(metadata)
+    program_headers = _elf_program_headers(reader, header)
+    build_ids: set[str] = set()
+    release: str | None = None
+    for segment_type, offset, size in program_headers:
+        if segment_type == 4:  # PT_NOTE
+            build_ids.update(_gnu_build_ids_from_notes(reader.read(offset, size)))
+        elif segment_type == 1 and release is None:  # PT_LOAD
+            data = reader.read(offset, min(size, _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES))
+            release = _optional_linux_release(data)
+    if release is None:
+        raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
     if len(build_ids) != 1:
         raise _build_failure(
             "decoded boot/vmlinuz must contain one unambiguous GNU build ID",
@@ -777,8 +849,8 @@ def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, Jso
     if not 4 <= len(build_id) // 2 <= 64:
         raise _build_failure("decoded boot/vmlinuz GNU build ID has an invalid byte length")
     return {
-        "decoded_kernel_size_bytes": decoded_size,
-        "elf_metadata_bytes": len(metadata),
+        "decoded_kernel_size_bytes": reader.size,
+        "elf_metadata_bytes": reader.measured_bytes,
         "architecture": expected_arch,
         "release": release,
         "gnu_build_id": build_id,
@@ -786,11 +858,38 @@ def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, Jso
     }
 
 
+def _elf_program_headers(reader: _BoundedElfReader, header: bytes) -> list[tuple[int, int, int]]:
+    offset = struct.unpack_from("<Q", header, 0x20)[0]
+    entry_size = struct.unpack_from("<H", header, 0x36)[0]
+    count = struct.unpack_from("<H", header, 0x38)[0]
+    if offset == 0 or count == 0 or entry_size < 56:
+        raise _build_failure("decoded boot/vmlinuz has no usable ELF program header table")
+    table = reader.read(offset, entry_size * count)
+    result: list[tuple[int, int, int]] = []
+    for index in range(count):
+        base = index * entry_size
+        result.append(
+            (
+                struct.unpack_from("<I", table, base)[0],
+                struct.unpack_from("<Q", table, base + 8)[0],
+                struct.unpack_from("<Q", table, base + 32)[0],
+            )
+        )
+    return result
+
+
 def _release_from_linux_banner(data: bytes) -> str:
+    release = _optional_linux_release(data)
+    if release is None:
+        raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
+    return release
+
+
+def _optional_linux_release(data: bytes) -> str | None:
     marker = b"Linux version "
     start = data.find(marker)
     if start < 0:
-        raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
+        return None
     release = data[start + len(marker) :].split(maxsplit=1)[0]
     return _validated_release(release)
 
@@ -800,8 +899,7 @@ def _validated_release(value: bytes) -> str:
         release = value.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _build_failure("boot/vmlinuz release is not UTF-8") from exc
-    canonical = unicodedata.normalize("NFC", release)
-    if not release or len(release.encode()) > 255 or canonical != release:
+    if _KERNEL_RELEASE_RE.fullmatch(release) is None:
         raise _build_failure("boot/vmlinuz release is not canonical")
     return release
 
@@ -814,19 +912,20 @@ def _open_zstd(source: IO[bytes]) -> zstd.ZstdFile:
     return zstd.ZstdFile(source, mode="rb")  # noqa: SIM115
 
 
-def _gnu_build_ids(data: bytes) -> set[str]:
+def _gnu_build_ids_from_notes(data: bytes) -> set[str]:
     found: set[str] = set()
-    marker = b"GNU\0"
-    start = 0
-    while (name_offset := data.find(marker, start)) >= 0:
-        header_offset = name_offset - 12
-        if header_offset >= 0:
-            namesz, descsz, note_type = struct.unpack_from("<III", data, header_offset)
-            desc_offset = name_offset + (-namesz % 4) + namesz
-            desc_end = desc_offset + descsz
-            if namesz == 4 and note_type == _NT_GNU_BUILD_ID and desc_end <= len(data):
-                found.add(data[desc_offset:desc_end].hex())
-        start = name_offset + len(marker)
+    offset = 0
+    while offset + 12 <= len(data):
+        namesz, descsz, note_type = struct.unpack_from("<III", data, offset)
+        name_start = offset + 12
+        name_end = name_start + namesz
+        desc_start = name_end + (-namesz % 4)
+        desc_end = desc_start + descsz
+        if desc_end > len(data):
+            raise _build_failure("decoded boot/vmlinuz has a malformed ELF note segment")
+        if note_type == _NT_GNU_BUILD_ID and data[name_start:name_end].rstrip(b"\0") == b"GNU":
+            found.add(data[desc_start:desc_end].hex())
+        offset = desc_end + (-descsz % 4)
     return found
 
 

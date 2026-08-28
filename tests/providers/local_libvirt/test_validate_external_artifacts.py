@@ -37,10 +37,24 @@ def _boot_elf(
     body[4] = 2  # ELFCLASS64
     body[5] = 1  # ELFDATA2LSB
     struct.pack_into("<H", body, 0x12, e_machine)  # e_machine
+    struct.pack_into("<Q", body, 0x20, 64)  # e_phoff
+    struct.pack_into("<H", body, 0x36, 56)  # e_phentsize
+    struct.pack_into("<H", body, 0x38, 2)  # e_phnum
     notes = b"".join(
         struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id for build_id in build_ids
     )
-    return bytes(body) + notes + f"Linux version {release} test\x00".encode() + b"\x00" * pad
+    banner = f"Linux version {release} test\x00".encode() + b"\x00" * pad
+    note_offset = 64 + 2 * 56
+    banner_offset = note_offset + len(notes)
+    note_header = bytearray(56)
+    struct.pack_into("<I", note_header, 0, 4)  # PT_NOTE
+    struct.pack_into("<Q", note_header, 8, note_offset)
+    struct.pack_into("<Q", note_header, 32, len(notes))
+    load_header = bytearray(56)
+    struct.pack_into("<I", load_header, 0, 1)  # PT_LOAD
+    struct.pack_into("<Q", load_header, 8, banner_offset)
+    struct.pack_into("<Q", load_header, 32, len(banner))
+    return bytes(body) + bytes(note_header) + bytes(load_header) + notes + banner
 
 
 def _bzimage(
@@ -352,8 +366,56 @@ def test_external_boot_scan_rejects_metadata_outside_read_limit(
 ) -> None:
     monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES", 64)
 
-    with pytest.raises(CategorizedError, match="release banner"):
+    with pytest.raises(CategorizedError, match="ELF metadata read limit"):
         _validate_kernel_blob(_KERNEL_TAR)
+
+
+def test_external_boot_scan_rejects_note_shaped_bytes_outside_elf_tables() -> None:
+    fake = bytearray(64)
+    fake[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", fake, 0x12, _EM_X86_64)
+    fake += struct.pack("<III", 4, 4, 3) + b"GNU\x00" + _BUILD_ID
+    fake += b"Linux version 6.9.0 forged\x00"
+    header = bytearray(0x400)
+    header[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", header, 0x20E, 0x100)
+    header[0x300:0x306] = b"6.9.0\x00"
+
+    with pytest.raises(CategorizedError, match="program header table"):
+        _validate_kernel_blob(_combined_kernel_tar(boot=bytes(header) + gzip.compress(fake)))
+
+
+@pytest.mark.parametrize("symlink_first", [True, False])
+def test_external_boot_scan_rejects_children_below_symlinks(symlink_first: bool) -> None:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "boot/vmlinuz", _BZIMAGE_BODY)
+        link = tarfile.TarInfo("lib/modules/6.9.0/kernel")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "real"
+        child = ("lib/modules/6.9.0/kernel/foo.ko", b"module")
+        if symlink_first:
+            tar.addfile(link)
+            _tar_add(tar, *child)
+        else:
+            _tar_add(tar, *child)
+            tar.addfile(link)
+
+    with pytest.raises(CategorizedError, match="non-directory ancestor"):
+        _validate_kernel_blob(buf.getvalue())
+
+
+def test_external_boot_scan_bounds_compression_candidates() -> None:
+    with pytest.raises(CategorizedError, match="compression-candidate work limit"):
+        list(validation._magic_offsets(io.BytesIO(b"\x1f\x8b\x08" * 65), b"\x1f\x8b\x08"))
+
+
+@pytest.mark.parametrize("release", [".6.9.0", "6.9/0", "6.9.0-" + "x" * 59, "6.9.0é"])
+def test_external_boot_scan_enforces_release_grammar(release: str) -> None:
+    with pytest.raises(CategorizedError, match="release is not canonical"):
+        _validate_kernel_blob(
+            _combined_kernel_tar(boot=_bzimage(header_release=release, decoded_release=release))
+        )
 
 
 def test_non_gzip_kernel_is_build_failure() -> None:
