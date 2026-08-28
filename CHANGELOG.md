@@ -949,6 +949,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Version external boot evidence
 - Finalize external run boot contract
 - Date accepted external boot decision
+- Decide external-boot mutation authority
+- Anchor external-boot journal continuity
 - Expose finalization bounds
 
 ### Fixed
