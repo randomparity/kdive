@@ -445,22 +445,6 @@ in the distributed model: stale handles surface after a reprovision or reboot
 invalidates a System/DebugSession reference; transport conflicts surface when two
 attaches contend for one debug transport.
 
-## Decomposition into sub-projects
-
-Each gets its own spec → plan → implementation cycle.
-
-1. **Core platform** — domain model, Postgres schema + repository layer, object
-   store, job queue + worker tier, MCP/HTTP server skeleton, OIDC/RBAC, audit.
-   (Foundation; everything depends on it.)
-2. **Resource + Allocation plane** — discovery, resource capability metadata, admission
-   control, accounting ledger, quotas/budgets.
-3. **Provisioning plane** — provisioning-profile model + the libvirt provisioner.
-4. **Build + Install plane** — local build, kernel install onto a System.
-5. **Connect + Debug plane** — gdbstub/SSH transport, debug session lifecycle,
-   ported gdb-MI/drgn/crash.
-6. **Control + Retrieve plane** — virsh power/reset/force-crash, vmcore
-   capture/fetch.
-
 ## Delivery status
 
 This document describes the live architecture. Historical milestone sequencing and exit criteria
