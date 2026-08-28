@@ -393,6 +393,17 @@ retained. No observation made at `prepared` is fresh enough to satisfy this gate
 suite pauses after `prepared`, starts the domain out of band, resumes activation, and proves that
 neither modules nor definition are changed.
 
+This guarantee covers provider-mediated actors. Deployment ACLs grant mutation of KDIVE-owned domains
+and their volumes only to the fenced executor credential; worker, reconciler, and other service
+credentials are read-only and cannot bypass its lane. A privileged host administrator can bypass
+libvirt ACLs and mutate during the bounded interval between the final observation and commit. That
+concurrent break-glass action is unsupported: KDIVE preserves changes observed before the interval
+and detects drift afterward, but does not claim compare-and-set against root-equivalent interference
+inside a libvirt call. The executor audit marks the interval and runbooks require administrators first
+quiesce it. Tests inject ordinary-client start/redefine attempts after the final check and prove ACL
+denial; a privileged-interference test records the documented unsupported outcome rather than claiming
+recovery-conflict preservation.
+
 The existing transaction-scoped System advisory lock protects each database transition only; it
 cannot fence provider work across those commits. The System owns a durable monotonically increasing
 `operation_generation` allocated under that lock; it never resets when an activation terminates.
@@ -494,11 +505,21 @@ provider write. A changed or unreadable value leaves the conflict untouched. Pro
 then uses the normal per-component write-ahead CAS journal from the acknowledged identity. A crash
 before the transition changes no provider state; a crash after it resumes the same recovering
 operation, and a CAS mismatch returns to `recovery_conflict` with evidence retained. Alternatively,
-ordinary authorized System teardown
-destroys the domain before releasing the reservation and artifacts. There is no adopt-current-state,
+ordinary authorized System teardown follows the limited claim and quarantine path below. There is no adopt-current-state,
 force-overwrite, or automatic timeout edge, because a mixed external definition cannot become a
 trusted reusable baseline by declaration. Reconciliation preserves evidence and performs no provider
 write while the state remains `recovery_conflict`.
+
+Teardown uses a distinct destination-fence claim. It waits for the same positive executor-quiescence
+barrier and proves the domain's KDIVE System/Allocation ownership from core plus persistent domain
+metadata, but it does not require the recovery journal, manifests, or artifact digests to validate.
+Its authority is limited to stopping/destroying that domain, deleting its deterministic overlay, and
+deleting recovery objects whose individual stable activation ownership remains provable. Missing or
+corrupt ownership evidence is quarantined, never guessed: teardown completes the System destruction,
+the reservation stays charged, and the response exposes non-retryable `CONFLICT` with an operator
+repair reference. A platform administrator must use audited `ops.resolve_recovery_orphan` with the
+quarantined object identities to delete or adopt them; only verified absence then releases capacity.
+Thus corrupt recovery evidence cannot block destruction or authorize unsafe cleanup.
 
 Recovery restores a usable disk/GRUB baseline, not only persistent bytes. Run build state is not its
 usage lease: current Runs are already `succeeded` before install and boot. A new contributor operation,
@@ -613,9 +634,11 @@ HTTP/iPXE.
 - Module source identity and installed identity are distinct. The portable source digest covers
   validated bundle input; the installed digest includes provider-generated indexes and is what
   activation and recovery compare.
-- A provider-side change outside KDIVE's System lock is preserved as `recovery_conflict`. Recovery
-  is therefore fail-closed and requires an administrator either to compare-and-set restoration of
-  the recorded point from the acknowledged observed identity or to tear down the System.
+- A provider-side change observed outside a fenced executor commit interval is preserved as
+  `recovery_conflict`. Managed service identities cannot mutate inside that interval; privileged host
+  interference during it is an audited, unsupported break-glass race. Recovery otherwise remains
+  fail-closed and requires an administrator either to compare-and-set restoration of the recorded
+  point from the acknowledged observed identity or to tear down the System.
 - Libvirt state identity compares the canonical full preserved inactive definition plus the three
   external-boot fields and module-tree content, never live XML. External boot still requires the
   running-kernel identity proof; GRUB recovery requires fresh-boot readiness because its bootloader
