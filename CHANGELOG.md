@@ -154,6 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add verify-profile-kinds CLI command (#1907)
 - Expose provision execution boundaries
 - Paginate operator job listings
+- Persist external boot evidence
 
 ### Changed
 
@@ -948,6 +949,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Version external boot evidence
 - Finalize external run boot contract
 - Date accepted external boot decision
+- Decide external-boot mutation authority
+- Anchor external-boot journal continuity
+- Expose finalization bounds
 
 ### Fixed
 
@@ -1500,6 +1504,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve safe capture failure context
 - Shield capture cancellation cleanup
 - Copy relocated manifest generator into image
+- Derive boot evidence from kernel bytes
+- Validate kernel evidence structurally
+- Bound archive parsing work
+- Serialize bounded finalization work
+- Reject incomplete kernel segments
+- Validate boot metadata canonically
+- Reject failed kernel streams
 
 ### Security
 

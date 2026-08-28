@@ -41,6 +41,7 @@ from kdive.services.runs.steps import BuildStepResult
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 
 _log = logging.getLogger(__name__)
+_EXTERNAL_BUILD_VALIDATION_SLOTS = asyncio.Semaphore(1)
 
 
 class ExternalBuildStore(Protocol):
@@ -214,14 +215,15 @@ class CompleteBuildFinalizer:
             final_versions = {}
 
         try:
-            validated = await asyncio.to_thread(
-                self._validate_complete_build,
-                list(prepared.manifest_row.entries),
-                prepared.keys,
-                build_id,
-                arch,
-                final_versions,
-            )
+            async with _EXTERNAL_BUILD_VALIDATION_SLOTS:
+                validated = await asyncio.to_thread(
+                    self._validate_complete_build,
+                    list(prepared.manifest_row.entries),
+                    prepared.keys,
+                    build_id,
+                    arch,
+                    final_versions,
+                )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
 
@@ -238,6 +240,7 @@ class CompleteBuildFinalizer:
             chunked=prepared.has_chunks,
             chunk_heads=chunk_heads,
             window_deadline=window_deadline,
+            external_boot_evidence=validated.external_boot_evidence,
         )
 
     def _validate_complete_build(
@@ -304,6 +307,7 @@ class _ExternalBuildFinalization:
     chunked: bool
     chunk_heads: dict[str, HeadResult]
     window_deadline: datetime
+    external_boot_evidence: dict[str, JsonValue] | None
     """The deadline of the manifest these artifacts were validated against — the window's identity.
 
     A manifest row carrying a different deadline at commit time is one a concurrent re-mint
@@ -512,6 +516,7 @@ async def _finalize_external_build(
             result=candidate,
             heads=heads,
             verified_identities=finalization.verified_identities,
+            external_boot_evidence=finalization.external_boot_evidence,
             retention=timedelta(days=config.require(BUILD_ARTIFACT_RETENTION_DAYS)),
         )
         result = _published_result(publication)
