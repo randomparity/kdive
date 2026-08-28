@@ -1,4 +1,4 @@
-"""Remote-libvirt gdbstub port allocation helpers."""
+"""Remote-libvirt GDB and SSH port allocation helpers."""
 
 from __future__ import annotations
 
@@ -17,19 +17,19 @@ DOMAIN_PREFIX = "kdive-"
 
 
 class Domain(Protocol):
-    """The domain slice gdbstub enumeration uses."""
+    """The domain slice port enumeration uses."""
 
     def name(self) -> str: ...
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802
 
 
-class GdbPortConn(Protocol):
-    """The connection slice gdbstub enumeration uses."""
+class PortAllocationConn(Protocol):
+    """The connection slice port enumeration uses."""
 
     def listAllDomains(self, flags: int = 0) -> Sequence[Domain]: ...  # noqa: N802
 
 
-def allocate_gdb_port(
+def allocate_port(
     used: dict[str, int],
     *,
     own_name: str,
@@ -37,7 +37,7 @@ def allocate_gdb_port(
     port_max: int,
     exclude: set[int] | None = None,
 ) -> int:
-    """Pick the System's gdbstub port from the assignable range (ADR-0080 §2).
+    """Pick the System's lowest free port from an assignable range.
 
     Reuses the System's own recorded in-range port (stable across retries); otherwise
     the lowest port not recorded by another defined kdive domain and not in
@@ -61,13 +61,13 @@ def allocate_gdb_port(
         if port not in taken:
             return port
     raise CategorizedError(
-        "gdbstub port range is exhausted on the remote host",
+        "port range is exhausted on the remote host",
         category=ErrorCategory.PROVISIONING_FAILURE,
         details={"port_min": port_min, "port_max": port_max, "in_use": len(taken)},
     )
 
 
-def used_gdb_ports(conn: GdbPortConn) -> dict[str, int]:
+def used_gdb_ports(conn: PortAllocationConn) -> dict[str, int]:
     """Ports recorded by defined kdive domains; a domain vanishing mid-walk is skipped."""
     used: dict[str, int] = {}
     try:
@@ -93,11 +93,11 @@ def used_gdb_ports(conn: GdbPortConn) -> dict[str, int]:
     return used
 
 
-def used_ssh_ports(conn: GdbPortConn) -> dict[str, int]:
+def used_ssh_ports(conn: PortAllocationConn) -> dict[str, int]:
     """SSH hostfwd ports recorded by defined kdive domains; a domain vanishing mid-walk is skipped.
 
     Sibling of :func:`used_gdb_ports` for the per-System SSH forward (ADR-0291); the allocator
-    (:func:`allocate_gdb_port`, a generic lowest-free-in-range helper) is shared.
+    (:func:`allocate_port`, a generic lowest-free-in-range helper) is shared.
     """
     used: dict[str, int] = {}
     try:

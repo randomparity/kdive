@@ -26,10 +26,10 @@ from kdive.providers.remote_libvirt.config import (
     remote_config_for_resource,
     resolve_base_image_staged_volume_for,
 )
-from kdive.providers.remote_libvirt.lifecycle.gdb import (
+from kdive.providers.remote_libvirt.lifecycle.port_allocation import (
     DOMAIN_PREFIX,
     Domain,
-    allocate_gdb_port,
+    allocate_port,
     used_gdb_ports,
     used_ssh_ports,
 )
@@ -540,7 +540,7 @@ def test_probe_target_is_the_reserved_never_allocated_port() -> None:
     asyncio.run(probe(cfg.gdb_addr or "", port_range))
 
     assert captured["port"] == cfg.acl_probe_port
-    allocated = allocate_gdb_port(
+    allocated = allocate_port(
         {},
         own_name="kdive-x",
         port_min=cfg.assignable_gdb_port_min,
@@ -620,43 +620,43 @@ class _FakeConn:
         return self._domains
 
 
-def test_allocate_gdb_port_reuses_own_recorded_in_range_port() -> None:
+def test_allocate_port_reuses_own_recorded_in_range_port() -> None:
     # A System's own recorded in-range port is returned (stable across retries), not a fresh one.
     assert (
-        allocate_gdb_port({"kdive-x": 47005}, own_name="kdive-x", port_min=47001, port_max=47099)
+        allocate_port({"kdive-x": 47005}, own_name="kdive-x", port_min=47001, port_max=47099)
         == 47005
     )
 
 
-def test_allocate_gdb_port_reuses_own_port_at_min_boundary() -> None:
+def test_allocate_port_reuses_own_port_at_min_boundary() -> None:
     # own == port_min is inclusive: it is reused even though another domain holds the next
     # port (so a fall-through to lowest-free would return a different port, exposing a
     # `<=` -> `<` boundary mutation).
     used = {"kdive-x": 47001, "kdive-y": 47002}
-    assert allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47099) == 47001
+    assert allocate_port(used, own_name="kdive-x", port_min=47001, port_max=47099) == 47001
 
 
-def test_allocate_gdb_port_reuses_own_port_at_max_boundary() -> None:
+def test_allocate_port_reuses_own_port_at_max_boundary() -> None:
     # own == port_max is inclusive: it is reused even though every lower port is taken (so a
     # fall-through would otherwise raise exhaustion or pick a lower port).
     used = {"kdive-x": 47002, "kdive-y": 47001}
-    assert allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47002) == 47002
+    assert allocate_port(used, own_name="kdive-x", port_min=47001, port_max=47002) == 47002
 
 
-def test_allocate_gdb_port_picks_lowest_free_when_no_own_port() -> None:
+def test_allocate_port_picks_lowest_free_when_no_own_port() -> None:
     # 47001 is taken by another domain, so the lowest free port is 47002.
     assert (
-        allocate_gdb_port({"kdive-y": 47001}, own_name="kdive-x", port_min=47001, port_max=47099)
+        allocate_port({"kdive-y": 47001}, own_name="kdive-x", port_min=47001, port_max=47099)
         == 47002
     )
 
 
-def test_allocate_gdb_port_exhausted_range_is_provisioning_failure() -> None:
+def test_allocate_port_exhausted_range_is_provisioning_failure() -> None:
     used = {"kdive-y": 47001, "kdive-z": 47002}
     with pytest.raises(CategorizedError) as excinfo:
-        allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47002)
+        allocate_port(used, own_name="kdive-x", port_min=47001, port_max=47002)
     assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
-    assert str(excinfo.value) == "gdbstub port range is exhausted on the remote host"
+    assert str(excinfo.value) == "port range is exhausted on the remote host"
     assert excinfo.value.details == {"port_min": 47001, "port_max": 47002, "in_use": 2}
 
 
