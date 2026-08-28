@@ -43,44 +43,44 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     NullDumpVolumeReaper,
 )
-from kdive.reconciler.cleanup import (
-    artifact_retention,
-    idempotency,
-    investigation_rootfs,
-)
-from kdive.reconciler.cleanup.capture_reaping import (
-    DEFAULT_CAPTURE_REAP_BATCH,
-    DEFAULT_CAPTURE_RETRY_BASE,
-    DEFAULT_CAPTURE_RETRY_CAP,
-    DEFAULT_CAPTURE_SETTLE,
-)
-from kdive.reconciler.cleanup.capture_reaping import (
-    reap_orphaned_captures as _reap_orphaned_captures,
-)
-from kdive.reconciler.cleanup.console_reaping import (
-    reap_console_collectors as _reap_console_collectors,
-)
-from kdive.reconciler.cleanup.dump_volume_reaping import (
-    DEFAULT_DUMP_VOLUME_GRACE,
-)
-from kdive.reconciler.cleanup.dump_volume_reaping import (
-    reap_orphaned_dump_volumes as _reap_orphaned_dump_volumes,
-)
+from kdive.reconciler.cleanup import idempotency
+from kdive.reconciler.cleanup.artifacts import artifact_retention, investigation_rootfs
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
 )
 from kdive.reconciler.cleanup.images import (
     repair_leaked_images as _repair_leaked_images,
 )
-from kdive.reconciler.cleanup.provider_domain_reaping import (
+from kdive.reconciler.cleanup.provider_resources.capture_reaping import (
+    DEFAULT_CAPTURE_REAP_BATCH,
+    DEFAULT_CAPTURE_RETRY_BASE,
+    DEFAULT_CAPTURE_RETRY_CAP,
+    DEFAULT_CAPTURE_SETTLE,
+)
+from kdive.reconciler.cleanup.provider_resources.capture_reaping import (
+    reap_orphaned_captures as _reap_orphaned_captures,
+)
+from kdive.reconciler.cleanup.provider_resources.console_reaping import (
+    reap_console_collectors as _reap_console_collectors,
+)
+from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
+    DEFAULT_DUMP_VOLUME_GRACE,
+)
+from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
+    reap_orphaned_dump_volumes as _reap_orphaned_dump_volumes,
+)
+from kdive.reconciler.cleanup.provider_resources.provider_domain_reaping import (
     repair_leaked_domains as _repair_leaked_domains,
 )
-from kdive.reconciler.cleanup.provider_domain_reaping import (
+from kdive.reconciler.cleanup.provider_resources.provider_domain_reaping import (
     repair_leaked_probe_guests as _repair_leaked_probe_guests,
 )
-from kdive.reconciler.cleanup.reaping_common import DEFAULT_LANE_BUDGET, ReapLaneOutcome
-from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
-from kdive.reconciler.cleanup.runtime_resources import (
+from kdive.reconciler.cleanup.provider_resources.reaping_common import (
+    DEFAULT_LANE_BUDGET,
+    ReapLaneOutcome,
+)
+from kdive.reconciler.cleanup.provider_resources.runtime_resources import ResourceProbe
+from kdive.reconciler.cleanup.provider_resources.runtime_resources import (
     reap_expired_runtime_resources as _reap_expired_runtime_resources,
 )
 from kdive.reconciler.cleanup.system_object_versions import (
@@ -89,16 +89,16 @@ from kdive.reconciler.cleanup.system_object_versions import (
     sweep_local_system_object_versions,
     sweep_remote_system_object_versions,
 )
-from kdive.reconciler.cleanup.upload_orphans import (
+from kdive.reconciler.cleanup.uploads.upload_orphans import (
     UploadOrphanStore,
 )
-from kdive.reconciler.cleanup.upload_orphans import (
+from kdive.reconciler.cleanup.uploads.upload_orphans import (
     repair_leaked_upload_objects as _repair_leaked_upload_objects,
 )
-from kdive.reconciler.cleanup.uploads import (
+from kdive.reconciler.cleanup.uploads.uploads import (
     UploadStore,
 )
-from kdive.reconciler.cleanup.uploads import (
+from kdive.reconciler.cleanup.uploads.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
 )
 from kdive.reconciler.fleet import FleetTelemetry, read_fleet_snapshot

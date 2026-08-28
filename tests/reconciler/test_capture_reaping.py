@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.domain.capacity.state import JobState
 from kdive.providers.infra.reaping import CaptureReaper, NullCaptureReaper, OrphanedCapture
-from kdive.reconciler.cleanup.provider_reaping import (
+from kdive.reconciler.cleanup.provider_resources.capture_reaping import (
     DEFAULT_CAPTURE_REAP_BATCH,
     DEFAULT_CAPTURE_RETRY_BASE,
     DEFAULT_CAPTURE_RETRY_CAP,

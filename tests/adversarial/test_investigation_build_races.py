@@ -12,8 +12,8 @@ import pytest
 from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.tools.lifecycle.runs import steps as run_steps_module
-from kdive.reconciler.cleanup import artifact_retention as artifact_retention_module
-from kdive.reconciler.cleanup.artifact_retention import (
+from kdive.reconciler.cleanup.artifacts import artifact_retention as artifact_retention_module
+from kdive.reconciler.cleanup.artifacts.artifact_retention import (
     gc_expired_build_artifacts,
     gc_investigation_artifacts,
 )

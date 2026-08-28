@@ -40,14 +40,18 @@ from kdive.providers.infra.reaping import (
     DumpVolumeReaper,
     OrphanedCapture,
 )
-from kdive.reconciler.cleanup.provider_reaping import (
+from kdive.reconciler.cleanup.provider_resources.capture_reaping import (
     DEFAULT_CAPTURE_REAP_BATCH,
     DEFAULT_CAPTURE_RETRY_BASE,
     DEFAULT_CAPTURE_RETRY_CAP,
+    reap_orphaned_captures,
+)
+from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
+    reap_orphaned_dump_volumes,
+)
+from kdive.reconciler.cleanup.provider_resources.reaping_common import (
     DEFAULT_LANE_BUDGET,
     ReapLaneOutcome,
-    reap_orphaned_captures,
-    reap_orphaned_dump_volumes,
 )
 from tests.reconciler.capture_reaping_support import (
     REMOTE,

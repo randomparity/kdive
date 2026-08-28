@@ -19,7 +19,7 @@ from kdive.providers.infra.reaping import (
     OrphanedCapture,
     dispatchable_capture_kinds,
 )
-from kdive.reconciler.cleanup.reaping_common import (
+from kdive.reconciler.cleanup.provider_resources.reaping_common import (
     DEFAULT_LANE_BUDGET,
     ReapLaneOutcome,
     budget_unattempted,

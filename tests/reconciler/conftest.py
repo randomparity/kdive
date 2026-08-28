@@ -38,7 +38,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.providers.infra.reaping import OwnedDomain
-from kdive.reconciler.cleanup.provider_reaping import ReapLaneOutcome
+from kdive.reconciler.cleanup.provider_resources.reaping_common import ReapLaneOutcome
 from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url
 
 __all__ = ["_migrated_db", "migrated_url", "pg_conn", "postgres_url"]

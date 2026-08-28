@@ -26,8 +26,8 @@ from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
-from kdive.reconciler.cleanup import investigation_rootfs
-from kdive.reconciler.cleanup.investigation_rootfs import (
+from kdive.reconciler.cleanup.artifacts import investigation_rootfs
+from kdive.reconciler.cleanup.artifacts.investigation_rootfs import (
     sweep_expired_investigation_rootfs_reclaim,
     sweep_investigation_rootfs_reclaim,
     sweep_unowned_investigation_rootfs_staging,

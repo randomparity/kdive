@@ -41,7 +41,9 @@ from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, Fault
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.ports.lifecycle import InstallRequest
-from kdive.reconciler.cleanup.provider_reaping import repair_leaked_domains
+from kdive.reconciler.cleanup.provider_resources.provider_domain_reaping import (
+    repair_leaked_domains,
+)
 from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
 from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from kdive.reconciler.repairs.systems import repair_orphaned_systems

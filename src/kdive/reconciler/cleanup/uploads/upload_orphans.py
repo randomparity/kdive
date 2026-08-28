@@ -31,7 +31,7 @@ from kdive.artifacts.uploads.upload_manifest import (
 )
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.upload_fences import (
+from kdive.reconciler.cleanup.uploads.upload_fences import (
     UploadOrphanCandidate,
     reclaimable_upload_keys,
 )

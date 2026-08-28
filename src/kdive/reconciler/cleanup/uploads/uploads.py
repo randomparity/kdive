@@ -18,7 +18,7 @@ from kdive.artifacts.uploads import upload_manifest
 from kdive.artifacts.uploads.upload_manifest import UPLOAD_OWNER_KINDS, lock_scope_for
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.upload_fences import owner_key_is_fenced
+from kdive.reconciler.cleanup.uploads.upload_fences import owner_key_is_fenced
 
 _log = logging.getLogger(__name__)
 
@@ -332,8 +332,8 @@ async def _sweep_uncommitted_objects(
 
     These are keys under the owner's whole prefix, so a re-mint, capture retry, or vmcore finalize
     can publish one before this loop reaches it. Each captured key is rechecked against committed
-    state (:func:`~kdive.reconciler.cleanup.upload_fences.owner_key_is_fenced`) inside a short
-    owner-locked transaction. That transaction commits before :meth:`UploadStore.delete_batch`
+    state (:func:`~kdive.reconciler.cleanup.uploads.upload_fences.owner_key_is_fenced`) inside a
+    short owner-locked transaction. That transaction commits before :meth:`UploadStore.delete_batch`
     runs, so store latency never extends the owner lock. Exact immutable identities make that
     unlock safe: a peer PUT after capture receives a different VersionId and cannot enter the batch.
 

@@ -26,7 +26,7 @@ from kdive.db import migrate
 from kdive.jobs import queue
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import build_uses
-from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
+from kdive.reconciler.cleanup.artifacts.artifact_retention import gc_expired_build_artifacts
 from kdive.security import audit
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry

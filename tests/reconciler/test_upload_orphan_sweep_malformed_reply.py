@@ -30,7 +30,7 @@ from kdive.artifacts.uploads import upload_manifest
 from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.upload_orphans import repair_leaked_upload_objects
+from kdive.reconciler.cleanup.uploads.upload_orphans import repair_leaked_upload_objects
 from kdive.store.objectstore import ObjectStore
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
 
@@ -224,7 +224,10 @@ def test_the_recorded_fault_names_the_store_call_the_key_and_the_field(
             bad_field="LastModified",
         )
 
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.upload_orphans"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.upload_orphans",
+        ):
             await _sweep_expecting_one_fault(migrated_url, client)
 
         # The per-key skip is the WARNING; the pass's end-of-run tally is the ERROR beside it.

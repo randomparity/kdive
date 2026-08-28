@@ -13,7 +13,7 @@ from kdive.providers.shared.staging.host_dump_volume_leases import (
     has_live_host_dump_volume_lease,
     reap_stale_host_dump_volume_leases,
 )
-from kdive.reconciler.cleanup.reaping_common import (
+from kdive.reconciler.cleanup.provider_resources.reaping_common import (
     DEFAULT_LANE_BUDGET,
     ReapLaneOutcome,
     budget_unattempted,

@@ -17,8 +17,8 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup import artifact_retention
-from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifacts
+from kdive.reconciler.cleanup.artifacts import artifact_retention
+from kdive.reconciler.cleanup.artifacts.artifact_retention import gc_expired_build_artifacts
 from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,

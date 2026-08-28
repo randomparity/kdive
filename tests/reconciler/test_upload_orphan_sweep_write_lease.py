@@ -54,7 +54,7 @@ from kdive.db.locks import advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.lifecycle.records import Investigation
-from kdive.reconciler.cleanup.upload_orphans import (
+from kdive.reconciler.cleanup.uploads.upload_orphans import (
     UploadOrphanCandidate,
     reclaimable_upload_keys,
     repair_leaked_upload_objects,
@@ -423,7 +423,7 @@ def test_a_lease_minted_in_the_classify_delete_gap_cannot_be_missed(
                 AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
             ):
                 with caplog.at_level(
-                    logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"
+                    logging.INFO, logger="kdive.reconciler.cleanup.uploads.upload_orphans"
                 ):
                     assert await run_repair(pool, _sweep(store)) == 0
                 assert store.deleted == []

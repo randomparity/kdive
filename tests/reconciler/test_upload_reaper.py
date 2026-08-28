@@ -39,11 +39,11 @@ from kdive.artifacts.uploads.uploads import ManifestEntry
 from kdive.db.locks import advisory_xact_lock
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.uploads import ReapOutcome
-from kdive.reconciler.cleanup.uploads import (
+from kdive.reconciler.cleanup.uploads.uploads import ReapOutcome
+from kdive.reconciler.cleanup.uploads.uploads import (
     reap_one_owner as _reap_one_owner,
 )
-from kdive.reconciler.cleanup.uploads import (
+from kdive.reconciler.cleanup.uploads.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
 )
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
@@ -613,7 +613,10 @@ def test_undeleted_objects_are_reported_at_error(
         store = _FailingStore(
             {prefix: [f"{prefix}a", f"{prefix}b"]}, fail_keys={f"{prefix}a", f"{prefix}b"}
         )
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.uploads",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 with pytest.raises(CategorizedError):
                     await run_repair(pool, _reap(store))
@@ -651,7 +654,7 @@ def test_the_prefix_is_logged_before_the_sweep_starts(
             seen_at_first_delete.extend(r.getMessage() for r in caplog.records)
 
         store = _HookedStore({prefix: keys}, before_delete=_snapshot_the_log, once=True)
-        with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.uploads"):
+        with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.uploads.uploads"):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 assert await run_repair(pool, _reap(store)) == 1
         assert store.deleted == keys
@@ -689,7 +692,10 @@ def test_successful_sweep_logs_no_failure_summary(
     async def _run() -> None:
         run_id, prefix = await _seed_expired_run(migrated_url)
         store = _FakeStore({prefix: [f"{prefix}a"]})
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.uploads",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 assert await run_repair(pool, _reap(store)) == 1
         assert caplog.records == []
@@ -1048,7 +1054,10 @@ def test_a_deferred_owner_is_reported_with_its_count_and_age(
     async def _run() -> None:
         run_id, prefix = await _seed_expired_run(migrated_url)
         store = _FakeStore({prefix: [f"{prefix}kernel"]})
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.uploads",
+        ):
             async with (
                 _owner_lock_held(migrated_url, run_id),
                 AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
@@ -1075,7 +1084,10 @@ def test_a_clean_pass_reports_no_deferral(
     async def _run() -> None:
         run_id, prefix = await _seed_expired_run(migrated_url)
         store = _FakeStore({prefix: [f"{prefix}kernel"]})
-        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+        with caplog.at_level(
+            logging.WARNING,
+            logger="kdive.reconciler.cleanup.uploads.uploads",
+        ):
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 assert await run_repair(pool, _reap(store)) == 1
         assert [r for r in caplog.records if r.levelno == logging.WARNING] == []

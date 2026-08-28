@@ -57,7 +57,9 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import host_dump_
 from kdive.providers.shared.staging.host_dump_volume_leases import (
     reap_stale_host_dump_volume_leases,
 )
-from kdive.reconciler.cleanup.provider_reaping import reap_orphaned_dump_volumes
+from kdive.reconciler.cleanup.provider_resources.dump_volume_reaping import (
+    reap_orphaned_dump_volumes,
+)
 from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver

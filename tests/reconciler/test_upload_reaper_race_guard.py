@@ -40,7 +40,7 @@ from kdive.artifacts.uploads.upload_manifest import (
 )
 from kdive.db.locks import advisory_xact_lock
 from kdive.domain.capacity.state import RunState
-from kdive.reconciler.cleanup.uploads import (
+from kdive.reconciler.cleanup.uploads.uploads import (
     ReapOutcome,
     _sweep_uncommitted_objects,
     repair_abandoned_uploads,

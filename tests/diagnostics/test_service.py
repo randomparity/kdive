@@ -13,9 +13,9 @@ import asyncio
 import pytest
 
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
+from kdive.diagnostics.contracts import WORKER_UNAVAILABLE_DETAIL
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
-    WORKER_UNAVAILABLE_DETAIL,
     DiagnosticsService,
     WorkerVantageCheck,
     WorkerVantageDispatchMode,
