@@ -92,7 +92,12 @@ Break-glass teardown of a stuck cross-project System. Requires platform_admin.
 
 `implemented` · `read-only`
 
-Cross-project queue depth and per-job state. Requires platform operator.
+Cross-project queue depth and a bounded newest-first job page. Requires operator.
+
+`data.limit` is the applied per-page cap. When `data.truncated` is true, pass the
+opaque `data.next_cursor` back as `request.cursor` to read the next page. A terminal
+page returns `data.truncated=false` and `data.next_cursor=null`. The depth fields
+always summarize the whole queue, independent of the page and state filters.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -102,6 +107,7 @@ Cross-project queue depth and per-job state. Requires platform operator.
 
 - `states` (`array<string> (nullable)`, optional) — Filter per-job rows to these job states; omit for all.
 - `limit` (`integer`, optional) — Maximum per-job rows returned (capped at 200).
+- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from data.next_cursor; omit to start with the newest jobs.
 
 ## `ops.reconcile_now`
 

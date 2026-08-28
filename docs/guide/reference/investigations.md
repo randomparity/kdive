@@ -84,7 +84,7 @@ Link an external tracker ref to an Investigation.
 List the Investigations you can view, newest-first, for reporting.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` for the next page.
+``request.cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

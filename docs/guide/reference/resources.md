@@ -85,7 +85,7 @@ destructive and demands a non-blank audited `reason`.
 List runtime resources visible to the caller.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` for the next page.
+``request.cursor`` for the next page.
 
 ``data.host_cpu`` is the host's default guest CPU: ``{model, vendor?, arch,
 baseline_level?}`` — remote under host-model, local the host's native CPU.

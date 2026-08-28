@@ -238,7 +238,7 @@ An unchanged already-installed variant remains an idempotent no-op after expiry.
 List the caller's Runs, filterable by system/investigation/state. Requires viewer.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` for the next page.
+``request.cursor`` for the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
