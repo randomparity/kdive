@@ -41,7 +41,8 @@ paths are unchanged.
 The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1`, serialized with
 the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
 these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
-strings `run_id` and `build_generation`; `bundle` with NFC object-store `key` and `version` plus `sha256`;
+strings `run_id` and `build_generation`; `bundle` with NFC object-store `key` and `version` plus
+complete-object `sha256` and extracted-kernel `vmlinuz_sha256`;
 `initrd`, either null or the same key/version/digest shape; complete `cmdline` string;
 `debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
 with `mode`, `release`, `source_manifest`, `member_count`, and `uncompressed_bytes`; and the closed
@@ -55,24 +56,29 @@ evidence; their caller-supplied advisory whole-object hash is never copied into 
 chunk vector with an incorrect advisory whole hash therefore finalizes with the server-computed
 digest. Plan construction copies only those persisted trusted digests.
 
-The same finalization pass streams the pinned bundle without filesystem extraction, derives and
-persists `boot/vmlinuz` architecture, release, and GNU build ID, applies the version-1 safe topology
-rules below to the matching release subtree, computes `module-source-manifest-v1`, and persists its digest, member count, and
-sum of regular-file sizes on the InvestigationBuild generation before publication. Schema version 1
+The same finalization pass streams the pinned bundle without filesystem extraction. It accepts
+exactly one member named byte-for-byte `boot/vmlinuz`, requires that member to be a regular file,
+and rejects duplicate names, normalized aliases such as `./boot/vmlinuz`, absolute names, links, and
+other noncanonical or nonregular representations of that path. It derives and persists that member's
+SHA-256, architecture, release, and GNU build ID, applies the version-1 safe topology rules below to
+the matching release subtree, computes `module-source-manifest-v1`, and persists its digest, member
+count, and sum of regular-file sizes on the InvestigationBuild generation before publication. Schema version 1
 allows at most 200,000 module-subtree members and 8 GiB (8,589,934,592 bytes) of uncompressed regular
 file content per exact bundle VersionId; these are fixed per-bundle limits with no reference clock.
 Exceeding either records terminal `BUILD_FAILURE`, publishes no generation, and directs the producer
 to remove unnecessary files or split/rebuild the bundle. Retry for the same VersionId reuses the
 persisted completed scan or resumes its server-owned bounded stream; caller manifest values are never
-accepted. Plan construction copies only all three persisted values.
+accepted. Plan construction copies the persisted kernel digest and all three module-obligation
+values.
 
 Every materializer streams and recomputes the same manifest before any write, enforcing those bounds
 before counting or buffering the next member. Digest, count, or byte-total mismatch is terminal
 `INSTALL_FAILURE`, changes no System state, and directs re-finalization. Thus both planes reject a tar
 bomb at the same schema boundary while the expected value has one authoritative producer.
-Materialization must extract
+Materialization must repeat the canonical-member and uniqueness checks, extract that one
 `boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
-compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
+match the extracted bytes' SHA-256 digest to `bundle.vmlinuz_sha256`, and satisfy the plan's
+module-install obligation. The
 provider fetches the exact recorded object versions and stream-verifies the complete bundle and
 optional initrd bytes against their plan digests before extraction, publication, or reuse. The
 compressed bundle is never itself a bootable kernel.
@@ -141,16 +147,16 @@ or interrupted recovery deadline. Ordinary job and worker retries never extend o
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:4232434560a0c2c420ad98df7a24ca9775bee7082512bac1e07282ff0db4054b","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:d8faa1e122cb37e8faa0ba67a2d3f524e016501ffc050c4433c4c67b1deca85b","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
-`sha256:4232434560a0c2c420ad98df7a24ca9775bee7082512bac1e07282ff0db4054b` and
-`sha256:0f826177f189dd024f100ac4608954f9f6a07f901b61df82686c018ef180529a`.
+`sha256:d8faa1e122cb37e8faa0ba67a2d3f524e016501ffc050c4433c4c67b1deca85b` and
+`sha256:00b5b29a67e57d39b224588a01a2213ea6a2481c30099eef425c0c4a2287884b`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
@@ -303,6 +309,9 @@ direct-kernel bytes one composition result while preserving currently admitted l
 Contract tests reject each platform-owned substring, including a later `root=/dev/evil`, and prove
 ordinary quoted, backslash-containing, whitespace-containing, and non-ASCII debug text remains
 byte-preserved.
+They also reject a missing or repeated `boot/vmlinuz`, `./` and leading-slash aliases, links and
+other nonregular members, and two kernels with equal metadata but different bytes. The accepted case
+proves every materializer matches the server-produced `bundle.vmlinuz_sha256` before publication.
 
 The root specification is a versioned, closed data shape with exactly `schema`, `architecture`,
 `root`, `arguments`, `authority`, and `source`. Version 1 admits authority/source-kind pairs
