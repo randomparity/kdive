@@ -153,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scan stored Systems for profile-kind mismatches
 - Add verify-profile-kinds CLI command (#1907)
 - Expose provision execution boundaries
+- Paginate operator job listings
 
 ### Changed
 
@@ -224,6 +225,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mask the status bullet only where the preamble is examined
 - Drop a guard in mask_status_bullet that cannot fire
 - Move pcap_volume_name beside capture_qom_id in ports
+- Align remote retrieve naming
+- Clarify system admission result
+- Name pidfd waits explicitly
+- Preserve termination outcome type
+- Clarify domain identifier names
+- Derive reconcile reports from catalog
+- Move console evidence to shared provider
+- Colocate capture bootstrap entrypoint
+- Group deployment lifecycle modules
+- Organize repository scripts
+- Simplify install cleanup outcomes
+- Extract systemd diagnostics renderer
+- Split live debug workflows
+- Split capture launcher concerns
+- Partition rootfs build dependencies
+- Isolate services from job internals
+- Drop obsolete build GC cursors
+- Own libvirt event loop in remote composition
+- Unify provider contributions
+- Unify process store assembly
+- Finish remote retrieve rename
+- Move rootfs commands to CLI assembly
+- Move process assembly to neutral root
+- Separate capture startup recovery
+- Assemble worker lifecycle authority
+- Unify capture failure cleanup
+- Separate generation scan modes
+- Separate assembly construction modes
+- Clarify untracked file probe
+- Organize capture operation boundaries
+- Unify worker termination outcome
+- Trim trivial helper documentation
+- Break diagnostics dispatch cycle
+- Name public rootfs provisioning policy
+- Remove stale payload registry aliases
+- Organize diagnostic contributions
+- Align list handler requests
+- Model failure job lookup states
+- Separate worker lifecycle boundary
+- Model capture execution phases
+- Organize artifact subsystems
+- Trim profile scan documentation
+- Type lifecycle list state filters
+- Expose worker handler dependencies
+- Share traffic capture execution
+- Organize provider staging fences
+- Model job recycle policy
+- Clarify tool maturity conversion
+- Organize local retrieval provider
+- Type debug session list filters
+- Isolate systemd diagnostics pipeline
+- Type Kubernetes termination outcomes
+- Type worker authority bindings
+- Relocate worker authority store
+- Trim internal helper documentation
+- Align jobs list state filter
+- Remove unused vmcore fetch seams
+- Separate uploaded rootfs pipeline
+- Correlate worker authority bindings
+- Name rootfs acquisition boundary
+- Tighten internal contract docs
+- Discriminate worker incarnations
+- Relocate console artifact lifecycle
+- Trim internal contract history
+- Trim direct helper documentation
+- Type capture repository queries
+- Type capture exit outcomes
+- Condense internal safety contracts
+- Condense residual helper contracts
+- Narrow run service boundaries
+- Relocate system bootstrap secrets
+- Rename remote port allocation
+- Normalize catalog list requests
+- Align provider component record
+- Clarify allocation pricing selector
+- Centralize capture authority waits
+- Align host dump options record
+- Remove completed config migration path
+- Remove noisy provision stage logs
+- Inject complete build object store
+- Qualify allocation occupancy constants
+- Type runtime authorization rows
+- Split provider reaping lanes
+- Inject diagnostic worker checks
+- Clarify run context reader
+- Share investigation terminal states
+- Group reconciler cleanup lanes
 
 ### Documentation
 
@@ -798,6 +886,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind review gates to current scope
 - Fix ADR 0581 record format
 - Define native worker checkout execution
+- Document all runtime roles
+- Describe system traffic capture capability
+- Align provider architecture status
+- Focus storage helper contracts
+- Describe active provider dispatch
+- Define artifact package ownership
+- Trim internal implementation narratives
+- Describe deployed worker topology
+- Trim repeated operational narratives
+- Align topology with live ingress
+- Refresh generated tool contracts
+- Complete public input contracts
+- Reduce internal contract narratives
+- Align architecture delivery status
+- Remove obsolete lifecycle sequence
+- Complete internal boundary arguments
+- Align authoritative architecture status
+- Preserve accepted ADR text
 
 ### Fixed
 
@@ -1334,6 +1440,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Allow worker audit inserts
 - Run native workers from checkout
 - Gate mutating lifecycle requests
+- Document nested list cursors
+- Preserve safe diagnostic failure context
+- Preserve token review API failures
+- Expose activation rollback failures
+- Type libguestfs mount failures
+- Preserve remote console failure context
+- Standardize list cursor object ids
+- Align list project filter semantics
+- Bound gateway schema terms
+- Propagate unexpected profile parser faults
+- Reject removed Helm database value
+- Run full suite when git discovery fails
+- Share injected MCP telemetry meter
+- Preserve safe capture failure context
+- Shield capture cancellation cleanup
+- Copy relocated manifest generator into image
 
 ### Security
 
