@@ -33,25 +33,50 @@ idempotent operation. Shared values contain only immutable artifact identities, 
 kernel release, the complete ordered kernel argument set, a versioned root specification, a module
 installation obligation, and opaque provider references returned by those operations.
 
-The boot plan is one immutable set. Its identity hashes the schema version, Run/build ownership,
-architecture, kernel bundle object key and version, bundle digest, kernel release, optional initrd
-object key/version/digest, root specification, ordered command line, and complete module-install
-obligation. An initrd is valid only as part of this set; it has no independent activation identity.
+The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1`, serialized with
+the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
+these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
+strings `run_id` and `build_id`; `bundle` with NFC object-store `key` and `version` plus `sha256`;
+`initrd`, either null or the same key/version/digest shape; ordered `cmdline`; `module_obligation` with
+`mode`, `release`, and `source_manifest`; and the closed `root` shape defined below. Unknown keys are
+rejected. An initrd is valid only as part of this set; it has no independent activation identity.
 Materialization must extract
 `boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
 compressed bundle is never itself a bootable kernel.
 
-Successful materialization produces an immutable `external-boot-materialization-v1` record. Its
-identity uses the manifest JSON serializer and domain prefix
-`kdive-external-boot-materialization-v1`, and binds System and Run ownership, provider kind, plan
-identity, architecture, extracted-vmlinuz SHA-256, source- and installed-module-tree digests, the
-paired initrd object key/version/digest or explicit absence, and deterministic opaque provider
-references for every boot and module artifact. Core persists the complete record, not only the
-references. Repeated materialization for a plan must reproduce every field; an absent, unreadable,
-or different field fails closed and is neither reused nor activated. Running-kernel observation
-compares against the persisted extracted-vmlinuz digest rather than recomputing an expectation from
-the compressed bundle.
+Successful materialization produces an immutable `external-boot-materialization-v1` record. It uses
+the same serializer and ASCII domain prefix `kdive-external-boot-materialization-v1` plus NUL. It has
+exactly: `schema`; `architecture`; NFC `provider_kind`; `ownership` with canonical UUID `system_id`
+and `run_id`; `plan_identity`; `extracted_vmlinuz_sha256`; `source_module_manifest`;
+`installed_module_tree`; `kernel_observation` with architecture, release, and lowercase even-length
+GNU `build_id` hex; and `artifacts`, whose `kernel` and `modules` each contain one deterministic
+NFC opaque `ref` and whose `initrd` is null or contains one such `ref`. Core persists the complete
+record, not only the references. Repeated materialization for a plan must reproduce every field; an
+absent, unreadable, or different field fails closed and is neither reused nor activated.
+
+The materializer also extracts the kernel's architecture, release, and GNU build ID from the
+extracted vmlinuz and binds that tuple to its byte digest in the materialization record. Missing or
+ambiguous build notes reject external boot. The provider-neutral running-kernel observation returns
+architecture, `uname` release, and the GNU build ID from the running kernel's notes. Local observes
+it through its existing guest connection, remote through its fixed guest-agent helper, and the
+non-libvirt test provider returns the same value type. Unavailable evidence is retryable before the
+readiness deadline; a mismatch is `BOOT_FAILURE` and triggers recovery. Readiness, boot ID, and
+persistent definition identity cannot substitute for this comparison.
+
+These normative all-zero vectors also pin every key and absence representation:
+
+```json
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":["root=UUID=x"],"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_id":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"build","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"build"}},"schema":"external-boot-plan-v1"}
+```
+
+```json
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+```
+
+Their respective identities are
+`sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44` and
+`sha256:3d0cef743bc2b4614944cfc38e8aac7710ac50ebf74dab339d3c31dce05d5c4d`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
@@ -115,8 +140,9 @@ verifies the same installed manifest after restore. Thus portable source identit
 metadata while provider-state CAS
 detects metadata drift that can change module usability.
 
-Materialization does not change the System. Core commits `preparing` before the provider quiesces the
-domain. A deterministic provider prepare journal records the source definition and prior power state,
+Materialization does not change the System. Core first commits `preparing` with reservation state
+`pending`; the provider then creates the reservation and core records it `ready`. No quiesce or other
+guest mutation is allowed before `ready`. A deterministic provider prepare journal records the source definition and prior power state,
 stops the domain, verifies it inactive, and only then records whether the release-qualified target is
 absent or saves its exact prior tree. The completed journal becomes the opaque recovery reference and
 allows core to commit `prepared`. A worker loss in `preparing` is resumed from that journal; abandoning
@@ -131,12 +157,14 @@ preparation. “Preserve the disk overlay” below means keep the same attached 
 definition; it does not promise that the guest filesystem is byte-immutable. The optional initrd
 never substitutes for this obligation.
 
-Before committing `preparing`, the provider creates a deterministic reservation owned by this
+After the pending row exists, the provider creates a deterministic reservation owned by this
 System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
 reservations in one provider instance's recovery store cannot exceed its
 `recovery_max_bytes`; both values are byte counts, and availability is observed at the response
-envelope's `server_time`. Creation is idempotent, and a provider sweeper removes an orphan whose
-matching activation row was never committed. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
+envelope's `server_time`. Creation is idempotent. Reconciliation releases a reservation only when its
+durable activation row is terminal or absent; because the row precedes allocation, a live allocation
+cannot be mistaken for an orphan. A crash before `ready` resumes allocation or abandons the pending
+row without guest mutation. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
 guest state, and directs the operator to clean terminal artifacts or raise the cap before retry.
 
 The fixed reservation bounds the captured definition, prior module tree, journal, and verification
@@ -206,7 +234,8 @@ Core persists the plan identity and materialization before prepare, then the rec
 both provider state identities when preparation completes. The state machine is
 `preparing -> prepared -> activating -> active`, with
 `activating|active -> recovering -> recovered`,
-`preparing|prepared -> abandoned`, `preparing|activating|active|recovering -> recovery_conflict`, and
+`preparing|prepared -> abandoned`,
+`preparing|prepared|activating|active|recovering -> recovery_conflict`, and
 failure metadata on an operation attempt.
 Transitions and provider calls run under the existing per-System advisory lock. Activation is
 compare-and-set from the recovery point's source-state identity: the provider refuses changed state
@@ -225,7 +254,9 @@ terminal and the System remains reusable, the provider first observes the comple
 state under the System lock. Only that state may take the normal `active -> recovering` edge. An
 absent or unreadable component remains retryable; any third component enters `recovery_conflict`
 without stopping or overwriting the System. After committing `recovering`, the provider stops the
-domain through the control plane, verifies it is inactive, restores the prior module tree and persistent
+domain through the control plane and verifies it is inactive. It then re-observes the complete target
+state immediately before the first restore write. An unreadable or third component at that point
+enters `recovery_conflict` without an overwrite. The provider then restores the prior module tree and persistent
 definition, boots that definition, and requires a fresh boot plus the existing System readiness
 contract before committing `recovered`. The exact GRUB-selected kernel is guest bootloader state and
 is not knowable from an inactive domain definition, so it is not an identity gate; a recovery that
@@ -233,7 +264,9 @@ cannot reach readiness after bounded retries remains `recovering` for operator a
 all evidence. A recovery retry re-observes each component: complete target resumes restoration,
 complete source resumes boot/readiness, and a source/target mixture may resume only when every
 component matches one of those recorded identities and the journal proves the partial write belongs
-to this recovery. Any other mixture or third value enters `recovery_conflict`. Concurrent terminalization
+to this recovery. Before each subsequent write, that journal records the expected component identity;
+the write uses compare-and-set from that value and records its result. Any other mixture or third
+value enters `recovery_conflict`. Concurrent terminalization
 serializes under the System lock. The recovery point and materialized artifacts cannot be deleted
 before `recovered`. System teardown instead destroys the domain before cleaning the recovery point
 and materialization, because a definition that will be destroyed need not be restored or rebooted.
