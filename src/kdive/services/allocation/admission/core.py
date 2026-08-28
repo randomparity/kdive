@@ -158,7 +158,7 @@ async def price_window_and_estimate(
     validate_against_resource(request.selector, request.resource)
     validate_disk_against_resource(request.disk_gb, request.resource)
     coeff = await resolve_coeff(conn, request.resource.cost_class)
-    accel = _reserve_accel(request)
+    accel = _pricing_accel(request)
     estimate = quantize_kcu(
         cost(
             rate(
@@ -173,7 +173,7 @@ async def price_window_and_estimate(
     return window_hours, estimate
 
 
-def _reserve_accel(request: AllocationRequest) -> str | None:
+def _pricing_accel(request: AllocationRequest) -> str | None:
     """Return the advertised accelerator to price, or the native baseline (ADR-0362)."""
     if request.arch is None:
         return None
