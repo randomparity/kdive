@@ -144,7 +144,7 @@ async def list_resources(
         try:
             after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, request.cursor)
         except InvalidCursor:
-            return _invalid_cursor_error("resources.list")
+            return _invalid_cursor_error("resources")
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:

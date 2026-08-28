@@ -69,7 +69,7 @@ async def list_investigations(
         try:
             after = _decode_ts_uuid_cursor(_LIST_TAG, request.cursor)
         except InvalidCursor:
-            return _invalid_cursor_error("investigations.list")
+            return _invalid_cursor_error("investigations")
     rows = await list_investigation_rows(
         pool,
         ctx,

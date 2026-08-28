@@ -1459,6 +1459,7 @@ def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await _list_resources(pool, CTX, kind=None, cursor="!!!")
         assert resp.status == "error"
+        assert resp.object_id == "resources"
         assert resp.data["reason"] == "invalid_cursor"
 
     asyncio.run(_run())

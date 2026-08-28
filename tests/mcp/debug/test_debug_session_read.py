@@ -423,6 +423,7 @@ def test_list_sessions_bad_cursor_is_config_error(migrated_url: str) -> None:
                 pool, _ctx(), sessions_read.SessionsListRequest(cursor="not-a-token")
             )
         assert resp.status == "error"
+        assert resp.object_id == "debug_sessions"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_cursor"
 
