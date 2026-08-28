@@ -419,6 +419,21 @@ newest generation and passes through the same quiescence barrier before destroyi
 Connection loss does not release authority to an older generation; only a durable higher claim
 supersedes it. Tests lose responses during every mutation, pause an old actor before publication and
 boot, claim replacement and teardown generations, and prove no late completion crosses the barrier.
+
+The same triple fences core truth. Every actor-originated activation transition, deadline or attempt
+metadata update, failure/result write, recovery-job completion, and `cleanup_complete` commit runs
+under the database System lock and compare-and-sets the activation identity, current
+`operation_generation`, and claimant token stored for that live execution. Job-result persistence uses
+the same predicate in its transaction rather than committing independently. Allocating a replacement
+generation first compare-and-sets the prior row generation, so two replacements cannot both become
+current. A predicate mismatch returns an internal `superseded` outcome and performs no activation,
+job, cleanup, or audit-result write; the current actor or reconciler owns durable completion. Merely
+re-observing the provider or holding the transaction-scoped lock never authorizes an old result.
+
+Adversarial tests pause an actor after each representative provider/readiness result and immediately
+before `prepared`, `active`, `recovered`, `recovery_failed`, attempt-failure, job-result, and
+cleanup-complete commits. Replacement and teardown actors claim a higher generation, after which each
+old commit must affect zero rows and leave current lifecycle truth unchanged.
 The stale-actor suite also completes one activation, starts a later Run with a greater generation,
 and proves that an actor from the earlier Run can never reclaim authority.
 It separately loses a worker after `prepared` and after the first target-component write, claims the
