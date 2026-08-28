@@ -116,6 +116,73 @@ def test_materialization_matches_adr_golden_vector_and_identity() -> None:
     )
 
 
+def test_non_null_initrd_matches_adr_boundary_vectors() -> None:
+    plan_data = _plan_data()
+    plan_data["initrd"] = {
+        "key": "initrd/i.img",
+        "sha256": ZERO_DIGEST,
+        "size_bytes": 536_870_912,
+        "version": "v1",
+    }
+    plan = ExternalBootPlan.model_validate(plan_data)
+    assert plan.identity == (
+        "sha256:3727eedd7d5a4b3740828f083229b7aa67ebca0497b959dcf9727a64ced6e488"
+    )
+
+    materialization_data = {
+        "architecture": "x86_64",
+        "artifacts": {
+            "initrd": {"ref": "initrd/ref"},
+            "kernel": {"ref": "kernel/ref"},
+            "modules": {"ref": "modules/ref"},
+        },
+        "extracted_vmlinuz_sha256": ZERO_DIGEST,
+        "installed_module_tree": ZERO_DIGEST,
+        "kernel_observation": {
+            "architecture": "x86_64",
+            "gnu_build_id": "0" * 40,
+            "release": "6.1.0",
+        },
+        "ownership": {"run_id": RUN_ID, "system_id": SYSTEM_ID},
+        "plan_identity": plan.identity,
+        "provider_kind": "local-libvirt",
+        "schema": "external-boot-materialization-v1",
+        "source_module_manifest": ZERO_DIGEST,
+        "verified_bundle_sha256": ZERO_DIGEST,
+        "verified_initrd_sha256": ZERO_DIGEST,
+    }
+    materialization = ExternalBootMaterialization.model_validate(materialization_data)
+    assert materialization.identity == (
+        "sha256:c1bcec0d307105434d087774bc6a3fa61ce9be5250fcdff0d2dfb6a8ae152aab"
+    )
+    assert ExternalBootPlan.from_canonical_json(plan.to_canonical_json()) == plan
+    assert (
+        ExternalBootMaterialization.from_canonical_json(materialization.to_canonical_json())
+        == materialization
+    )
+
+
+def test_plan_rejects_initrd_larger_than_v1_limit() -> None:
+    data = _plan_data()
+    data["initrd"] = {
+        "key": "initrd/i.img",
+        "sha256": ZERO_DIGEST,
+        "size_bytes": 536_870_913,
+        "version": "v1",
+    }
+
+    with pytest.raises(ValidationError, match="less than or equal to 536870912"):
+        ExternalBootPlan.model_validate(data)
+
+
+def test_internal_schema_field_name_is_not_a_wire_alias() -> None:
+    data = _plan_data()
+    data["schema_"] = data.pop("schema")
+
+    with pytest.raises(ValidationError):
+        ExternalBootPlan.model_validate(data)
+
+
 @pytest.mark.parametrize(
     ("authority", "kind"),
     [

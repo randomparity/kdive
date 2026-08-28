@@ -27,7 +27,7 @@ _CANONICAL_VALUE_MAX_BYTES = 65_536
 
 
 class _ClosedValue(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
 
     def to_canonical_json(self) -> bytes:
         """Return compact, sorted UTF-8 JSON without a trailing newline."""
