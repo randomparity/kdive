@@ -35,8 +35,9 @@ installation obligation, and opaque provider references returned by those operat
 
 The boot plan is one immutable set. Its identity hashes the schema version, Run/build ownership,
 architecture, kernel bundle object key and version, bundle digest, kernel release, optional initrd
-object key/version/digest, root specification, and ordered command line. An initrd is valid only as
-part of this set; it has no independent activation identity. Materialization must extract
+object key/version/digest, root specification, ordered command line, and complete module-install
+obligation. An initrd is valid only as part of this set; it has no independent activation identity.
+Materialization must extract
 `boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
 compressed bundle is never itself a bootable kernel.
@@ -50,20 +51,24 @@ architecture mismatch fail before materialization or activation and name the rec
 pre-schema image remains eligible for its existing GRUB boot but not external Run boot.
 
 Before changing boot state, the provider creates a durable recovery point representing the exact
-currently defined boot configuration and returns an opaque recovery reference. For remote-libvirt,
-that point contains the exact inactive disk/GRUB domain definition, stored behind the provider seam;
-the shared state never interprets its XML. Deterministic identifiers make repeated prepare calls for
-the same System, Run, plan identity, and current definition return the same point.
+currently defined boot configuration and returns its provider-computed source-definition identity
+plus an opaque recovery reference. For remote-libvirt, that point contains the exact inactive
+disk/GRUB domain definition, stored behind the provider seam; the shared state never interprets its
+XML. Deterministic identifiers make repeated prepare calls for the same System, Run, plan identity,
+and current definition return the same point.
 
 Core persists the plan identity, materialization reference, recovery reference, and activation state
 before calling activate. The state machine is `prepared -> activating -> active`, with
-`activating -> recovering -> recovered` and failure metadata on an operation attempt. Transitions
-and provider calls run under the existing per-System advisory lock. Activation is compare-and-set:
-the provider refuses a materialization or recovery reference belonging to another System, Run, or
-plan. On an `activating` record after worker loss, reconciliation compares the provider-observed
-active identity with the desired plan identity. An exact match completes `active`; absence or a
-different identity restores the recorded recovery point and completes `recovered`. It never guesses
-from readiness alone.
+`activating -> recovering -> recovered`, `activating|recovering -> recovery_conflict`, and failure
+metadata on an operation attempt. Transitions and provider calls run under the existing per-System
+advisory lock. Activation is compare-and-set from the recovery point's source-definition identity:
+the provider refuses a changed definition or a materialization/recovery reference belonging to
+another System, Run, or plan. On an `activating` record after worker loss, reconciliation compares
+the provider-observed definition identity with both recorded identities. The desired plan identity
+completes `active`; the source-definition identity completes `recovered`. Recovery may replace only
+the desired plan identity with the recorded source definition. Any absent, unreadable, or third
+identity enters `recovery_conflict` for operator resolution instead of overwriting provider state.
+It never guesses from readiness alone.
 
 Recovery restores the recorded point before declaring the System usable. The recovery point remains
 until the Run is terminal and no recovery is in flight. Materialized artifacts remain while the Run
@@ -90,8 +95,11 @@ HTTP/iPXE.
 - Core gains durable activation state and reconciliation work. This is necessary because provider
   activation and database commits cannot share a transaction.
 - Retries compare immutable plan and materialization identities. A reused object key with another
-  version, digest, architecture, release, root specification, or initrd pairing is rejected rather
-  than overwritten.
+  version, digest, architecture, release, root specification, initrd pairing, or module obligation
+  is rejected rather than overwritten.
+- A provider-side change outside KDIVE's System lock is preserved as `recovery_conflict`. Recovery
+  is therefore fail-closed and may require an operator to choose between the recorded point and the
+  newly observed definition.
 - ADR-0082's in-guest GRUB install remains the provisioning/recovery mechanism but no longer defines
   iterative remote Run boot once this decision is implemented.
 
