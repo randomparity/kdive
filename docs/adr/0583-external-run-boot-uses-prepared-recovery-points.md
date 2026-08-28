@@ -344,12 +344,23 @@ The existing transaction-scoped System advisory lock protects each database tran
 cannot fence provider work across those commits. The System owns a durable monotonically increasing
 `operation_generation` allocated under that lock; it never resets when an activation terminates.
 Each new activation and every takeover increments the System value and copies the resulting generation
-plus activation identity into the activation row. Every recovery point, provider journal, staged
-artifact, maintenance domain, and externally visible target component records both values. Before
-provider work, an actor atomically claims that ordered pair in a provider-durable per-System fence.
+plus activation identity into the activation row. Recovery points, staged artifacts, maintenance
+domains, and externally visible target components bind only the stable
+System/activation/Run/plan identity and their content identities; takeover never retags or recreates
+them. The provider-durable per-System fence and each append-only mutation-journal entry additionally
+record the actor generation.
+
+Before provider work, an actor atomically claims `(activation identity, generation)` in that fence.
 An idempotent claim requires the same pair; any different claim must have a strictly greater System
-generation. Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all
-allocate before claiming. Provider-local serialization makes a new claim wait for any bounded
+generation. Under the provider-local System lock, takeover validates the stable ownership and content
+digests of every existing recovery object, then validates the mutation journal as an unbroken sequence
+ending at the prior claimed generation before compare-and-setting the fence to the new generation.
+Existing journal entries remain immutable; new work appends with the new generation. A crash after the
+database increment but before the provider claim retries the same generation. Missing, changed, or
+unowned evidence enters `recovery_conflict` and is never recaptured from the current System state.
+
+Replacement workers, reconciliation, conflict resolution, teardown, and later Runs all allocate
+before claiming. Provider-local serialization makes a new claim wait for any bounded
 publication critical section; long downloads, extraction, and helper execution write only private
 staging and are cancelable or discardable.
 
@@ -362,6 +373,9 @@ an old actor before publication and boot, claim a replacement or teardown epoch,
 write is refused.
 The stale-actor suite also completes one activation, starts a later Run with a greater generation,
 and proves that an actor from the earlier Run can never reclaim authority.
+It separately loses a worker after `prepared` and after the first target-component write, claims the
+next generation, consumes the original activation-owned evidence, and proves safe resume without
+retagging or source recapture.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
