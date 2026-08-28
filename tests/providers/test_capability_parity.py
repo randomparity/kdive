@@ -29,7 +29,7 @@ from pathlib import Path
 
 import kdive
 from kdive.components import references
-from kdive.components.references import ROOTFS_COMPONENT, ComponentKind
+from kdive.components.references import INITRD_COMPONENT, ROOTFS_COMPONENT, ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.providers.assembly.composition import (
     ProviderComposition,
@@ -47,6 +47,12 @@ _ROOTFS_CATALOG_WAIVER = (
     "remote ROOTFS accepts a supplied `local` qcow2 (ADR-0440, #1433) but not `catalog`: a remote "
     "catalog image is the operator-staged base_image_volume referenced by name, so a catalog "
     "source would download-then-re-upload it to the host it already lives on."
+)
+
+_INITRD_LOCAL_WAIVER = (
+    "remote generates the deterministic grub slot's initramfs in-guest with dracut, against the "
+    "guest's actual storage stack; a worker-host initrd could inherit root=UUID= via "
+    "grubby --copy-default but still lack what it needs to mount that root (ADR-0583, #1436)."
 )
 
 # Capability keys local-libvirt advertises that remote-libvirt deliberately does not, each mapped to
@@ -72,6 +78,7 @@ _WAIVERS: dict[str, str] = {
         "System that also carries a crashkernel reservation (ADR-0349)."
     ),
     "support.component_sources.rootfs:catalog": _ROOTFS_CATALOG_WAIVER,
+    "support.component_sources.initrd:local": _INITRD_LOCAL_WAIVER,
 }
 
 
@@ -319,3 +326,12 @@ def test_rootfs_is_declared_by_every_provider_and_enforced() -> None:
     for provider, caps in declarations.items():
         accepted = caps.accepted_component_sources.get(ROOTFS_COMPONENT, frozenset())
         assert "local" in accepted, f"{provider} must still accept a `local` ROOTFS source"
+
+
+def test_initrd_provider_decision_is_declared_and_enforced() -> None:
+    assert INITRD_COMPONENT in _enforced_component_kinds()
+    declarations = _declared_component_sources()
+    assert declarations["local-libvirt"].accepted_component_sources[INITRD_COMPONENT] == {"local"}
+    assert declarations["fault-inject"].accepted_component_sources[INITRD_COMPONENT] == {"local"}
+    assert declarations["remote-libvirt"].accepted_component_sources[INITRD_COMPONENT] == set()
+    assert "support.component_sources.initrd:local" in _WAIVERS

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 
-from kdive.components.references import ROOTFS_COMPONENT
+from kdive.components.references import INITRD_COMPONENT, ROOTFS_COMPONENT
 from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
@@ -95,15 +95,18 @@ def validate_profile_for_provider(
     _reject_unknown_destructive_ops(profile)
     profile_policy.validate_profile(profile)
     rootfs = profile_policy.rootfs_source(profile)
-    if rootfs is None:
-        return
-    if isinstance(rootfs, _UploadRootfs):
-        return
-    reject_unsupported_component_source(
-        capabilities,
-        component_kind=ROOTFS_COMPONENT,
-        ref=rootfs,
-    )
+    if rootfs is not None and not isinstance(rootfs, _UploadRootfs):
+        reject_unsupported_component_source(
+            capabilities,
+            component_kind=ROOTFS_COMPONENT,
+            ref=rootfs,
+        )
+    if profile.initrd is not None:
+        reject_unsupported_component_source(
+            capabilities,
+            component_kind=INITRD_COMPONENT,
+            ref=profile.initrd,
+        )
 
 
 async def validate_rootfs_for_provider(

@@ -10,6 +10,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import (
+    INITRD_COMPONENT,
     ROOTFS_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
@@ -199,6 +200,11 @@ def _component_sources() -> ComponentSourceCapabilities:
     # declaration without one.
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         ROOTFS_COMPONENT: frozenset({"local"}),
+        # Remote deliberately accepts no supplied INITRD. Its disk-image lane runs dracut inside
+        # the guest against the actual storage stack, then gives that image to grubby
+        # --copy-default so the bootloader retains its root=UUID= device. A worker-host initrd
+        # could lack the drivers/configuration needed to mount that root and fail only at boot.
+        INITRD_COMPONENT: frozenset(),
     }
     return ComponentSourceCapabilities(
         provider=ResourceKind.REMOTE_LIBVIRT.value,

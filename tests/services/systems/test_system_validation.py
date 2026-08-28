@@ -9,13 +9,14 @@ from typing import Any
 
 import pytest
 
-from kdive.components.references import ROOTFS_COMPONENT, ComponentSourceKind
+from kdive.components.references import INITRD_COMPONENT, ROOTFS_COMPONENT, ComponentSourceKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.catalog.resource_capabilities import GuestArch, resolve_accel_emulator
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
+from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.services.systems.validation import (
     _reject_unknown_destructive_ops,
     require_fadump_supported,
@@ -26,6 +27,7 @@ from kdive.services.systems.validation import (
 
 _LOCAL_POLICY = LocalLibvirtProfilePolicy()
 _FAULT_POLICY = FaultInjectProfilePolicy()
+_REMOTE_POLICY = RemoteLibvirtProfilePolicy()
 
 _VALID_PROFILE: dict[str, Any] = {
     "schema_version": 1,
@@ -62,6 +64,28 @@ def _capabilities(*accepted_rootfs_sources: ComponentSourceKind) -> ComponentSou
     )
 
 
+def _initrd_capabilities(
+    provider: str, *accepted_sources: ComponentSourceKind
+) -> ComponentSourceCapabilities:
+    return ComponentSourceCapabilities(
+        provider=provider,
+        accepted_component_sources={
+            ROOTFS_COMPONENT: frozenset({"local"}),
+            INITRD_COMPONENT: frozenset(accepted_sources),
+        },
+    )
+
+
+def _profile_with_initrd(*, remote: bool = False) -> ProvisioningProfile:
+    data = copy.deepcopy(_VALID_PROFILE)
+    data["initrd"] = {"kind": "local", "path": "/var/lib/kdive/rootfs/initramfs.img"}
+    if remote:
+        data["boot_method"] = "disk-image"
+        data["kernel_source_ref"] = None
+        data["provider"] = {"remote-libvirt": {"base_image_volume": "base.qcow2"}}
+    return ProvisioningProfile.parse(data)
+
+
 def test_validate_profile_for_provider_accepts_advertised_rootfs_source() -> None:
     validate_profile_for_provider(_profile(), _LOCAL_POLICY, _capabilities("local"))
 
@@ -77,6 +101,32 @@ def test_validate_profile_for_provider_rejects_unsupported_rootfs_source() -> No
         "component_kind": "rootfs",
         "source_kind": "local",
         "accepted_source_kinds": ["catalog"],
+    }
+
+
+def test_validate_profile_for_provider_accepts_advertised_initrd_source() -> None:
+    validate_profile_for_provider(
+        _profile_with_initrd(),
+        _LOCAL_POLICY,
+        _initrd_capabilities("local-libvirt", "local"),
+    )
+
+
+def test_validate_profile_for_provider_rejects_remote_initrd_before_provider_io() -> None:
+    with pytest.raises(CategorizedError) as exc_info:
+        validate_profile_for_provider(
+            _profile_with_initrd(remote=True),
+            _REMOTE_POLICY,
+            _initrd_capabilities("remote-libvirt"),
+        )
+
+    error = exc_info.value
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {
+        "provider": "remote-libvirt",
+        "component_kind": "initrd",
+        "source_kind": "local",
+        "accepted_source_kinds": [],
     }
 
 

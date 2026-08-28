@@ -75,6 +75,28 @@ def test_kernel_source_ref_field_documents_baseline_and_disk_image_exception() -
     assert "baseline" in lowered
 
 
+def test_initrd_field_documents_reference_and_provider_matrix() -> None:
+    description = ProvisioningProfile.model_fields["initrd"].description
+    assert description is not None
+    lowered = description.lower()
+    assert "discriminated" in lowered
+    assert "local-libvirt" in lowered
+    assert "fault-inject" in lowered
+    assert "remote-libvirt" in lowered
+    assert "in-guest" in lowered
+
+
+def test_initrd_component_reference_round_trips() -> None:
+    data = _valid()
+    data["initrd"] = {"kind": "local", "path": "/var/lib/kdive/rootfs/initramfs.img"}
+
+    profile = ProvisioningProfile.parse(data)
+
+    assert profile.initrd is not None
+    assert profile.initrd.kind == "local"
+    assert dump_profile(profile)["initrd"] == data["initrd"]
+
+
 def test_valid_libvirt_profile_parses() -> None:
     profile = ProvisioningProfile.parse(_valid())
 

@@ -10,6 +10,7 @@ import libvirt
 
 import kdive.config as config
 from kdive.components.references import (
+    INITRD_COMPONENT,
     ROOTFS_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
@@ -105,15 +106,13 @@ def build_capture_quiescence(
 
 
 def _component_sources() -> ComponentSourceCapabilities:
-    # ROOTFS only: it is the one kind a caller can supply, and the one kind
-    # `reject_unsupported_component_source` is reached for (ADR-0563, #1942). A KERNEL, VMLINUX,
-    # CONFIG, PATCH or INITRD entry here declared a rejection that never happened, because no
-    # profile field or tool input carries a ref of those kinds — `ProvisioningProfile` carries
-    # `rootfs` and nothing else, and `runs.kernel_ref` is written from build output. Re-declare a
-    # kind in the same change that adds the caller entry point and its enforcement call site; the
-    # guard in `tests/providers/test_capability_parity.py` fails a declaration without one.
+    # ROOTFS and INITRD are caller inputs backed by admission enforcement. INITRD local paths are
+    # staged into the atomic baseline directory for direct-kernel boot (ADR-0583, #1436). Re-declare
+    # another kind only with its caller entry point and enforcement call site; the parity guard
+    # fails an inert declaration (ADR-0563, #1942).
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
+        INITRD_COMPONENT: frozenset({"local"}),
     }
     return ComponentSourceCapabilities(
         provider=ResourceKind.LOCAL_LIBVIRT.value,

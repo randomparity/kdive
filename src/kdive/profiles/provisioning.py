@@ -35,6 +35,7 @@ from pydantic import (
 from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
+    ComponentRef,
     LocalComponentRef,
 )
 from kdive.domain.capture import CaptureMethod
@@ -384,6 +385,15 @@ class ProvisioningProfile(_ProfileBase):
             "named here); it is an opaque label only, not a URL or fetchable reference. "
             "Omit it for boot_method 'disk-image': that lane boots the operator-staged base "
             "image's own kernel and never reads this field."
+        ),
+    )
+    initrd: ComponentRef | None = Field(
+        default=None,
+        description=(
+            "Optional discriminated INITRD component reference. local-libvirt and fault-inject "
+            "accept only kind 'local', an absolute worker-host path; remote-libvirt rejects every "
+            "supplied INITRD because its disk-image lane generates a guest-specific initramfs "
+            "in-guest. Omit this field to use the provider's existing initrd behavior."
         ),
     )
     provider: ProviderSection
