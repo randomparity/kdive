@@ -261,8 +261,19 @@ direct-kernel bytes one composition result while preserving currently admitted l
 The root specification is a versioned, closed data shape with exactly `schema`, `architecture`,
 `root`, `arguments`, `authority`, and `source`. Version 1 admits authority/source-kind pairs
 `build/build`, `stage-inspection/staged-image`, and `catalog-attestation/catalog-image`; no other pair
-is valid. `source` has exactly `kind` and an immutable lowercase `sha256:<64-hex>` `identity` over,
-respectively, the build output, inspected staged-image version, or catalog image version. Build facts
+is valid. `source` has exactly `kind` and an immutable lowercase `sha256:<64-hex>` `identity` copied
+from a persisted source field, never re-serialized from the root facts. For `build/build`, it is
+`sha256:` plus the selected ADR-0531 `InvestigationBuild.content_digest`, whose canonical document
+must contain these root facts. For `stage-inspection/staged-image`, it is the staged provenance row's
+new `staged_image_sha256`, computed over the complete image bytes before bounded inspection and stored
+with the inspection result. For `catalog-attestation/catalog-image`, it is the typed catalog
+attestation's new immutable `image_sha256`, computed over or supplied with the verified catalog image
+and stored with the attested root facts. Records lacking the required digest are ineligible rather
+than assigned a surrogate identity.
+
+Immediately before plan creation, core reloads the named build, staged-provenance, or catalog row and
+requires its persisted digest and root facts to equal the candidate source and root shape. Plan retry
+repeats that comparison; a changed/missing row is stale input. Build facts
 and bounded stage inspection are verified authorities. Catalog data extends the existing typed
 attestation path with the same root value, ordered arguments, architecture, schema version, and
 immutable image identity; the current attestation fields alone are insufficient. No second untyped
@@ -320,8 +331,9 @@ Core persists the plan identity and materialization before prepare, then the rec
 both provider state identities when preparation completes. The state machine is
 `preparing -> prepared -> activating -> active`, with
 `activating|active -> recovering -> recovered`,
+`prepared -> recovering`,
 `recovering -> recovery_failed`,
-`preparing|prepared -> abandoned`,
+`preparing -> abandoned`,
 `preparing|prepared|activating|active|recovering -> recovery_conflict`, and
 `recovery_conflict -> recovering`,
 failure metadata on an operation attempt.
@@ -447,10 +459,14 @@ conflict, retagging, or source recapture.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
-observed composite state identity. Under the System lock, the provider repeats that observation,
-compare-and-sets every component from it, records the authority and before/after identities, and
-transitions to `recovering`; a changed or unreadable value leaves the conflict untouched. The normal
-recovery journal and readiness gates then apply. Alternatively, ordinary authorized System teardown
+observed composite state identity and an idempotency key. Under the System lock, core repeats the
+read-only observation, then durably records the acknowledged identity, resolution operation identity,
+new generation/token, recovery deadline, and `recovery_conflict -> recovering` transition before any
+provider write. A changed or unreadable value leaves the conflict untouched. Provider restoration
+then uses the normal per-component write-ahead CAS journal from the acknowledged identity. A crash
+before the transition changes no provider state; a crash after it resumes the same recovering
+operation, and a CAS mismatch returns to `recovery_conflict` with evidence retained. Alternatively,
+ordinary authorized System teardown
 destroys the domain before releasing the reservation and artifacts. There is no adopt-current-state,
 force-overwrite, or automatic timeout edge, because a mixed external definition cannot become a
 trusted reusable baseline by declaration. Reconciliation preserves evidence and performs no provider
@@ -496,10 +512,12 @@ swept by deterministic ownership after worker death. A partial materialization i
 published under its final identity or discoverable as an owned partial and removed; it is never
 activated.
 
-`preparing|prepared -> abandoned` is the pre-activation disposal path. From `preparing`, the provider
-journal first restores the captured source definition and prior power state; from `prepared`, provider
-observation must still equal recorded source state. Cancellation of the activation or reconciliation may take
-either edge only after retries are no longer possible. After source verification, core commits
+`preparing -> abandoned` is the pre-preparation disposal path. The provider journal first restores
+the captured source definition and prior power state. Cancellation or reconciliation may take this
+edge only after retries are no longer possible. Once `prepared`, cancellation instead takes
+`prepared -> recovering` and uses the same recorded-power-state, deadline, readiness, terminalization,
+and cleanup rules as post-activation recovery; recovery evidence remains until those rules complete.
+After source verification in the preparing path, core commits
 `abandoned` with `cleanup_complete=false` while retaining deterministic cleanup ownership. Cleanup
 then removes the journal or recovery point and materialization idempotently and commits
 `cleanup_complete=true`; reconciliation resumes any interrupted deletion. Worker loss at a deletion
