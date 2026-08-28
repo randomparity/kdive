@@ -42,8 +42,9 @@ The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1
 the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
 these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
 strings `run_id` and `build_id`; `bundle` with NFC object-store `key` and `version` plus `sha256`;
-`initrd`, either null or the same key/version/digest shape; ordered `cmdline`; `module_obligation` with
-`mode`, `release`, and `source_manifest`; and the closed `root` shape defined below. Unknown keys are
+`initrd`, either null or the same key/version/digest shape; complete `cmdline` string;
+`debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
+with `mode`, `release`, and `source_manifest`; and the closed `root` shape defined below. Unknown keys are
 rejected. An initrd is valid only as part of this set; it has no independent activation identity.
 Materialization must extract
 `boot/vmlinuz` from the combined bundle, validate its architecture and release against the plan,
@@ -71,14 +72,16 @@ ambiguous build notes reject external boot. The provider-neutral running-kernel 
 architecture, `uname` release, and the GNU build ID from the running kernel's notes. Local observes
 it through its existing guest connection, remote through its fixed guest-agent helper, and the
 non-libvirt test provider returns the same value type. Unavailable evidence is retryable before the
-readiness deadline; a mismatch is `BOOT_FAILURE` and triggers recovery. Readiness, boot ID, and
+readiness deadline; a mismatch records terminal-on-this-attempt `READINESS_FAILURE` and triggers
+recovery. Readiness, boot ID, and
 persistent definition identity cannot substitute for this comparison.
 
 When core commits `activating`, it also persists `server_time` and an absolute UTC RFC 3339
 `activation_readiness_deadline`, computed once from operator-configured
 `activation_readiness_timeout_seconds`. Unit is seconds and scope is this System/Run activation.
 Every worker retry reuses that deadline. Unavailable running-kernel evidence or readiness before it
-is retryable; reaching it without both proofs records `BOOT_FAILURE`, transitions to `recovering`,
+is retryable; reaching it without both proofs records terminal-on-this-attempt `BOOT_TIMEOUT`,
+transitions to `recovering`,
 and suggests `jobs.wait` and `runs.get` while recovery runs.
 
 The first `recovering` commit likewise persists `server_time` and an absolute
@@ -88,22 +91,31 @@ never extended by worker retry. Failure to restore and reach fresh readiness by 
 and suggests the administrator call `systems.teardown`. System teardown is the only exit from
 `recovery_failed`.
 
+An administrator resolving `recovery_conflict -> recovering` starts a new recovery attempt and
+records a new deadline from that operation's `server_time`; time parked in conflict consumes no
+recovery-attempt window. That explicit resolution is the only operation that may replace an expired
+or interrupted recovery deadline. Ordinary job and worker retries never extend one.
+
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":["root=UUID=x"],"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_id":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"build","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"build"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_id":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"build","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"build"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:0e8a1930e670dc87302d13bc07463ecd2805a45b6c5e3eb9bbe81575dd344b3b","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
-`sha256:3e4a46bb40f4a0410448ea39a1432d4f4322e7a85daea5d9514f927a4b55da44` and
-`sha256:219a1a50c28e3423e11c8da1444000e38e0e3dacdef974b575d754d1c3a2f918`.
+`sha256:0e8a1930e670dc87302d13bc07463ecd2805a45b6c5e3eb9bbe81575dd344b3b` and
+`sha256:03d69bb7ddc381795419f76e77c26355a683b8a0832b7bcd89cb54aaa77ec6ab`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
+release is 1 through 64 ASCII bytes matching `[A-Za-z0-9][A-Za-z0-9._+-]{0,63}` and is neither `.`
+nor `..`. The extracted kernel release must match it byte-for-byte. Providers select the directory
+with a no-follow directory-relative lookup; separators, controls, NUL, and every noncanonical value
+are rejected before a manifest walk or write. The
 manifest applies one shared extraction normalization first: absolute symlinks named exactly
 `build` or `source` at the release root are omitted, while every other absolute or escaping link is
 rejected. This exact-name rule intentionally tightens the current local filter, which omits every
@@ -198,7 +210,10 @@ After the pending row exists, the provider creates a deterministic reservation o
 System/Run/plan for exactly operator-configured `recovery_reserve_bytes`. The sum of retained
 reservations in one provider instance's recovery store cannot exceed its
 `recovery_max_bytes`; both values are byte counts, and availability is observed at the response
-envelope's `server_time`. Creation is idempotent. Reconciliation releases a reservation only when its
+envelope's `server_time`. Each store has a durable identity; compare-and-debit, idempotent lookup,
+and release serialize under a store-scoped advisory lock, independently of the System lock. The debit
+and reservation row commit atomically, and the deterministic ownership key makes retries find the
+same debit. Release deletes that row and credits its bytes exactly once. Reconciliation releases a reservation only when its
 durable activation row is terminal or absent; because the row precedes allocation, a live allocation
 cannot be mistaken for an orphan. A crash before `ready` resumes allocation or abandons the pending
 row without guest mutation. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
@@ -212,13 +227,21 @@ After verification it commits `abandoned`, releases the reservation, and reports
 `recovery_reserve_bytes`. Prepared, recovery, and conflict states retain the reservation;
 abandonment, recovery, and System teardown release it idempotently.
 
-Every `cmdline` element is one nonempty ASCII token containing bytes `0x21` through `0x7e` except
-single quote, double quote, and backslash. Whitespace, NUL, controls, and empty elements are rejected,
-not escaped. The canonical libvirt string joins the elements with one ASCII space. Exactly one token
-starts `root=` and it must equal `root.root`; `root.arguments` is a nonempty ordered array whose first
-element is that token and whose complete sequence occurs exactly once as a contiguous subsequence of
-`cmdline`. No other element may use a key present in `root.arguments`. This makes the plan's array,
-root provenance, and rendered direct-kernel string one value rather than three composition points.
+`platform_arguments` contains 1 through 32 nonempty ASCII tokens, each at most 256 bytes and without
+ASCII whitespace or NUL; their one-space join is at most 4096 bytes. Exactly one starts `root=` and it
+must equal `root.root`; `root.arguments` is a nonempty ordered array whose complete sequence occurs
+exactly once as a contiguous subsequence of `platform_arguments`. No other platform element may use a
+key present in `root.arguments`.
+
+`debug_cmdline` preserves the current caller contract: core strips surrounding characters with
+Python 3.14 `str.strip`, then accepts 1 through 4096 printable Unicode scalar values, including
+non-ASCII, internal whitespace, quotes, and backslashes; NUL and non-printable values remain rejected.
+It is null when no caller extra exists. This field and the derived `cmdline` are exempt from the
+serializer's NFC-input rule so the accepted scalar sequence is not rewritten. Core builds `cmdline` exactly as the one-space join of
+`platform_arguments`, followed by one space and `debug_cmdline` when non-null. The final UTF-8 encoding
+is bounded to 20,480 bytes. Providers pass this string directly to libvirt or a fixed argv parameter;
+they do not tokenize, quote, normalize, or invoke a shell. This makes the provenance and rendered
+direct-kernel bytes one composition result while preserving currently admitted local inputs.
 
 The root specification is a versioned, closed data shape with exactly `schema`, `architecture`,
 `root`, `arguments`, `authority`, and `source`. Version 1 admits authority/source-kind pairs
@@ -312,9 +335,17 @@ force-overwrite, or automatic timeout edge, because a mixed external definition 
 trusted reusable baseline by declaration. Reconciliation preserves evidence and performs no provider
 write while the state remains `recovery_conflict`.
 
-Recovery restores a usable disk/GRUB baseline, not only persistent bytes. When an active Run becomes
-terminal and the System remains reusable, the provider first observes the complete recorded target
-state under the System lock. Only that state may take the normal `active -> recovering` edge. An
+Recovery restores a usable disk/GRUB baseline, not only persistent bytes. Run build state is not its
+usage lease: current Runs are already `succeeded` before install and boot. A new contributor operation,
+`runs.release_external_boot`, is the explicit end-of-use event for an active external-boot activation.
+Under the System lock it refuses while that Run has a live DebugSession or another active lifecycle,
+capture, or debug job, then atomically records the release request and enqueues recovery. Repeating it
+is idempotent and returns the same recovery job. `debug_sessions.detach` does not release implicitly;
+its response suggests `runs.release_external_boot` when it detached the last live session. Authorized
+System teardown bypasses release because destruction owns cleanup.
+
+On release, the provider first observes the complete recorded target state under the System lock.
+Only that state may take the normal `active -> recovering` edge. An
 absent or unreadable component remains retryable; any third component enters `recovery_conflict`
 without stopping or overwriting the System. After committing `recovering`, the provider stops the
 domain through the control plane and verifies it is inactive. It then re-observes the complete target
@@ -323,8 +354,9 @@ enters `recovery_conflict` without an overwrite. The provider then restores the 
 definition, boots that definition, and requires a fresh boot plus the existing System readiness
 contract before committing `recovered`. The exact GRUB-selected kernel is guest bootloader state and
 is not knowable from an inactive domain definition, so it is not an identity gate; a recovery that
-cannot reach readiness after bounded retries remains `recovering` for operator action and retains
-all evidence. A recovery retry re-observes each component: complete target resumes restoration,
+reaches its persisted recovery deadline without readiness transitions to `recovery_failed` and
+retains all evidence; it does not remain `recovering`. A recovery retry before that deadline
+re-observes each component: complete target resumes restoration,
 complete source resumes boot/readiness, and a source/target mixture may resume only when every
 component matches one of those recorded identities and the journal proves the partial write belongs
 to this recovery. Before each subsequent write, that journal records the expected component identity;
@@ -351,16 +383,22 @@ Remote-libvirt uploads per-System/per-Run kernel and optional initrd artifacts a
 provider-local paths internally. It cannot mount the remote overlay from the worker, and its existing
 guest-agent seam exists only while the System guest runs, so it gains one provider-private offline
 disk-editor operation. After stopping the System domain, the provider attaches that same overlay,
-and no other writable disk, to a deterministic transient maintenance domain on the remote libvirt
-host. The maintenance domain boots an operator-staged, architecture-matched immutable appliance,
+plus one deterministic reservation-backed recovery volume, to a transient maintenance domain on the
+remote libvirt host; no other disk is writable. The recovery volume capacity equals the activation's
+remaining reserved bytes and is never attached to the System domain. The maintenance domain boots an operator-staged, architecture-matched immutable appliance,
 has no network interface, and exposes only a guest-agent command whose fixed helper can capture,
 stage, atomically publish, verify, or restore the release-qualified module tree. The helper receives
 content through a provider-owned read-only libvirt volume, never a presigned URL or caller-composed
-command. The provider verifies the System domain inactive and the maintenance domain destroyed before
+command. Capture writes a no-follow recovery archive and manifest to the recovery volume, hashes it
+incrementally against the reservation, fsyncs its data, and atomically writes a committed footer
+containing its length and digest. Retry accepts only that complete footer, resumes an owned incomplete
+archive from its journaled chunk boundary or recreates it, and never treats guest-agent stdout or
+worker memory as the durable copy. The provider verifies the System domain inactive and the maintenance domain destroyed before
 each attachment or System boot; both domains cannot hold the overlay concurrently.
 
-The prepare journal records the appliance and content-volume immutable identities, maintenance-domain
-identity, overlay target identity, requested helper operation, and helper result before advancing.
+The prepare journal records the appliance, content-volume, and recovery-volume immutable identities,
+reserved byte debit, maintenance-domain identity, overlay target identity, requested helper
+operation, archive length/digest/footer, and helper result before advancing.
 Retry observes those identities and either resumes the same operation or fails closed; an unknown
 domain, attachment, volume, or helper result enters `recovery_conflict`. Recovery uses the same
 editor and saved tree. The appliance and helper are a remote-libvirt deployment prerequisite owned
