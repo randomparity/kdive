@@ -42,8 +42,9 @@ The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1
 the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
 these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
 strings `system_id`, `run_id`, and `build_generation`; `bundle` with NFC object-store `key` and
-`version`, complete-object `sha256`, extracted-kernel `vmlinuz_sha256`, `member_count`, and
-`uncompressed_bytes`;
+`version`, complete-object `sha256`, extracted-kernel `vmlinuz_sha256`, `member_count`,
+`uncompressed_bytes`, `vmlinuz_size_bytes`, `decoded_kernel_size_bytes`, `elf_metadata_bytes`, and
+`gnu_build_id_size_bytes`;
 `initrd`, either null or the same key/version/digest shape plus `size_bytes`; complete `cmdline` string;
 `debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
 with `mode`, `release`, `source_manifest`, `member_count`, and `uncompressed_bytes`; and the closed
@@ -76,7 +77,18 @@ directories and rejected structural metadata, so zero-sized junk cannot evade th
 SHA-256, architecture, release, and GNU build ID, applies the version-1 safe topology rules below to
 the matching release subtree, computes `module-source-manifest-v1`, and persists its digest, member
 count, and sum of regular-file sizes plus the whole-archive count and byte total on the
-InvestigationBuild generation before publication. Schema version 1
+InvestigationBuild generation before publication. Boot-image parsing is bounded separately: on both
+x86_64 and ppc64le v1 permits at most 536,870,912 boot-member bytes, 2,147,483,648 decoded-kernel
+bytes, and 16,777,216 distinct bytes read while parsing ELF headers, section tables, and note records;
+the one unambiguous GNU build ID is 4 through 64 bytes. Units are bytes, scope is the one
+`boot/vmlinuz` member, and there is no reference clock. Finalization and materialization decode only
+to a quota-backed temporary object while streaming, never an unbounded memory buffer, and stop before
+reading or writing limit plus one. Exceeding a parse limit records `BUILD_FAILURE` before publication
+or `INSTALL_FAILURE` before provider mutation respectively and directs the producer to rebuild a
+normal boot image. Finalization persists all four measured sizes above, plan construction copies
+them, and materialization requires exact equality in addition to kernel digest and metadata.
+
+Schema version 1
 allows at most 200,000 whole-archive members and 8 GiB (8,589,934,592 bytes) of uncompressed regular
 file content across the accepted kernel and module members per exact bundle VersionId; these are
 fixed per-bundle limits with no reference clock.
@@ -163,30 +175,30 @@ or interrupted recovery deadline. Ordinary job and worker retries never extend o
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","member_count":2,"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":2,"version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"decoded_kernel_size_bytes":200,"elf_metadata_bytes":50,"gnu_build_id_size_bytes":20,"key":"bundles/k.tar","member_count":2,"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":101,"version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","vmlinuz_size_bytes":100},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:e37b8ee676bef2c4de7314d0279595e8ad6812b6ed385bbdcf0e6ffa52f1e064","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:a526825f6daf93774d3892c515332ce86390d914c1ff8faf1d994f24a9ea061b","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
-`sha256:e37b8ee676bef2c4de7314d0279595e8ad6812b6ed385bbdcf0e6ffa52f1e064` and
-`sha256:42ed2ac335091cb0fb8c09b5fc3ba970ed185e54db0946058338b542201b9f6c`.
+`sha256:a526825f6daf93774d3892c515332ce86390d914c1ff8faf1d994f24a9ea061b` and
+`sha256:dc2cdf6635a5caca475257f6c62c886cdd763e1858c5fb63a95346d800b54361`.
 
 The non-null boundary vectors use an initrd exactly at the v1 byte limit:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","member_count":2,"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":2,"version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":{"key":"initrd/i.img","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size_bytes":536870912,"version":"v1"},"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"decoded_kernel_size_bytes":200,"elf_metadata_bytes":50,"gnu_build_id_size_bytes":20,"key":"bundles/k.tar","member_count":2,"sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":101,"version":"v1","vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","vmlinuz_size_bytes":100},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":{"key":"initrd/i.img","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size_bytes":536870912,"version":"v1"},"module_obligation":{"member_count":1,"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","uncompressed_bytes":1},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"stage-inspection","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"staged-image"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":{"ref":"initrd/ref"},"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:a236c2fce2c32abfdafaa3e6480ae13586cbae567fe5d5ce16a93e4c3ffe2f16","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+{"architecture":"x86_64","artifacts":{"initrd":{"ref":"initrd/ref"},"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:3727eedd7d5a4b3740828f083229b7aa67ebca0497b959dcf9727a64ced6e488","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}
 ```
 
 Their respective identities are
-`sha256:a236c2fce2c32abfdafaa3e6480ae13586cbae567fe5d5ce16a93e4c3ffe2f16` and
-`sha256:1f021bf0d49a0b239e5b16a66d091bcf160b794fc58268cdce0c867fcc4e75f4`.
+`sha256:3727eedd7d5a4b3740828f083229b7aa67ebca0497b959dcf9727a64ced6e488` and
+`sha256:c1bcec0d307105434d087774bc6a3fa61ce9be5250fcdff0d2dfb6a8ae152aab`.
 Boundary tests accept that size and reject 536,870,913 bytes before publication.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
@@ -273,13 +285,16 @@ recovery copy is created and restored with no-follow directory-relative operatio
 against this manifest. Conventional release-root `build` and `source` absolute symlinks are therefore
 represented exactly rather than omitted from recovery CAS.
 
-Materialization does not change the System. Core first commits `preparing` with reservation state
+Materialization does not change the System, but it occurs only after admission. Core first creates
+the unique activation and commits `preparing` with reservation state
 `pending` only while a System-locked query proves that no DebugSession for that System is attaching
 or live, regardless of owning Run or transport, and that no active lifecycle, control, force-crash,
 snapshot, traffic-capture, vmcore-capture, or other debug job owns or depends on the System; otherwise
-the request returns `CONFLICT` before reservation or provider work. The provider then creates the
-reservation and core records it `ready`.
-No quiesce or other guest mutation is allowed before `ready`. Immediately before the first stop or
+the request returns `CONFLICT` before reservation or provider work. The provider then creates one
+reservation covering materialization plus recovery and core records it `ready`. Only then may the
+provider materialize the plan and persist its immutable record. A materialization failure or
+cancellation follows `preparing -> abandoned` and the common verified cleanup/release sequence.
+No quiesce or other guest mutation is allowed before materialization succeeds. Immediately before the first stop or
 other power mutation, the destination-side serialized lane rechecks the same System-wide session
 condition through core's authority-bound snapshot; a present or unreadable result performs no provider
 mutation and returns to conflict handling. A deterministic provider prepare journal records the source definition and prior power state,
@@ -334,8 +349,10 @@ allocation cannot be mistaken for an orphan. A crash before `ready` resumes allo
 row without guest mutation. Exhaustion is retryable `CAPACITY_EXHAUSTED`, changes no
 guest state, and directs the operator to clean terminal artifacts or raise the cap before retry.
 
-The fixed reservation bounds the captured definition, prior module tree, journal, and verification
-metadata together. Offline capture cannot exceed it. An overrun restores the source definition,
+The fixed reservation bounds materialized kernel/modules/initrd artifacts, the captured definition,
+prior module tree, journal, and verification metadata together. Materialization and offline capture
+cannot exceed it. An overrun before guest mutation abandons and cleans the activation; an overrun
+after preparation restores the source definition,
 exact prior module tree, and recorded prior power state; a previously stopped System remains stopped.
 After verification it commits `abandoned` with cleanup pending; the common cleanup sequence deletes
 and verifies the owned objects, releases the reservation exactly once, commits cleanup complete, and
@@ -463,8 +480,9 @@ activation row owns it; that row must recover under the System lock before anoth
 other mismatch or unowned external definition enters `recovery_conflict` and is never captured as a
 new source point.
 
-Core persists the plan identity and materialization before prepare, then the recovery reference and
-both provider state identities when preparation completes. The state machine is
+Core persists the plan identity on the unique pending activation, then reservation readiness and the
+materialization, and finally the recovery reference and both provider state identities when provider
+preparation completes. The state machine is
 `preparing -> prepared -> activating -> active`, with
 `activating|active -> recovering -> recovered`,
 `prepared -> recovering`,
