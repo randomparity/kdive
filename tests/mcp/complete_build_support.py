@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
+import io
+import struct
+import tarfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -32,6 +36,44 @@ from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provisioning_profile as _provisioning_profile
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def valid_combined_kernel_tar() -> bytes:
+    """Return a minimal structurally valid external x86 kernel bundle."""
+    build_id = bytes.fromhex("0123456789abcdef")
+    note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id
+    elf = bytearray(64 + 112 + len(note) + 32)
+    elf[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", elf, 0x12, 62)
+    struct.pack_into("<Q", elf, 0x20, 64)
+    struct.pack_into("<H", elf, 0x36, 56)
+    struct.pack_into("<H", elf, 0x38, 2)
+    note_offset = 64 + 112
+    struct.pack_into("<I", elf, 64, 4)
+    struct.pack_into("<Q", elf, 64 + 8, note_offset)
+    struct.pack_into("<Q", elf, 64 + 32, len(note))
+    load_offset = note_offset + len(note)
+    struct.pack_into("<I", elf, 120, 1)
+    struct.pack_into("<Q", elf, 120 + 8, load_offset)
+    struct.pack_into("<Q", elf, 120 + 32, len(elf) - load_offset)
+    elf[note_offset : note_offset + len(note)] = note
+    elf[load_offset:] = b"Linux version 6.9.0 test\x00".ljust(len(elf) - load_offset, b"\x00")
+    boot = bytearray(0x400)
+    boot[0x202:0x206] = b"HdrS"
+    struct.pack_into("<H", boot, 0x20E, 0x100)
+    boot[0x300:0x306] = b"6.9.0\x00"
+    boot.extend(gzip.compress(elf))
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+        for name, data in (
+            ("boot/vmlinuz", bytes(boot)),
+            ("lib/modules/6.9.0/modules.dep", b""),
+            ("lib/modules/6.9.0/kernel/drivers/foo.ko", b"\x7fELFmod"),
+        ):
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return buf.getvalue()
 
 
 def ctx(role: Role = Role.OPERATOR) -> RequestContext:

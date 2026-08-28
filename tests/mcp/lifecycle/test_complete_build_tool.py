@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import tarfile
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -64,23 +62,8 @@ from tests.mcp.complete_build_support import (
 from tests.mcp.complete_build_support import (
     seed_run as _seed_run,
 )
+from tests.mcp.complete_build_support import valid_combined_kernel_tar as _combined_kernel_tar
 from tests.mcp.systems_support import provider_resolver
-
-
-def _combined_kernel_tar() -> bytes:
-    """The unified `kernel` artifact: gzip tar of boot/vmlinuz (a bzImage) + lib/modules/<ver>/."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for name, data in (
-            ("boot/vmlinuz", b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16),
-            ("lib/modules/6.9.0/modules.dep", b""),
-            ("lib/modules/6.9.0/kernel/drivers/foo.ko", b"\x7fELFmod"),
-        ):
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
-
 
 _KERNEL_TAR = _combined_kernel_tar()
 _EXTERNAL_PROFILE = {"schema_version": 1}
