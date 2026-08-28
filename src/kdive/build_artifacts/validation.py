@@ -56,12 +56,13 @@ _MODULE_SUFFIXES = (".ko", ".ko.xz", ".ko.gz", ".ko.zst")
 _KERNEL_TAR_SCAN_MAX_BYTES = 128 * 1024 * 1024
 _RANGE_CHUNK_BYTES = 4 * 1024 * 1024
 _EXTERNAL_BOOT_INITRD_MAX_BYTES = 512 * 1024 * 1024
+_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
 _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_EXTENSION_MAX_BYTES = 1024 * 1024
 _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
-_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 16 * 1024 * 1024
+_EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 64 * 1024 * 1024
 _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX = 64
 _SHA256_PREFIX = "sha256:"
 _KERNEL_RELEASE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
@@ -402,6 +403,11 @@ def _external_boot_evidence(
 ) -> dict[str, JsonValue]:
     """Produce server-owned, version-pinned external-boot evidence (ADR-0583)."""
     bundle_head = heads["kernel"]
+    if bundle_head.size_bytes > _EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES:
+        raise _build_failure(
+            "kernel bundle exceeds the external-boot compressed byte limit",
+            max_bytes=_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES,
+        )
     archive = _scan_external_boot_archive(store, keys["kernel"], bundle_head.size_bytes, arch)
     if build_id and archive["gnu_build_id"] != build_id:
         raise _build_failure(
@@ -795,6 +801,10 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
                 with opener(boot) as source:
                     _copy_kernel_bounded(source, decoded, budget)
             except EOFError, OSError, zlib.error, lzma.LZMAError, zstd.ZstdError:
+                decoded.seek(0)
+                if decoded.read(4) == _ELF_MAGIC:
+                    decoded.seek(0)
+                    return decoded
                 decoded.seek(0)
                 decoded.truncate()
                 continue

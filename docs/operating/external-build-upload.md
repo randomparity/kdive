@@ -183,12 +183,13 @@ requires canonical member names, exactly one regular `boot/vmlinuz`, and exactly
 links, devices, FIFOs, sockets, unrelated members, and escaping symlinks are rejected. The
 release-root `build` and `source` absolute symlinks are omitted from the source manifest.
 
-The full scan is bounded to 200,000 tar headers, 8,589,934,592 uncompressed regular-file bytes,
-and 536,870,912 bytes for `boot/vmlinuz`. These units are bytes, scoped to one exact uploaded
-kernel object version; there is no reference clock. Crossing a bound fails the build before a
-generation is published. Remove unneeded content or rebuild a smaller bundle, then upload and
-finalize again. An optional `initrd` is paired with this exact generation and is limited to
-536,870,912 bytes under the same failure and recovery contract.
+The full scan is bounded to 2,147,483,648 compressed bytes, 200,000 tar headers, 8,589,934,592
+uncompressed regular-file bytes, and 536,870,912 bytes for `boot/vmlinuz`. These units are bytes,
+scoped to one exact uploaded kernel object version; there is no reference clock. Finalizations are
+admitted one at a time per server process. Crossing a bound fails the build before a generation is
+published. Remove unneeded content or rebuild a smaller bundle, then upload and finalize again. An
+optional `initrd` is paired with this exact generation and is limited to 536,870,912 bytes under the
+same failure and recovery contract.
 
 Two further rules come from how the artifact is validated and consumed:
 

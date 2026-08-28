@@ -41,6 +41,7 @@ from kdive.services.runs.steps import BuildStepResult
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 
 _log = logging.getLogger(__name__)
+_EXTERNAL_BUILD_VALIDATION_SLOTS = asyncio.Semaphore(1)
 
 
 class ExternalBuildStore(Protocol):
@@ -214,14 +215,15 @@ class CompleteBuildFinalizer:
             final_versions = {}
 
         try:
-            validated = await asyncio.to_thread(
-                self._validate_complete_build,
-                list(prepared.manifest_row.entries),
-                prepared.keys,
-                build_id,
-                arch,
-                final_versions,
-            )
+            async with _EXTERNAL_BUILD_VALIDATION_SLOTS:
+                validated = await asyncio.to_thread(
+                    self._validate_complete_build,
+                    list(prepared.manifest_row.entries),
+                    prepared.keys,
+                    build_id,
+                    arch,
+                    final_versions,
+                )
         except CategorizedError as exc:
             raise CompleteBuildValidationError(exc) from exc
 
