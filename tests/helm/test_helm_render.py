@@ -294,12 +294,18 @@ def _oidc_request_mappings(res: subprocess.CompletedProcess[str]) -> list[dict[s
 
 
 def test_renders_three_app_workloads_against_external_backends() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    res = _template()
     assert res.returncode == 0, res.stderr
     # Server, reconciler, and lifecycle witness are Deployments; worker is a StatefulSet.
     assert res.stdout.count("kind: Deployment") == 3
     assert res.stdout.count("kind: StatefulSet") == 1
     assert "pre-install" in res.stdout
+
+
+def test_deprecated_database_url_value_is_rejected() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://legacy/db")
+    assert res.returncode != 0
+    assert "configure databaseCredentials.* Secret references" in res.stderr
 
 
 def _container_env(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -308,7 +314,7 @@ def _container_env(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def test_database_principals_are_distinct_secret_refs() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://migration-owner/db")
+    res = _template()
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
     expected = {
@@ -340,7 +346,7 @@ def test_database_principals_are_distinct_secret_refs() -> None:
 
 
 def test_shared_config_omits_database_credentials() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://migration-owner/db")
+    res = _template()
     assert res.returncode == 0, res.stderr
     config = next(
         doc
@@ -422,7 +428,7 @@ def test_database_principals_support_distinct_secrets_and_keys() -> None:
 
 
 def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=2")
+    res = _template("worker.replicas=2")
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
     role = next(doc for doc in docs if doc.get("kind") == "Role")
@@ -470,7 +476,6 @@ def test_worker_death_verifier_has_pod_uid_identity_and_namespaced_get_only_rbac
 
 def test_worker_credential_broker_is_private_tls_and_init_only() -> None:
     res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y",
         "workerCredentialBroker.tls.secretName=broker-tls",
         "workerCredentialBroker.envelopeKey.secretName=broker-envelope",
     )
@@ -599,7 +604,6 @@ def test_worker_credential_broker_port_names_meet_kubernetes_limit() -> None:
 
 def test_worker_death_authority_ceiling_survives_scale_down_and_is_bounded() -> None:
     res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y",
         "worker.replicas=0",
         "worker.deathVerificationOrdinalCeiling=4",
     )
@@ -619,7 +623,6 @@ def test_worker_death_authority_ceiling_survives_scale_down_and_is_bounded() -> 
 
 def test_worker_death_authority_ceiling_must_cover_replicas() -> None:
     res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y",
         "worker.replicas=3",
         "worker.deathVerificationOrdinalCeiling=2",
     )
@@ -630,7 +633,6 @@ def test_worker_death_authority_ceiling_must_cover_replicas() -> None:
 @pytest.mark.parametrize("ceiling", [0, 257])
 def test_worker_death_authority_ceiling_is_bounded(ceiling: int) -> None:
     res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y",
         "worker.replicas=0",
         f"worker.deathVerificationOrdinalCeiling={ceiling}",
     )
@@ -862,7 +864,7 @@ def test_external_render_omits_post_install_migrate_hook() -> None:
     # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
     # after the in-chart DB). Assert on the migrate Job's phase specifically, not a blanket output
     # scan.
-    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    jobs = _jobs_by_name()
     assert "post-install" not in (jobs["migrate"]["phase"] or "")
     assert "pre-install" in jobs["migrate"]["phase"]
 
@@ -893,7 +895,7 @@ def test_bundled_path_wires_backends_into_config() -> None:
 
 
 def test_external_path_ignores_legacy_db_url_and_omits_demo_creds() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://ext/db")
+    res = _template()
     assert res.returncode == 0, res.stderr
     assert "postgresql://ext/db" not in res.stdout
     assert "AWS_ACCESS_KEY_ID" not in res.stdout
@@ -954,18 +956,14 @@ def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
 
 
 def test_validate_hook_rendered_only_with_systems_configmap() -> None:
-    without = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    without = _jobs_by_name()
     assert "validate-systems" not in without
-    with_cm = _jobs_by_name(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
-    )
+    with_cm = _jobs_by_name("systems.configMapName=my-systems")
     assert "validate-systems" in with_cm
 
 
 def test_validate_hook_is_pre_upgrade_weighted_before_migrate() -> None:
-    jobs = _jobs_by_name(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
-    )
+    jobs = _jobs_by_name("systems.configMapName=my-systems")
     v = jobs["validate-systems"]
     assert "pre-install" in v["phase"] and "pre-upgrade" in v["phase"]
     assert v["weight"] < jobs["migrate"]["weight"]  # runs before migrate
@@ -980,9 +978,7 @@ def test_validate_hook_is_pre_upgrade_weighted_before_migrate() -> None:
 def test_migrate_job_has_no_systems_volume() -> None:
     # migrate() no longer reads systems.toml (ADR-0121), so the migrate Job must not mount the
     # systems ConfigMap even when one is configured.
-    jobs = _jobs_by_name(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
-    )
+    jobs = _jobs_by_name("systems.configMapName=my-systems")
     assert "migrate" in jobs
     assert "kdive-systems" not in jobs["migrate"]["volumes"]
 
@@ -993,10 +989,8 @@ def test_external_configmap_is_a_pre_install_hook_before_migrate() -> None:
     # ConfigMap leaves the migrate pod in CreateContainerConfigError until the hook
     # timeout (issue #311). The ConfigMap must therefore be a pre-install hook too,
     # weighted strictly lower than the migrate Job so Helm creates it first.
-    hooks = _hooks_by_kind("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    migrate_weight = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")["migrate"][
-        "weight"
-    ]
+    hooks = _hooks_by_kind()
+    migrate_weight = _jobs_by_name()["migrate"]["weight"]
     assert "ConfigMap" in hooks, "external-path ConfigMap is not a hook; migrate cannot read it"
     assert "pre-install" in hooks["ConfigMap"]["phase"]
     assert "pre-upgrade" in hooks["ConfigMap"]["phase"]
@@ -1020,11 +1014,11 @@ def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
     Covers both workload kinds: server/reconciler are Deployments, the worker is a
     StatefulSet (ADR-0514). Extra ``--set`` args layer onto the external-backend base.
     """
-    return _rendered_app_workloads("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    return _rendered_app_workloads(*set_args)
 
 
 def _witness_workload(*set_args: str) -> dict[str, Any]:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    res = _template(*set_args)
     assert res.returncode == 0, res.stderr
     for doc in yaml.safe_load_all(res.stdout):
         if not (isinstance(doc, dict) and doc.get("kind") == "Deployment"):
@@ -1213,7 +1207,7 @@ def test_workload_carries_its_process_kind(proc: str) -> None:
     # Matched on NAME against every pod-carrying kind, not via _workloads(), which filters on
     # the kind it expects — asserting there could only ever fail with a KeyError, never on the
     # kind itself. The candidate set is deliberately wider than what the chart renders.
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    res = _template()
     assert res.returncode == 0, res.stderr
     candidates = [
         doc
@@ -1266,7 +1260,7 @@ def test_no_service_exposes_an_aux_port() -> None:
     # may front it. The server's MCP Service publishes 8000 only; the worker's governing
     # headless Service (ADR-0514) publishes NO ports at all — declaring 9465 there would give
     # the unauthenticated aux listener a named Service endpoint.
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    res = _template()
     assert res.returncode == 0, res.stderr
     published: dict[str, set[int]] = {}
     for doc in yaml.safe_load_all(res.stdout):
@@ -1284,7 +1278,7 @@ def test_no_service_exposes_an_aux_port() -> None:
 
 def _service(*set_args: str) -> dict[str, Any]:
     """The server's MCP Service — the only Service in the render that publishes ports."""
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    res = _template(*set_args)
     assert res.returncode == 0, res.stderr
     return next(
         doc
@@ -1362,7 +1356,7 @@ def test_systems_inventory_unset_mounts_nothing() -> None:
 
 
 def test_systems_inventory_configmap_mounts_on_components_not_migrate() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=inv")
+    res = _template("systems.configMapName=inv")
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
 
@@ -1407,7 +1401,7 @@ def test_fixtures_unset_mounts_nothing() -> None:
 
 
 def test_fixtures_configmap_mounts_on_components_not_migrate() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "fixtures.configMapName=fx")
+    res = _template("fixtures.configMapName=fx")
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
 
@@ -1499,7 +1493,7 @@ def test_bundled_minio_init_propagates_version_info_command_failure(tmp_path: Pa
 
 
 def test_external_path_has_no_demo_backends() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    res = _template()
     assert res.returncode == 0, res.stderr
     assert "mock-oauth2-server" not in res.stdout
     assert res.stdout.count("kind: NetworkPolicy") == 1
@@ -1708,7 +1702,7 @@ def _worker_workload(*set_args: str) -> dict[str, Any]:
     guards below stay meaningful against a chart that spells the worker as a Deployment —
     which is exactly the shape #1703 describes.
     """
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    res = _template(*set_args)
     assert res.returncode == 0, res.stderr
     return next(
         doc
@@ -1762,7 +1756,7 @@ def test_worker_scratch_comes_from_per_replica_claim_templates() -> None:
 def test_chart_renders_no_standalone_worker_pvc() -> None:
     # The retired pvc-worker.yaml declared two release-scoped ReadWriteOnce PVCs. A standalone
     # PVC is by construction shared by every replica that names it, so the chart must render none.
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=2")
+    res = _template("worker.replicas=2")
     assert res.returncode == 0, res.stderr
     standalone = [
         doc["metadata"]["name"]
@@ -1784,7 +1778,7 @@ def test_worker_claim_templates_carry_no_version_dependent_metadata() -> None:
 
 def test_worker_statefulset_is_governed_by_a_headless_service() -> None:
     # serviceName must name a Service that exists, or the pods get no stable DNS identity.
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    res = _template()
     assert res.returncode == 0, res.stderr
     docs = [d for d in yaml.safe_load_all(res.stdout) if isinstance(d, dict)]
     sts = next(d for d in docs if d["kind"] == "StatefulSet")
@@ -1821,9 +1815,7 @@ def test_worker_claims_are_released_on_scale_down_and_uninstall() -> None:
 
 def _obs_docs(*set_args: str) -> list[dict[str, Any]]:
     """Render with bundledObservability on and return every YAML doc."""
-    res = _template(
-        "config.KDIVE_DATABASE_URL=postgresql://x/y", "bundledObservability=true", *set_args
-    )
+    res = _template("bundledObservability=true", *set_args)
     assert res.returncode == 0, res.stderr
     return [d for d in yaml.safe_load_all(res.stdout) if isinstance(d, dict)]
 
@@ -1842,7 +1834,7 @@ def _scrape_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def test_observability_off_by_default_renders_no_prometheus() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    res = _template()
     assert res.returncode == 0, res.stderr
     assert "-prometheus" not in res.stdout
 
