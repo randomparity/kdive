@@ -228,10 +228,13 @@ After verification it commits `abandoned`, releases the reservation, and reports
 abandonment, recovery, and System teardown release it idempotently.
 
 `platform_arguments` contains 1 through 32 nonempty ASCII tokens, each at most 256 bytes and without
-ASCII whitespace or NUL; their one-space join is at most 4096 bytes. Exactly one starts `root=` and it
-must equal `root.root`; `root.arguments` is a nonempty ordered array whose complete sequence occurs
+ASCII whitespace or NUL; their one-space join is at most 4096 bytes. Exactly one starts `root=`;
+`root.arguments` is a nonempty ordered array whose complete sequence occurs
 exactly once as a contiguous subsequence of `platform_arguments`. No other platform element may use a
-key present in `root.arguments`.
+key present in `root.arguments`. Specifically, the sole root token equals ASCII `root=` concatenated
+with `root.root`. A token's key is the nonempty bytes before its first `=`, or the entire token when
+`=` is absent; duplicate-key checks compare those bytes, and “other” excludes the one validated
+`root.arguments` occurrence.
 
 `debug_cmdline` preserves the current caller contract: core strips surrounding characters with
 Python 3.14 `str.strip`, then accepts 1 through 4096 printable Unicode scalar values, including
@@ -310,12 +313,16 @@ both provider state identities when preparation completes. The state machine is
 `preparing|prepared|activating|active|recovering -> recovery_conflict`, and
 `recovery_conflict -> recovering`,
 failure metadata on an operation attempt.
-Transitions and provider calls run under the existing per-System advisory lock. Activation is
+Each transition is committed under the existing per-System advisory lock; provider calls use the
+cross-transaction epoch fence defined below. Activation is
 compare-and-set from the recovery point's source-state identity: the provider refuses changed state
 or materialization/recovery references belonging to another System, Run, or plan. On an `activating`
 record after worker loss, reconciliation compares the persistent definition and module-tree
-identities with both recorded states. The complete target state completes `active`; the complete
-source state completes `recovered`. A mixed state whose every component equals its recorded source
+identities with both recorded states. A complete target state resumes boot, fresh readiness, and
+running-kernel identity proof before core may commit `active`; persistent equality alone never does.
+A complete source state resumes restoration of the recorded prior power state and, when that state
+was running, fresh baseline readiness before core may commit `recovered`. When it was stopped,
+verified inactive source state is the recovered condition. A mixed state whose every component equals its recorded source
 or target component may be restored to source only when the activation write-ahead journal recorded
 the expected identity before each target write and its result afterward, proving every target-valued
 component belongs to this activation. An unproven mixture enters `recovery_conflict`. Any absent,
@@ -323,6 +330,24 @@ unreadable, or third component identity enters `recovery_conflict` for operator 
 of overwriting provider state. The portable plan identity is never compared directly with provider
 definition bytes. Runtime readiness and running-kernel identity are separate observations and never
 decide which persistent definition won.
+
+The existing transaction-scoped System advisory lock protects each database transition only; it
+cannot fence provider work across those commits. Each activation row therefore owns a monotonically
+increasing `operation_epoch`, and every recovery point, provider journal, staged artifact, maintenance
+domain, and externally visible target component records it. Before provider work, an actor atomically
+claims that epoch in a provider-durable per-System fence. Replacement workers, reconciliation,
+conflict resolution, and teardown first increment the database epoch under the System lock, then
+claim the higher provider epoch. Provider-local serialization makes a new claim wait for any bounded
+publication critical section; long downloads, extraction, and helper execution write only private
+staging and are cancelable or discardable.
+
+Immediately before every definition, module-tree, attachment, power, or cleanup mutation, and again
+before recording its result, the provider holds that local fence and rejects an epoch other than the
+current claimed value. A stale actor can finish private work but cannot publish, boot, restore, or
+delete after takeover. Teardown claims the newest epoch before destroying anything. Connection loss
+does not release authority to an older epoch; only a durable higher claim supersedes it. Tests pause
+an old actor before publication and boot, claim a replacement or teardown epoch, and prove the stale
+write is refused.
 
 `recovery_conflict` has two resolutions only. A project administrator may invoke the audited
 `resolve_external_boot_conflict` operation with `restore-recorded-source` and the exact currently
