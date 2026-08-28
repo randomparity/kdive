@@ -410,6 +410,33 @@ def test_external_boot_scan_bounds_compression_candidates() -> None:
         list(validation._magic_offsets(io.BytesIO(b"\x1f\x8b\x08" * 65), b"\x1f\x8b\x08"))
 
 
+def test_external_boot_scan_shares_decompression_budget_across_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES", 8)
+    budget = validation._DecodeBudget()
+    validation._copy_kernel_bounded(io.BytesIO(b"first"), io.BytesIO(), budget)
+
+    with pytest.raises(CategorizedError, match="aggregate decompression work limit"):
+        validation._copy_kernel_bounded(io.BytesIO(b"second"), io.BytesIO(), budget)
+
+
+def test_external_boot_scan_bounds_pax_metadata_before_tarfile_consumes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_EXTENSION_MAX_BYTES", 32)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        member = tarfile.TarInfo("boot/vmlinuz")
+        member.pax_headers = {"comment": "x" * 64}
+        member.size = len(_BZIMAGE_BODY)
+        tar.addfile(member, io.BytesIO(_BZIMAGE_BODY))
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+
+    with pytest.raises(CategorizedError, match="extension metadata exceeds"):
+        _validate_kernel_blob(buf.getvalue())
+
+
 @pytest.mark.parametrize("release", [".6.9.0", "6.9/0", "6.9.0-" + "x" * 59, "6.9.0é"])
 def test_external_boot_scan_enforces_release_grammar(release: str) -> None:
     with pytest.raises(CategorizedError, match="release is not canonical"):

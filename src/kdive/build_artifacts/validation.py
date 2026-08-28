@@ -59,6 +59,7 @@ _EXTERNAL_BOOT_INITRD_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
 _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
+_EXTERNAL_BOOT_EXTENSION_MAX_BYTES = 1024 * 1024
 _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES = 16 * 1024 * 1024
 _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX = 64
@@ -488,6 +489,7 @@ def _scan_external_boot_archive(
     module_bytes = 0
     module_members = 0
     member_count = 0
+    _preflight_external_boot_archive(store, key, size_bytes)
     reader = _RangedReader(store, key, size_bytes)
     try:
         with tarfile.open(fileobj=cast("IO[bytes]", reader), mode="r|gz") as archive:
@@ -567,6 +569,65 @@ def _scan_external_boot_archive(
         "module_member_count": module_members,
         "module_uncompressed_bytes": module_bytes,
     }
+
+
+def _preflight_external_boot_archive(store: ValidatorStore, key: str, size_bytes: int) -> None:
+    """Bound raw tar work before ``tarfile`` consumes GNU/PAX extension payloads."""
+    reader = _RangedReader(store, key, size_bytes)
+    raw_bytes = 0
+    headers = 0
+    try:
+        with gzip.GzipFile(fileobj=cast("IO[bytes]", reader), mode="rb") as source:
+            while True:
+                header = source.read(tarfile.BLOCKSIZE)
+                if not header:
+                    return
+                if len(header) != tarfile.BLOCKSIZE:
+                    raise _build_failure("kernel bundle has a truncated tar header")
+                raw_bytes += len(header)
+                if header == tarfile.NUL * tarfile.BLOCKSIZE:
+                    return
+                headers += 1
+                if headers > _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS:
+                    raise _build_failure(
+                        "kernel bundle exceeds the external-boot member limit",
+                        max_members=_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS,
+                    )
+                member = tarfile.TarInfo.frombuf(header, "utf-8", "surrogateescape")
+                extension_types = {
+                    tarfile.XHDTYPE,
+                    tarfile.XGLTYPE,
+                    tarfile.GNUTYPE_LONGNAME,
+                    tarfile.GNUTYPE_LONGLINK,
+                }
+                if (
+                    member.type in extension_types
+                    and member.size > _EXTERNAL_BOOT_EXTENSION_MAX_BYTES
+                ):
+                    raise _build_failure(
+                        "kernel bundle extension metadata exceeds the byte limit",
+                        max_bytes=_EXTERNAL_BOOT_EXTENSION_MAX_BYTES,
+                    )
+                blocks = (member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE
+                padded_size = blocks * tarfile.BLOCKSIZE
+                raw_bytes += padded_size
+                if raw_bytes > _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES:
+                    raise _build_failure(
+                        "kernel bundle exceeds the external-boot raw tar byte limit",
+                        max_bytes=_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES,
+                    )
+                _discard_exact(source, padded_size)
+    except (OSError, tarfile.TarError) as exc:
+        raise _build_failure("kernel bundle is not a complete readable gzip tar") from exc
+
+
+def _discard_exact(source: _BinaryReader, size: int) -> None:
+    remaining = size
+    while remaining:
+        chunk = source.read(min(_RANGE_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise _build_failure("kernel bundle ended before its recorded member size")
+        remaining -= len(chunk)
 
 
 def _canonical_tar_path(member: tarfile.TarInfo) -> str:
@@ -707,9 +768,10 @@ def _boot_release(boot: IO[bytes], arch: str) -> str:
 def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile[bytes]:
     # Ownership transfers to the caller, which closes the returned spool.
     decoded = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)  # noqa: SIM115
+    budget = _DecodeBudget()
     if arch == "ppc64le":
         boot.seek(0)
-        _copy_kernel_bounded(boot, decoded)
+        _copy_kernel_bounded(boot, decoded, budget)
         decoded.seek(0)
         return decoded
     candidates = (
@@ -718,12 +780,20 @@ def _decoded_kernel(boot: IO[bytes], arch: str) -> tempfile.SpooledTemporaryFile
         (b"\xfd7zXZ\x00", _open_lzma),
         (b"\x28\xb5\x2f\xfd", _open_zstd),
     )
+    candidate_count = 0
     for magic, opener in candidates:
         for offset in _magic_offsets(boot, magic):
+            candidate_count += 1
+            if candidate_count > _EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX:
+                decoded.close()
+                raise _build_failure(
+                    "boot/vmlinuz exceeds the compression-candidate work limit",
+                    max_candidates=_EXTERNAL_BOOT_COMPRESSION_CANDIDATES_MAX,
+                )
             boot.seek(offset)
             try:
                 with opener(boot) as source:
-                    _copy_kernel_bounded(source, decoded)
+                    _copy_kernel_bounded(source, decoded, budget)
             except EOFError, OSError, zlib.error, lzma.LZMAError, zstd.ZstdError:
                 decoded.seek(0)
                 decoded.truncate()
@@ -761,15 +831,21 @@ def _magic_offsets(source: IO[bytes], magic: bytes) -> Iterator[int]:
         position += len(chunk)
 
 
-def _copy_kernel_bounded(source: _BinaryReader, destination: IO[bytes]) -> int:
+@dataclass(slots=True)
+class _DecodeBudget:
+    remaining: int = field(default_factory=lambda: _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES)
+
+
+def _copy_kernel_bounded(
+    source: _BinaryReader, destination: IO[bytes], budget: _DecodeBudget
+) -> int:
     total = 0
-    while chunk := source.read(
-        min(_RANGE_CHUNK_BYTES, _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES - total + 1)
-    ):
+    while chunk := source.read(min(_RANGE_CHUNK_BYTES, budget.remaining + 1)):
         total += len(chunk)
-        if total > _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES:
+        budget.remaining -= len(chunk)
+        if budget.remaining < 0:
             raise _build_failure(
-                "decoded boot/vmlinuz exceeds the external-boot byte limit",
+                "decoded boot/vmlinuz exceeds the aggregate decompression work limit",
                 max_bytes=_EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES,
             )
         destination.write(chunk)
@@ -836,7 +912,8 @@ def _elf_kernel_metadata(kernel: IO[bytes], expected_arch: str) -> dict[str, Jso
         if segment_type == 4:  # PT_NOTE
             build_ids.update(_gnu_build_ids_from_notes(reader.read(offset, size)))
         elif segment_type == 1 and release is None:  # PT_LOAD
-            data = reader.read(offset, min(size, _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES))
+            remaining = _EXTERNAL_BOOT_ELF_METADATA_MAX_BYTES - reader.measured_bytes
+            data = reader.read(offset, min(size, remaining))
             release = _optional_linux_release(data)
     if release is None:
         raise _build_failure("decoded boot/vmlinuz has no bounded Linux release banner")
