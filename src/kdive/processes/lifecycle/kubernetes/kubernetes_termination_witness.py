@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kdive.services.runs.worker_incarnations import KubernetesAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 FINALIZER = "kdive.io/worker-termination-evidence"
@@ -24,7 +25,9 @@ _MAX_PASS_COUNT = 1_000
 
 type ReadPod = Callable[[str, str], Mapping[str, Any] | None]
 type PatchFinalizers = Callable[[str, str, list[dict[str, object]]], Awaitable[None]]
-type TerminateIncarnation = Callable[[str, dict[str, str], TerminationOutcome], Awaitable[bool]]
+type TerminateIncarnation = Callable[
+    [str, KubernetesAuthorityBinding, TerminationOutcome], Awaitable[bool]
+]
 
 _TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _CA = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
@@ -150,7 +153,7 @@ class KubernetesTerminationWitness:
                     break
                 uid, resource_version, outcome, index = claim
                 holder = f"kubernetes:{self.namespace}:{name}:{uid}"
-                binding = {"namespace": self.namespace, "name": name, "uid": uid}
+                binding = KubernetesAuthorityBinding(namespace=self.namespace, name=name, uid=uid)
                 if not await self.terminate(holder, binding, outcome):
                     break
                 operations: list[dict[str, object]] = [

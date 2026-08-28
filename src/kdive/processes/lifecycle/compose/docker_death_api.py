@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
+from kdive.services.runs.worker_incarnations import DockerAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _INSPECT_PATH = re.compile(r"/containers/[0-9a-f]{64}/json")
@@ -23,7 +24,7 @@ _CREDENTIAL = re.compile(r"[0-9a-f]{64}")
 
 type Inspect = Callable[[str], Mapping[str, object] | None]
 type Register = Callable[[str, str, bytes], Awaitable[None]]
-type Terminate = Callable[[str, dict[str, str], TerminationOutcome], Awaitable[None]]
+type Terminate = Callable[[str, DockerAuthorityBinding, TerminationOutcome], Awaitable[None]]
 type ContainerOperation = Callable[[str], Awaitable[None]]
 type Credential = Callable[[], str]
 type InjectCredential = Callable[[str, str], Awaitable[None]]

@@ -30,6 +30,7 @@ from kdive.config.core_settings import (
 from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    DockerAuthorityBinding,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -369,7 +370,9 @@ async def _register(holder: str, container_id: str, credential_hash: bytes) -> N
         await conn.close()
 
 
-async def _terminate(holder: str, binding: dict[str, str], outcome: TerminationOutcome) -> None:
+async def _terminate(
+    holder: str, binding: DockerAuthorityBinding, outcome: TerminationOutcome
+) -> None:
     conn = await psycopg.AsyncConnection.connect(require(LIFECYCLE_WITNESS_DATABASE_URL))
     try:
         await terminate_worker_incarnation(

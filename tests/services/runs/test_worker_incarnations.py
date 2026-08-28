@@ -13,7 +13,9 @@ from pydantic import SecretStr
 import kdive.services.runs.worker_incarnations as incarnations
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    DockerAuthorityBinding,
     IncarnationConflict,
+    KubernetesAuthorityBinding,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
@@ -41,7 +43,7 @@ def test_authority_registration_identical_replay_returns_public_facts(
 ) -> None:
     async def _run() -> None:
         witness = await _role_connection(migrated_url, "kdive_lifecycle_witness")
-        binding = {"pod_namespace": "kdive", "pod_name": "worker-0", "pod_uid": "uid-1"}
+        binding = KubernetesAuthorityBinding(namespace="kdive", name="worker-0", uid="uid-1")
         credential_hash = _credential_hash(_credential("credential-one"))
         try:
             first = await register_worker_incarnation(
@@ -76,7 +78,7 @@ def test_authority_registration_rejects_conflicting_immutable_fact(
 ) -> None:
     async def _run() -> None:
         witness = await _role_connection(migrated_url, "kdive_lifecycle_witness")
-        binding = {"container_id": "a" * 64}
+        binding = DockerAuthorityBinding(container_id="a" * 64)
         credential_hash = _credential_hash(_credential("credential-two"))
         try:
             await register_worker_incarnation(
@@ -87,7 +89,9 @@ def test_authority_registration_rejects_conflicting_immutable_fact(
                 credential_hash,
                 _PROTOCOL,
             )
-            replay_binding = {"container_id": "b" * 64} if conflict == "binding" else binding
+            replay_binding = (
+                DockerAuthorityBinding(container_id="b" * 64) if conflict == "binding" else binding
+            )
             replay_hash = (
                 _credential_hash(_credential("different-credential"))
                 if conflict == "credential_hash"
@@ -133,7 +137,7 @@ def test_authentication_derives_holder_and_rejects_wrong_credential(migrated_url
         witness = await _role_connection(migrated_url, "kdive_lifecycle_witness")
         worker = await _role_connection(migrated_url, "kdive_worker")
         credential = _credential("authority-delivered-credential")
-        binding = {"container_id": "c" * 64}
+        binding = DockerAuthorityBinding(container_id="c" * 64)
         try:
             await register_worker_incarnation(
                 witness,
@@ -193,7 +197,7 @@ def test_recovery_copies_exact_durable_termination_evidence(migrated_url: str) -
 
         investigation_id, generation, job_id, use_id = uuid4(), uuid4(), uuid4(), uuid4()
         holder = "docker:nonce-copy"
-        binding = {"container_id": "c" * 64}
+        binding = DockerAuthorityBinding(container_id="c" * 64)
         credential_hash = _credential_hash(_credential("recovery-credential"))
         conn = await connect(migrated_url)
         witness = await _role_connection(migrated_url, "kdive_lifecycle_witness")

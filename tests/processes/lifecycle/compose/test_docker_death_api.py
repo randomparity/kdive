@@ -11,6 +11,8 @@ from kdive.processes.lifecycle.compose.docker_death_api import (
     WorkerLifecycleGate,
     permitted_inspect_path,
 )
+from kdive.services.runs.worker_incarnations import DockerAuthorityBinding
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _CREDENTIAL = "c" * 64  # pragma: allowlist secret
 
@@ -62,7 +64,9 @@ def test_gate_commits_binding_before_start_and_termination_before_remove() -> No
     async def inject(value: str, credential: str) -> None:
         events.append(("inject", (value, credential)))
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
+    async def terminate(
+        holder: str, binding: DockerAuthorityBinding, outcome: TerminationOutcome
+    ) -> None:
         events.append(("terminate", f"{holder}:{outcome}"))
 
     async def start(value: str) -> None:
@@ -183,7 +187,9 @@ def test_termination_outage_retains_terminal_container() -> None:
         events.append("stop")
         state["State"] = {"Status": "exited", "ExitCode": 137}
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
+    async def terminate(
+        holder: str, binding: DockerAuthorityBinding, outcome: TerminationOutcome
+    ) -> None:
         events.append("terminate")
         raise RuntimeError("database unavailable")
 
@@ -215,7 +221,9 @@ def test_gate_records_sigkill_as_killed_before_removal() -> None:
     state["State"] = {"Status": "exited", "ExitCode": 137, "OOMKilled": False}
     outcomes: list[str] = []
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
+    async def terminate(
+        holder: str, binding: DockerAuthorityBinding, outcome: TerminationOutcome
+    ) -> None:
         outcomes.append(outcome)
 
     gate = WorkerLifecycleGate(
@@ -241,7 +249,9 @@ def test_gate_reconciles_retained_terminal_worker_before_requesting_replacement(
     state = _worker(container_id, nonce, status="exited")
     events: list[str] = []
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
+    async def terminate(
+        holder: str, binding: DockerAuthorityBinding, outcome: TerminationOutcome
+    ) -> None:
         events.append("terminate")
 
     async def remove(value: str) -> None:
@@ -298,7 +308,9 @@ def test_runtime_absence_never_publishes_termination() -> None:
     container_id = "a" * 64
     terminated = False
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
+    async def terminate(
+        holder: str, binding: DockerAuthorityBinding, outcome: TerminationOutcome
+    ) -> None:
         nonlocal terminated
         terminated = True
 

@@ -24,6 +24,7 @@ from kdive.config.core_settings import (
 from kdive.db.pool import create_pool
 from kdive.health.probe import BackendCheck, HealthProbe
 from kdive.processes.runtime import install_stop, run_process_runtime
+from kdive.services.runs.worker_incarnations import KubernetesAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 if TYPE_CHECKING:
@@ -116,7 +117,7 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
 
     async def terminate(
         incarnation: str,
-        authority_binding: dict[str, str],
+        authority_binding: KubernetesAuthorityBinding,
         outcome: TerminationOutcome,
     ) -> bool:
         async with pool.connection() as connection:
@@ -131,7 +132,7 @@ async def run_lifecycle_witness_body(pool: AsyncConnectionPool, stop: asyncio.Ev
     def incarnation(identity: PodIdentity) -> str:
         return f"kubernetes:{identity.namespace}:{identity.name}:{identity.uid}"
 
-    def binding(identity: PodIdentity) -> dict[str, str]:
+    def binding(identity: PodIdentity) -> KubernetesAuthorityBinding:
         return {"namespace": identity.namespace, "name": identity.name, "uid": identity.uid}
 
     async def register(identity: PodIdentity, credential_hash: bytes, envelope: bytes) -> bool:

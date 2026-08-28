@@ -23,6 +23,7 @@ from kdive.processes.lifecycle.compose.compose_worker_lifecycle import ComposeWo
 from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    DockerAuthorityBinding,
     TerminationOutcome,
     register_worker_incarnation,
     terminate_worker_incarnation,
@@ -584,7 +585,7 @@ def _gate(
         finally:
             await conn.close()
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> None:
+    async def terminate(holder: str, binding: DockerAuthorityBinding, outcome: str) -> None:
         conn = await psycopg.AsyncConnection.connect(witness_dsn)
         try:
             await terminate_worker_incarnation(

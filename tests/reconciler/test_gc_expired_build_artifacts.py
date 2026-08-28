@@ -22,10 +22,21 @@ from kdive.reconciler.cleanup.artifact_retention import gc_expired_build_artifac
 from kdive.services.runs.build_use import recover_build_use_after_confirmed_worker_death
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    LocalAuthorityBinding,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
 from tests.reconciler.conftest import connect
+
+
+def _local_binding(holder: str) -> LocalAuthorityBinding:
+    return LocalAuthorityBinding(
+        unit=f"kdive-worker@{holder}.service",
+        generation="test-generation",
+        boot_id=f"boot-{holder}",
+        invocation_id=f"invocation-{holder}",
+        host="test-host",
+    )
 
 
 class _RecordingStore:
@@ -144,7 +155,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
                     conn,
                     holder,
                     "local",
-                    {"test_identity": holder},
+                    _local_binding(holder),
                     hashlib.sha256(holder.encode()).digest(),
                     CURRENT_WORKER_FENCE_PROTOCOL,
                 )
@@ -211,7 +222,7 @@ def test_overlapping_attempt_use_stays_pinned_until_each_handler_releases(
             )
             for holder in ("dead-worker", "recycled-worker"):
                 await terminate_worker_incarnation(
-                    conn, holder, "local", {"test_identity": holder}, "failed"
+                    conn, holder, "local", _local_binding(holder), "failed"
                 )
             assert await recover_build_use_after_confirmed_worker_death(
                 conn,

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
 from psycopg import AsyncConnection, errors
 from psycopg.types.json import Jsonb
@@ -13,6 +14,27 @@ from kdive.db.locks import require_top_level_transaction
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 type AuthorityKind = Literal["local", "docker", "kubernetes"]
+
+
+class LocalAuthorityBinding(TypedDict):
+    unit: str
+    generation: str
+    boot_id: str
+    invocation_id: str
+    host: str
+
+
+class DockerAuthorityBinding(TypedDict):
+    container_id: str
+
+
+class KubernetesAuthorityBinding(TypedDict):
+    namespace: str
+    name: str
+    uid: str
+
+
+type AuthorityBinding = LocalAuthorityBinding | DockerAuthorityBinding | KubernetesAuthorityBinding
 
 CURRENT_WORKER_FENCE_PROTOCOL = 4
 
@@ -31,15 +53,36 @@ class WorkerIncarnation:
 
     incarnation: str
     authority_kind: AuthorityKind
-    authority_binding: dict[str, Any]
+    authority_binding: AuthorityBinding
     fence_protocol: int
 
 
+_BINDING_KEYS: dict[AuthorityKind, frozenset[str]] = {
+    "local": frozenset(LocalAuthorityBinding.__required_keys__),
+    "docker": frozenset(DockerAuthorityBinding.__required_keys__),
+    "kubernetes": frozenset(KubernetesAuthorityBinding.__required_keys__),
+}
+
+
+def _validated_binding(kind: AuthorityKind, value: object) -> AuthorityBinding:
+    if not isinstance(value, Mapping) or set(value) != _BINDING_KEYS[kind]:
+        raise RuntimeError(f"worker incarnation has invalid {kind} authority binding")
+    valid_values = all(
+        isinstance(key, str) and isinstance(item, str) and item for key, item in value.items()
+    )
+    if not valid_values:
+        raise RuntimeError(f"worker incarnation has invalid {kind} authority binding")
+    return cast(AuthorityBinding, dict(value))
+
+
 def _record(row: tuple[Any, ...]) -> WorkerIncarnation:
+    authority_kind = cast(AuthorityKind, row[1])
+    if authority_kind not in _BINDING_KEYS:
+        raise RuntimeError("worker incarnation has invalid authority kind")
     return WorkerIncarnation(
         incarnation=cast(str, row[0]),
-        authority_kind=cast(AuthorityKind, row[1]),
-        authority_binding=cast(dict[str, Any], row[2]),
+        authority_kind=authority_kind,
+        authority_binding=_validated_binding(authority_kind, row[2]),
         fence_protocol=cast(int, row[3]),
     )
 
@@ -48,7 +91,7 @@ async def register_worker_incarnation(
     conn: AsyncConnection,
     incarnation: str,
     authority_kind: AuthorityKind,
-    binding: dict[str, Any],
+    binding: AuthorityBinding,
     credential_hash: bytes,
     fence_protocol: int,
 ) -> WorkerIncarnation:
@@ -103,7 +146,7 @@ async def terminate_worker_incarnation(
     conn: AsyncConnection,
     incarnation: str,
     authority_kind: AuthorityKind,
-    binding: dict[str, Any],
+    binding: AuthorityBinding,
     outcome: TerminationOutcome,
 ) -> bool:
     """Terminate or confirm one exact immutable authority-bound incarnation."""
@@ -122,7 +165,7 @@ async def terminate_worker_incarnation(
 async def register_kubernetes_worker_incarnation(
     conn: AsyncConnection,
     incarnation: str,
-    binding: dict[str, Any],
+    binding: KubernetesAuthorityBinding,
     credential_hash: bytes,
     credential_envelope: bytes,
     fence_protocol: int,
@@ -147,7 +190,7 @@ async def register_kubernetes_worker_incarnation(
 
 
 async def read_kubernetes_credential_envelope(
-    conn: AsyncConnection, incarnation: str, binding: dict[str, Any]
+    conn: AsyncConnection, incarnation: str, binding: KubernetesAuthorityBinding
 ) -> bytes | None:
     """Return a pending encrypted envelope only for the exact active Kubernetes binding."""
     require_top_level_transaction(conn, "read_kubernetes_credential_envelope")
@@ -162,7 +205,7 @@ async def read_kubernetes_credential_envelope(
 
 
 async def acknowledge_kubernetes_credential_envelope(
-    conn: AsyncConnection, incarnation: str, binding: dict[str, Any]
+    conn: AsyncConnection, incarnation: str, binding: KubernetesAuthorityBinding
 ) -> bool:
     """Durably clear a pending exact envelope, accepting a repeated exact acknowledgment."""
     require_top_level_transaction(conn, "acknowledge_kubernetes_credential_envelope")

@@ -21,9 +21,11 @@ from kdive.processes.lifecycle.kubernetes.kubernetes_termination_witness import 
 )
 from kdive.services.runs.worker_incarnations import (
     CURRENT_WORKER_FENCE_PROTOCOL,
+    KubernetesAuthorityBinding,
     register_worker_incarnation,
     terminate_worker_incarnation,
 )
+from kdive.worker_lifecycle.contracts import TerminationOutcome
 from tests.reconciler.conftest import connect
 
 
@@ -135,7 +137,9 @@ def test_terminal_exact_uid_commits_before_finalizer_patch() -> None:
     events: list[tuple[object, ...]] = []
     pod = _pod(uid="uid-1", phase="Failed")
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+    async def terminate(
+        holder: str, binding: KubernetesAuthorityBinding, outcome: TerminationOutcome
+    ) -> bool:
         events.append(("terminate", holder, binding, outcome))
         return True
 
@@ -175,7 +179,9 @@ def test_unregistered_terminal_pod_retains_finalizer_and_cannot_publish_evidence
     patched = False
     terminated: list[str] = []
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+    async def terminate(
+        holder: str, binding: KubernetesAuthorityBinding, outcome: TerminationOutcome
+    ) -> bool:
         terminated.append(holder)
         return False
 
@@ -205,7 +211,9 @@ def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
         "kdive-worker-2": {"metadata": {"uid": "bad"}, "status": {"phase": "Failed"}},
     }
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+    async def terminate(
+        holder: str, binding: KubernetesAuthorityBinding, outcome: TerminationOutcome
+    ) -> bool:
         terminated.append(holder)
         return False
 
@@ -228,7 +236,9 @@ def test_live_absent_replaced_and_malformed_pods_fail_closed() -> None:
 def test_database_failure_preserves_finalizer() -> None:
     patched = False
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+    async def terminate(
+        holder: str, binding: KubernetesAuthorityBinding, outcome: TerminationOutcome
+    ) -> bool:
         raise RuntimeError("database unavailable")
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
@@ -261,7 +271,9 @@ def test_patch_conflict_rereads_fresh_resource_version_before_removal() -> None:
         reads += 1
         return _pod(uid="uid", phase="Failed", resource_version=str(reads))
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+    async def terminate(
+        holder: str, binding: KubernetesAuthorityBinding, outcome: TerminationOutcome
+    ) -> bool:
         return True
 
     async def patch(namespace: str, name: str, operations: list[dict[str, object]]) -> None:
@@ -295,7 +307,9 @@ def test_witness_loop_survives_authority_failure_and_retries() -> None:
         stop.set()
         return None
 
-    async def terminate(holder: str, binding: dict[str, str], outcome: str) -> bool:
+    async def terminate(
+        holder: str, binding: KubernetesAuthorityBinding, outcome: TerminationOutcome
+    ) -> bool:
         return False
 
     witness = KubernetesTerminationWitness(
@@ -323,7 +337,9 @@ def test_committed_termination_retries_finalizer_patch_on_second_sweep(
 ) -> None:
     async def run() -> None:
         holder = "kubernetes:kdive:kdive-worker-0:uid-retry"
-        binding = {"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-retry"}
+        binding = KubernetesAuthorityBinding(
+            namespace="kdive", name="kdive-worker-0", uid="uid-retry"
+        )
         witness_connection = await _witness_connection(migrated_url)
         admin = await connect(migrated_url)
         patch_attempts = 0
@@ -338,7 +354,9 @@ def test_committed_termination_retries_finalizer_patch_on_second_sweep(
             )
 
             async def terminate(
-                incarnation: str, exact_binding: dict[str, str], outcome: str
+                incarnation: str,
+                exact_binding: KubernetesAuthorityBinding,
+                outcome: TerminationOutcome,
             ) -> bool:
                 return await terminate_worker_incarnation(
                     witness_connection, incarnation, "kubernetes", exact_binding, "failed"
@@ -388,7 +406,9 @@ def test_committed_termination_retries_finalizer_patch_on_second_sweep(
 def test_termination_confirmation_requires_exact_binding_and_outcome(migrated_url: str) -> None:
     async def run() -> None:
         holder = "kubernetes:kdive:kdive-worker-0:uid-exact"
-        binding = {"namespace": "kdive", "name": "kdive-worker-0", "uid": "uid-exact"}
+        binding = KubernetesAuthorityBinding(
+            namespace="kdive", name="kdive-worker-0", uid="uid-exact"
+        )
         witness = await _witness_connection(migrated_url)
         admin = await connect(migrated_url)
         try:
@@ -417,7 +437,9 @@ def test_termination_confirmation_requires_exact_binding_and_outcome(migrated_ur
                 witness,
                 holder,
                 "kubernetes",
-                {**binding, "uid": "other-uid"},
+                KubernetesAuthorityBinding(
+                    namespace=binding["namespace"], name=binding["name"], uid="other-uid"
+                ),
                 "failed",
             )
             assert not await terminate_worker_incarnation(

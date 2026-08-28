@@ -29,6 +29,7 @@ from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
     WorkerSettings,
     validate_utf8_bytes,
 )
+from kdive.services.runs.worker_incarnations import LocalAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _HEX_32 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
@@ -94,7 +95,7 @@ with warnings.catch_warnings():
                 validate_utf8_bytes(value, limits[field])
             return value
 
-        def authority_binding(self) -> dict[str, str]:
+        def authority_binding(self) -> LocalAuthorityBinding:
             """Return the exact non-secret binding required by the witness authority."""
             if self.boot_id is None or self.invocation_id is None:
                 raise StateConflict("registered state requires boot and invocation identifiers")
