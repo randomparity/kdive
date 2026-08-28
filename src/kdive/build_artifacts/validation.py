@@ -211,6 +211,10 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
             "Must be gzip specifically; a plain .tar, .tar.xz, or .tar.zst is rejected.",
             "List boot/vmlinuz before lib/modules: validation scans at most the first 128 MiB of "
             "decompressed output (a gzip-bomb guard), so the lib/modules header must be within it.",
+            "Finalization then scans the complete exact object version: at most 200000 headers, "
+            "8589934592 uncompressed regular-file bytes, and 536870912 boot/vmlinuz bytes. "
+            "It rejects aliases, duplicate paths, unrelated members, unsafe links, and nodes "
+            "other than directories, regular files, and contained relative symlinks.",
         ),
     ),
     "vmlinux": ArtifactContract(
@@ -230,7 +234,13 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
         name="initrd",
         requirement="optional",
         summary="Initial ramdisk / initramfs image; upload when boot needs a specific initramfs.",
-        format=FormatContract(container="initramfs image"),
+        format=FormatContract(
+            container="initramfs image", max_bytes=_EXTERNAL_BOOT_INITRD_MAX_BYTES
+        ),
+        notes=(
+            "Finalization streams and hashes the exact object version and pairs it with the "
+            "kernel generation; exceeding the byte cap fails before publication.",
+        ),
     ),
     "effective_config": ArtifactContract(
         name="effective_config",
@@ -439,6 +449,8 @@ class _RangedReader:
         data = self._store.get_range(self._key, start=self._offset, length=length)
         if not data:
             return b""
+        if len(data) > length:
+            raise _build_failure("object store range response exceeded the requested bound")
         self._offset += len(data)
         return data
 
