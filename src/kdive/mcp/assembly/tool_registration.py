@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from fastmcp import FastMCP
-from opentelemetry import metrics
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.service import DiagnosticsService, default_service_factory
@@ -70,6 +69,7 @@ class AppAssembly:
     dump_volume_reaper: DumpVolumeReaper
     capture_reapers: Mapping[str, CaptureReaper]
     object_stores: ObjectStoreAssembly
+    debug_session_telemetry: DebugSessionTelemetry
     worker_death_verifier: WorkerDeathVerifier | None
 
 
@@ -153,7 +153,9 @@ def _vmcore_tools_registrar(
 
 
 def _debug_tools_registrar(
-    resolver: ProviderResolver, secret_registry: SecretRegistry
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    telemetry: DebugSessionTelemetry,
 ) -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         debug_tools.register(
@@ -161,7 +163,7 @@ def _debug_tools_registrar(
             pool,
             resolver=resolver,
             secret_registry=secret_registry,
-            telemetry=DebugSessionTelemetry(meter=metrics.get_meter("kdive.mcp")),
+            telemetry=telemetry,
         )
 
     return _register
@@ -290,7 +292,11 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _resolver_tools_registrar(control_tools.register, assembly.resolver),
         _resolver_tools_registrar(artifacts_tools.register, assembly.resolver),
         _vmcore_tools_registrar(assembly.resolver, assembly.secret_registry),
-        _debug_tools_registrar(assembly.resolver, assembly.secret_registry),
+        _debug_tools_registrar(
+            assembly.resolver,
+            assembly.secret_registry,
+            assembly.debug_session_telemetry,
+        ),
         _introspection_tools_registrar(assembly.resolver, assembly.secret_registry),
         _pool_only_plane_registrar(ops_queue_tools.register),
         *recovery,

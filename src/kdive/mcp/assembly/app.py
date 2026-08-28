@@ -25,6 +25,7 @@ from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 from kdive.mcp.schema.tool_index import build_instructions
 from kdive.mcp.verbosity import compact_responses_enabled
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 
@@ -69,10 +70,11 @@ def build_app_from_assembly(
     # are overridable per app (ADR-0487): the OTel globals are set-once per process, so an
     # app's telemetry is otherwise only observable by mutating state every other app in the
     # process shares.
+    effective_meter = meter or metrics.get_meter("kdive.mcp")
     app.add_middleware(
         TelemetryMiddleware(
             tracer=tracer or trace.get_tracer("kdive.mcp"),
-            meter=meter or metrics.get_meter("kdive.mcp"),
+            meter=effective_meter,
         )
     )
     process = process_assembly
@@ -92,6 +94,7 @@ def build_app_from_assembly(
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
         capture_reapers=composition.build_reconciler_capture_reapers(),
         object_stores=stores,
+        debug_session_telemetry=DebugSessionTelemetry(meter=effective_meter),
         worker_death_verifier=(
             worker_death_verifier
             if worker_death_verifier is not None

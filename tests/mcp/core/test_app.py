@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from opentelemetry import metrics
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
@@ -341,6 +342,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     app = FastMCP("probe")
     expected_resolver = object()
     expected_secret_registry = SecretRegistry()
+    expected_telemetry = DebugSessionTelemetry(meter=metrics.get_meter("test.mcp"))
     captured: dict[str, object] = {}
 
     def _register(
@@ -360,7 +362,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     monkeypatch.setattr(tool_module.debug_tools, "register", _register)
 
     registrar = tool_module._debug_tools_registrar(
-        cast(Any, expected_resolver), expected_secret_registry
+        cast(Any, expected_resolver), expected_secret_registry, expected_telemetry
     )
     registrar(app, pool)
 
@@ -369,8 +371,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     assert captured["resolver"] is expected_resolver
     assert captured["secret_registry"] is expected_secret_registry
     telemetry = captured["telemetry"]
-    assert isinstance(telemetry, DebugSessionTelemetry)
-    assert telemetry.enabled
+    assert telemetry is expected_telemetry
 
 
 def test_object_store_assembly_preserves_configured_store_error(
