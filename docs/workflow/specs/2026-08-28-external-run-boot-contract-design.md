@@ -67,7 +67,7 @@ class RootSpecV1:
 class ModuleInstallObligation:
     mode: Literal["system-root-tree"]
     kernel_release: str
-    modules_tree_sha256: str
+    source_manifest_sha256: str
 
 @dataclass(frozen=True, slots=True)
 class ExternalBootPlan:
@@ -197,7 +197,16 @@ content, and publishes the final reference atomically. A retry reuses only a fin
 whose plan identity and extracted-kernel digest match; any mismatch is `INSTALL_FAILURE` and leaves
 the existing object untouched for investigation.
 
-Materialization stages the module tree but does not change the System. Recovery preparation records
+`module-source-manifest-v1` recursively sorts relative UTF-8 paths by encoded bytes. It rejects
+absolute paths, `.`/`..`, duplicate normalized paths, hard links, devices, sockets, FIFOs, and
+symlinks escaping the tree. Each directory, regular file, or contained relative symlink records its
+normalized path, type, permission bits, and regular-file size/SHA-256 or symlink target; uid, gid,
+and timestamps are excluded. This digest covers validated bundle input.
+
+Materialization stages the module tree, runs required indexing, and computes
+`installed-module-tree-v1` with the same walker over the final tree. Generated files such as
+`modules.dep` are included only there. The returned installed digest enters target provider-state
+identity. Materialization does not change the System. Recovery preparation records
 the prior `/lib/modules/<kernel_release>` tree or its absence. Activation atomically publishes the
 exact staged tree only after stopping the domain and verifying it inactive, then applies and boots
 the target definition. Failure to quiesce leaves `prepared` and changes nothing. An exact tree may be
@@ -270,6 +279,11 @@ XML is excluded. The provider validates that the source belongs to the System an
 disk/GRUB boot before storing it. Restore uses the recorded source with compare-and-set against
 target or activation-owned partial state.
 
+Remote prepare accepts a disk/GRUB source only when its inactive boot projection has no kernel,
+initrd, or cmdline and KDIVE metadata binds it to the System. An external projection must be owned by
+a matching durable activation row and recovered under the System lock before another prepare. An
+unowned external projection enters `recovery_conflict`; it is never captured as the source point.
+
 When a reusable System recovers from `active`, the provider stops the domain, verifies it inactive,
 restores the prior module tree and persistent definition, boots that definition, and proves both a
 fresh boot and the existing System readiness contract before committing `recovered`. GRUB's selected
@@ -332,14 +346,15 @@ Those are existing deployment trust or excluded provider concerns.
 - Pure contract tests cover canonical identity, ordering sensitivity, optional initrd pairing,
   ownership, architecture/release/root conflicts, and a test-only non-libvirt runtime.
 - Archive tests cover duplicates, links, traversal, malformed headers, missing/multiple vmlinuz,
-  wrong modules release, expansion bounds, digest mismatch, and partial cleanup.
+  wrong modules release, expansion bounds, source-manifest normalization, generated-index installed
+  identity, digest mismatch, and partial cleanup.
 - State-machine and adversarial tests fault every boundary before/after provider calls and database
   commits, including prepared abandonment, same-release module replacement/restoration, a running
   domain after worker loss, duplicate delivery, and concurrent retry under the System lock.
 - Provider tests prove local behavior remains unchanged and remote upload, path resolution, XML
   preservation, full preserved-definition comparison across XML syntax normalization,
-  compare-and-set activation, exact offline module restoration, recovered GRUB readiness,
-  idempotent cleanup, and reaping.
+  GRUB-source admission and unowned-external conflict, compare-and-set activation, exact offline
+  module restoration, recovered GRUB readiness, idempotent cleanup, and reaping.
 - Remote `live_vm` boots the exact paired artifacts, verifies extracted-kernel identity, exercises a
   forced activation failure, restores GRUB, and proves the System remains usable.
 

@@ -42,10 +42,20 @@ Materialization must extract
 compute the extracted bytes' SHA-256 digest, and satisfy the plan's module-install obligation. The
 compressed bundle is never itself a bootable kernel.
 
-The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and
-the manifest digest of the bundle's exact `lib/modules/<release>/` tree. Materialization stages that
-tree without changing the System. Recovery preparation records whether the release-qualified target
-is absent or saves its exact prior tree behind the opaque recovery reference. Activation atomically
+The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
+`module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
+manifest sorts relative UTF-8 paths by encoded bytes; rejects absolute paths, `.`/`..`, duplicates,
+hard links, devices, sockets, FIFOs, and escaping symlinks; and admits only directories, regular
+files, and contained relative symlinks. Each entry records normalized path, type, permission bits,
+and regular-file size/SHA-256 or symlink target; uid, gid, and timestamps are excluded.
+Materialization validates that source manifest, stages the tree, runs required indexing, and computes
+`installed-module-tree-v1` with the same walker over the final tree. Generated indexes such as
+`modules.dep` belong to installed identity, not source identity. The provider returns the installed
+digest, and target state identity binds it.
+
+Materialization does not change the System. Recovery preparation records whether the
+release-qualified target is absent or saves its exact prior tree behind the opaque recovery
+reference. Activation atomically
 stops the domain through the provider control plane, verifies it inactive, then publishes the staged
 tree at `/lib/modules/<release>` before applying and booting the target definition. Failure to reach
 inactive leaves `prepared` unchanged and mutates neither tree nor definition. An exact existing tree
@@ -86,6 +96,12 @@ Live XML is never an identity input. Remote's recovery point stores the exact in
 definition behind the provider seam, so shared state never interprets its XML. Deterministic
 identifiers make repeated prepare calls for the same System, Run, plan identity, and source state
 return the same point and target identity.
+
+Remote preparation also proves that the source is an owned disk/GRUB baseline: its inactive boot
+projection has no kernel, initrd, or cmdline, and KDIVE metadata binds it to this System. A source
+carrying external-boot fields is admissible only while a matching durable activation row owns it;
+that row must recover under the System lock before another prepare. An unowned external definition
+enters `recovery_conflict` and is never captured as a new source point.
 
 Core persists the plan identity, materialization reference, recovery reference, both provider state
 identities, and activation state before calling activate. The state machine is
@@ -153,6 +169,9 @@ HTTP/iPXE.
 - Retries compare immutable plan and materialization identities. A reused object key with another
   version, digest, architecture, release, root specification, initrd pairing, or module obligation
   is rejected rather than overwritten.
+- Module source identity and installed identity are distinct. The portable source digest covers
+  validated bundle input; the installed digest includes provider-generated indexes and is what
+  activation and recovery compare.
 - A provider-side change outside KDIVE's System lock is preserved as `recovery_conflict`. Recovery
   is therefore fail-closed and may require an operator to choose between the recorded point and the
   newly observed definition.
