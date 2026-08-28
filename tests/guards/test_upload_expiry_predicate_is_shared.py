@@ -39,7 +39,7 @@ _SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "kdive"
 # walked rather than just the two lanes: an expiry verdict rendered in a reconciler or a provider
 # module would be the same drift, and scoping the walk to where the duplication happened to live
 # would leave the guard blind to the next site.
-_ALLOWED = _SRC_ROOT / "artifacts" / "upload_manifest.py"
+_ALLOWED = _SRC_ROOT / "artifacts" / "uploads" / "upload_manifest.py"
 
 _FIELDS = frozenset(ManifestStamp._fields)
 
