@@ -18,29 +18,12 @@ class ProfilePolicy(Protocol):
 
     @property
     def kind(self) -> ResourceKind:
-        """The ``ResourceKind`` whose profile section this policy reads (ADR-0549).
-
-        The section-reading members here read that one section, so a policy applied to a profile
-        carrying a different section reads an absent attribute. The policy is resolved from the
-        Resource (``ProviderResolver.runtime_for_allocation``/``runtime_for_system``), so this is
-        what admission cross-checks ``ProviderSection.kind`` against.
-
-        Read-only on purpose: it is the discriminant the admission guard trusts, and declaring it
-        as a mutable attribute would both make it assignable and reject the two idiomatic constant
-        spellings (``ClassVar`` and ``@property``) in an implementer.
-        """
+        """The resource kind whose provider-profile section this policy reads (ADR-0549)."""
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None: ...
 
     def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
-        """Return whether a drgn-live ``start_session`` gates+seeds on the per-System bootstrap key.
-
-        True iff the drgn-live transport-open at ``start_session`` authenticates over the loopback
-        SSH forward, so the handler must fail closed on a missing per-System bootstrap key and seed
-        redaction from it before opening the transport (ADR-0289, ADR-0315). A provider that opens
-        drgn-live over the guest agent returns ``False`` — it needs no start-time seed even though
-        it still uses the bootstrap key at ``introspect.run``.
-        """
+        """Whether drgn-live startup requires and redacts the System bootstrap key."""
 
     def validate_profile(self, profile: ProvisioningProfile) -> None: ...
 

@@ -159,40 +159,10 @@ async def dequeue(
     lease: timedelta = DEFAULT_LEASE,
     accepted_lanes: Sequence[str] = DEFAULT_DISPATCH_LANES,
 ) -> Job | None:
-    """Claim the oldest eligible job for ``worker_id``, charging an attempt.
+    """Claim the oldest eligible job in an accepted lane, charging one attempt.
 
-    Eligible: ``queued``, or ``running`` with a lapsed lease (an abandoned job), and
-    ``attempt < max_attempts``. The single ``UPDATE`` sets ``running``/``worker_id``/
-    lease/``heartbeat_at`` and ``attempt = attempt + 1`` (charging the claim bounds
-    retries across worker death). ``FOR UPDATE SKIP LOCKED`` lets parallel workers
-    claim disjoint rows without blocking. ``now()`` is the database clock, so no
-    worker clocks need to agree.
-
-    ``accepted_lanes`` is the worker's explicit dispatch boundary. A worker claims only
-    queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
-    workers do not acquire work they cannot execute.
-
-    ``incarnation_credential`` is authority-minted for this exact worker. The guarded
-    database function derives the incarnation from its hash and claims only when it is active,
-    matches ``worker_id``, and uses the fixed current fence protocol.
-
-    A ``capture_traffic`` retry remains ineligible while any prior supervised operation lacks
-    complete provider quiescence, closed publication, or disposed spool evidence. Refusal does not
-    charge an attempt or clear the current operation link; startup recovery must close the whole
-    operation product first.
-
-    ``lease`` is one PostgreSQL interval applied to ``clock_timestamp()`` captured by the database
-    after the blocking incarnation fence and immediately before this claim. The computed deadline
-    must be after that reference and no more than one hour later. SQLSTATE ``22023`` is raised
-    before any job mutation when it is outside that elapsed bound; retry with an interval whose
-    computed deadline is valid.
-
-    ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
-    inserted: :func:`enqueue`'s terminal recycle re-dates ``created_at`` (ADR-0447), so a
-    revived job queues behind the work admitted while it was settled instead of preempting it.
-
-    Returns:
-        The claimed :class:`Job`, or ``None`` when nothing is eligible for the accepted lanes.
+    The database authenticates the exact worker incarnation and owns lease-clock validation.
+    An empty lane set or a queue with no eligible work returns ``None``.
     """
     if not accepted_lanes:
         return None
