@@ -41,7 +41,7 @@ paths are unchanged.
 The boot plan is one immutable set. Its exact envelope is `external-boot-plan-v1`, serialized with
 the manifest JSON rules and hashed after ASCII `kdive-external-boot-plan-v1` plus NUL. It has exactly
 these keys and shapes: `schema`; `architecture`; `ownership` with canonical lowercase hyphenated UUID
-strings `run_id` and `build_id`; `bundle` with NFC object-store `key` and `version` plus `sha256`;
+strings `run_id` and `build_generation`; `bundle` with NFC object-store `key` and `version` plus `sha256`;
 `initrd`, either null or the same key/version/digest shape; complete `cmdline` string;
 `debug_cmdline`, null or the preserved caller extra; ordered `platform_arguments`; `module_obligation`
 with `mode`, `release`, and `source_manifest`; and the closed `root` shape defined below. Unknown keys are
@@ -59,7 +59,7 @@ exactly: `schema`; `architecture`; NFC `provider_kind`; `ownership` with canonic
 and `run_id`; `plan_identity`; `extracted_vmlinuz_sha256`; `source_module_manifest`;
 `installed_module_tree`; `verified_bundle_sha256`; `verified_initrd_sha256`, null exactly when the
 plan initrd is null; `kernel_observation` with architecture, release, and lowercase even-length
-GNU `build_id` hex; and `artifacts`, whose `kernel` and `modules` each contain one deterministic
+GNU `gnu_build_id` hex; and `artifacts`, whose `kernel` and `modules` each contain one deterministic
 NFC opaque `ref` and whose `initrd` is null or contains one such `ref`. Core persists the complete
 record, not only the references. Repeated materialization for a plan must reproduce every field; an
 absent, unreadable, or different field fails closed and is neither reused nor activated. Observation
@@ -75,6 +75,13 @@ non-libvirt test provider returns the same value type. Unavailable evidence is r
 readiness deadline; a mismatch records terminal-on-this-attempt `READINESS_FAILURE` and triggers
 recovery. Readiness, boot ID, and
 persistent definition identity cannot substitute for this comparison.
+
+`ownership.build_generation` is exactly the selected `InvestigationBuild.generation` from ADR-0531;
+its public lookup handle remains `build_ref`. It is not `BuildStepResult.build_id`, which is the GNU
+kernel build ID represented separately as `kernel_observation.gnu_build_id`. Legacy Run-owned build
+records without an InvestigationBuild generation are ineligible for external boot until published
+through the existing generation-backed external-build flow; their current install/boot path remains
+unchanged.
 
 When core commits `activating`, it also persists `server_time` and an absolute UTC RFC 3339
 `activation_readiness_deadline`, computed once from operator-configured
@@ -99,16 +106,16 @@ or interrupted recovery deadline. Ordinary job and worker retries never extend o
 These normative all-zero vectors also pin every key and absence representation:
 
 ```json
-{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_id":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"build","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"build"}},"schema":"external-boot-plan-v1"}
+{"architecture":"x86_64","bundle":{"key":"bundles/k.tar","sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","version":"v1"},"cmdline":"root=UUID=x","debug_cmdline":null,"initrd":null,"module_obligation":{"mode":"system-root-tree","release":"6.1.0","source_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"},"ownership":{"build_generation":"00000000-0000-0000-0000-000000000001","run_id":"00000000-0000-0000-0000-000000000002"},"platform_arguments":["root=UUID=x"],"root":{"architecture":"x86_64","arguments":["root=UUID=x"],"authority":"build","root":"UUID=x","schema":"root-spec-v1","source":{"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kind":"build"}},"schema":"external-boot-plan-v1"}
 ```
 
 ```json
-{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:0e8a1930e670dc87302d13bc07463ecd2805a45b6c5e3eb9bbe81575dd344b3b","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
+{"architecture":"x86_64","artifacts":{"initrd":null,"kernel":{"ref":"kernel/ref"},"modules":{"ref":"modules/ref"}},"extracted_vmlinuz_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","installed_module_tree":"sha256:0000000000000000000000000000000000000000000000000000000000000000","kernel_observation":{"architecture":"x86_64","gnu_build_id":"0000000000000000000000000000000000000000","release":"6.1.0"},"ownership":{"run_id":"00000000-0000-0000-0000-000000000002","system_id":"00000000-0000-0000-0000-000000000003"},"plan_identity":"sha256:dd9a636c84d101bf5da572a1384e35c7083f3b08a4b5b13d586d3593dd0b47fc","provider_kind":"local-libvirt","schema":"external-boot-materialization-v1","source_module_manifest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_bundle_sha256":"sha256:0000000000000000000000000000000000000000000000000000000000000000","verified_initrd_sha256":null}
 ```
 
 Their respective identities are
-`sha256:0e8a1930e670dc87302d13bc07463ecd2805a45b6c5e3eb9bbe81575dd344b3b` and
-`sha256:03d69bb7ddc381795419f76e77c26355a683b8a0832b7bcd89cb54aaa77ec6ab`.
+`sha256:dd9a636c84d101bf5da572a1384e35c7083f3b08a4b5b13d586d3593dd0b47fc` and
+`sha256:b2ec655d5deaae794d8bde34c53493a3fef0a6b6950b630c3c25bfefe4db968c`.
 
 The version-1 module obligation has one mode: `system-root-tree`. It names the kernel release and a
 `module-source-manifest-v1` digest of the bundle's exact `lib/modules/<release>/` subtree. The
@@ -382,13 +389,36 @@ before claiming. Provider-local serialization makes a new claim wait for any bou
 publication critical section; long downloads, extraction, and helper execution write only private
 staging and are cancelable or discardable.
 
-Immediately before every definition, module-tree, attachment, power, or cleanup mutation, and again
-before recording its result, the provider holds that local fence and rejects a generation other than the
-current claimed value. A stale actor can finish private work but cannot publish, boot, restore, or
-delete after takeover. Teardown claims the newest generation before destroying anything. Connection loss
-does not release authority to an older generation; only a durable higher claim supersedes it. Tests pause
-an old actor before publication and boot, claim a replacement or teardown generation, and prove the stale
-write is refused.
+All definition, module-tree, attachment, power, and cleanup mutations execute through a
+provider-private destination-side fenced executor, not directly from the queue worker. Local-libvirt
+runs it as a separately supervised host service; remote-libvirt runs the same fixed-operation service
+beside its libvirt host. Its typed requests contain only the stable operation identity, generation,
+claimant token, expected component identity, and immutable artifact references—never caller commands
+or shared libvirt types. The non-libvirt test implementation exercises the same protocol. Deployment
+provisioning owns the service and external boot is not advertised until its health and durable store
+are verified.
+
+The executor serializes each System at the destination and validates the generation/token immediately
+before the actual commit point. A higher-generation claim queues behind an executing mutation and is
+acknowledged only after that operation has completed and its result identity is durably journaled;
+that acknowledgement is the positive-quiescence barrier for replacement writes. A lost client
+response is resolved by the stable operation identity at the executor, never by redispatching the
+side effect. Module publication and maintenance-helper commits perform the token check inside the
+helper immediately before rename. Libvirt mutations remain inside the executor's serialized lane; if
+the executor itself restarts with an operation lacking a completion record, it accepts no new claim
+until a domain-scoped libvirt barrier has waited for the old connection to close, acquired the same
+domain mutation lock, and recorded the resulting persistent definition, attachment, job, and power
+observations. An unreadable or non-quiescent result remains unresolved and permits only observation
+through the executor; replacement and teardown writes remain barred until positive quiescence, with
+out-of-band operator repair required if the barrier cannot complete.
+
+The worker checks the fence before dispatch and after the result, but those checks are diagnostic;
+destination serialization and commit-point validation carry the safety guarantee. A stale actor can
+finish private work but cannot publish, boot, restore, or delete after takeover. Teardown claims the
+newest generation and passes through the same quiescence barrier before destroying anything.
+Connection loss does not release authority to an older generation; only a durable higher claim
+supersedes it. Tests lose responses during every mutation, pause an old actor before publication and
+boot, claim replacement and teardown generations, and prove no late completion crosses the barrier.
 The stale-actor suite also completes one activation, starts a later Run with a greater generation,
 and proves that an actor from the earlier Run can never reclaim authority.
 It separately loses a worker after `prepared` and after the first target-component write, claims the
