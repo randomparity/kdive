@@ -54,7 +54,6 @@ from kdive.observability.debug_session_telemetry import (
     DebugSessionOutcome,
     DebugSessionTelemetry,
 )
-from kdive.prereqs.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -71,6 +70,7 @@ from kdive.providers.ports.retrieve import LiveIntrospector
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.serialization import JsonValue
 from kdive.services.debug import lifecycle as debug_lifecycle
 

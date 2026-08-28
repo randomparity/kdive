@@ -42,10 +42,6 @@ from kdive.jobs.payloads import (
     load_payload,
 )
 from kdive.jobs.provider_context import set_provider_kind
-from kdive.prereqs.system_bootstrap_key import (
-    delete_system_bootstrap_key,
-    ensure_system_bootstrap_key,
-)
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
@@ -53,6 +49,10 @@ from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
+    delete_system_bootstrap_key,
+    ensure_system_bootstrap_key,
+)
 from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)

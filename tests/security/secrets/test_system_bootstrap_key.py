@@ -12,14 +12,14 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.prereqs.system_bootstrap_key import (
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
     delete_system_bootstrap_key,
     ensure_system_bootstrap_key,
     generate_keypair,
     load_system_bootstrap_private_key,
     materialized_private_key,
 )
-from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def test_generate_keypair_returns_ed25519_pair_and_leaves_no_scratch() -> None:

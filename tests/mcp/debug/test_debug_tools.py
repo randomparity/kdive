@@ -32,10 +32,6 @@ from kdive.mcp.tools.debug.introspection import gate as introspect_gate
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_lifecycle
 from kdive.mcp.tools.debug.sessions import lifecycle as debug_tools
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
-from kdive.prereqs.system_bootstrap_key import (
-    ensure_system_bootstrap_key,
-    load_system_bootstrap_private_key,
-)
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -52,6 +48,10 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import (
+    ensure_system_bootstrap_key,
+    load_system_bootstrap_private_key,
+)
 from kdive.services.debug import lifecycle as debug_service_lifecycle
 from tests.mcp.debug.session_support import (
     FIXED_TIME,

@@ -34,10 +34,10 @@ from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
 from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
-from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
 from tests.mcp.systems_support import PROVISIONING_PROFILE, provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
 
