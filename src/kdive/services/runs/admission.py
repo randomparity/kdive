@@ -31,7 +31,6 @@ from kdive.domain.profile_documents import SerializedExpectedBootFailure
 from kdive.log import bind_context
 from kdive.profiles.build import BuildProfile, dump_build_profile
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
-from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -185,7 +184,7 @@ async def create_run(
     ctx: RequestContext,
     request: RunCreateRequest,
     *,
-    resolver: ProviderResolver,
+    available_target_kinds: frozenset[ResourceKind],
     recorder: RunCreateRecorder | None = None,
 ) -> RunCreateResult:
     """Create a Run, bound to a `ready` System or unbound against a ``target_kind`` (ADR-0169).
@@ -227,7 +226,7 @@ async def create_run(
                     parsed_build_profile,
                     parsed_expected,
                     requirement=requirement,
-                    resolver=resolver,
+                    available_target_kinds=available_target_kinds,
                     recorder=recorder,
                     label=label,
                 )
@@ -570,7 +569,7 @@ async def _resolve_selected_build(
 
 
 def _validate_unbound_target_kind(
-    object_id: str, value: str | None, resolver: ProviderResolver
+    object_id: str, value: str | None, available_target_kinds: frozenset[ResourceKind]
 ) -> ResourceKind:
     """Validate an unbound Run's ``target_kind`` against the registered provider kinds.
 
@@ -585,7 +584,7 @@ def _validate_unbound_target_kind(
         kind = ResourceKind(value)
     except ValueError:
         kind = None
-    if kind is None or kind not in resolver.registered_kinds():
+    if kind is None or kind not in available_target_kinds:
         raise config_failure(object_id, data={"reason": "unknown_target_kind"})
     return kind
 
@@ -599,7 +598,7 @@ async def _create_unbound(
     expected_boot_failure: SerializedExpectedBootFailure | None,
     *,
     requirement: ReuseRequirement,
-    resolver: ProviderResolver,
+    available_target_kinds: frozenset[ResourceKind],
     recorder: RunCreateRecorder | None = None,
     label: str | None = None,
 ) -> RunCreateResult:
@@ -610,7 +609,9 @@ async def _create_unbound(
     ``reuse_requirement`` is meaningless without a System and is rejected.
     """
     object_id = request.investigation_id
-    target_kind = _validate_unbound_target_kind(object_id, request.target_kind, resolver)
+    target_kind = _validate_unbound_target_kind(
+        object_id, request.target_kind, available_target_kinds
+    )
     if not requirement.is_empty():
         raise config_failure(object_id, data={"reason": "reuse_requires_system"})
     inv = await INVESTIGATIONS.get(conn, investigation_id)

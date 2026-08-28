@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -23,6 +24,7 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.shared.console_evidence import redacted_console_tail
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -195,7 +197,11 @@ async def _liveness(
         or progress.boot_outcome != READY_BOOT_OUTCOME
     ):
         return None
-    return await derive_liveness(conn, run.system_id, secret_registry, jobs)
+
+    async def read_console_tail(system_id: UUID, max_chars: int) -> str | None:
+        return await redacted_console_tail(system_id, secret_registry, max_chars=max_chars)
+
+    return await derive_liveness(conn, run.system_id, read_console_tail, jobs)
 
 
 def _required_cmdline(system: System | None, runtime: ProviderRuntime | None) -> str | None:

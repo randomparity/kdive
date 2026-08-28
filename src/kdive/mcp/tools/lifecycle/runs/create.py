@@ -45,7 +45,12 @@ async def create_run(
 ) -> ToolResponse:
     if idempotency_key is None:
         try:
-            result = await _create_run(pool, ctx, request, resolver=resolver)
+            result = await _create_run(
+                pool,
+                ctx,
+                request,
+                available_target_kinds=resolver.registered_kinds(),
+            )
         except RunCreateError as exc:
             return ToolResponse.failure_from_error(
                 exc.object_id,
@@ -94,7 +99,13 @@ async def _create_run_keyed(
         )
 
     try:
-        result = await _create_run(pool, ctx, request, resolver=resolver, recorder=_record)
+        result = await _create_run(
+            pool,
+            ctx,
+            request,
+            available_target_kinds=resolver.registered_kinds(),
+            recorder=_record,
+        )
     except RunCreateError as exc:
         return ToolResponse.failure_from_error(
             exc.object_id,

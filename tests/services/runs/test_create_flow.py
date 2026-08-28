@@ -150,7 +150,13 @@ async def _create(
     *,
     recorder: _Recorder | None = None,
 ):
-    return await create_run(pool, ctx, request, resolver=provider_resolver(), recorder=recorder)
+    return await create_run(
+        pool,
+        ctx,
+        request,
+        available_target_kinds=provider_resolver().registered_kinds(),
+        recorder=recorder,
+    )
 
 
 async def _fetchall(pool: AsyncConnectionPool, query: LiteralString, params: tuple) -> list[tuple]:

@@ -1127,7 +1127,7 @@ def test_reused_step_matches_real_publisher_step(migrated_url: str) -> None:
                     build_profile={"schema_version": 1},
                     build_ref=published.build_ref,
                 ),
-                resolver=provider_resolver(),
+                available_target_kinds=provider_resolver().registered_kinds(),
             )
             steps = await _fetchall(
                 pool,
