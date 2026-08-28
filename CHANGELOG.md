@@ -905,6 +905,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align authoritative architecture status
 - Preserve accepted ADR text
 - Refresh project landing page
+- Design external run boot contract
+- Fence external boot recovery
+- Define provider activation identities
+- Restore boot state after active runs
+- Close module and prepared-state contracts
+- Resolve external boot review findings
+- Bind recovery to offline semantic state
+- Make external boot transitions offline
+- Bind module and grub recovery identities
+- Make recovery preparation crash consistent
+- Canonicalize module tree identities
+- Pin recovery identity encodings
+- Define remote offline module editing
+- Bind materialization and recovery CAS
+- Close external boot identity races
+- Close recovery resolution contract
+- Bind artifacts and readiness deadlines
+- Define external boot release lifecycle
+- Fence external boot operations
+- Serialize external boot activations
+- Separate recovery ownership from fencing
+- Fence duplicate worker claims
+- Make fence claims crash consistent
+- Make recovery cleanup crash consistent
+- Fence mutations at destination
+- Fence stale lifecycle commits
+- Order recovery authority before writes
+- Ground digests and recovery bounds
+- Preserve platform cmdline ownership
+- Retain recovery capacity through cleanup
+- Gate activation on inactive domain
+- Bound executor and teardown authority
+- Bind kernel and debug identities
+- Produce trusted module manifests
+- Bind the extracted boot kernel
+- Close recovery authority races
+- Bind external boot admission
+- Bound active boot operations
+- Reserve and bound boot materialization
+- Order build identity validation
+- Version external boot evidence
+- Finalize external run boot contract
+- Date accepted external boot decision
 
 ### Fixed
 
