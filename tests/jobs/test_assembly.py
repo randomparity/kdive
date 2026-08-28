@@ -29,6 +29,7 @@ def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> No
             CaptureOperationSupervisor,
             SimpleNamespace(credential=credential),
         ),
+        worker_check_builders={},
     )
 
     register_all_handlers(registry, assembly)

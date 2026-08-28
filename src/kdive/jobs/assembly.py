@@ -21,6 +21,7 @@ from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import capture_traffic, control, diagnostic_sysrq, watch_for_crash
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.models import HandlerRegistry
+from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly
@@ -35,6 +36,7 @@ class WorkerHandlerAssembly:
     secret_registry: SecretRegistry
     object_stores: ObjectStoreAssembly
     capture_supervisor: CaptureOperationSupervisor
+    worker_check_builders: diagnostics.WorkerCheckBuilders
 
 
 def build_worker_handler_assembly(
@@ -60,6 +62,11 @@ def build_worker_handler_assembly(
         secret_registry=composition.secret_registry,
         object_stores=stores,
         capture_supervisor=supervisor,
+        worker_check_builders={
+            contribution.provider: contribution.worker_checks
+            for contribution in diagnostic_provider_contributions()
+            if contribution.enabled()
+        },
     )
 
 
@@ -156,4 +163,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
     )
 
     rootfs_reclaim.register_handlers(registry, artifact_store=assembly.object_stores.store)
-    diagnostics.register_handlers(registry)
+    diagnostics.register_handlers(
+        registry,
+        worker_check_builders=assembly.worker_check_builders,
+    )
