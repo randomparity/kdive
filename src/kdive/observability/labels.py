@@ -45,13 +45,5 @@ ALLOWED_LABEL_KEYS: frozenset[str] = frozenset(
 
 
 def filter_label_keys[V](attributes: Mapping[str, V]) -> dict[str, V]:
-    """Return only the allowlisted label keys from ``attributes``.
-
-    Args:
-        attributes: Candidate metric/span attributes.
-
-    Returns:
-        A new dict containing only keys in :data:`ALLOWED_LABEL_KEYS`; identifier
-        keys are dropped so they never become free-cardinality labels.
-    """
+    """Drop attributes that are not approved bounded-cardinality labels."""
     return {key: value for key, value in attributes.items() if key in ALLOWED_LABEL_KEYS}

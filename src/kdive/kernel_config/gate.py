@@ -124,30 +124,10 @@ def _clause_payload(
 async def crash_capture_refusal(
     conn: AsyncConnection, run_id: UUID, *, arch: str
 ) -> dict[str, JsonValue] | None:
-    """Refusal ``details`` if the Run's uploaded config lacks crash-capture symbols, else ``None``.
+    """Return shared refusal details when crash capture is unsupported.
 
-    Returns ``None`` (arm as today) when no config was uploaded or it cannot be read/trusted
-    (:func:`load_effective_config` fails open), and when the config fully supports crash capture.
-    Otherwise returns ``{reason, missing, remediation}`` — the shared payload both crash seams
-    spread into their own refusal envelope, so the reason code and remediation cannot drift.
-
-    ``arch`` is the Run's System's provisioning-profile architecture (``services.runs.steps``'s
-    ``system_arch``), and both seams hold a ``System`` to read it off. It is required and typed
-    ``str`` rather than ``str | None`` (#1875): ``crash_capture`` now carries an arch-scoped gated
-    clause, and a scoped clause the checks cannot place is *skipped*, so a call that omitted the
-    arch would turn this refusal into a silent pass. A type error at the call site is the intended
-    outcome for a seam that cannot resolve one.
-
-    **The System's arch, not the build's, and the two can differ.** The config being checked came
-    from the *build*, whose own arch is ``run.build_profile["arch"]`` (ADR-0343) — and ``runs.bind``
-    enforces a resource-kind match, not an arch match, so nothing forbids binding a ppc64le build
-    to an x86_64 System. The System's arch is still the better source: ADR-0343 makes
-    ``build_profile.arch`` optional with a **default of x86_64**, so a ppc64le Run created from a
-    v1 build document would silently claim x86_64 and be refused over ``FW_CFG_SYSFS`` — the very
-    defect #1875 fixes — whereas a System's profile arch is always explicit and is validated at
-    admission against the arches its bound Resource advertises. The residual cost is that a
-    *mismatched* build/System pair gets the wrong arch's verdict here; such a pair cannot boot at
-    all, so its gate verdict is not its real problem.
+    Missing or unreadable configs fail open. ``arch`` is the bound System's explicit
+    provisioning-profile architecture, not the build document's optional architecture.
     """
     config = await load_effective_config(conn, run_id)
     if config is None:

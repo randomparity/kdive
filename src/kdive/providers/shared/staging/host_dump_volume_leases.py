@@ -51,32 +51,10 @@ _LIVE_LEASE_SQL = f"""SELECT 1 FROM host_dump_volume_leases l
 
 
 async def hold_host_dump_volume_lease(conn: AsyncConnection, system_id: UUID, job_id: UUID) -> None:
-    """Declare that ``job_id`` is about to operate on ``system_id``'s host_dump volume.
+    """Commit an idempotent dump-volume lease before provider work begins.
 
-    Must be called **before** the first provider call that touches the volume and committed, because
-    the sweep's fence reads committed rows. It commits its own transaction for that reason: an
-    uncommitted lease protects nothing, so a caller cannot usefully batch this into a later
-    transaction — and it *checks* that it can, via
-    :func:`~kdive.db.locks.require_top_level_transaction`. On a connection already in a transaction
-    the whole block would degrade to a savepoint: the lease would stay invisible for the entire
-    operation it exists to fence, and ``LockScope.SYSTEM`` would be held until the caller's commit,
-    across a core dump and a multi-GiB download. Both failures are silent at the call site, so the
-    precondition is enforced rather than documented.
-
-    The System's advisory lock — the one the sweep's classify-and-delete also takes — is held over
-    the insert. That is not for row-level safety (the upsert is atomic on its own) but for the
-    ordering ADR-0562 rests on: while the sweep holds the lock, no mint can slip between its
-    classification and its delete. The critical section is one INSERT, so the provider work that
-    follows runs holding nothing.
-
-    Idempotent per holder. The primary key includes ``job_id``, so a retried attempt of the same job
-    is a no-op and no holder can release another's row.
-
-    Args:
-        conn: An async connection with **no** transaction open; one is opened here.
-        system_id: The System whose deterministic dump volume is about to be created.
-        job_id: The holding job. Its ``jobs`` row is what the fence tests for liveness, so the lease
-            outlives its usefulness exactly when the job stops being a live claim.
+    The connection must be outside a transaction so the sweep can observe the lease. The
+    shared System advisory lock orders the insert against sweep classification (ADR-0562).
     """
     require_top_level_transaction(conn, "hold_host_dump_volume_lease")
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
