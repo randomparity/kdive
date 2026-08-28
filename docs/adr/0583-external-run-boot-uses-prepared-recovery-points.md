@@ -142,13 +142,17 @@ through the existing generation-backed external-build flow; their current instal
 unchanged.
 
 When the selected generation's `BuildStepResult.build_id` is nonempty, core requires it to equal
-`materialization.kernel_observation.gnu_build_id` before `preparing`. A mismatch is terminal
-`INSTALL_FAILURE`, performs no System or recovery-store mutation, and names re-finalization with a
-matching kernel bundle/vmlinux pair as the recovery action. When no persisted debug build ID exists,
+`materialization.kernel_observation.gnu_build_id` immediately after the immutable materialization is
+persisted and before provider preparation or any guest mutation. A mismatch is terminal
+`INSTALL_FAILURE`, takes `preparing -> abandoned`, deletes and verifies the materialized artifacts,
+releases the reservation, commits cleanup complete, and names re-finalization with a matching kernel
+bundle/vmlinux pair as the recovery action. It changes no guest, persistent definition, module tree,
+or recovery point. When no persisted debug build ID exists,
 the materializer-observed GNU ID still binds running-kernel proof, but debuginfo-dependent consumers
 remain unavailable until their existing provenance contract is satisfied. Contract tests finalize
 individually valid K1 bundle and K2 vmlinux inputs and prove the mismatch cannot reach preparation or
-activation.
+activation. The mismatch case asserts durable `abandoned` with verified cleanup and no provider/System
+boot-state mutation.
 
 When core commits `activating`, it also persists `server_time` and an absolute UTC RFC 3339
 `activation_readiness_deadline`, computed once from operator-configured
