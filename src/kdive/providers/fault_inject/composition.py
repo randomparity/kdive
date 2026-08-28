@@ -29,6 +29,7 @@ from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect
 from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvisioning
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
@@ -120,4 +121,5 @@ def build_runtime(
             attach_seam=fault_inject_attach_seam,
             engine=FaultInjectDebugEngine(),
         ),
+        external_boot=FaultInjectExternalBoot(),
     )

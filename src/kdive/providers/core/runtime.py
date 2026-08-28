@@ -22,6 +22,7 @@ from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiEngine,
 )
+from kdive.providers.ports.external_boot import ExternalBootPorts
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
@@ -174,6 +175,9 @@ class ProviderRuntime:
     # ``support.supports_traffic_capture is False``).
     traffic_capturer: TrafficCapturer | None = None
     traffic_capture_operation: TrafficCaptureOperationPorts | None = None
+    # Provider-neutral external Run-boot operations (ADR-0583). Existing providers leave this
+    # absent until their adapter issues land; legacy install and boot remain unchanged.
+    external_boot: ExternalBootPorts | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(
