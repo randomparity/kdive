@@ -173,10 +173,24 @@ class ExternalBootActivationRepository:
             reservation_row = await cur.fetchone()
             if reservation_row is None:
                 await cur.execute(
-                    "SELECT 1 FROM external_boot_reservation_releases WHERE activation_id = %s",
+                    "SELECT store_identity, owner_key, reserved_bytes "
+                    "FROM external_boot_reservation_releases WHERE activation_id = %s",
                     (activation.id,),
                 )
-                if await cur.fetchone() is not None:
+                release_identity = await cur.fetchone()
+                if release_identity is not None:
+                    if (
+                        release_identity["store_identity"],
+                        release_identity["owner_key"],
+                        release_identity["reserved_bytes"],
+                    ) != (
+                        reservation.store_identity,
+                        reservation.owner_key,
+                        reservation.reserved_bytes,
+                    ):
+                        raise ValueError(
+                            "activation reservation retry does not match release identity"
+                        )
                     current = _activation(row)
                     if current is None:
                         raise RuntimeError("activation retry returned no row")
@@ -485,6 +499,14 @@ class ExternalBootActivationRepository:
         attempt_id: UUID,
         evidence: ExternalBootConflictEvidenceV1,
     ) -> CasResult:
+        direct_sources = {
+            ExternalBootActivationState.PREPARING,
+            ExternalBootActivationState.PREPARED,
+            ExternalBootActivationState.ACTIVATING,
+            ExternalBootActivationState.ACTIVE,
+        }
+        if expected_state not in direct_sources:
+            raise ValueError("record_conflict accepts only direct-conflict source states")
         ensure_transition(expected_state, ExternalBootActivationState.RECOVERY_CONFLICT)
         if (evidence.activation_id, evidence.system_id) != (activation_id, system_id):
             raise ValueError("conflict evidence ownership does not match the activation")

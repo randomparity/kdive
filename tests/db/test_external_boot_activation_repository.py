@@ -367,6 +367,9 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
                 ExternalBootActivationState.ABANDONED
             )
             assert await repo.get_reservation(conn, activation.id) is None
+            mismatched_reservation = reservation.model_copy(update={"owner_key": "owners/other"})
+            with pytest.raises(ValueError, match="release identity"):
+                await repo.create(conn, activation, mismatched_reservation)
 
             cleanup = ExternalBootCleanupEvidenceV1(
                 activation_id=activation.id,
@@ -631,6 +634,16 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
             current_attempt = await repo.get_current_recovery_attempt(conn, activation.id)
             assert current_attempt is not None
             assert current_attempt.attempt_id == second_attempt
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="direct-conflict"):
+                await repo.record_conflict(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERING,
+                    attempt_id=uuid4(),
+                    evidence=conflict,
+                )
+            assert await _ledger_snapshot(conn) == before
 
             terminal = ExternalBootTerminalEvidenceV1(
                 activation_id=activation.id,

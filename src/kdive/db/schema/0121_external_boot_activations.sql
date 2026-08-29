@@ -43,11 +43,26 @@ CREATE TABLE external_boot_activations (
             AND materialization IS NOT NULL AND recovery_point IS NOT NULL)
         OR (state = 'active'
             AND materialization IS NOT NULL AND recovery_point IS NOT NULL
-            AND terminal_evidence ->> 'outcome' = 'active')
+            AND terminal_evidence ->> 'outcome' IS NOT DISTINCT FROM 'active')
         OR (state IN ('recovering', 'recovery_conflict', 'recovery_failed', 'recovered')
             AND materialization IS NOT NULL AND current_attempt_id IS NOT NULL
             AND (recovery_point IS NOT NULL OR pre_recovery_evidence IS NOT NULL))
-        OR (state = 'abandoned' AND terminal_evidence ->> 'outcome' = 'abandoned')
+        OR (state = 'abandoned'
+            AND terminal_evidence ->> 'outcome' IS NOT DISTINCT FROM 'abandoned')
+    ),
+    CONSTRAINT external_boot_activation_evidence_schema CHECK (
+        (materialization IS NULL OR materialization ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-materialization-v1')
+        AND (recovery_point IS NULL OR recovery_point ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-recovery-v1')
+        AND (pre_recovery_evidence IS NULL OR pre_recovery_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-pre-recovery-evidence-v1')
+        AND (terminal_evidence IS NULL OR terminal_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-terminal-evidence-v1')
+        AND (teardown_evidence IS NULL OR teardown_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-teardown-evidence-v1')
+        AND (cleanup_evidence IS NULL OR cleanup_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-cleanup-evidence-v1')
     ),
     CONSTRAINT external_boot_activation_cleanup_evidence CHECK (
         NOT cleanup_complete
@@ -55,11 +70,11 @@ CREATE TABLE external_boot_activations (
             cleanup_evidence IS NOT NULL
             AND (
                 (state IN ('recovered', 'abandoned')
-                 AND cleanup_evidence ->> 'mode' = 'ordinary'
+                 AND cleanup_evidence ->> 'mode' IS NOT DISTINCT FROM 'ordinary'
                  AND teardown_evidence IS NULL)
                 OR
                 (state IN ('recovery_conflict', 'recovery_failed')
-                 AND cleanup_evidence ->> 'mode' = 'system_teardown'
+                 AND cleanup_evidence ->> 'mode' IS NOT DISTINCT FROM 'system_teardown'
                  AND teardown_evidence IS NOT NULL)
             )
         )
@@ -133,7 +148,13 @@ CREATE TABLE external_boot_reservation_releases (
     teardown_evidence  jsonb CONSTRAINT external_boot_release_teardown_size
                            CHECK (teardown_evidence IS NULL
                                   OR pg_column_size(teardown_evidence) <= 65536),
-    released_at        timestamptz NOT NULL DEFAULT now()
+    released_at        timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT external_boot_release_evidence_schema CHECK (
+        release_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-release-evidence-v1'
+        AND (teardown_evidence IS NULL OR teardown_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-teardown-evidence-v1')
+    )
 );
 
 CREATE FUNCTION reject_external_boot_release_mutation() RETURNS trigger
@@ -191,6 +212,12 @@ CREATE TABLE external_boot_recovery_attempts (
         AND (state NOT IN ('failed', 'recovered') OR terminal_evidence IS NOT NULL)
         AND (conflict_evidence IS NULL OR pg_column_size(conflict_evidence) <= 65536)
         AND (terminal_evidence IS NULL OR pg_column_size(terminal_evidence) <= 65536)
+    ),
+    CONSTRAINT external_boot_attempt_evidence_schema CHECK (
+        (conflict_evidence IS NULL OR conflict_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-conflict-evidence-v1')
+        AND (terminal_evidence IS NULL OR terminal_evidence ->> 'schema'
+            IS NOT DISTINCT FROM 'external-boot-terminal-evidence-v1')
     )
 );
 
