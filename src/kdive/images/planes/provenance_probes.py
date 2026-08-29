@@ -84,7 +84,14 @@ def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no 
         stage="package-version-inspection",
         failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
     )
-    return parse_virt_inspector_versions(stdout.decode())
+    try:
+        return parse_virt_inspector_versions(stdout.decode())
+    except (ParseError, UnicodeDecodeError, ValueError) as exc:
+        raise CategorizedError(
+            "virt-inspector output is malformed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"stage": "package-version-inspection", "reason": "malformed_output"},
+        ) from exc
 
 
 DEFAULT_VERSION_INSPECT: VersionInspectSeam = inspect_package_versions

@@ -165,8 +165,29 @@ def test_inspect_package_versions_rejects_malformed_output(
 ) -> None:
     monkeypatch.setattr(probes, "_run_bounded_inspector", lambda *args, **kwargs: (b"<bad", b""))
 
-    with pytest.raises(probes.ParseError):
+    with pytest.raises(CategorizedError) as caught:
         probes.inspect_package_versions(Path("image.qcow2"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {
+        "stage": "package-version-inspection",
+        "reason": "malformed_output",
+    }
+
+
+def test_inspect_package_versions_rejects_invalid_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(probes, "_run_bounded_inspector", lambda *args, **kwargs: (b"\xff", b""))
+
+    with pytest.raises(CategorizedError) as caught:
+        probes.inspect_package_versions(Path("image.qcow2"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {
+        "stage": "package-version-inspection",
+        "reason": "malformed_output",
+    }
 
 
 type _PathProbe = Callable[[Path], object]
