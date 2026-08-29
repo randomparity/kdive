@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -359,6 +360,8 @@ def _appliance_fixture(
         base = Path(arguments[2])
         staged_tree = base / "lib" / "modules" / release
         assert (staged_tree / "new.ko").read_bytes() == b"new"
+        assert _kwargs["stdout"] is subprocess.DEVNULL
+        assert _kwargs["stderr"] is subprocess.DEVNULL
         (staged_tree / "modules.dep").write_bytes(b"new.ko:\n")
         return subprocess.CompletedProcess(arguments, 0)
 
@@ -409,6 +412,31 @@ def test_install_retry_reconciles_every_durable_terminal_transition(
     assert not any(path.name.endswith("-old") for path in old_tree.parent.iterdir())
 
 
+def test_install_retry_removes_empty_stage_left_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    original_remove = appliance._remove_empty_stage
+    interrupted = False
+
+    def interrupt_remove(path: Path) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise appliance.ApplianceError("FILESYSTEM_FAILURE")
+        original_remove(path)
+
+    monkeypatch.setattr(appliance, "_remove_empty_stage", interrupt_remove)
+    with pytest.raises(appliance.ApplianceError):
+        appliance.execute(appliance._validate_operation(operation))
+    monkeypatch.setattr(appliance, "_remove_empty_stage", original_remove)
+
+    result = appliance.execute(appliance._validate_operation(operation))
+
+    assert result["phase"] == "installed"
+    assert not any(path.name.endswith("-new") for path in old_tree.parent.iterdir())
+
+
 @pytest.mark.parametrize("interrupted_phase", ["restore-ready", "restored"])
 def test_restore_retry_reconciles_every_durable_terminal_transition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_phase: str
@@ -445,6 +473,40 @@ def test_restore_retry_reconciles_every_durable_terminal_transition(
 
     assert result["phase"] == "restored"
     assert (old_tree / "old.ko").read_bytes() == b"old"
+
+
+def test_restore_retry_removes_empty_stage_left_after_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    installed = appliance.execute(appliance._validate_operation(operation))
+    restore = appliance._validate_operation(
+        {
+            **operation,
+            "operation": "restore",
+            "capture_manifest": installed["capture_manifest"],
+            "installed_manifest": installed["installed_manifest"],
+        }
+    )
+    original_remove = appliance._remove_empty_stage
+    interrupted = False
+
+    def interrupt_remove(path: Path) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise appliance.ApplianceError("FILESYSTEM_FAILURE")
+        original_remove(path)
+
+    monkeypatch.setattr(appliance, "_remove_empty_stage", interrupt_remove)
+    with pytest.raises(appliance.ApplianceError):
+        appliance.execute(restore)
+    monkeypatch.setattr(appliance, "_remove_empty_stage", original_remove)
+
+    result = appliance.execute(restore)
+
+    assert result["phase"] == "restored"
+    assert not any(path.name.endswith("-new") for path in old_tree.parent.iterdir())
 
 
 def test_absent_capture_install_and_restore_round_trip(
@@ -543,6 +605,95 @@ def test_retry_rejects_a_malformed_durable_checkpoint(
 
     with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
         appliance.execute(appliance._validate_operation(operation))
+
+
+def test_identity_mismatch_preserves_the_prior_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, _destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    appliance.execute(appliance._validate_operation(operation))
+    checkpoint_path = scratch / "result-v1.json"
+    before = checkpoint_path.read_bytes()
+    wrong_operation = {
+        **operation,
+        "run_id": "00000000-0000-4000-8000-000000000099",
+    }
+
+    appliance._write_failure(
+        appliance._validate_operation(wrong_operation),
+        appliance.ApplianceError("IDENTITY_MISMATCH"),
+    )
+
+    assert checkpoint_path.read_bytes() == before
+
+
+def test_checkpoint_write_reconciles_a_crash_temp(tmp_path: Path) -> None:
+    appliance = _module()
+    result = tmp_path / "result-v1.json"
+    temporary = tmp_path / ".result-v1.json.tmp"
+    temporary.write_bytes(b"interrupted")
+
+    appliance._write_json(result, {"phase": "captured"})
+
+    assert json.loads(result.read_text(encoding="utf-8")) == {"phase": "captured"}
+    assert not temporary.exists()
+
+
+def test_source_xattrs_are_discarded_before_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, destination, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    source_module = tmp_path / "source" / "modules" / "new.ko"
+    try:
+        os.setxattr(source_module, "user.unverified", b"attacker")
+    except OSError as error:
+        pytest.skip(f"xattrs unavailable: {error}")
+    operation["source_manifest"] = appliance._tree_manifest(source_module.parent)[0]
+
+    appliance.execute(appliance._validate_operation(operation))
+
+    assert "user.unverified" not in os.listxattr(destination / "new.ko", follow_symlinks=False)
+
+
+def test_release_and_manifest_path_grammar_matches_v1(tmp_path: Path) -> None:
+    appliance = _module()
+    validator = Draft202012Validator(_json("operation-v1.schema.json"))
+    valid = _operation()
+    valid["release"] = "k" * 64
+    assert not list(validator.iter_errors(valid))
+    appliance._validate_operation(valid)
+    invalid = {**valid, "release": "k" * 65}
+    assert list(validator.iter_errors(invalid))
+    with pytest.raises(appliance.ApplianceError, match="INVALID_DOCUMENT"):
+        appliance._validate_operation(invalid)
+    tree = tmp_path / "modules"
+    tree.mkdir()
+    (tree / "bad\nname.ko").write_bytes(b"module")
+    with pytest.raises(appliance.ApplianceError, match="SOURCE_INVALID"):
+        appliance._tree_manifest(tree)
+
+
+def test_shutdown_failure_replaces_terminal_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(appliance, "SCRATCH", scratch)
+    mounted: set[Path] = set()
+    monkeypatch.setattr(Path, "is_mount", lambda path: path in mounted)
+    monkeypatch.setattr(appliance, "_reboot", lambda: -1)
+    monkeypatch.setattr(appliance.os, "sync", lambda: None)
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: mounted.add(scratch))
+    monkeypatch.setattr(appliance, "_unmount", lambda path: mounted.remove(path))
+    document = appliance._validate_operation(_operation())
+
+    with pytest.raises(appliance.ApplianceError, match="SHUTDOWN_FAILURE"):
+        appliance._poweroff(document)
+
+    result = json.loads((scratch / "result-v1.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failure"
+    assert result["error_code"] == "SHUTDOWN_FAILURE"
 
 
 def test_success_result_shapes_require_terminal_phase_fields() -> None:

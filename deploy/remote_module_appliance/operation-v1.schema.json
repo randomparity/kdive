@@ -26,8 +26,8 @@
     "release": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+      "maxLength": 64,
+      "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._+-]*$"
     },
     "root_volume": {
       "type": "object",

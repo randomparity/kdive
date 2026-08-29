@@ -25,7 +25,7 @@ DOCUMENT_LIMIT = 16 * 1024
 ROOT = Path("/mnt/root")
 SOURCE = Path("/mnt/source")
 SCRATCH = Path("/mnt/scratch")
-RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
@@ -54,6 +54,14 @@ class ApplianceError(Exception):
 
 def _matches(pattern: Pattern[str], value: object) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _valid_manifest_text(value: str) -> bool:
+    return (
+        unicodedata.normalize("NFC", value) == value
+        and all(not 0xD800 <= ord(character) <= 0xDFFF for character in value)
+        and all(unicodedata.category(character) != "Cc" for character in value)
+    )
 
 
 def _read_operation(path: Path) -> dict[str, object]:
@@ -102,7 +110,8 @@ def _validate_operation(document: dict[str, object]) -> dict[str, object]:
         _matches(UUID_RE, document.get("run_id")),
         _matches(DIGEST_RE, document.get("plan_identity")),
         _matches(HEX32_RE, document.get("operation_nonce")),
-        _matches(RELEASE_RE, document.get("release")),
+        _matches(RELEASE_RE, document.get("release"))
+        and document.get("release") not in {".", ".."},
         _matches(DIGEST_RE, document.get("source_manifest")),
         _matches(DIGEST_RE, document.get("appliance_image_digest")),
     )
@@ -158,7 +167,9 @@ def _manifest_entry(
     root: Path, entry: os.DirEntry[str], kind: str
 ) -> tuple[dict[str, object] | None, int]:
     relative = Path(entry.path).relative_to(root).as_posix()
-    if unicodedata.normalize("NFC", relative) != relative:
+    if not _valid_manifest_text(relative) or any(
+        segment in {"", ".", ".."} for segment in relative.split("/")
+    ):
         raise ApplianceError("SOURCE_INVALID")
     metadata = entry.stat(follow_symlinks=False)
     mode = metadata.st_mode & 0o777
@@ -191,13 +202,22 @@ def _manifest_entry(
         }, metadata.st_size
     if stat.S_ISLNK(metadata.st_mode):
         target = os.readlink(entry.path)
-        if unicodedata.normalize("NFC", target) != target:
+        if not _valid_manifest_text(target):
             raise ApplianceError("SOURCE_INVALID")
         if kind == "source":
             if relative in {"build", "source"} and target.startswith("/"):
                 return None, 0
+            target_parts = target.split("/")
+            if any(part in {"", "."} for part in target_parts):
+                raise ApplianceError("SOURCE_INVALID")
             resolved = os.path.normpath(os.path.join(os.path.dirname(relative), target))
-            if target.startswith("/") or resolved == ".." or resolved.startswith("../"):
+            resolved_parts = resolved.split("/")
+            if (
+                target.startswith("/")
+                or resolved == ".."
+                or resolved.startswith("../")
+                or any(part in {"", ".", ".."} for part in resolved_parts)
+            ):
                 raise ApplianceError("SOURCE_INVALID")
         return {"mode": "0777", "path": relative, "target": target, "type": "symlink", **extra}, 0
     raise ApplianceError("SOURCE_INVALID")
@@ -267,7 +287,10 @@ def _remove_owned_tree(path: Path) -> None:
 
 
 def _normalize_source_tree(root: Path) -> None:
+    paths = [root]
     for directory, subdirectories, files in os.walk(root, followlinks=False):
+        paths.extend(Path(directory) / name for name in subdirectories)
+        paths.extend(Path(directory) / name for name in files)
         for name in subdirectories:
             path = Path(directory) / name
             if not path.is_symlink():
@@ -279,6 +302,31 @@ def _normalize_source_tree(root: Path) -> None:
             mode = path.stat(follow_symlinks=False).st_mode
             path.chmod(0o755 if mode & 0o111 else 0o644)
         Path(directory).chmod(0o755)
+    for path in paths:
+        try:
+            names = os.listxattr(path, follow_symlinks=False)
+        except OSError as error:
+            if error.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+                names = []
+            else:
+                raise ApplianceError("FILESYSTEM_FAILURE") from error
+        for name in names:
+            try:
+                os.removexattr(path, name, follow_symlinks=False)
+            except PermissionError as error:
+                if os.geteuid() == 0 and name != "security.selinux":
+                    raise ApplianceError("FILESYSTEM_FAILURE") from error
+            except OSError as error:
+                if error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+                    raise ApplianceError("FILESYSTEM_FAILURE") from error
+        try:
+            os.chown(path, 0, 0, follow_symlinks=False)
+        except PermissionError as error:
+            if os.geteuid() == 0:
+                raise ApplianceError("FILESYSTEM_FAILURE") from error
+        except OSError as error:
+            if error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+                raise ApplianceError("FILESYSTEM_FAILURE") from error
 
 
 def _copy_tree(source: Path, destination: Path, kind: str = "source") -> tuple[str, int, int]:
@@ -343,6 +391,14 @@ def _write_json(path: Path, document: dict[str, object]) -> None:
     data = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
     temporary = path.with_name(f".{path.name}.tmp")
     try:
+        try:
+            metadata = temporary.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ApplianceError("RECOVERY_CONFLICT")
+            temporary.unlink()
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
@@ -493,6 +549,42 @@ def _manifest_or_none(path: Path, kind: str) -> str | None:
     return _tree_manifest(path, kind)[0]
 
 
+def _path_present(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
+    return True
+
+
+def _stage_manifest(staged: Path, staged_tree: Path, kind: str) -> str | None:
+    try:
+        metadata = staged.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    return _manifest_or_none(staged_tree, kind)
+
+
+def _remove_empty_stage(staged: Path) -> None:
+    if not stat.S_ISDIR(staged.lstat().st_mode):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    try:
+        relative_entries = sorted(path.relative_to(staged).as_posix() for path in staged.rglob("*"))
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
+    if relative_entries != ["lib", "lib/modules"] or any(
+        path.is_symlink() for path in staged.rglob("*")
+    ):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    _remove_owned_tree(staged)
+
+
 def _capture_material(checkpoint: dict[str, object]) -> dict[str, object]:
     fields = _capture_fields(checkpoint)
     capture = SCRATCH / "capture"
@@ -520,7 +612,7 @@ def _transition_replacement(
         raise ApplianceError("RECOVERY_CONFLICT")
     destination_installed = _manifest_or_none(destination, "installed")
     destination_original = _manifest_or_none(destination, "recovery")
-    staged_manifest = _manifest_or_none(staged_tree, "installed")
+    staged_manifest = _stage_manifest(staged, staged_tree, "installed")
     displaced_manifest = _manifest_or_none(displaced, "recovery")
 
     if (
@@ -542,7 +634,10 @@ def _transition_replacement(
 
     if _manifest_or_none(destination, "installed") is None:
         staged_tree.rename(destination)
-        _remove_owned_tree(staged)
+        _remove_empty_stage(staged)
+        _sync_path(destination.parent)
+    elif _path_present(staged):
+        _remove_empty_stage(staged)
         _sync_path(destination.parent)
     if _manifest_or_none(destination, "installed") != installed:
         raise ApplianceError("RECOVERY_CONFLICT")
@@ -568,10 +663,11 @@ def _finish_installed(
     installed = checkpoint.get("installed_manifest")
     if not isinstance(installed, str) or _manifest_or_none(destination, "installed") != installed:
         raise ApplianceError("RECOVERY_CONFLICT")
-    if _manifest_or_none(staged_tree, "installed") is not None:
+    if _stage_manifest(staged, staged_tree, "installed") is not None:
         raise ApplianceError("RECOVERY_CONFLICT")
-    if staged.exists():
-        _remove_owned_tree(staged)
+    if _path_present(staged):
+        _remove_empty_stage(staged)
+        _sync_path(destination.parent)
     displaced_manifest = _manifest_or_none(displaced, "recovery")
     if displaced_manifest not in {None, _original_manifest(fields)}:
         raise ApplianceError("RECOVERY_CONFLICT")
@@ -595,7 +691,7 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
     checkpoint = _existing_checkpoint(document)
     capture = SCRATCH / "capture"
     if checkpoint is None:
-        if staged.exists() or _manifest_or_none(displaced, "recovery") is not None:
+        if _path_present(staged) or _manifest_or_none(displaced, "recovery") is not None:
             raise ApplianceError("RECOVERY_CONFLICT")
         _remove_owned_tree(capture)
         original = _manifest_or_none(destination, "recovery")
@@ -632,6 +728,8 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
             [DEPMOD, "-b", str(staged), str(document["release"])],
             check=False,
             env={"PATH": "/sbin"},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except OSError as error:
         raise ApplianceError("DEPMOD_FAILURE") from error
@@ -672,7 +770,7 @@ def _restore(document: dict[str, object]) -> dict[str, object]:
     if checkpoint.get("phase") == "installed":
         if _manifest_or_none(destination, "installed") != installed:
             raise ApplianceError("RECOVERY_CONFLICT")
-        if staged.exists() or _manifest_or_none(displaced, "installed") is not None:
+        if _path_present(staged) or _manifest_or_none(displaced, "installed") is not None:
             raise ApplianceError("RECOVERY_CONFLICT")
         if not absent:
             staged_tree.parent.mkdir(parents=True)
@@ -680,7 +778,7 @@ def _restore(document: dict[str, object]) -> dict[str, object]:
         checkpoint = _checkpoint(document, "restore-ready", installed_manifest=installed, **fields)
     destination_installed = _manifest_or_none(destination, "installed")
     destination_captured = _manifest_or_none(destination, "recovery")
-    staged_captured = _manifest_or_none(staged_tree, "recovery")
+    staged_captured = _stage_manifest(staged, staged_tree, "recovery")
     displaced_installed = _manifest_or_none(displaced, "installed")
     if checkpoint.get("phase") == "restore-ready":
         if destination_installed == installed and displaced_installed is None:
@@ -696,7 +794,10 @@ def _restore(document: dict[str, object]) -> dict[str, object]:
                 raise ApplianceError("RECOVERY_CONFLICT")
         if not absent and _manifest_or_none(destination, "recovery") is None:
             staged_tree.rename(destination)
-            _remove_owned_tree(staged)
+            _remove_empty_stage(staged)
+            _sync_path(destination.parent)
+        elif _path_present(staged):
+            _remove_empty_stage(staged)
             _sync_path(destination.parent)
         if absent and _manifest_or_none(destination, "installed") is not None:
             raise ApplianceError("RECOVERY_CONFLICT")
@@ -754,14 +855,33 @@ def _mount_root() -> None:
     _mount(matches[0][0], ROOT, matches[0][1], 2 | 4 | 8)
 
 
-def _poweroff() -> NoReturn:
-    os.sync()
+def _reboot() -> int:
     libc = ctypes.CDLL(None, use_errno=True)
-    libc.reboot(LINUX_REBOOT_CMD_POWER_OFF)
-    raise ApplianceError("SHUTDOWN_FAILURE")
+    return int(libc.reboot(LINUX_REBOOT_CMD_POWER_OFF))
+
+
+def _poweroff(document: dict[str, object] | None) -> NoReturn:
+    os.sync()
+    _reboot()
+    failure = ApplianceError("SHUTDOWN_FAILURE")
+    try:
+        _mount("/dev/vdc", SCRATCH, "ext4", 2 | 4 | 8)
+        _write_failure(document, failure)
+    except (ApplianceError, OSError) as error:
+        raise failure from error
+    finally:
+        if SCRATCH.is_mount():
+            try:
+                _unmount(SCRATCH)
+            except OSError as error:
+                raise failure from error
+    _reboot()
+    raise failure
 
 
 def _write_failure(document: dict[str, object] | None, error: ApplianceError) -> None:
+    if error.code == "IDENTITY_MISMATCH" and (SCRATCH / "result-v1.json").exists():
+        return
     failure: dict[str, object] = {
         "protocol": "remote-module-result-v1",
         "status": "failure",
@@ -831,7 +951,7 @@ def main() -> NoReturn:
     try:
         _finish_mounts(document, operation_error)
     finally:
-        _poweroff()
+        _poweroff(document)
 
 
 if __name__ == "__main__":

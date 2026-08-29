@@ -43,8 +43,12 @@ export ANSIBLE_ROLES_PATH=deploy/ansible/roles
 playbook=deploy/ansible/tests/remote-module-appliance.yml
 ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json"
 second_log="$test_root/second.log"
-ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json" | tee "$second_log"
-grep -Eq 'changed=0([[:space:]]|$)' "$second_log"
+if ! ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json" >"$second_log" 2>&1; then
+  cat "$second_log"
+  exit 1
+fi
+cat "$second_log"
+grep -Eq 'changed=0([[:space:]].*)?failed=0([[:space:]]|$)' "$second_log"
 
 for arch in x86_64 ppc64le; do
   test -f "$install_dir/$arch/image/vmlinuz"

@@ -29,7 +29,12 @@
     "plan_identity": {"$ref": "#/$defs/sha256"},
     "operation_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "appliance_image_digest": {"$ref": "#/$defs/sha256"},
-    "release": {"type": "string", "minLength": 1, "maxLength": 128},
+    "release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
     "root_volume_key": {"type": "string", "minLength": 1, "maxLength": 255},
     "root_volume_identity": {"$ref": "#/$defs/sha256"},
     "source_manifest": {"$ref": "#/$defs/sha256"},
