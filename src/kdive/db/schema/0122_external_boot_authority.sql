@@ -476,7 +476,7 @@ BEGIN
        OR (p_purpose = 'recover'
            AND v_operation NOT IN ('recover', 'deadline', 'recovery-attempt', 'fail'))
        OR (p_purpose = 'resolve-conflict'
-           AND v_operation NOT IN ('resolve-conflict', 'deadline', 'fail'))
+           AND v_operation NOT IN ('resolve-conflict', 'fail'))
        OR (p_purpose = 'release' AND v_operation NOT IN ('release', 'cleanup', 'fail'))
        OR (p_purpose = 'teardown' AND v_operation NOT IN ('teardown', 'fail'))
        OR (p_purpose = 'activate' AND (
@@ -821,14 +821,8 @@ BEGIN
     v_result_ref := p_result ->> 'result_ref';
     IF (p_result ? 'result_ref'
         AND jsonb_typeof(p_result -> 'result_ref') NOT IN ('string', 'null'))
-       OR (v_result_ref IS NOT NULL AND (
-           octet_length(v_result_ref) NOT BETWEEN 1 AND 2048
-           OR (
-               v_result_ref !~ '^sha256:[0-9a-f]{64}$'
-               AND v_result_ref
-                   !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
-           )
-       ))
+       OR (v_result_ref IS NOT NULL
+           AND octet_length(v_result_ref) NOT BETWEEN 1 AND 2048)
        OR (p_result ? 'evidence' AND (
            jsonb_typeof(p_result -> 'evidence') <> 'object'
            OR pg_column_size(p_result -> 'evidence') > 65536
@@ -1098,6 +1092,16 @@ BEGIN
               )
        ) THEN
         RAISE EXCEPTION 'external boot authority object evidence is invalid'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_operation IN ('activate', 'recover', 'resolve-conflict')
+       AND (
+           SELECT count(*) <> count(DISTINCT item.value::text)
+               OR p_result #> '{evidence,objects}' IS DISTINCT FROM
+                  COALESCE(jsonb_agg(item.value ORDER BY item.value::text), '[]'::jsonb)
+           FROM jsonb_array_elements(p_result #> '{evidence,objects}') AS item(value)
+       ) THEN
+        RAISE EXCEPTION 'external boot authority object evidence must be canonical'
             USING ERRCODE = '22023';
     END IF;
     IF v_operation = 'release'

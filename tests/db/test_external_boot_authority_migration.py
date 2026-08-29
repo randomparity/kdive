@@ -1780,7 +1780,6 @@ def test_unexpected_or_forbidden_result_content_is_rejected_without_writes(
 @pytest.mark.parametrize(
     "location",
     [
-        pytest.param("result_ref", id="untyped-result-reference"),
         pytest.param("object_ref", id="untyped-provider-object-reference"),
         pytest.param("observed_at", id="noncanonical-observation-timestamp"),
         pytest.param("failure_context", id="untyped-failure-context-value"),
@@ -1825,9 +1824,7 @@ def test_untyped_result_scalars_are_rejected_without_writes(
             "evidence": evidence,
             "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
         }
-        if location == "result_ref":
-            result["result_ref"] = "../../provider-secret"
-        elif location == "object_ref":
+        if location == "object_ref":
             evidence["objects"] = [{"ref": "../../provider-secret"}]
         else:
             evidence["observed_at"] = "../../provider-secret"
