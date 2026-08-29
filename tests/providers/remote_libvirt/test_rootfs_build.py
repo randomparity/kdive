@@ -297,7 +297,7 @@ def test_root_inspection_failure_publishes_no_image(tmp_path: Path) -> None:
     assert not (workspace / "fedora-remote-43.qcow2").exists()
 
 
-def test_post_publish_identity_mismatch_removes_image(
+def test_pre_publish_identity_mismatch_publishes_no_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rec = _Recorder()

@@ -8,6 +8,7 @@ import signal
 import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import IO, cast
 from xml.etree.ElementTree import ParseError
@@ -39,6 +40,13 @@ type OsReleaseProbeSeam = Callable[[Path], str | None]
 type RootBootProbeSeam = Callable[[Path, Architecture, str], RootSpecV1]
 
 ROOT_INSPECTION_MAX_OUTPUT_BYTES = 1024 * 1024
+
+
+def _kill_inspector_group(process: subprocess.Popen[bytes]) -> None:
+    """Idempotently terminate and reap an inspector process group."""
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
 
 
 def parse_virt_inspector_versions(xml: str) -> dict[str, str]:
@@ -145,8 +153,7 @@ def _run_bounded_inspector(
                 if sum(len(value) for value in streams.values()) > max_output_bytes:
                     raise OverflowError
     except (TimeoutError, OverflowError) as exc:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+        _kill_inspector_group(process)
         reason = "timeout" if isinstance(exc, TimeoutError) else "output_limit"
         raise CategorizedError(
             "root boot inspection exceeded its bounded execution contract; rebuild and retry",
@@ -158,8 +165,7 @@ def _run_bounded_inspector(
     try:
         returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+        _kill_inspector_group(process)
         raise CategorizedError(
             "root boot inspection exceeded its bounded execution contract; rebuild and retry",
             category=ErrorCategory.PROVISIONING_FAILURE,

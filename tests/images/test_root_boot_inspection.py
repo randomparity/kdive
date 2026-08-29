@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 from xml.etree.ElementTree import ParseError
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.provenance_probes import (
     ROOT_INSPECTION_MAX_OUTPUT_BYTES,
+    _kill_inspector_group,
     _parse_root_boot,
     _run_bounded_inspector,
     inspect_root_boot,
@@ -64,6 +66,25 @@ def test_bounded_runner_kills_descendants(tmp_path: Path) -> None:
         _run_bounded_inspector([sys.executable, "-c", code], timeout_s=0.01)
     time.sleep(0.3)
     assert not sentinel.exists()
+
+
+def test_process_group_cleanup_tolerates_natural_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaped: list[bool] = []
+
+    class _ExitedProcess:
+        pid = 123
+
+        def wait(self) -> None:
+            reaped.append(True)
+
+    def missing_group(_pid: int, _signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr("os.killpg", missing_group)
+    _kill_inspector_group(cast("Any", _ExitedProcess()))
+    assert reaped == [True]
 
 
 def test_parser_builds_digest_bound_root_spec() -> None:

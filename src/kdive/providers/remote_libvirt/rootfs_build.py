@@ -173,18 +173,17 @@ class RemoteLibvirtRootfsBuildPlane:
                     category=ErrorCategory.PROVISIONING_FAILURE,
                     details={"stage": "root-inspection", "reason": "invalid_result"},
                 )
+            verified_digest = digest_file(scratch)
+            if verified_digest != image_digest:
+                raise CategorizedError(
+                    "image identity changed after root inspection; rebuild and retry",
+                    category=ErrorCategory.PROVISIONING_FAILURE,
+                    details={"stage": "root-inspection", "reason": "identity_changed"},
+                )
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=scratch)
-        digest = digest_file(qcow2)
-        if digest != image_digest:
-            qcow2.unlink(missing_ok=True)
-            raise CategorizedError(
-                "published image identity changed after root inspection; rebuild and retry",
-                category=ErrorCategory.PROVISIONING_FAILURE,
-                details={"stage": "root-inspection", "reason": "identity_changed"},
-            )
         return RootfsBuildOutput(
             qcow2_path=qcow2,
-            digest=digest,
+            digest=verified_digest,
             provenance=RootfsBuildProvenance.remote_libvirt(
                 spec,
                 packages=_guest_agent_packages(spec.packages),
