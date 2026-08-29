@@ -139,7 +139,8 @@ def _rehash_volume(conn: BootArtifactVolumeConn, volume: _ArtifactVolume, expect
     try:
         volume.download(stream, 0, 0, 0)
         stream.recvAll(receive, None)
-    except libvirt.libvirtError, OSError:
+        stream.finish()
+    except libvirt.libvirtError, OSError, RuntimeError:
         with contextlib.suppress(libvirt.libvirtError):
             stream.abort()
         raise
