@@ -15,35 +15,18 @@ functions and are never persisted in authority or audit rows.
 
 ## Architecture
 
-Migration 0122 owns five durable records. `external_boot_authority_counters` keeps the last issued
+Migration 0122 owns four durable records. `external_boot_authority_counters` keeps the last issued
 generation per System and is never decremented or deleted by application roles.
 `external_boot_authorities` stores the immutable System, Allocation, activation, Run, plan, job,
 attempt, purpose, provider, authority-instance, worker-incarnation, operation identity, and digest
 binding plus its `allocating|current|superseded|retired` state. A partial unique index permits one
-current row per System. `external_boot_authority_journal_heads` stores the trusted
-per-authority-instance/System journal sequence, record digest, phase, operation identity, authority
-UUID, and generation. The
-provider role advances it by monotonic compare-and-set from the exact prior sequence and digest;
-neither truncation nor a longer uncommitted suffix can move it.
 `external_boot_authority_acknowledgements` stores the provider-authority principal's
 acknowledgement, journal sequence/digest, operation digest, and positive-quiescence digest, and
-promotion requires an exact match to the trusted head. `external_boot_authority_audit` stores
-takeover and commit outcomes with identity references only. Allocation creates a new lane's sole
-genesis head, bound to the System and authority instance, at sequence zero with the protocol's fixed
-empty-journal SHA-256 digest and phase `empty`. The provider role has no direct table INSERT grant;
-its first append must compare-and-set that exact genesis head to sequence one and `admitted`.
-CAS enforces the closed per-operation phase graph `admitted -> mutation-started ->
-provider-returned -> observed -> terminal`; it permits no skips, repeats, or backward edges. A new
-lane admits its first newest `allocating` generation from `empty`. After `terminal`, the same
-System/authority lane may admit only the newest `allocating` generation and a new operation identity,
-continuing at the next sequence and binding the prior terminal digest; it never resets sequence or
-digest continuity. The CAS takes the System lock, checks that generation against the counter, and
-binds the `admitted` head before acknowledgement. Exact acknowledgement of that head is the only
-transition that promotes the generation to `current`; admission alone authorizes no provider commit.
-System and authority instance are immutable across the lane. Generation, authority UUID, and
-operation identity are immutable from one `admitted` record through its `terminal` record, and each
-digest binds the prior digest plus the complete record identity. CAS requires the authority UUID and
-generation to match the exact newest allocating row at admission and preserves them through terminal.
+promotion requires an exact match to the newest allocating authority's immutable binding.
+`external_boot_authority_audit` stores takeover and commit outcomes with identity references only.
+Journal anchoring, phase continuity, append/fsync, restart, and provider-call quiescence proof belong
+to #2126; migration 0122 treats the provider-role acknowledgement's bounded journal and quiescence
+digests as opaque evidence and never claims to validate the journal behind them.
 
 `allocate_external_boot_authority` authenticates the worker credential, resolves project and
 Allocation from the activation without trusting that first read, then acquires advisory locks in the
@@ -68,15 +51,15 @@ any older generation returns `superseded`. Replays with
 identical facts are idempotent; mismatches affect zero rows.
 An identical replay after promotion returns `applied` with the existing acknowledgement, including
 after response loss; a concurrent or later replay with any differing fact returns `superseded` and
-does not alter the current row or trusted head.
+does not alter the current row or acknowledgement.
 
 `commit_external_boot_authority_result` authenticates the worker credential and takes advisory
 locks in System then Run order before row-locking the job, authority, activation, current recovery
-attempt, acknowledgement, and journal head in that order. Allocation takes the System advisory
+attempt and acknowledgement in that order. Allocation takes the System advisory
 lock before the job and activation rows; acknowledgement takes the System advisory lock before
-authority, head, and acknowledgement rows. It validates the exact current
+authority and acknowledgement rows. It validates the exact current
 generation, acknowledgement, job attempt ownership, activation/Run/System/plan binding, purpose,
-provider, authority instance, journal sequence/digest, and operation digest. Its requested operation
+provider, authority instance, acknowledged journal sequence/digest, and operation digest. Its requested operation
 is a closed enum covering activation state/evidence transition, activation deadline update,
 recovery-attempt creation or state/evidence transition, exact job completion, exact job
 failure/requeue with Run compensation, reservation release, System teardown transition, and cleanup
@@ -149,9 +132,8 @@ stored operation digest raises `22023` before any durable write.
   wrong-provider, wrong-authority-instance, or acknowledgement mismatch returns `superseded` and
   affects zero durable rows.
 - Counter overflow raises `22003`; generations are never wrapped or reused.
-- A missing, reordered, truncated, divergent, foreign, or non-monotonic journal head affects zero
-  rows. An acknowledgement without positive quiescence or an exact trusted journal-head match cannot
-  promote authority.
+- An acknowledgement without bounded positive-quiescence evidence, a positive journal sequence,
+  fixed-format journal digest, or an exact immutable authority binding cannot promote authority.
 - Audit rows contain UUIDs, bounded digests, generations, purpose, and outcome; they contain no
   credentials, provider definitions, commands, paths, or provider secrets.
 
@@ -173,26 +155,23 @@ SQL or provider ACLs; ADR-0584 explicitly excludes that bypass from generation f
 journal integrity and mutation serialization are outside this slice and must be proved by the
 provider-host authority implementation before external-boot v1 is advertised.
 
-This issue's journal tests cover only PostgreSQL trusted-head genesis, monotonic CAS, immutable
-identity, sequence/digest continuity, and zero-row rejection using bounded synthetic record metadata.
-They do not implement or claim proof of provider append/fsync, process restart, surviving provider
-calls, local-journal truncation recovery, mutation serialization, deployment ACLs, or live providers.
+This issue tests only persistence and exact matching of bounded opaque acknowledgement metadata. It
+does not implement or claim proof of provider journal anchoring, phase continuity, append/fsync,
+process restart, surviving provider calls, truncation recovery, mutation serialization, deployment
+ACLs, or live providers; those belong to #2126/#2127.
 
 ## Verification
 
 Migration tests race allocations and prove strictly increasing generations. They exercise every
-purpose-to-job-kind mapping; pre-claim admission to post-claim authority handoff; genesis journal
-head initialization, first CAS, restart, truncation, and foreign-head rejection; every cross-binding
+purpose-to-job-kind mapping; pre-claim admission to post-claim authority handoff; every cross-binding
 mismatch; inactive credentials; acknowledgement mismatch; stale takeover; exact idempotent replay;
 delayed acknowledgement after a newer allocation; mixed old/new protocol-4 workers and the separate
 external-enqueue absence; later-Run denial; cleanup and audit zero-row behavior; old-worker
-generic-finalization rejection; foreign authority/generation journal heads;
+generic-finalization rejection; foreign authority/generation acknowledgements;
 malformed success/failure carriers; semantically invalid evidence; grants; and absence of credentials
 or provider secrets in persisted rows. They also prove external teardown cannot set the System
 terminal before accepted provider evidence and stale teardown affects zero System/job/audit rows;
-the complete journal phase graph rejects
-skips, repeats, foreign identities, and cross-operation heads while allowing sequential current
-generations on one authority instance only through terminal-to-admitted continuity; allocation racing Allocation release
+opaque acknowledgement metadata is bounded and exactly matched; allocation racing Allocation release
 mints no authority after release begins; and protocol-4 workers claim, heartbeat, complete, retry,
 and fail ordinary jobs while protocol-3 workers remain rejected from claim, heartbeat, capture,
 success, retry, and failure. Queue/worker tests prove external-boot success and failure
