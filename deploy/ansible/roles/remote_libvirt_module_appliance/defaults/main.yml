@@ -1,0 +1,9 @@
+---
+remote_libvirt_module_appliance_install_dir: /var/lib/libvirt/kdive/module-appliance/v1
+remote_libvirt_module_appliance_images:
+  x86_64:
+    url: ""
+    sha256: ""
+  ppc64le:
+    url: ""
+    sha256: ""

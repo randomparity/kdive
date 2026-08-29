@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kdive.dev/schema/remote-module-result-v1",
+  "title": "remote-module-result-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "status",
+    "phase"
+  ],
+  "properties": {
+    "protocol": {"const": "remote-module-result-v1"},
+    "status": {"enum": ["success", "failure"]},
+    "phase": {
+      "enum": [
+        "accepted",
+        "captured",
+        "staging-intent",
+        "replacement-ready",
+        "installed",
+        "restore-ready",
+        "restored"
+      ]
+    },
+    "error_code": {"$ref": "#/$defs/error_code"},
+    "system_id": {"$ref": "#/$defs/uuid"},
+    "run_id": {"$ref": "#/$defs/uuid"},
+    "plan_identity": {"$ref": "#/$defs/sha256"},
+    "operation_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "appliance_image_digest": {"$ref": "#/$defs/sha256"},
+    "release": {"type": "string", "minLength": 1, "maxLength": 128},
+    "root_volume_key": {"type": "string", "minLength": 1, "maxLength": 255},
+    "root_volume_identity": {"$ref": "#/$defs/sha256"},
+    "source_manifest": {"$ref": "#/$defs/sha256"},
+    "installed_manifest": {"$ref": "#/$defs/sha256"},
+    "capture_manifest": {"$ref": "#/$defs/sha256"},
+    "capture_absent": {"type": "boolean"},
+    "entry_count": {"type": "integer", "minimum": 0, "maximum": 200000},
+    "content_bytes": {"type": "integer", "minimum": 0, "maximum": 8589934592}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "success"}}},
+      "then": {
+        "required": [
+          "system_id",
+          "run_id",
+          "plan_identity",
+          "operation_nonce",
+          "appliance_image_digest"
+        ],
+        "not": {"required": ["error_code"]}
+      },
+      "else": {
+        "required": ["error_code"],
+        "allOf": [
+          {
+            "if": {"properties": {"error_code": {"not": {"const": "INVALID_DOCUMENT"}}}},
+            "then": {
+              "required": [
+                "system_id",
+                "run_id",
+                "plan_identity",
+                "operation_nonce",
+                "appliance_image_digest"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "error_code": {
+      "enum": [
+        "INVALID_DOCUMENT",
+        "IDENTITY_MISMATCH",
+        "LIMIT_EXCEEDED",
+        "SOURCE_INVALID",
+        "ROOT_DISCOVERY_FAILED",
+        "FILESYSTEM_FAILURE",
+        "RECOVERY_CONFLICT",
+        "DEPMOD_FAILURE",
+        "FLUSH_FAILURE",
+        "SHUTDOWN_FAILURE"
+      ]
+    },
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

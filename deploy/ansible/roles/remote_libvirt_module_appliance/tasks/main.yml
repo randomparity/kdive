@@ -1,0 +1,78 @@
+---
+- name: Validate the pinned module-appliance image catalog
+  ansible.builtin.assert:
+    that:
+      - remote_libvirt_module_appliance_images.keys() | list == ['x86_64', 'ppc64le']
+      - item.value.url is match('^https://')
+      - item.value.sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: >-
+      remote_libvirt_module_appliance_images must pin HTTPS URLs and lowercase SHA-256
+      digests for exactly x86_64 and ppc64le.
+  loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Create the read-only module-appliance image directory
+  ansible.builtin.file:
+    path: "{{ remote_libvirt_module_appliance_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download and digest-verify each module-appliance image
+  ansible.builtin.get_url:
+    url: "{{ item.value.url }}"
+    dest: "{{ remote_libvirt_module_appliance_install_dir }}/appliance-v1-{{ item.key }}.tar"
+    checksum: "sha256:{{ item.value.sha256 }}"
+    owner: root
+    group: root
+    mode: "0444"
+  loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Create architecture-specific module-appliance directories
+  ansible.builtin.file:
+    path: "{{ remote_libvirt_module_appliance_install_dir }}/{{ item.key }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Extract the verified module-appliance bundles
+  ansible.builtin.unarchive:
+    src: "{{ remote_libvirt_module_appliance_install_dir }}/appliance-v1-{{ item.key }}.tar"
+    dest: "{{ remote_libvirt_module_appliance_install_dir }}/{{ item.key }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "u=rX,go=rX"
+  loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Re-read installed module-appliance image digests
+  ansible.builtin.stat:
+    path: "{{ remote_libvirt_module_appliance_install_dir }}/appliance-v1-{{ item.key }}.tar"
+    checksum_algorithm: sha256
+  loop: "{{ remote_libvirt_module_appliance_images | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: remote_libvirt_module_appliance_installed
+
+- name: Refuse a changed installed module-appliance image
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg
+      - item.stat.checksum == item.item.value.sha256
+      - item.stat.mode == '0444'
+    fail_msg: >-
+      Installed module-appliance image {{ item.item.key }} does not match its pinned
+      digest or immutable file mode.
+  loop: "{{ remote_libvirt_module_appliance_installed.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
