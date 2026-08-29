@@ -23,14 +23,14 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
@@ -39,7 +39,16 @@ from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatc
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.supervisor import capture_authority_scope
-from kdive.jobs.models import HandlerRegistry, JobHandler
+from kdive.jobs.models import (
+    ExternalBootAuthorityFailure,
+    ExternalBootAuthorityFailureV1,
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthorityResultV1,
+    ExternalBootAuthoritySuccessV1,
+    HandlerRegistry,
+    JobHandler,
+    JobHandlerResult,
+)
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
 from kdive.security.secrets.redaction import Redactor
@@ -475,12 +484,12 @@ class Worker:
                     task.cancel()
             await asyncio.gather(*authority_tasks, return_exceptions=True)
 
-    async def _invoke_handler(self, job: Job, handler: JobHandler) -> str | None:
+    async def _invoke_handler(self, job: Job, handler: JobHandler) -> JobHandlerResult:
         """Run only handler work; capture authority is adjudicated before finalization."""
         async with self._pool.connection() as conn:
             await conn.set_autocommit(True)
             try:
-                return await handler(conn, job)
+                return cast(JobHandlerResult, await handler(conn, job))
             finally:
                 await conn.set_autocommit(False)
 
@@ -489,11 +498,19 @@ class Worker:
         await self._finalize_handler(job, span, handler_task)
 
     async def _finalize_handler(
-        self, job: Job, span: JobSpan, handler_task: asyncio.Task[str | None]
+        self, job: Job, span: JobSpan, handler_task: asyncio.Task[JobHandlerResult]
     ) -> None:
         try:
             result_ref = await handler_task
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
+            if _external_marker(job) is not None:
+                if isinstance(exc, ExternalBootAuthorityFailure):
+                    await self._commit_external_result(job, exc.result)
+                else:
+                    _log.warning(
+                        "marked external boot job %s failed without authority result", job.id
+                    )
+                return
             span.set_outcome("error")
             category = _failure_category(exc)
             terminal = _is_terminal(exc, category)
@@ -511,6 +528,15 @@ class Worker:
                 self._telemetry.record_job_retry(job.kind.value)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
+        if _external_marker(job) is not None:
+            if isinstance(result_ref, ExternalBootAuthorityResultV1):
+                await self._commit_external_result(job, result_ref)
+            else:
+                _log.warning("marked external boot job %s returned no authority result", job.id)
+            return
+        if isinstance(result_ref, ExternalBootAuthorityResultV1):
+            _log.warning("ordinary job %s returned an external authority result", job.id)
+            return
         async with self._pool.connection() as conn:
             completed = await queue.complete(
                 conn,
@@ -521,6 +547,24 @@ class Worker:
             )
         if completed is None:
             _log.warning("job %s completed but was reclaimed; result dropped", job.id)
+
+    async def _commit_external_result(
+        self, job: Job, result: ExternalBootAuthorityResultV1
+    ) -> None:
+        async with self._pool.connection() as conn:
+            if isinstance(result, ExternalBootAuthoritySuccessV1):
+                committed = await queue.complete_external_boot(
+                    conn, job, result, incarnation_credential=self._incarnation_credential
+                )
+            elif isinstance(result, ExternalBootAuthorityFailureV1):
+                committed = await queue.fail_external_boot(
+                    conn, job, result, incarnation_credential=self._incarnation_credential
+                )
+            else:
+                _log.warning("external boot job %s returned an untyped result variant", job.id)
+                return
+        if committed is None:
+            _log.warning("external boot job %s result was superseded; result dropped", job.id)
 
     async def _heartbeat_loop(self, job_id: UUID, attempt: int) -> None:
         """Renew the lease until cancelled, the fence misses, or a heartbeat errors.
@@ -559,6 +603,22 @@ def _failure_category(exc: Exception) -> ErrorCategory:
     if isinstance(exc, PayloadValidationError):
         return ErrorCategory.CONFIGURATION_ERROR
     return ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
+    """Decode a persisted marker; malformed markers remain fenced from generic finalization."""
+    raw = job.payload.get("external_boot_authority_v1")
+    if raw is None:
+        return None
+    try:
+        return ExternalBootAuthorityMarkerV1.model_validate(raw)
+    except ValidationError:
+        _log.warning("job %s has a malformed external boot authority marker", job.id)
+        # Presence, rather than validity, selects the fail-closed path.
+        return _MALFORMED_EXTERNAL_MARKER
+
+
+_MALFORMED_EXTERNAL_MARKER = ExternalBootAuthorityMarkerV1.model_construct()
 
 
 def _is_terminal(exc: Exception, category: ErrorCategory) -> bool:

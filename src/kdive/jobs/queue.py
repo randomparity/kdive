@@ -33,6 +33,12 @@ from kdive.domain.operations.jobs import (
     JobKind,
     dispatch_lane_for_kind,
 )
+from kdive.jobs.models import (
+    ExternalBootAuthorityFailureV1,
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthorityResultV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.jobs.payloads import (
     ActivePayloadModel,
     Authorizing,
@@ -257,6 +263,106 @@ async def complete(
         )
         row = await cur.fetchone()
     return None if row is None else Job.model_validate(row)
+
+
+async def allocate_external_boot_authority(
+    conn: AsyncConnection,
+    job: Job,
+    marker: ExternalBootAuthorityMarkerV1,
+    *,
+    incarnation_credential: SecretStr,
+) -> tuple[UUID, int, str] | None:
+    """Mint authority for the exact claimed attempt, or return ``None`` when superseded."""
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(
+            "SELECT status, authority_id, generation, operation_digest "
+            "FROM public.allocate_external_boot_authority("
+            "sha256(convert_to(%s, 'UTF8')), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                incarnation_credential.get_secret_value(),
+                job.id,
+                job.attempt,
+                marker.activation_id,
+                marker.run_id,
+                marker.system_id,
+                marker.plan_identity,
+                marker.purpose,
+                marker.provider_kind,
+                marker.authority_instance,
+                marker.operation_identity,
+            ),
+        )
+        row = await cur.fetchone()
+    if row is None or row[0] != "allocated":
+        return None
+    return row[1], int(row[2]), str(row[3])
+
+
+async def commit_external_boot_authority_result(
+    conn: AsyncConnection,
+    job: Job,
+    result: ExternalBootAuthorityResultV1,
+    *,
+    incarnation_credential: SecretStr,
+) -> Job | None:
+    """Commit an authority-bound provider result atomically, or drop a stale result."""
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT status, job_state FROM public.commit_external_boot_authority_result("
+            "sha256(convert_to(%s, 'UTF8')), %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s, %s, %s, %s, %s, %s)",
+            (
+                incarnation_credential.get_secret_value(),
+                job.id,
+                job.attempt,
+                result.authority_id,
+                result.generation,
+                result.activation_id,
+                result.run_id,
+                result.system_id,
+                result.plan_identity,
+                result.purpose,
+                result.provider_kind,
+                result.authority_instance,
+                result.operation_identity,
+                result.operation_digest,
+                result.journal_sequence,
+                result.journal_digest,
+                Jsonb(result.result),
+            ),
+        )
+        status_row = await cur.fetchone()
+        if status_row is None or status_row["status"] != "applied":
+            return None
+        await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
+        row = await cur.fetchone()
+    return None if row is None else Job.model_validate(row)
+
+
+async def complete_external_boot(
+    conn: AsyncConnection,
+    job: Job,
+    result: ExternalBootAuthoritySuccessV1,
+    *,
+    incarnation_credential: SecretStr,
+) -> Job | None:
+    """Complete an external boot only through its exact authority binding."""
+    return await commit_external_boot_authority_result(
+        conn, job, result, incarnation_credential=incarnation_credential
+    )
+
+
+async def fail_external_boot(
+    conn: AsyncConnection,
+    job: Job,
+    result: ExternalBootAuthorityFailureV1,
+    *,
+    incarnation_credential: SecretStr,
+) -> Job | None:
+    """Fail or requeue an external boot only through its exact authority binding."""
+    return await commit_external_boot_authority_result(
+        conn, job, result, incarnation_credential=incarnation_credential
+    )
 
 
 async def fail(
