@@ -196,7 +196,7 @@ def _materialize_one(
     kind: BootArtifactKind,
     payload: bytes,
     attempt_id: UUID,
-) -> OpaqueProviderRef:
+) -> tuple[OpaqueProviderRef, bool]:
     name = artifact_volume_name(kind, system_id, run_id)
     ref = artifact_volume_ref(kind, system_id, run_id)
     try:
@@ -211,7 +211,7 @@ def _materialize_one(
             raise _infra("rehashing the existing artifact", kind=kind, pool=pool_name) from exc
         if not matches:
             raise _conflict(kind, pool_name)
-        return ref
+        return ref, False
     partial_name = artifact_partial_volume_name(kind, system_id, run_id, payload, attempt_id)
     staged: _ArtifactVolume | None = None
     published: _ArtifactVolume | None = None
@@ -251,14 +251,14 @@ def _materialize_one(
             with contextlib.suppress(libvirt.libvirtError):
                 staged.delete(0)
         raise _infra("publishing the artifact", kind=kind, pool=pool_name) from exc
-    return ref
+    return ref, True
 
 
 def create_boot_artifact_volume(
     conn: BootArtifactVolumeConn, pool_name: str, artifact: BootArtifact
 ) -> OpaqueProviderRef:
     """Create or identity-check one deterministic artifact volume."""
-    return _materialize_one(
+    ref, _created = _materialize_one(
         conn,
         pool_name,
         artifact.system_id,
@@ -267,6 +267,7 @@ def create_boot_artifact_volume(
         bytes(artifact.payload),
         uuid4(),
     )
+    return ref
 
 
 def _read_payload(value: bytes | bytearray | memoryview | Path) -> bytes:
@@ -279,6 +280,24 @@ def _read_payload(value: bytes | bytearray | memoryview | Path) -> bytes:
                 category=ErrorCategory.CONFIGURATION_ERROR,
             ) from exc
     return bytes(value)
+
+
+def _delete_owned_final(
+    conn: BootArtifactVolumeConn,
+    pool_name: str,
+    system_id: UUID,
+    run_id: UUID,
+    payload: bytes,
+    kind: BootArtifactKind,
+) -> None:
+    """Delete a final volume only while its bytes still prove this attempt owns it."""
+    try:
+        pool = conn.storagePoolLookupByName(pool_name)
+        volume = _lookup(pool, artifact_volume_name(kind, system_id, run_id))
+        if volume is not None and _rehash_volume(conn, volume, payload):
+            volume.delete(0)
+    except (libvirt.libvirtError, OSError, RuntimeError) as exc:
+        raise _infra("cleaning the published artifact", kind=kind, pool=pool_name) from exc
 
 
 def materialize_boot_artifacts(
@@ -305,14 +324,21 @@ def materialize_boot_artifacts(
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     attempt = attempt_id or uuid4()
-    kernel_ref = _materialize_one(
+    initrd_payload = _read_payload(initrd) if initrd is not None else None
+    kernel_ref, kernel_created = _materialize_one(
         conn, pool_name, system_id, run_id, "kernel", kernel_payload, attempt
     )
-    initrd_ref = (
-        _materialize_one(
-            conn, pool_name, system_id, run_id, "initrd", _read_payload(initrd), attempt
+    try:
+        initrd_ref = (
+            _materialize_one(conn, pool_name, system_id, run_id, "initrd", initrd_payload, attempt)[
+                0
+            ]
+            if initrd_payload is not None
+            else None
         )
-        if initrd is not None
-        else None
-    )
+    except CategorizedError:
+        if kernel_created:
+            with contextlib.suppress(CategorizedError):
+                _delete_owned_final(conn, pool_name, system_id, run_id, kernel_payload, "kernel")
+        raise
     return MaterializedBootArtifacts(kernel=kernel_ref, initrd=initrd_ref)
