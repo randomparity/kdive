@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Callable
 from typing import Literal, cast
 from uuid import UUID
 
@@ -23,9 +25,10 @@ ATTEMPT = UUID("00000000-0000-0000-0000-000000000004")
 
 
 class _Volume:
-    def __init__(self, name: str, xml: str) -> None:
+    def __init__(self, name: str, xml: str, data: bytes = b"kernel") -> None:
         self._name = name
         self._xml = xml
+        self.data = data
         self.deleted = False
 
     def name(self) -> str:
@@ -38,6 +41,26 @@ class _Volume:
     def delete(self, flags: int = 0) -> int:
         del flags
         self.deleted = True
+        return 0
+
+    def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
+        del offset, length, flags
+        assert isinstance(stream, _Stream)
+        stream.data = self.data
+        return 0
+
+
+class _Stream:
+    def __init__(self) -> None:
+        self.data = b""
+
+    def recvAll(self, callback: Callable[[object, bytes, object], None], opaque: object) -> None:  # noqa: N802
+        callback(self, self.data, opaque)
+
+    def finish(self) -> int:
+        return 0
+
+    def abort(self) -> int:
         return 0
 
 
@@ -62,6 +85,10 @@ class _Conn:
         assert name == "boot-artifacts"
         return self.pool
 
+    def newStream(self, flags: int = 0) -> _Stream:  # noqa: N802
+        del flags
+        return _Stream()
+
 
 def _xml(kind: str, digest: str, *, attempt: UUID | None = None) -> str:
     return render_boot_artifact_volume_xml(
@@ -76,7 +103,7 @@ def _xml(kind: str, digest: str, *, attempt: UUID | None = None) -> str:
 
 
 def test_listing_accepts_only_metadata_matching_the_deterministic_name() -> None:
-    digest = "sha256:" + "a" * 64
+    digest = "sha256:" + hashlib.sha256(b"kernel").hexdigest()
     final = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("kernel", digest))
     foreign = _Volume("kdive-kernel-foreign", _xml("kernel", digest))
     malformed = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), "<volume/>")
@@ -99,15 +126,11 @@ def test_listing_accepts_only_metadata_matching_the_deterministic_name() -> None
 
 
 def test_reap_removes_orphaned_owned_final_and_partial_but_preserves_mismatch() -> None:
-    digest = "sha256:" + "a" * 64
+    digest = "sha256:" + hashlib.sha256(b"kernel").hexdigest()
     orphan_final = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("kernel", digest))
     orphan_partial = _Volume(
         artifact_partial_volume_name("kernel", SYSTEM, RUN, b"kernel", ATTEMPT),
-        _xml(
-            "kernel",
-            "sha256:6923dd1bc0460082c5d55a831908c24a282860b7f1cd6c2b79cf1bc8857c639c",
-            attempt=ATTEMPT,
-        ),
+        _xml("kernel", digest, attempt=ATTEMPT),
     )
     mismatch = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("initrd", digest))
     pool = _Pool([orphan_final, orphan_partial, mismatch])
@@ -122,7 +145,7 @@ def test_reap_removes_orphaned_owned_final_and_partial_but_preserves_mismatch() 
 
 
 def test_reap_keeps_a_live_owner_and_a_foreign_name() -> None:
-    digest = "sha256:" + "a" * 64
+    digest = "sha256:" + hashlib.sha256(b"kernel").hexdigest()
     volume = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("kernel", digest))
     pool = _Pool([volume])
 

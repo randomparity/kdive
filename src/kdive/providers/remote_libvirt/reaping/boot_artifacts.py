@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import re
 import xml.etree.ElementTree as ET
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -46,6 +48,15 @@ class _Volume(Protocol):
     def name(self) -> str: ...
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802
     def delete(self, flags: int = 0) -> int: ...
+    def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int: ...
+
+
+class _Stream(Protocol):
+    def recvAll(
+        self, callback: Callable[[object, bytes, object], None], opaque: object
+    ) -> None: ...  # noqa: N802
+    def finish(self) -> int: ...
+    def abort(self) -> int: ...
 
 
 class _Pool(Protocol):
@@ -55,6 +66,7 @@ class _Pool(Protocol):
 
 class BootArtifactReaperConn(Protocol):
     def storagePoolLookupByName(self, name: str) -> _Pool: ...  # noqa: N802
+    def newStream(self, flags: int = 0) -> _Stream: ...  # noqa: N802
 
 
 def _metadata(xml: str) -> dict[str, str] | None:
@@ -122,7 +134,12 @@ def list_owned_boot_artifacts(
     try:
         pool = conn.storagePoolLookupByName(pool_name)
         pool.refresh(0)
-        return [artifact for volume in pool.listAllVolumes(0) if (artifact := _parse(volume))]
+        artifacts: list[BootArtifactVolume] = []
+        for volume in pool.listAllVolumes(0):
+            artifact = _parse(volume)
+            if artifact is not None and _content_matches(conn, volume, artifact.digest):
+                artifacts.append(artifact)
+        return artifacts
     except libvirt.libvirtError as exc:
         raise CategorizedError(
             "could not enumerate remote boot-artifact storage",
@@ -155,7 +172,11 @@ def reap_orphaned_boot_artifacts(
     live = set(live_owners)
     for volume in pool.listAllVolumes(0):
         artifact = _parse(volume)
-        if artifact is None or artifact.owner in live:
+        if (
+            artifact is None
+            or artifact.owner in live
+            or not _content_matches(conn, volume, artifact.digest)
+        ):
             continue
         try:
             volume.delete(0)
@@ -168,6 +189,25 @@ def reap_orphaned_boot_artifacts(
                 ) from exc
         removed += 1
     return removed
+
+
+def _content_matches(conn: BootArtifactReaperConn, volume: _Volume, expected: str) -> bool:
+    """Confirm the volume's complete bytes before considering it owned and removable."""
+    stream = conn.newStream(0)
+    digest = hashlib.sha256()
+
+    def receive(_stream: object, chunk: bytes, _opaque: object) -> None:
+        digest.update(chunk)
+
+    try:
+        volume.download(stream, 0, 0, 0)
+        stream.recvAll(receive, None)
+        stream.finish()
+    except libvirt.libvirtError, OSError, RuntimeError, AttributeError:
+        with contextlib.suppress(libvirt.libvirtError, AttributeError):
+            stream.abort()
+        return False
+    return digest.hexdigest() == expected.removeprefix("sha256:")
 
 
 __all__ = [
