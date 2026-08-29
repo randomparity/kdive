@@ -1103,6 +1103,11 @@ class ExternalBootActivationRepository:
             if release_row is None:
                 return await self._miss(conn, activation_id)
             release = ExternalBootReservationRelease.model_validate(release_row)
+            if release.release_evidence.system_id != system_id or (
+                release.teardown_evidence is not None
+                and release.teardown_evidence.system_id != system_id
+            ):
+                return CasResult(CasStatus.SUPERSEDED)
             if teardown:
                 state_cur = await conn.execute(
                     "SELECT state FROM systems WHERE id = %s", (system_id,)

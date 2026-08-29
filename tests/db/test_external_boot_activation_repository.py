@@ -463,6 +463,74 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_cleanup_rejects_release_evidence_for_another_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(conn, activation, reservation)
+            terminal = ExternalBootTerminalEvidenceV1(
+                activation_id=activation.id,
+                system_id=system_id,
+                outcome="abandoned",
+                composite_state=_DIGEST,
+                objects=(),
+                observed_at=_AT,
+            )
+            await repo.transition(
+                conn,
+                **_authority(activation),
+                expected_state=ExternalBootActivationState.PREPARING,
+                new_state=ExternalBootActivationState.ABANDONED,
+                terminal_evidence=terminal,
+            )
+            evidence = ExternalBootReleaseEvidenceV1(
+                activation_id=activation.id,
+                system_id=uuid4(),
+                store_identity=OpaqueProviderRef(ref=reservation.store_identity),
+                owner_key=OpaqueProviderRef(ref=reservation.owner_key),
+                reserved_bytes=reservation.reserved_bytes,
+                objects=(),
+                verified_at=_AT,
+            )
+            await conn.execute(
+                "DELETE FROM external_boot_reservations WHERE activation_id = %s",
+                (activation.id,),
+            )
+            await conn.execute(
+                "INSERT INTO external_boot_reservation_releases "
+                "(activation_id, store_identity, owner_key, reserved_bytes, release_identity, "
+                "release_evidence) VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    activation.id,
+                    reservation.store_identity,
+                    reservation.owner_key,
+                    reservation.reserved_bytes,
+                    evidence.identity,
+                    Jsonb(evidence.model_dump(mode="json", by_alias=True)),
+                ),
+            )
+            cleanup = ExternalBootCleanupEvidenceV1(
+                activation_id=activation.id,
+                system_id=system_id,
+                release_identity=evidence.identity,
+                mode="ordinary",
+                completed_at=_AT,
+            )
+            before = await _ledger_snapshot(conn)
+            result = await repo.mark_cleanup_complete(
+                conn,
+                **_authority(activation),
+                expected_state=ExternalBootActivationState.ABANDONED,
+                cleanup_evidence=cleanup,
+            )
+            assert result.status is CasStatus.SUPERSEDED
+            assert await _ledger_snapshot(conn) == before
+
+    asyncio.run(_run())
+
+
 def test_prepared_activation_deadline_and_terminal_evidence_round_trip(
     migrated_url: str,
 ) -> None:
