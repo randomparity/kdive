@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,10 @@ def _patch_run(
 
 
 def test_inspect_package_versions_missing_executable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_run(monkeypatch, [FileNotFoundError("virt-inspector")])
+    def missing(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        raise FileNotFoundError("virt-inspector")
+
+    monkeypatch.setattr(probes.subprocess, "Popen", missing)
 
     with pytest.raises(CategorizedError) as caught:
         probes.inspect_package_versions(Path("image.qcow2"))
@@ -51,9 +55,16 @@ def test_inspect_package_versions_missing_executable(monkeypatch: pytest.MonkeyP
 
 
 def test_inspect_package_versions_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_run(
-        monkeypatch,
-        [subprocess.TimeoutExpired(cmd="virt-inspector", timeout=probes._VIRT_INSPECTOR_TIMEOUT_S)],
+    monkeypatch.setattr(
+        probes,
+        "_run_bounded_inspector",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            CategorizedError(
+                "bounded",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"timeout_s": probes._VIRT_INSPECTOR_TIMEOUT_S},
+            )
+        ),
     )
 
     with pytest.raises(CategorizedError) as caught:
@@ -67,7 +78,17 @@ def test_inspect_package_versions_nonzero_exit_reports_stderr_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     stderr = "x" * 2100
-    _patch_run(monkeypatch, [_completed(returncode=2, stderr=stderr)])
+    monkeypatch.setattr(
+        probes,
+        "_run_bounded_inspector",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            CategorizedError(
+                "failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"stderr": stderr[-2000:]},
+            )
+        ),
+    )
 
     with pytest.raises(CategorizedError) as caught:
         probes.inspect_package_versions(Path("image.qcow2"))
@@ -89,20 +110,67 @@ def test_inspect_package_versions_parses_successful_stdout(
       </operatingsystem>
     </operatingsystems>
     """
-    calls = _patch_run(monkeypatch, [_completed(stdout=xml)])
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def bounded(argv: list[str], **kwargs: Any) -> tuple[bytes, bytes]:
+        calls.append((argv, kwargs))
+        return xml.encode(), b""
+
+    monkeypatch.setattr(probes, "_run_bounded_inspector", bounded)
 
     assert probes.inspect_package_versions(Path("image.qcow2")) == {"kernel": "6.12"}
     assert calls == [
         (
             ["virt-inspector", "--no-icon", "-a", "image.qcow2"],
             {
-                "capture_output": True,
-                "text": True,
-                "timeout": probes._VIRT_INSPECTOR_TIMEOUT_S,
-                "check": False,
+                "timeout_s": probes._VIRT_INSPECTOR_TIMEOUT_S,
+                "max_output_bytes": probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
+                "stage": "package-version-inspection",
+                "failure_category": ErrorCategory.INFRASTRUCTURE_FAILURE,
             },
         )
     ]
+
+
+def test_package_inspection_accepts_exact_combined_cap() -> None:
+    code = f"import sys; sys.stdout.write('x' * {probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES})"
+
+    stdout, stderr = probes._run_bounded_inspector(
+        [sys.executable, "-c", code],
+        timeout_s=5,
+        max_output_bytes=probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
+        stage="package-version-inspection",
+        failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+
+    assert len(stdout) + len(stderr) == probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES
+
+
+def test_package_inspection_rejects_cap_plus_one_without_partial_data() -> None:
+    code = f"import sys; sys.stdout.write('x' * {probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES + 1})"
+
+    with pytest.raises(CategorizedError) as caught:
+        probes._run_bounded_inspector(
+            [sys.executable, "-c", code],
+            timeout_s=5,
+            max_output_bytes=probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
+            stage="package-version-inspection",
+            failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {
+        "max_output_bytes": probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
+    }
+
+
+def test_inspect_package_versions_rejects_malformed_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(probes, "_run_bounded_inspector", lambda *args, **kwargs: (b"<bad", b""))
+
+    with pytest.raises(probes.ParseError):
+        probes.inspect_package_versions(Path("image.qcow2"))
 
 
 type _PathProbe = Callable[[Path], object]
