@@ -115,10 +115,9 @@ Red:
 4. For each mutator, test wrong System, activation, owner, generation, expected state, and cleaned
    state. Snapshot all four tables before a stale-generation call and prove every row/evidence value
    remains byte-for-byte unchanged afterward.
-5. Add deterministic two-connection tests that hold the exact System lock and prove a lifecycle
-   mutator waits, then hold the exact recovery-store lock and prove a dual-lock capacity mutator
-   waits only after taking its System lock. Pin the `SYSTEM -> RECOVERY_STORE` order in the lock
-   module documentation and tests.
+5. Add deterministic tests that the recovery-store namespace is distinct from existing scopes and
+   a two-connection test that holds the exact System lock and proves a Task-3 lifecycle mutator
+   waits. Pin the later `SYSTEM -> RECOVERY_STORE` order in the lock module documentation.
 6. Run the focused repository and lock tests and observe failure.
 
 Green:
@@ -140,12 +139,15 @@ Green:
 Files:
 
 - Modify `src/kdive/db/external_boot_activations.py`.
+- Extend `tests/db/test_locks.py`.
 - Extend `tests/db/test_external_boot_activation_repository.py`.
 
 Red:
 
 1. Test pending-to-ready admission at exact cap, rejection over cap, idempotent retry, and two-
-   System concurrent admission serialized by one store identity.
+   System concurrent admission serialized by one store identity. In a deterministic two-connection
+   lock test, hold the exact recovery-store lock and prove the capacity mutator waits after taking
+   its System lock, directly exercising the documented dual-lock order.
 2. Test immutable activation deadlines and per-attempt recovery deadlines, ordinary recovery,
    two distinct conflict-resolution attempts, mandatory resolution operation/idempotency identity/
    acknowledged composite state, and both terminal results from a pre-recovery basis without a
