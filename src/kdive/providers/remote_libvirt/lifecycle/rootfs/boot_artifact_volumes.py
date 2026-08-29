@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import libvirt
 
@@ -78,11 +78,11 @@ def artifact_volume_name(kind: BootArtifactKind, system_id: UUID, run_id: UUID) 
 
 
 def artifact_partial_volume_name(
-    kind: BootArtifactKind, system_id: UUID, run_id: UUID, payload: bytes
+    kind: BootArtifactKind, system_id: UUID, run_id: UUID, payload: bytes, attempt_id: UUID
 ) -> str:
-    """Return the deterministic, attempt-owned staging volume name."""
+    """Return the attempt-owned staging volume name."""
     digest = hashlib.sha256(payload).hexdigest()
-    return f"{artifact_volume_name(kind, system_id, run_id)}-partial-{digest}"
+    return f"{artifact_volume_name(kind, system_id, run_id)}-partial-{attempt_id}-{digest}"
 
 
 def artifact_volume_ref(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -> OpaqueProviderRef:
@@ -195,7 +195,8 @@ def _materialize_one(
     run_id: UUID,
     kind: BootArtifactKind,
     payload: bytes,
-) -> tuple[OpaqueProviderRef, bool]:
+    attempt_id: UUID,
+) -> OpaqueProviderRef:
     name = artifact_volume_name(kind, system_id, run_id)
     ref = artifact_volume_ref(kind, system_id, run_id)
     try:
@@ -210,8 +211,8 @@ def _materialize_one(
             raise _infra("rehashing the existing artifact", kind=kind, pool=pool_name) from exc
         if not matches:
             raise _conflict(kind, pool_name)
-        return ref, False
-    partial_name = artifact_partial_volume_name(kind, system_id, run_id, payload)
+        return ref
+    partial_name = artifact_partial_volume_name(kind, system_id, run_id, payload, attempt_id)
     staged: _ArtifactVolume | None = None
     try:
         partial = _lookup(pool, partial_name)
@@ -220,9 +221,13 @@ def _materialize_one(
             # of this exact artifact.  It is never a published volume and is safe to replace.
             partial.delete(0)
         staged = _upload_volume(conn, pool, partial_name, payload, kind=kind, pool_name=pool_name)
-        pool.createXMLFrom(
+        published = pool.createXMLFrom(
             render_boot_artifact_volume_xml(name, capacity_bytes=len(payload)), staged
         )
+        if not _rehash_volume(conn, published, payload):
+            with contextlib.suppress(libvirt.libvirtError):
+                published.delete(0)
+            raise _infra("verifying the published artifact", kind=kind, pool=pool_name)
         try:
             staged.delete(0)
         except libvirt.libvirtError as exc:
@@ -234,22 +239,22 @@ def _materialize_one(
             with contextlib.suppress(libvirt.libvirtError):
                 staged.delete(0)
         raise _infra("publishing the artifact", kind=kind, pool=pool_name) from exc
-    return ref, True
+    return ref
 
 
 def create_boot_artifact_volume(
     conn: BootArtifactVolumeConn, pool_name: str, artifact: BootArtifact
 ) -> OpaqueProviderRef:
     """Create or identity-check one deterministic artifact volume."""
-    ref, _created = _materialize_one(
+    return _materialize_one(
         conn,
         pool_name,
         artifact.system_id,
         artifact.run_id,
         artifact.kind,
         bytes(artifact.payload),
+        uuid4(),
     )
-    return ref
 
 
 def _read_payload(value: bytes | bytearray | memoryview | Path) -> bytes:
@@ -272,6 +277,7 @@ def materialize_boot_artifacts(
     run_id: UUID,
     kernel: bytes | bytearray | memoryview | Path,
     initrd: bytes | bytearray | memoryview | Path | None,
+    attempt_id: UUID | None = None,
 ) -> MaterializedBootArtifacts:
     """Transfer exact kernel and optional initrd bytes over the existing mTLS connection.
 
@@ -286,23 +292,15 @@ def materialize_boot_artifacts(
             "kernel boot artifact must not be empty",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    kernel_ref, kernel_created = _materialize_one(
-        conn, pool_name, system_id, run_id, "kernel", kernel_payload
+    attempt = attempt_id or uuid4()
+    kernel_ref = _materialize_one(
+        conn, pool_name, system_id, run_id, "kernel", kernel_payload, attempt
     )
-    try:
-        initrd_ref = (
-            _materialize_one(conn, pool_name, system_id, run_id, "initrd", _read_payload(initrd))[0]
-            if initrd is not None
-            else None
+    initrd_ref = (
+        _materialize_one(
+            conn, pool_name, system_id, run_id, "initrd", _read_payload(initrd), attempt
         )
-    except Exception:
-        # The kernel can be removed only when this invocation created it.  An existing matching
-        # volume belongs to a prior completed attempt and must remain untouched on an initrd fault.
-        if kernel_created:
-            with contextlib.suppress(libvirt.libvirtError):
-                pool = conn.storagePoolLookupByName(pool_name)
-                existing = _lookup(pool, artifact_volume_name("kernel", system_id, run_id))
-                if existing is not None:
-                    existing.delete(0)
-        raise
+        if initrd is not None
+        else None
+    )
     return MaterializedBootArtifacts(kernel=kernel_ref, initrd=initrd_ref)

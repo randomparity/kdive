@@ -48,11 +48,12 @@ class _Volume:
     def __init__(self, data: bytes = b"") -> None:
         self.data = data
         self.deleted = False
+        self.upload_stream: _Stream | None = None
 
     def upload(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
         del offset, length, flags
         assert isinstance(stream, _Stream)
-        stream.data = self.data
+        self.upload_stream = stream
         return 0
 
     def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
@@ -84,9 +85,10 @@ class _Pool:
         return self.created
 
     def createXMLFrom(self, xml: str, volume: object, flags: int = 0) -> _Volume:  # noqa: N802
-        del volume, flags
+        del flags
+        assert isinstance(volume, _Volume)
         self.created_xml.append(xml)
-        self.created = _Volume()
+        self.created = _Volume(volume.upload_stream.sent if volume.upload_stream else b"")
         return self.created
 
 
@@ -105,7 +107,7 @@ class _Conn:
 
 def test_materializes_kernel_and_optional_initrd_with_opaque_deterministic_refs() -> None:
     pool = _Pool()
-    conn = _Conn(pool, [_Stream(), _Stream()])
+    conn = _Conn(pool, [_Stream(), _Stream(), _Stream(), _Stream(), _Stream(), _Stream()])
 
     result = materialize_boot_artifacts(
         conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"kernel", initrd=b"initrd"
