@@ -67,6 +67,18 @@ async def resolve_root_provenance(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "malformed_root_provenance"},
         ) from exc
+    argument_keys = [argument.split("=", 1)[0] for argument in root_spec.arguments]
+    if (
+        argument_keys.count("root") != 1
+        or len(argument_keys) != len(set(argument_keys))
+        or root_spec.arguments.count(f"root={root_spec.root}") != 1
+    ):
+        raise CategorizedError(
+            "catalog root provenance has conflicting storage arguments; rebuild the image and "
+            "retry provisioning",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "conflicting_root_provenance_arguments"},
+        )
     digest = str(row["digest"])
     architecture = str(row["arch"])
     if root_spec.authority != "stage-inspection" or root_spec.source.kind != "staged-image":

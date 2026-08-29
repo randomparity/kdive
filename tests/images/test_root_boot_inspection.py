@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
 
@@ -50,6 +51,19 @@ def test_bounded_runner_keeps_deadline_after_output_closes() -> None:
     with pytest.raises(CategorizedError) as exc:
         _run_bounded_inspector([sys.executable, "-c", code], timeout_s=0.01)
     assert exc.value.details["reason"] == "timeout"
+
+
+def test_bounded_runner_kills_descendants(tmp_path: Path) -> None:
+    sentinel = tmp_path / "descendant-survived"
+    code = (
+        "import os,time; pid=os.fork(); "
+        "pid and time.sleep(5); os.close(1); os.close(2); time.sleep(.2); "
+        f"open({str(sentinel)!r},'w').close()"
+    )
+    with pytest.raises(CategorizedError):
+        _run_bounded_inspector([sys.executable, "-c", code], timeout_s=0.01)
+    time.sleep(0.3)
+    assert not sentinel.exists()
 
 
 def test_parser_builds_digest_bound_root_spec() -> None:

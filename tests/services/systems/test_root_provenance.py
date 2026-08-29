@@ -120,6 +120,30 @@ def test_duplicate_digest_authorities_fail_closed() -> None:
                 }
             }
         ),
+        _row(
+            provenance={
+                "root_spec": {
+                    "schema": "root-spec-v1",
+                    "architecture": "x86_64",
+                    "root": "UUID=abc",
+                    "arguments": ["root=UUID=abc", "root=/dev/evil"],
+                    "authority": "stage-inspection",
+                    "source": {"kind": "staged-image", "identity": _DIGEST},
+                }
+            }
+        ),
+        _row(
+            provenance={
+                "root_spec": {
+                    "schema": "root-spec-v1",
+                    "architecture": "x86_64",
+                    "root": "UUID=abc",
+                    "arguments": ["root=UUID=abc", "rootfstype=xfs", "rootfstype=ext4"],
+                    "authority": "stage-inspection",
+                    "source": {"kind": "staged-image", "identity": _DIGEST},
+                }
+            }
+        ),
     ],
 )
 def test_incompatible_or_stale_authority_fails_closed(row: dict[str, object]) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import selectors
+import signal
 import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Callable
@@ -108,6 +109,7 @@ def _run_bounded_inspector(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise CategorizedError(
@@ -143,7 +145,7 @@ def _run_bounded_inspector(
                 if sum(len(value) for value in streams.values()) > max_output_bytes:
                     raise OverflowError
     except (TimeoutError, OverflowError) as exc:
-        process.kill()
+        os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         reason = "timeout" if isinstance(exc, TimeoutError) else "output_limit"
         raise CategorizedError(
@@ -156,7 +158,7 @@ def _run_bounded_inspector(
     try:
         returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
-        process.kill()
+        os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         raise CategorizedError(
             "root boot inspection exceeded its bounded execution contract; rebuild and retry",
