@@ -608,6 +608,32 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
             assert observed.status is CasStatus.APPLIED
 
             second_attempt = uuid4()
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="current conflict evidence"):
+                await repo.begin_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                    attempt_id=second_attempt,
+                    recovery_readiness_deadline=_AT + timedelta(minutes=10),
+                    resolution_operation="accept-observed-state",
+                    resolution_identity="sha256:" + "c" * 64,
+                    acknowledged_composite_state="sha256:" + "d" * 64,
+                )
+            assert await _ledger_snapshot(conn) == before
+            for invalid_operation in ("", "x" * 256):
+                with pytest.raises(ValueError, match="1 through 255"):
+                    await repo.begin_recovery_attempt(
+                        conn,
+                        **_authority(activation),
+                        expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                        attempt_id=second_attempt,
+                        recovery_readiness_deadline=_AT + timedelta(minutes=10),
+                        resolution_operation=invalid_operation,
+                        resolution_identity="sha256:" + "c" * 64,
+                        acknowledged_composite_state=_DIGEST,
+                    )
+                assert await _ledger_snapshot(conn) == before
             begun = await repo.begin_recovery_attempt(
                 conn,
                 **_authority(activation),

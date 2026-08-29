@@ -178,7 +178,9 @@ CREATE TABLE external_boot_recovery_attempts (
                                       CHECK (authority_generation > 0),
     recovery_basis                text NOT NULL CONSTRAINT external_boot_attempt_basis
                                       CHECK (recovery_basis IN ('recovery_point', 'pre_recovery')),
-    resolution_operation          text,
+    resolution_operation          text CONSTRAINT external_boot_attempt_resolution_operation
+                                      CHECK (resolution_operation IS NULL
+                                             OR char_length(resolution_operation) BETWEEN 1 AND 255),
     resolution_identity           text CONSTRAINT external_boot_attempt_resolution_digest
                                       CHECK (resolution_identity IS NULL
                                              OR resolution_identity ~ '^sha256:[0-9a-f]{64}$'),

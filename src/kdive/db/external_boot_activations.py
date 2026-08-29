@@ -612,6 +612,8 @@ class ExternalBootActivationRepository:
         if expected_state is ExternalBootActivationState.RECOVERY_CONFLICT:
             if not all(value is not None for value in resolution):
                 raise ValueError("conflict recovery requires all resolution fields")
+            if not 1 <= len(resolution_operation or "") <= 255:
+                raise ValueError("resolution_operation must contain 1 through 255 characters")
         elif any(value is not None for value in resolution):
             raise ValueError("ordinary recovery forbids resolution fields")
         async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
@@ -643,6 +645,15 @@ class ExternalBootActivationRepository:
             )
             if row is None:
                 return await self._miss(conn, activation_id)
+            if expected_state is ExternalBootActivationState.RECOVERY_CONFLICT and (
+                current is None
+                or current.state is not ExternalBootRecoveryAttemptState.CONFLICT
+                or current.conflict_evidence is None
+                or current.conflict_evidence.composite_state != acknowledged_composite_state
+            ):
+                raise ValueError(
+                    "acknowledged_composite_state must match current conflict evidence"
+                )
             if not await self._require_ready_reservation(conn, activation_id):
                 return CasResult(CasStatus.SUPERSEDED)
             basis = "recovery_point" if row["recovery_point"] is not None else "pre_recovery"
