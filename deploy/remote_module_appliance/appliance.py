@@ -393,10 +393,57 @@ def _existing_checkpoint(document: dict[str, object]) -> dict[str, object] | Non
         raise ApplianceError("RECOVERY_CONFLICT") from error
     if not isinstance(checkpoint, dict):
         raise ApplianceError("RECOVERY_CONFLICT")
+    allowed = {
+        "protocol",
+        "status",
+        "phase",
+        "error_code",
+        *set(_identity(document)),
+        "installed_manifest",
+        "capture_manifest",
+        "capture_absent",
+        "entry_count",
+        "content_bytes",
+    }
+    status = checkpoint.get("status")
+    valid_status = status == "success" and "error_code" not in checkpoint
+    valid_status = valid_status or (
+        status == "failure" and checkpoint.get("error_code") in ERROR_CODES
+    )
+    if (
+        set(checkpoint) - allowed
+        or checkpoint.get("protocol") != "remote-module-result-v1"
+        or checkpoint.get("phase")
+        not in {
+            "captured",
+            "staging-intent",
+            "replacement-ready",
+            "installed",
+            "restore-ready",
+            "restored",
+        }
+        or not valid_status
+    ):
+        raise ApplianceError("RECOVERY_CONFLICT")
     expected = _identity(document)
     if any(checkpoint.get(key) != value for key, value in expected.items()):
         raise ApplianceError("IDENTITY_MISMATCH")
     return checkpoint
+
+
+def _count_fields(checkpoint: dict[str, object]) -> dict[str, int]:
+    count = checkpoint.get("entry_count")
+    content_bytes = checkpoint.get("content_bytes")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or not 0 <= count <= ENTRY_LIMIT
+        or not isinstance(content_bytes, int)
+        or isinstance(content_bytes, bool)
+        or not 0 <= content_bytes <= BYTE_LIMIT
+    ):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    return {"entry_count": count, "content_bytes": content_bytes}
 
 
 def _capture_fields(checkpoint: dict[str, object]) -> dict[str, object]:
@@ -505,8 +552,7 @@ def _transition_replacement(
         document,
         "installed",
         installed_manifest=installed,
-        entry_count=checkpoint["entry_count"],
-        content_bytes=checkpoint["content_bytes"],
+        **_count_fields(checkpoint),
         **fields,
     )
     _remove_owned_tree(displaced)
@@ -533,8 +579,7 @@ def _finish_installed(
         document,
         "installed",
         installed_manifest=installed,
-        entry_count=checkpoint["entry_count"],
-        content_bytes=checkpoint["content_bytes"],
+        **_count_fields(checkpoint),
         **fields,
     )
     _remove_owned_tree(displaced)

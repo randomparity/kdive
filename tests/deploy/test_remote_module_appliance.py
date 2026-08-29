@@ -531,6 +531,20 @@ def test_unmount_failure_replaces_success_with_flush_failure(
     assert persisted["error_code"] == "FLUSH_FAILURE"
 
 
+def test_retry_rejects_a_malformed_durable_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, _destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    appliance.execute(appliance._validate_operation(operation))
+    checkpoint_path = scratch / "result-v1.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint.pop("entry_count")
+    checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance.execute(appliance._validate_operation(operation))
+
+
 def test_success_result_shapes_require_terminal_phase_fields() -> None:
     validator = Draft202012Validator(_json("result-v1.schema.json"))
     operation = _operation()
