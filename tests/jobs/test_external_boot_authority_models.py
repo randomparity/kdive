@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import AbstractAsyncContextManager
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -109,6 +109,34 @@ class _Pool:
         return _ConnectionContext()
 
 
+class _RecordingCursor(AbstractAsyncContextManager["_RecordingCursor"]):
+    def __init__(self) -> None:
+        self.params: tuple[object, ...] | None = None
+
+    async def __aenter__(self) -> _RecordingCursor:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def execute(self, _query: str, params: tuple[object, ...]) -> None:
+        self.params = params
+
+    async def fetchone(self) -> dict[str, str]:
+        return {"status": "superseded", "job_state": "running"}
+
+
+class _RecordingConnection:
+    def __init__(self) -> None:
+        self.recording_cursor = _RecordingCursor()
+
+    def transaction(self) -> _ConnectionContext:
+        return _ConnectionContext()
+
+    def cursor(self, **_kwargs: object) -> _RecordingCursor:
+        return self.recording_cursor
+
+
 def _job(marker: object = ...) -> Job:
     payload: dict[str, object] = {"run_id": str(uuid4())}
     if marker is not ...:
@@ -148,6 +176,29 @@ def _success(operation: str = "deadline") -> ExternalBootAuthoritySuccessV1:
         "deadline": "2026-08-29T00:01:00Z",
     }
     return ExternalBootAuthoritySuccessV1.model_validate(_carrier(result))
+
+
+def test_queue_serializes_schema_alias_and_canonical_utc_timestamp() -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        conn = _RecordingConnection()
+        assert (
+            await queue.commit_external_boot_authority_result(
+                cast(Any, conn),
+                _job(_marker(carrier)),
+                carrier,
+                incarnation_credential=SecretStr("credential"),
+            )
+            is None
+        )
+        assert conn.recording_cursor.params is not None
+        assert conn.recording_cursor.params[-2] == carrier.admitted_operation
+        payload = cast(Any, conn.recording_cursor.params[-1]).obj
+        assert payload["schema"] == "external-boot-authority-result-v1"
+        assert "schema_" not in payload
+        assert payload["deadline"].endswith("Z")
+
+    asyncio.run(exercise())
 
 
 def _teardown() -> ExternalBootAuthoritySuccessV1:

@@ -276,7 +276,7 @@ async def commit_external_boot_authority_result(
         await cur.execute(
             "SELECT status, job_state FROM public.commit_external_boot_authority_result("
             "sha256(convert_to(%s, 'UTF8')), %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "%s, %s, %s, %s, %s, %s, %s)",
+            "%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 incarnation_credential.get_secret_value(),
                 job.id,
@@ -294,7 +294,8 @@ async def commit_external_boot_authority_result(
                 result.operation_digest,
                 result.journal_sequence,
                 result.journal_digest,
-                Jsonb(result.result.model_dump(mode="json", exclude_none=True)),
+                result.admitted_operation,
+                Jsonb(result.result.model_dump(mode="json", by_alias=True, exclude_none=True)),
             ),
         )
         status_row = await cur.fetchone()

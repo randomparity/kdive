@@ -33,7 +33,7 @@ _ACKNOWLEDGE_SIGNATURE = (
 )
 _COMMIT_SIGNATURE = (
     "commit_external_boot_authority_result(bytea,uuid,integer,uuid,bigint,uuid,uuid,uuid,"
-    "text,text,text,text,text,text,bigint,text,jsonb)"
+    "text,text,text,text,text,text,bigint,text,text,jsonb)"
 )
 
 
@@ -428,10 +428,11 @@ def _commit(
     plan_identity: str = _PLAN,
     operation_identity: str | None = None,
     journal_sequence: int = 1,
+    admitted_operation: str | None = None,
 ) -> tuple[str, str | None]:
     row = worker.execute(
         "SELECT status, job_state FROM commit_external_boot_authority_result("
-        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             credential or case.credential,
             job_id or case.job_id,
@@ -449,6 +450,7 @@ def _commit(
             operation_digest or authority.operation_digest,
             journal_sequence,
             journal_digest,
+            admitted_operation or result.get("operation", case.operation),
             Jsonb(result),
         ),
     ).fetchone()
@@ -2506,6 +2508,31 @@ def test_retry_failure_requeues_job_and_audits_in_one_commit(
             "WHERE authority_id=%s ORDER BY created_at DESC LIMIT 1",
             (authority.authority_id,),
         ).fetchone() == ("result_requeued",)
+
+
+def test_failure_authenticates_admitted_operation_separately_from_fail_result(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, operation="activate", worker_suffix="w")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "fail",
+                "error_category": "infrastructure_failure",
+                "failure_context": {"phase": "provider-call"},
+                "terminal": False,
+            },
+            admitted_operation="activate",
+        ) == ("applied", "queued")
 
 
 @pytest.mark.parametrize("release_identity_kind", ["missing", "null"])

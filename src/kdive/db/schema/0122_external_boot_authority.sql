@@ -745,6 +745,7 @@ CREATE FUNCTION public.commit_external_boot_authority_result(
     p_operation_digest text,
     p_journal_sequence bigint,
     p_journal_digest text,
+    p_admitted_operation text,
     p_result jsonb
 ) RETURNS TABLE (status text, job_state text)
 LANGUAGE plpgsql
@@ -796,6 +797,11 @@ BEGIN
        OR p_operation_digest !~ '^sha256:[0-9a-f]{64}$'
        OR p_journal_sequence IS NULL OR p_journal_sequence <= 0
        OR p_journal_digest IS NULL OR p_journal_digest !~ '^sha256:[0-9a-f]{64}$'
+       OR p_admitted_operation IS NULL
+       OR p_admitted_operation NOT IN (
+           'activate', 'recover', 'resolve-conflict', 'release', 'cleanup', 'teardown',
+           'deadline', 'recovery-attempt', 'fail'
+       )
        OR p_result IS NULL OR jsonb_typeof(p_result) <> 'object'
        OR pg_column_size(p_result) > 131072
        OR p_result ->> 'schema' IS DISTINCT FROM 'external-boot-authority-result-v1'
@@ -808,6 +814,10 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
     v_operation := p_result ->> 'operation';
+    IF v_operation <> 'fail' AND v_operation <> p_admitted_operation THEN
+        RAISE EXCEPTION 'external boot authority result operation is invalid'
+            USING ERRCODE = '22023';
+    END IF;
     v_result_ref := p_result ->> 'result_ref';
     IF (p_result ? 'result_ref'
         AND jsonb_typeof(p_result -> 'result_ref') NOT IN ('string', 'null'))
@@ -916,7 +926,7 @@ BEGIN
        OR v_authority.purpose <> p_purpose OR v_authority.provider_kind <> p_provider_kind
        OR v_authority.authority_instance <> p_authority_instance
        OR v_authority.worker_incarnation <> v_incarnation
-       OR v_authority.operation <> v_operation
+       OR v_authority.operation <> p_admitted_operation
        OR v_authority.operation_identity <> p_operation_identity
        OR v_authority.operation_digest <> p_operation_digest
        OR v_activation.system_id <> p_system_id OR v_activation.run_id <> p_run_id
@@ -928,6 +938,7 @@ BEGIN
        OR v_marker ->> 'purpose' IS DISTINCT FROM p_purpose
        OR v_marker ->> 'provider_kind' IS DISTINCT FROM p_provider_kind
        OR v_marker ->> 'authority_instance' IS DISTINCT FROM p_authority_instance
+       OR v_marker ->> 'operation' IS DISTINCT FROM p_admitted_operation
        OR v_marker ->> 'operation_identity' IS DISTINCT FROM p_operation_identity
        OR v_ack.system_id <> p_system_id OR v_ack.generation <> p_generation
        OR v_ack.authority_instance <> p_authority_instance
@@ -1715,7 +1726,7 @@ REVOKE ALL ON FUNCTION
     ),
     public.commit_external_boot_authority_result(
         bytea, uuid, integer, uuid, bigint, uuid, uuid, uuid, text, text, text, text,
-        text, text, bigint, text, jsonb
+        text, text, bigint, text, text, jsonb
     )
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
     kdive_provider_authority;
@@ -1729,5 +1740,5 @@ GRANT EXECUTE ON FUNCTION public.acknowledge_external_boot_authority(
 ) TO kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION public.commit_external_boot_authority_result(
     bytea, uuid, integer, uuid, bigint, uuid, uuid, uuid, text, text, text, text,
-    text, text, bigint, text, jsonb
+    text, text, bigint, text, text, jsonb
 ) TO kdive_worker;
