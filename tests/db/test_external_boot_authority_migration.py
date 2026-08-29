@@ -860,6 +860,108 @@ def test_semantically_incomplete_lifecycle_evidence_is_rejected_before_writes(
         ).fetchone() == (0,)
 
 
+@pytest.mark.parametrize(
+    ("location", "field"),
+    [
+        pytest.param("result", "credential", id="credential-at-result-root"),
+        pytest.param("evidence", "provider_secret", id="provider-secret-in-evidence"),
+        pytest.param("object", "command", id="command-in-nested-object"),
+        pytest.param("object", "path", id="path-in-nested-object"),
+        pytest.param("object", "raw_definition", id="raw-definition-in-nested-object"),
+        pytest.param("object", "unexpected", id="unknown-nested-object-field"),
+        pytest.param("result", "unexpected", id="unknown-result-field"),
+        pytest.param("evidence", "unexpected", id="unknown-evidence-field"),
+        pytest.param("failure_context", "credential", id="credential-in-failure-context"),
+        pytest.param("failure_context", "provider_secret", id="provider-secret-in-failure-context"),
+        pytest.param("failure_context", "command", id="command-in-failure-context"),
+        pytest.param("failure_context", "path", id="path-in-failure-context"),
+        pytest.param("failure_context", "raw_definition", id="definition-in-failure-context"),
+    ],
+)
+def test_unexpected_or_forbidden_result_content_is_rejected_without_writes(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    location: str,
+    field: str,
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(
+            conn,
+            operation="fail" if location == "failure_context" else None,
+            worker_suffix="u",
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+
+    result: dict[str, object]
+    if location == "failure_context":
+        result = {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "fail",
+            "error_category": "infrastructure_failure",
+            "failure_context": {field: "forbidden"},
+            "terminal": True,
+        }
+    else:
+        evidence = _terminal_evidence(case, "active")
+        result = {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": "activate-result",
+            "evidence": evidence,
+            "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
+        }
+        if location == "result":
+            result[field] = "forbidden"
+        elif location == "evidence":
+            evidence[field] = "forbidden"
+        else:
+            evidence["objects"] = [{"ref": "objects/a", field: "forbidden"}]
+
+    with psycopg.connect(migrated_url) as conn:
+        before = conn.execute(
+            "SELECT e.state, e.terminal_evidence, e.activation_readiness_deadline, "
+            "e.cleanup_complete, e.cleanup_evidence, e.teardown_evidence, j.state, "
+            "j.result_ref, j.error_category, j.failure_context, r.state, r.failure_category, "
+            "a.state, a.retired_at, (SELECT count(*) FROM external_boot_authority_audit "
+            "WHERE authority_id=%s) FROM external_boot_activations AS e "
+            "JOIN jobs AS j ON j.id=%s JOIN runs AS r ON r.id=%s "
+            "JOIN external_boot_authorities AS a ON a.id=%s WHERE e.id=%s",
+            (
+                authority.authority_id,
+                case.job_id,
+                case.run_id,
+                authority.authority_id,
+                case.activation_id,
+            ),
+        ).fetchone()
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InvalidParameterValue),
+    ):
+        _commit(worker, case, authority, result)
+    with psycopg.connect(migrated_url) as conn:
+        after = conn.execute(
+            "SELECT e.state, e.terminal_evidence, e.activation_readiness_deadline, "
+            "e.cleanup_complete, e.cleanup_evidence, e.teardown_evidence, j.state, "
+            "j.result_ref, j.error_category, j.failure_context, r.state, r.failure_category, "
+            "a.state, a.retired_at, (SELECT count(*) FROM external_boot_authority_audit "
+            "WHERE authority_id=%s) FROM external_boot_activations AS e "
+            "JOIN jobs AS j ON j.id=%s JOIN runs AS r ON r.id=%s "
+            "JOIN external_boot_authorities AS a ON a.id=%s WHERE e.id=%s",
+            (
+                authority.authority_id,
+                case.job_id,
+                case.run_id,
+                authority.authority_id,
+                case.activation_id,
+            ),
+        ).fetchone()
+    assert after == before
+
+
 def test_recovery_attempt_creation_uses_locked_generation_and_next_sequence(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
