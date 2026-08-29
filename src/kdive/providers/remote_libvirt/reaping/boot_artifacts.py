@@ -168,27 +168,35 @@ def reap_orphaned_boot_artifacts(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"pool": pool_name},
         ) from exc
-    removed = 0
-    live = set(live_owners)
-    for volume in pool.listAllVolumes(0):
-        artifact = _parse(volume)
-        if (
-            artifact is None
-            or artifact.owner in live
-            or not _content_matches(conn, volume, artifact.digest)
-        ):
-            continue
-        try:
-            volume.delete(0)
-        except libvirt.libvirtError as exc:
-            if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
-                raise CategorizedError(
-                    "could not delete orphaned remote boot artifact",
-                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                    details={"pool": pool_name, "volume": artifact.name},
-                ) from exc
-        removed += 1
-    return removed
+    try:
+        volumes = pool.listAllVolumes(0)
+        removed = 0
+        live = set(live_owners)
+        for volume in volumes:
+            artifact = _parse(volume)
+            if (
+                artifact is None
+                or artifact.owner in live
+                or not _content_matches(conn, volume, artifact.digest)
+            ):
+                continue
+            try:
+                volume.delete(0)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    raise CategorizedError(
+                        "could not delete orphaned remote boot artifact",
+                        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                        details={"pool": pool_name, "volume": artifact.name},
+                    ) from exc
+            removed += 1
+        return removed
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "could not enumerate remote boot-artifact storage for reaping",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"pool": pool_name},
+        ) from exc
 
 
 def _content_matches(conn: BootArtifactReaperConn, volume: _Volume, expected: str) -> bool:
