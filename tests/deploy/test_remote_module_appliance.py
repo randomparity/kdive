@@ -80,6 +80,17 @@ def test_protocol_is_closed_and_rejects_caller_paths_or_commands() -> None:
     assert list(validator.iter_errors(document))
 
 
+def test_operation_document_is_regular_file_only_and_nofollow(tmp_path: Path) -> None:
+    appliance = _module()
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(_operation()) + "\n", encoding="utf-8")
+    operation = tmp_path / "operation-v1.json"
+    operation.symlink_to(outside)
+
+    with pytest.raises(appliance.ApplianceError, match="INVALID_DOCUMENT"):
+        appliance._read_operation(operation)
+
+
 def test_result_schema_has_stable_closed_errors_and_failure_coupling() -> None:
     schema = _json("result-v1.schema.json")
     definitions = cast(dict[str, object], schema["$defs"])
@@ -817,6 +828,24 @@ def test_recovery_xattrs_share_a_bounded_manifest_budget(
 
     with pytest.raises(appliance.ApplianceError, match="LIMIT_EXCEEDED"):
         appliance._tree_manifest(tree, "recovery")
+
+
+def test_regular_file_limit_is_checked_before_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    tree = tmp_path / "modules"
+    tree.mkdir()
+    (tree / "oversized.ko").write_bytes(b"too large")
+    monkeypatch.setattr(appliance, "BYTE_LIMIT", 1)
+    monkeypatch.setattr(
+        appliance,
+        "_manifest_entry",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("hashed before limit")),
+    )
+
+    with pytest.raises(appliance.ApplianceError, match="LIMIT_EXCEEDED"):
+        appliance._tree_manifest(tree)
 
 
 def test_release_and_manifest_path_grammar_matches_v1(tmp_path: Path) -> None:

@@ -68,10 +68,17 @@ def _valid_manifest_text(value: str) -> bool:
 
 def _read_operation(path: Path) -> dict[str, object]:
     try:
-        with path.open("rb") as stream:
-            data = stream.read(DOCUMENT_LIMIT + 1)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as error:
         raise ApplianceError("INVALID_DOCUMENT") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ApplianceError("INVALID_DOCUMENT")
+        data = os.read(descriptor, DOCUMENT_LIMIT + 1)
+    except OSError as error:
+        raise ApplianceError("INVALID_DOCUMENT") from error
+    finally:
+        os.close(descriptor)
     if len(data) > DOCUMENT_LIMIT or b"\x00" in data or not data.endswith(b"\n"):
         raise ApplianceError("INVALID_DOCUMENT")
     try:
@@ -256,13 +263,17 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
     while stack:
         directory = stack.pop()
         try:
-            children = sorted(os.scandir(directory), key=lambda entry: entry.name)
+            children: list[os.DirEntry[str]] = []
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    entries += 1
+                    if entries > ENTRY_LIMIT:
+                        raise ApplianceError("LIMIT_EXCEEDED")
+                    children.append(entry)
+            children.sort(key=lambda entry: entry.name)
         except OSError as error:
             raise ApplianceError("FILESYSTEM_FAILURE") from error
         for entry in children:
-            entries += 1
-            if entries > ENTRY_LIMIT:
-                raise ApplianceError("LIMIT_EXCEEDED")
             metadata = entry.stat(follow_symlinks=False)
             if stat.S_ISDIR(metadata.st_mode):
                 stack.append(Path(entry.path))
@@ -271,6 +282,8 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
                 if inode in regular_inodes:
                     raise ApplianceError("SOURCE_INVALID")
                 regular_inodes.add(inode)
+                if content_bytes + metadata.st_size > BYTE_LIMIT:
+                    raise ApplianceError("LIMIT_EXCEEDED")
             document, size, entry_xattr_bytes = _manifest_entry(root, entry, kind)
             content_bytes += size
             xattr_bytes += entry_xattr_bytes
