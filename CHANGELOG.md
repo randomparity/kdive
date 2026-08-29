@@ -158,6 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add external boot contracts
 - Bind verified remote root provenance
 - Materialize boot artifact volumes
+- Add module restoration appliance
 
 ### Changed
 
@@ -1535,6 +1536,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify published boot artifact bytes
 - Clean kernel after initrd failure
 - Clean failed final volume publication
+- Harden appliance recovery
+- Validate retry checkpoints
+- Keep domain placeholders internal
+- Close appliance crash boundaries
+- Preserve appliance recovery evidence
+- Resume pre-checkpoint failures
+- Validate accepted retry state
+- Bound appliance trust inputs
+- Bound appliance file reads
+- Secure absent capture marker
 
 ### Security
 
