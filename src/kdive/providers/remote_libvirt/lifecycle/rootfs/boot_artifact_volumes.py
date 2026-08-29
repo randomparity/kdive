@@ -192,7 +192,7 @@ def _materialize_one(
     if existing is not None:
         try:
             matches = _rehash_volume(conn, existing, payload)
-        except libvirt.libvirtError as exc:
+        except (libvirt.libvirtError, OSError) as exc:
             raise _infra("rehashing the existing artifact", kind=kind, pool=pool_name) from exc
         if not matches:
             raise _conflict(kind, pool_name)
