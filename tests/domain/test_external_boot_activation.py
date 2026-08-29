@@ -23,6 +23,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootReleaseObject,
     ExternalBootReservation,
+    ExternalBootReservationRelease,
     ExternalBootReservationState,
     ExternalBootTeardownEvidenceV1,
     ExternalBootTerminalEvidenceV1,
@@ -248,6 +249,36 @@ def test_activation_row_enforces_cleanup_matrix_and_positive_generation() -> Non
         ExternalBootActivation.model_validate(common | {"cleanup_complete": True})
     with pytest.raises(ValidationError, match="greater than 0"):
         ExternalBootActivation.model_validate(common | {"authority_generation": 0})
+    with pytest.raises(ValidationError, match="materialization"):
+        ExternalBootActivation.model_validate(
+            common | {"state": "active", "activation_readiness_deadline": _AT}
+        )
+
+
+def test_release_row_binds_identity_and_evidence_fields() -> None:
+    evidence = ExternalBootReleaseEvidenceV1(
+        activation_id=_ACTIVATION_ID,
+        system_id=_SYSTEM_ID,
+        store_identity=OpaqueProviderRef(ref="stores/main"),
+        owner_key=OpaqueProviderRef(ref="owners/activation-1"),
+        reserved_bytes=4096,
+        objects=(),
+        verified_at=_AT,
+    )
+    common = dict(
+        activation_id=_ACTIVATION_ID,
+        store_identity="stores/main",
+        owner_key="owners/activation-1",
+        reserved_bytes=4096,
+        release_identity=evidence.identity,
+        release_evidence=evidence,
+        released_at=_AT,
+    )
+    assert ExternalBootReservationRelease.model_validate(common).release_evidence == evidence
+    with pytest.raises(ValidationError, match="release identity"):
+        ExternalBootReservationRelease.model_validate(common | {"release_identity": _RELEASE})
+    with pytest.raises(ValidationError, match="release evidence ownership"):
+        ExternalBootReservationRelease.model_validate(common | {"store_identity": "stores/other"})
 
 
 def test_reservation_row_requires_ready_timestamp_exactly_when_ready() -> None:
@@ -299,4 +330,29 @@ def test_recovery_attempt_row_enforces_deadline_and_evidence_state() -> None:
     with pytest.raises(ValidationError, match="recovery_readiness_deadline"):
         ExternalBootRecoveryAttempt.model_validate(
             common | {"state": ExternalBootRecoveryAttemptState.RECOVERING}
+        )
+    wrong_conflict = conflict.model_copy(update={"activation_id": _RUN_ID})
+    with pytest.raises(ValidationError, match="conflict evidence ownership"):
+        ExternalBootRecoveryAttempt.model_validate(
+            common
+            | {
+                "state": ExternalBootRecoveryAttemptState.CONFLICT,
+                "conflict_evidence": wrong_conflict,
+            }
+        )
+    wrong_terminal = ExternalBootTerminalEvidenceV1(
+        activation_id=_ACTIVATION_ID,
+        system_id=_SYSTEM_ID,
+        outcome="active",
+        composite_state=_STATE,
+        objects=(),
+        observed_at=_AT,
+    )
+    with pytest.raises(ValidationError, match="terminal evidence"):
+        ExternalBootRecoveryAttempt.model_validate(
+            common
+            | {
+                "state": ExternalBootRecoveryAttemptState.RECOVERED,
+                "terminal_evidence": wrong_terminal,
+            }
         )

@@ -64,8 +64,31 @@ CREATE TABLE external_boot_activations (
         AND (cleanup_evidence IS NULL OR cleanup_evidence ->> 'schema'
             IS NOT DISTINCT FROM 'external-boot-cleanup-evidence-v1')
     ),
+    CONSTRAINT external_boot_activation_evidence_ownership CHECK (
+        (materialization IS NULL OR (
+            materialization #>> '{ownership,system_id}' IS NOT DISTINCT FROM system_id::text
+            AND materialization #>> '{ownership,run_id}' IS NOT DISTINCT FROM run_id::text
+            AND materialization ->> 'plan_identity' IS NOT DISTINCT FROM plan_identity))
+        AND (recovery_point IS NULL OR (
+            recovery_point #>> '{ownership,system_id}' IS NOT DISTINCT FROM system_id::text
+            AND recovery_point #>> '{ownership,run_id}' IS NOT DISTINCT FROM run_id::text
+            AND recovery_point ->> 'plan_identity' IS NOT DISTINCT FROM plan_identity))
+        AND (pre_recovery_evidence IS NULL OR (
+            pre_recovery_evidence ->> 'activation_id' IS NOT DISTINCT FROM id::text
+            AND pre_recovery_evidence ->> 'system_id' IS NOT DISTINCT FROM system_id::text
+            AND pre_recovery_evidence ->> 'run_id' IS NOT DISTINCT FROM run_id::text
+            AND pre_recovery_evidence ->> 'plan_identity' IS NOT DISTINCT FROM plan_identity))
+        AND (terminal_evidence IS NULL OR (
+            terminal_evidence ->> 'activation_id' IS NOT DISTINCT FROM id::text
+            AND terminal_evidence ->> 'system_id' IS NOT DISTINCT FROM system_id::text))
+        AND (teardown_evidence IS NULL OR teardown_evidence ->> 'system_id'
+            IS NOT DISTINCT FROM system_id::text)
+        AND (cleanup_evidence IS NULL OR (
+            cleanup_evidence ->> 'activation_id' IS NOT DISTINCT FROM id::text
+            AND cleanup_evidence ->> 'system_id' IS NOT DISTINCT FROM system_id::text))
+    ),
     CONSTRAINT external_boot_activation_cleanup_evidence CHECK (
-        NOT cleanup_complete
+        (NOT cleanup_complete AND cleanup_evidence IS NULL)
         OR (
             cleanup_evidence IS NOT NULL
             AND (
@@ -154,6 +177,12 @@ CREATE TABLE external_boot_reservation_releases (
             IS NOT DISTINCT FROM 'external-boot-release-evidence-v1'
         AND (teardown_evidence IS NULL OR teardown_evidence ->> 'schema'
             IS NOT DISTINCT FROM 'external-boot-teardown-evidence-v1')
+    ),
+    CONSTRAINT external_boot_release_evidence_ownership CHECK (
+        release_evidence ->> 'activation_id' IS NOT DISTINCT FROM activation_id::text
+        AND release_evidence #>> '{store_identity,ref}' IS NOT DISTINCT FROM store_identity
+        AND release_evidence #>> '{owner_key,ref}' IS NOT DISTINCT FROM owner_key
+        AND release_evidence ->> 'reserved_bytes' IS NOT DISTINCT FROM reserved_bytes::text
     )
 );
 
@@ -210,8 +239,8 @@ CREATE TABLE external_boot_recovery_attempts (
          AND acknowledged_composite_state IS NOT NULL)
     ),
     CONSTRAINT external_boot_attempt_evidence CHECK (
-        (state <> 'conflict' OR conflict_evidence IS NOT NULL)
-        AND (state NOT IN ('failed', 'recovered') OR terminal_evidence IS NOT NULL)
+        ((state = 'conflict') = (conflict_evidence IS NOT NULL))
+        AND ((state IN ('failed', 'recovered')) = (terminal_evidence IS NOT NULL))
         AND (conflict_evidence IS NULL OR pg_column_size(conflict_evidence) <= 65536)
         AND (terminal_evidence IS NULL OR pg_column_size(terminal_evidence) <= 65536)
     ),
@@ -220,6 +249,16 @@ CREATE TABLE external_boot_recovery_attempts (
             IS NOT DISTINCT FROM 'external-boot-conflict-evidence-v1')
         AND (terminal_evidence IS NULL OR terminal_evidence ->> 'schema'
             IS NOT DISTINCT FROM 'external-boot-terminal-evidence-v1')
+    ),
+    CONSTRAINT external_boot_attempt_evidence_ownership CHECK (
+        (conflict_evidence IS NULL OR conflict_evidence ->> 'activation_id'
+            IS NOT DISTINCT FROM activation_id::text)
+        AND (terminal_evidence IS NULL OR (
+            terminal_evidence ->> 'activation_id' IS NOT DISTINCT FROM activation_id::text
+            AND (state <> 'failed' OR terminal_evidence ->> 'outcome'
+                IS NOT DISTINCT FROM 'recovery_failed')
+            AND (state <> 'recovered' OR terminal_evidence ->> 'outcome'
+                IS NOT DISTINCT FROM 'recovered')))
     )
 );
 

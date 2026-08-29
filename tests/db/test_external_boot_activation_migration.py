@@ -55,30 +55,55 @@ def _insert_activation(
     attempt_id = uuid4() if state in recovery_states else None
     evidence_states = recovery_states | {"prepared", "activating", "active"}
     materialization = (
-        {"schema": "external-boot-materialization-v1"} if state in evidence_states else None
+        {
+            "schema": "external-boot-materialization-v1",
+            "ownership": {"system_id": str(system_id), "run_id": str(run_id)},
+            "plan_identity": plan_identity,
+        }
+        if state in evidence_states
+        else None
     )
     recovery_point = (
-        {"schema": "external-boot-recovery-v1"}
+        {
+            "schema": "external-boot-recovery-v1",
+            "ownership": {"system_id": str(system_id), "run_id": str(run_id)},
+            "plan_identity": plan_identity,
+        }
         if state in {"prepared", "activating", "active"}
         else None
     )
     pre_recovery = (
-        {"schema": "external-boot-pre-recovery-evidence-v1"} if state in recovery_states else None
+        {
+            "schema": "external-boot-pre-recovery-evidence-v1",
+            "activation_id": str(activation_id),
+            "system_id": str(system_id),
+            "run_id": str(run_id),
+            "plan_identity": plan_identity,
+        }
+        if state in recovery_states
+        else None
     )
     terminal = (
-        {"schema": "external-boot-terminal-evidence-v1", "outcome": state}
+        {
+            "schema": "external-boot-terminal-evidence-v1",
+            "activation_id": str(activation_id),
+            "system_id": str(system_id),
+            "outcome": state,
+        }
         if state in {"active", "abandoned"}
         else None
     )
     teardown_states = {"recovery_conflict", "recovery_failed"}
     teardown = (
-        {"schema": "external-boot-teardown-evidence-v1"}
+        {"schema": "external-boot-teardown-evidence-v1", "system_id": str(system_id)}
         if cleanup_complete and state in teardown_states
         else None
     )
     cleanup = (
         {
             "schema": "external-boot-cleanup-evidence-v1",
+            "activation_id": str(activation_id),
+            "system_id": str(system_id),
             "mode": (
                 "system_teardown"
                 if state in {"recovery_conflict", "recovery_failed"}
@@ -133,10 +158,23 @@ def _insert_activation(
                 attempt_id,
                 attempt_state,
                 attempt_state,
-                Jsonb({"schema": "external-boot-conflict-evidence-v1"})
+                Jsonb(
+                    {
+                        "schema": "external-boot-conflict-evidence-v1",
+                        "activation_id": str(activation_id),
+                    }
+                )
                 if attempt_state == "conflict"
                 else None,
-                Jsonb({"schema": "external-boot-terminal-evidence-v1"})
+                Jsonb(
+                    {
+                        "schema": "external-boot-terminal-evidence-v1",
+                        "activation_id": str(activation_id),
+                        "outcome": (
+                            "recovery_failed" if attempt_state == "failed" else "recovered"
+                        ),
+                    }
+                )
                 if attempt_state in {"failed", "recovered"}
                 else None,
             ),
@@ -288,6 +326,28 @@ def test_state_matrix_rejects_untyped_json_evidence(migrated_url: str, state: st
             )
 
 
+def test_evidence_ownership_must_match_ledger_row(migrated_url: str) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        system_id, run_id = _seed_run(conn)
+        activation_id, _ = _insert_activation(conn, system_id, run_id)
+        with pytest.raises(psycopg.errors.CheckViolation, match="evidence_ownership"):
+            conn.execute(
+                "UPDATE external_boot_activations SET pre_recovery_evidence = %s WHERE id = %s",
+                (
+                    Jsonb(
+                        {
+                            "schema": "external-boot-pre-recovery-evidence-v1",
+                            "activation_id": str(uuid4()),
+                            "system_id": str(system_id),
+                            "run_id": str(run_id),
+                            "plan_identity": "sha256:" + "a" * 64,
+                        }
+                    ),
+                    activation_id,
+                ),
+            )
+
+
 def test_reservation_state_and_immutable_identities(migrated_url: str) -> None:
     with psycopg.connect(migrated_url) as conn:
         system_id, run_id = _seed_run(conn)
@@ -344,7 +404,15 @@ def test_attempt_checks_and_release_tombstone_immutability(migrated_url: str) ->
             (
                 activation_id,
                 "sha256:" + "b" * 64,
-                Jsonb({"schema": "external-boot-release-evidence-v1"}),
+                Jsonb(
+                    {
+                        "schema": "external-boot-release-evidence-v1",
+                        "activation_id": str(activation_id),
+                        "store_identity": {"ref": "stores/main"},
+                        "owner_key": {"ref": "owners/a"},
+                        "reserved_bytes": 4096,
+                    }
+                ),
             ),
         )
         with pytest.raises(psycopg.errors.RaiseException, match="immutable"):

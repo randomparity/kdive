@@ -257,6 +257,91 @@ class ExternalBootActivation(_ClosedRow):
             and self.activation_readiness_deadline is None
         ):
             raise ValueError("activation_readiness_deadline is required")
+        materialized_states = set(ExternalBootActivationState) - {
+            ExternalBootActivationState.PREPARING,
+            ExternalBootActivationState.ABANDONED,
+        }
+        if self.state in materialized_states and self.materialization is None:
+            raise ValueError("materialization is required for this activation state")
+        recovery_point_states = {
+            ExternalBootActivationState.PREPARED,
+            ExternalBootActivationState.ACTIVATING,
+            ExternalBootActivationState.ACTIVE,
+        }
+        if self.state in recovery_point_states and self.recovery_point is None:
+            raise ValueError("recovery_point is required for this activation state")
+        attempt_states = {
+            ExternalBootActivationState.RECOVERING,
+            ExternalBootActivationState.RECOVERY_CONFLICT,
+            ExternalBootActivationState.RECOVERY_FAILED,
+            ExternalBootActivationState.RECOVERED,
+        }
+        if self.state in attempt_states and (
+            self.current_attempt_id is None
+            or (self.recovery_point is None and self.pre_recovery_evidence is None)
+        ):
+            raise ValueError("recovery state requires an attempt and recovery basis")
+        expected_outcome = {
+            ExternalBootActivationState.ACTIVE: "active",
+            ExternalBootActivationState.ABANDONED: "abandoned",
+        }.get(self.state)
+        if expected_outcome is not None and (
+            self.terminal_evidence is None or self.terminal_evidence.outcome != expected_outcome
+        ):
+            raise ValueError("terminal evidence outcome does not match activation state")
+        if self.materialization is not None and (
+            self.materialization.ownership.system_id != str(self.system_id)
+            or self.materialization.ownership.run_id != str(self.run_id)
+            or self.materialization.plan_identity != self.plan_identity
+        ):
+            raise ValueError("materialization ownership does not match activation")
+        if self.recovery_point is not None and (
+            self.recovery_point.ownership.system_id != str(self.system_id)
+            or self.recovery_point.ownership.run_id != str(self.run_id)
+            or self.recovery_point.plan_identity != self.plan_identity
+            or self.materialization is None
+            or self.recovery_point.materialization_identity != self.materialization.identity
+        ):
+            raise ValueError("recovery point ownership does not match activation")
+        if self.pre_recovery_evidence is not None and (
+            self.pre_recovery_evidence.activation_id != self.id
+            or self.pre_recovery_evidence.system_id != self.system_id
+            or self.pre_recovery_evidence.run_id != self.run_id
+            or self.pre_recovery_evidence.plan_identity != self.plan_identity
+        ):
+            raise ValueError("pre-recovery evidence ownership does not match activation")
+        for evidence in (self.terminal_evidence, self.cleanup_evidence):
+            if evidence is not None and (
+                evidence.activation_id != self.id or evidence.system_id != self.system_id
+            ):
+                raise ValueError("activation evidence ownership does not match activation")
+        if (
+            self.teardown_evidence is not None
+            and self.teardown_evidence.system_id != self.system_id
+        ):
+            raise ValueError("teardown evidence ownership does not match activation")
+        if self.cleanup_complete != (self.cleanup_evidence is not None):
+            raise ValueError("cleanup evidence presence must match cleanup_complete")
+        if self.cleanup_complete:
+            cleanup_evidence = self.cleanup_evidence
+            if cleanup_evidence is None:
+                raise AssertionError("cleanup evidence presence checked above")
+            ordinary = self.state in {
+                ExternalBootActivationState.RECOVERED,
+                ExternalBootActivationState.ABANDONED,
+            }
+            if (
+                (cleanup_evidence.mode == "ordinary") != ordinary
+                or ordinary != (self.teardown_evidence is None)
+                or (
+                    not ordinary
+                    and (
+                        self.teardown_evidence is None
+                        or cleanup_evidence.teardown_identity != self.teardown_evidence.identity
+                    )
+                )
+            ):
+                raise ValueError("cleanup evidence does not match activation state")
         return self
 
 
@@ -286,6 +371,19 @@ class ExternalBootReservationRelease(_ClosedRow):
     release_evidence: ExternalBootReleaseEvidenceV1
     teardown_evidence: ExternalBootTeardownEvidenceV1 | None = None
     released_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def _release_evidence_matches_row(self) -> ExternalBootReservationRelease:
+        if self.release_identity != self.release_evidence.identity:
+            raise ValueError("release identity does not match release evidence")
+        if (
+            self.release_evidence.activation_id != self.activation_id
+            or self.release_evidence.store_identity.ref != self.store_identity
+            or self.release_evidence.owner_key.ref != self.owner_key
+            or self.release_evidence.reserved_bytes != self.reserved_bytes
+        ):
+            raise ValueError("release evidence ownership does not match release row")
+        return self
 
 
 class ExternalBootRecoveryAttempt(_ClosedRow):
@@ -320,20 +418,31 @@ class ExternalBootRecoveryAttempt(_ClosedRow):
             and self.recovery_readiness_deadline is None
         ):
             raise ValueError("recovery_readiness_deadline is required while recovering")
-        if (
-            self.state is ExternalBootRecoveryAttemptState.CONFLICT
-            and self.conflict_evidence is None
+        if (self.state is ExternalBootRecoveryAttemptState.CONFLICT) != (
+            self.conflict_evidence is not None
         ):
-            raise ValueError("conflict evidence is required for a conflict attempt")
+            raise ValueError("conflict evidence presence must match attempt state")
         if (
             self.state
             in {
                 ExternalBootRecoveryAttemptState.FAILED,
                 ExternalBootRecoveryAttemptState.RECOVERED,
             }
-            and self.terminal_evidence is None
+        ) != (self.terminal_evidence is not None):
+            raise ValueError("terminal evidence presence must match attempt state")
+        if self.conflict_evidence is not None and (
+            self.conflict_evidence.activation_id != self.activation_id
         ):
-            raise ValueError("terminal evidence is required for a terminal attempt")
+            raise ValueError("conflict evidence ownership does not match recovery attempt")
+        expected_outcome = {
+            ExternalBootRecoveryAttemptState.FAILED: "recovery_failed",
+            ExternalBootRecoveryAttemptState.RECOVERED: "recovered",
+        }.get(self.state)
+        if self.terminal_evidence is not None and (
+            self.terminal_evidence.activation_id != self.activation_id
+            or (expected_outcome is not None and self.terminal_evidence.outcome != expected_outcome)
+        ):
+            raise ValueError("terminal evidence does not match recovery attempt")
         return self
 
 

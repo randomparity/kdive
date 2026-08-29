@@ -9,6 +9,9 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from kdive.db.external_boot_activations import (
     CasStatus,
@@ -24,6 +27,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootReleaseObject,
     ExternalBootReservation,
+    ExternalBootReservationRelease,
     ExternalBootReservationState,
     ExternalBootTeardownEvidenceV1,
     ExternalBootTerminalEvidenceV1,
@@ -231,6 +235,73 @@ def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None
             assert applied.activation is not None
             assert applied.activation.materialization == materialization
             await conn.commit()
+
+    asyncio.run(_run())
+
+
+def test_database_rejects_cross_activation_evidence(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(conn, activation, reservation)
+            evidence = ExternalBootPreRecoveryEvidenceV1(
+                activation_id=uuid4(),
+                system_id=system_id,
+                run_id=run_id,
+                plan_identity=_PLAN,
+                recovery_object=OpaqueProviderRef(ref="objects/recovery"),
+                source_composite_state=_DIGEST,
+                observed_at=_AT,
+            )
+            with pytest.raises(psycopg.errors.CheckViolation, match="evidence_ownership"):
+                await conn.execute(
+                    "UPDATE external_boot_activations SET pre_recovery_evidence = %s WHERE id = %s",
+                    (Jsonb(evidence.model_dump(mode="json", by_alias=True)), activation.id),
+                )
+
+    asyncio.run(_run())
+
+
+def test_release_row_load_rejects_mismatched_identity(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(conn, activation, reservation)
+            evidence = ExternalBootReleaseEvidenceV1(
+                activation_id=activation.id,
+                system_id=system_id,
+                store_identity=OpaqueProviderRef(ref=reservation.store_identity),
+                owner_key=OpaqueProviderRef(ref=reservation.owner_key),
+                reserved_bytes=reservation.reserved_bytes,
+                objects=(),
+                verified_at=_AT,
+            )
+            await conn.execute(
+                "INSERT INTO external_boot_reservation_releases "
+                "(activation_id, store_identity, owner_key, reserved_bytes, release_identity, "
+                "release_evidence) VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    activation.id,
+                    reservation.store_identity,
+                    reservation.owner_key,
+                    reservation.reserved_bytes,
+                    "sha256:" + "f" * 64,
+                    Jsonb(evidence.model_dump(mode="json", by_alias=True)),
+                ),
+            )
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT * FROM external_boot_reservation_releases WHERE activation_id = %s",
+                    (activation.id,),
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            with pytest.raises(ValidationError, match="release identity"):
+                ExternalBootReservationRelease.model_validate(row)
 
     asyncio.run(_run())
 
