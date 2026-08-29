@@ -15,6 +15,12 @@ from pathlib import Path
 ARCHITECTURES = ("x86_64", "ppc64le")
 BLOCKED_PARTS = {"bin/sh", "bin/ash", "bin/bash", "usr/bin/sh", "usr/bin/bash"}
 BLOCKED_NAMES = {"socket.py", "socket.pyc", "socketserver.py", "socketserver.pyc"}
+STARTUP_HOOK_NAMES = {
+    "sitecustomize.py",
+    "sitecustomize.pyc",
+    "usercustomize.py",
+    "usercustomize.pyc",
+}
 
 
 def _blocked_runtime_member(relative: str, name: str) -> bool:
@@ -32,6 +38,8 @@ def _runtime_files(root: Path) -> list[tuple[str, bytes, int]]:
     required = {"usr/bin/python3", "sbin/depmod"}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
+        if path.name in STARTUP_HOOK_NAMES or path.suffix == ".pth":
+            raise ValueError(f"runtime root contains a Python startup hook: {relative}")
         if _blocked_runtime_member(relative, path.name):
             continue
         include = (

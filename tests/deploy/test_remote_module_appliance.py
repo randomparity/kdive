@@ -175,6 +175,24 @@ def test_image_build_is_reproducible_and_excludes_shell_and_network(
     assert "bin/sh" not in initramfs_names
     assert not any("socket" in name.lower() for name in initramfs_names)
     assert {"init", "usr/bin/python3", "sbin/depmod"} <= initramfs_names
+    hook = runtime / "usr/lib/python3.14/sitecustomize.py"
+    hook.write_bytes(b"raise RuntimeError\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        subprocess.run(
+            [
+                sys.executable,
+                str(APPLIANCE / "build_image.py"),
+                "--architecture",
+                architecture,
+                "--kernel",
+                str(kernel),
+                "--runtime-root",
+                str(runtime),
+                "--output",
+                str(tmp_path / "rejected.tar"),
+            ],
+            check=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -243,6 +261,7 @@ def test_appliance_source_has_fixed_depmod_and_no_guest_exec_or_network() -> Non
     assert "shell=True" not in source
     assert "socket" not in source
     assert "os.exec" not in source
+    assert source.startswith("#!/usr/bin/python3 -S\n")
     assert "subprocess.run(" in source and '[DEPMOD, "-b"' in source
     assert "200_000" in source
     assert "8 * 1024**3" in source
@@ -366,6 +385,7 @@ def _appliance_fixture(
         assert (staged_tree / "new.ko").read_bytes() == b"new"
         assert _kwargs["stdout"] is subprocess.DEVNULL
         assert _kwargs["stderr"] is subprocess.DEVNULL
+        assert _kwargs["timeout"] == 300
         (staged_tree / "modules.dep").write_bytes(b"new.ko:\n")
         return subprocess.CompletedProcess(arguments, 0)
 
@@ -384,6 +404,19 @@ def test_depmod_indexes_the_staged_replacement(
 
     assert result["phase"] == "installed"
     assert (old_tree / "modules.dep").read_bytes() == b"new.ko:\n"
+
+
+def test_depmod_timeout_maps_to_the_stable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, _old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired("depmod", 300)
+
+    monkeypatch.setattr(appliance.subprocess, "run", timeout)
+    with pytest.raises(appliance.ApplianceError, match="DEPMOD_FAILURE"):
+        appliance.execute(appliance._validate_operation(operation))
 
 
 @pytest.mark.parametrize("interrupted_phase", ["replacement-ready", "installed"])
@@ -709,6 +742,26 @@ def test_checkpoint_write_reconciles_a_crash_temp(tmp_path: Path) -> None:
     assert not temporary.exists()
 
 
+@pytest.mark.parametrize("kind", ["symlink", "oversized"])
+def test_checkpoint_read_is_nofollow_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    appliance = _module()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(appliance, "SCRATCH", scratch)
+    checkpoint = scratch / "result-v1.json"
+    if kind == "symlink":
+        outside = tmp_path / "outside"
+        outside.write_text("{}", encoding="utf-8")
+        checkpoint.symlink_to(outside)
+    else:
+        checkpoint.write_bytes(b"x" * (appliance.DOCUMENT_LIMIT + 1))
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._existing_checkpoint(appliance._validate_operation(_operation()))
+
+
 def test_source_xattrs_are_discarded_before_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -746,6 +799,24 @@ def test_source_xattr_removal_failure_stops_before_replacement(
 
     with pytest.raises(appliance.ApplianceError, match="FILESYSTEM_FAILURE"):
         appliance._normalize_source_tree(tree)
+
+
+def test_recovery_xattrs_share_a_bounded_manifest_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    tree = tmp_path / "modules"
+    tree.mkdir()
+    module = tree / "module.ko"
+    module.write_bytes(b"module")
+    try:
+        os.setxattr(module, "user.large", b"metadata")
+    except OSError as error:
+        pytest.skip(f"xattrs unavailable: {error}")
+    monkeypatch.setattr(appliance, "XATTR_BYTE_LIMIT", 1)
+
+    with pytest.raises(appliance.ApplianceError, match="LIMIT_EXCEEDED"):
+        appliance._tree_manifest(tree, "recovery")
 
 
 def test_release_and_manifest_path_grammar_matches_v1(tmp_path: Path) -> None:

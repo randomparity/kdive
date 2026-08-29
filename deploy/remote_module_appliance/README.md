@@ -44,12 +44,19 @@ the operator reduces the existing tree or rebuilds the System baseline. Every du
 changed files and directories and syncs the root and scratch filesystems. Flush, unmount, shutdown,
 or detach failure is incomplete, never success.
 
+Observed installed/recovery xattr names and values share a 32 MiB per-tree budget. `depmod` has a
+300-second monotonic process deadline per capture/install attempt; expiry is `DEPMOD_FAILURE`, makes
+no replacement checkpoint durable, and recovery is to retry the same operation after reducing or
+repairing the source module tree.
+
 ## Image v1
 
 `build_image.py` accepts only an architecture (`x86_64` or `ppc64le`), a kernel, and a prepared
 runtime root. It emits a normalized tar bundle containing the kernel and a bootable newc initramfs.
 The runtime root must supply Python and appliance-owned `depmod`; the builder rejects symlinks and
-includes no shell or socket module. Every archive member has fixed ownership, modes, order, and
+includes no shell or socket module. Python runs with site initialization disabled, and the builder
+rejects `.pth`, `sitecustomize`, and `usercustomize` startup hooks. Every archive member has fixed
+ownership, modes, order, and
 timestamp, so identical inputs produce identical bytes. The output SHA-256 is the appliance image
 identity stored in operation and result documents.
 

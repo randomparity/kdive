@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -S
 """Fixed-operation init for the ADR-0585 remote module appliance."""
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ DEPMOD = "/sbin/depmod"
 ENTRY_LIMIT = 200_000
 BYTE_LIMIT = 8 * 1024**3
 DOCUMENT_LIMIT = 16 * 1024
+XATTR_BYTE_LIMIT = 32 * 1024**2
+DEPMOD_TIMEOUT_SECONDS = 300
 ROOT = Path("/mnt/root")
 SOURCE = Path("/mnt/source")
 SCRATCH = Path("/mnt/scratch")
@@ -142,30 +144,37 @@ def _validate_operation(document: dict[str, object]) -> dict[str, object]:
     return document
 
 
-def _installed_metadata(path: str, metadata: os.stat_result) -> dict[str, object]:
+def _installed_metadata(path: str, metadata: os.stat_result) -> tuple[dict[str, object], int]:
     attributes: dict[str, str] = {}
+    attribute_bytes = 0
     supported = True
     try:
         for name in sorted(os.listxattr(path, follow_symlinks=False)):
             if not _valid_manifest_text(name):
                 raise ApplianceError("RECOVERY_CONFLICT")
             value = os.getxattr(path, name, follow_symlinks=False)
+            attribute_bytes += len(name.encode()) + len(value)
+            if attribute_bytes > XATTR_BYTE_LIMIT:
+                raise ApplianceError("LIMIT_EXCEEDED")
             attributes[name] = base64.b64encode(value).decode().rstrip("=")
     except OSError as error:
         if error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}:
             raise ApplianceError("FILESYSTEM_FAILURE") from error
         supported = False
-    return {
-        "gid": metadata.st_gid,
-        "uid": metadata.st_uid,
-        "xattrs": attributes,
-        "xattrs_supported": supported,
-    }
+    return (
+        {
+            "gid": metadata.st_gid,
+            "uid": metadata.st_uid,
+            "xattrs": attributes,
+            "xattrs_supported": supported,
+        },
+        attribute_bytes,
+    )
 
 
 def _manifest_entry(
     root: Path, entry: os.DirEntry[str], kind: str
-) -> tuple[dict[str, object] | None, int]:
+) -> tuple[dict[str, object] | None, int, int]:
     relative = Path(entry.path).relative_to(root).as_posix()
     if not _valid_manifest_text(relative) or any(
         segment in {"", ".", ".."} for segment in relative.split("/")
@@ -174,14 +183,18 @@ def _manifest_entry(
     metadata = entry.stat(follow_symlinks=False)
     mode = metadata.st_mode & 0o777
     installed = kind != "source"
-    extra = _installed_metadata(entry.path, metadata) if installed else {}
+    extra, xattr_bytes = _installed_metadata(entry.path, metadata) if installed else ({}, 0)
     if stat.S_ISDIR(metadata.st_mode):
-        return {
-            "mode": f"{mode if installed else 0o755:04o}",
-            "path": relative,
-            "type": "dir",
-            **extra,
-        }, 0
+        return (
+            {
+                "mode": f"{mode if installed else 0o755:04o}",
+                "path": relative,
+                "type": "dir",
+                **extra,
+            },
+            0,
+            xattr_bytes,
+        )
     if stat.S_ISREG(metadata.st_mode):
         digest = hashlib.sha256()
         try:
@@ -192,21 +205,25 @@ def _manifest_entry(
         except OSError as error:
             raise ApplianceError("FILESYSTEM_FAILURE") from error
         normalized_mode = 0o755 if mode & 0o111 else 0o644
-        return {
-            "mode": f"{mode if installed else normalized_mode:04o}",
-            "path": relative,
-            "sha256": f"sha256:{digest.hexdigest()}",
-            "size": metadata.st_size,
-            "type": "file",
-            **extra,
-        }, metadata.st_size
+        return (
+            {
+                "mode": f"{mode if installed else normalized_mode:04o}",
+                "path": relative,
+                "sha256": f"sha256:{digest.hexdigest()}",
+                "size": metadata.st_size,
+                "type": "file",
+                **extra,
+            },
+            metadata.st_size,
+            xattr_bytes,
+        )
     if stat.S_ISLNK(metadata.st_mode):
         target = os.readlink(entry.path)
         if not _valid_manifest_text(target):
             raise ApplianceError("SOURCE_INVALID")
         if kind == "source":
             if relative in {"build", "source"} and target.startswith("/"):
-                return None, 0
+                return None, 0, 0
             target_parts = target.split("/")
             if any(part in {"", "."} for part in target_parts):
                 raise ApplianceError("SOURCE_INVALID")
@@ -219,7 +236,11 @@ def _manifest_entry(
                 or any(part in {"", ".", ".."} for part in resolved_parts)
             ):
                 raise ApplianceError("SOURCE_INVALID")
-        return {"mode": "0777", "path": relative, "target": target, "type": "symlink", **extra}, 0
+        return (
+            {"mode": "0777", "path": relative, "target": target, "type": "symlink", **extra},
+            0,
+            xattr_bytes,
+        )
     raise ApplianceError("SOURCE_INVALID")
 
 
@@ -229,6 +250,7 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
     entries_document: list[dict[str, object]] = []
     entries = 0
     content_bytes = 0
+    xattr_bytes = 0
     regular_inodes: set[tuple[int, int]] = set()
     stack = [root]
     while stack:
@@ -249,9 +271,12 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
                 if inode in regular_inodes:
                     raise ApplianceError("SOURCE_INVALID")
                 regular_inodes.add(inode)
-            document, size = _manifest_entry(root, entry, kind)
+            document, size, entry_xattr_bytes = _manifest_entry(root, entry, kind)
             content_bytes += size
+            xattr_bytes += entry_xattr_bytes
             if content_bytes > BYTE_LIMIT:
+                raise ApplianceError("LIMIT_EXCEEDED")
+            if xattr_bytes > XATTR_BYTE_LIMIT:
                 raise ApplianceError("LIMIT_EXCEEDED")
             if document is not None:
                 entries_document.append(document)
@@ -441,11 +466,26 @@ def _checkpoint(document: dict[str, object], phase: str, **fields: object) -> di
 
 def _existing_checkpoint(document: dict[str, object]) -> dict[str, object] | None:
     path = SCRATCH / "result-v1.json"
-    if not path.exists():
-        return None
     try:
-        checkpoint = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ApplianceError("RECOVERY_CONFLICT") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > DOCUMENT_LIMIT:
+            raise ApplianceError("RECOVERY_CONFLICT")
+        data = os.read(descriptor, DOCUMENT_LIMIT + 1)
+    except OSError as error:
+        raise ApplianceError("RECOVERY_CONFLICT") from error
+    finally:
+        os.close(descriptor)
+    if len(data) > DOCUMENT_LIMIT:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    try:
+        checkpoint = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise ApplianceError("RECOVERY_CONFLICT") from error
     if not isinstance(checkpoint, dict):
         raise ApplianceError("RECOVERY_CONFLICT")
@@ -747,8 +787,9 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
             env={"PATH": "/sbin"},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=DEPMOD_TIMEOUT_SECONDS,
         )
-    except OSError as error:
+    except (OSError, subprocess.TimeoutExpired) as error:
         raise ApplianceError("DEPMOD_FAILURE") from error
     if completed.returncode != 0:
         raise ApplianceError("DEPMOD_FAILURE")
