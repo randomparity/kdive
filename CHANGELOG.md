@@ -155,6 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expose provision execution boundaries
 - Paginate operator job listings
 - Persist external boot evidence
+- Add external boot contracts
 
 ### Changed
 
@@ -1514,6 +1515,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject incomplete kernel segments
 - Validate boot metadata canonically
 - Reject failed kernel streams
+- Reject invalid boot contract values
+- Bound external boot input parsing
+- Enforce canonical boot envelopes
 
 ### Security
 
