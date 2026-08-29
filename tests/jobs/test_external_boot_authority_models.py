@@ -431,7 +431,7 @@ def test_carrier_rejects_total_evidence_over_64_kib() -> None:
         }
     )
     data.update({"activation_id": activation_id, "system_id": system_id})
-    with pytest.raises(ValidationError, match="64 KiB"):
+    with pytest.raises(ValidationError, match="65536 bytes"):
         ExternalBootAuthoritySuccessV1.model_validate(data)
 
 
@@ -449,14 +449,14 @@ def test_carrier_rejects_evidence_list_over_cardinality_bound() -> None:
                 "system_id": system_id,
                 "outcome": "active",
                 "composite_state": _DIGEST,
-                "objects": [{"ref": "x"} for _ in range(4097)],
+                "objects": [{"ref": f"x-{index:04d}"} for index in range(4097)],
                 "observed_at": "2026-08-29T00:00:00Z",
             },
             "activation_readiness_deadline": "2026-08-29T00:01:00Z",
         }
     )
     data.update({"activation_id": activation_id, "system_id": system_id})
-    with pytest.raises(ValidationError, match="at most 4096"):
+    with pytest.raises(ValidationError, match="65536 bytes"):
         ExternalBootAuthoritySuccessV1.model_validate(data)
 
 

@@ -19,6 +19,7 @@ from psycopg import AsyncConnection
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_activation import ExternalBootTerminalEvidenceV1
 from kdive.domain.operations.jobs import Job, JobKind
 
 type _Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -59,18 +60,6 @@ class _OpaqueRef(_ClosedModel):
     @classmethod
     def _bounded_ref(cls, value: str) -> str:
         return _utf8_bytes(value, 1024)
-
-
-class _TerminalEvidence(_ClosedModel):
-    schema_: Literal["external-boot-terminal-evidence-v1"] = Field(alias="schema")
-    activation_id: UUID
-    system_id: UUID
-    outcome: Literal["active", "recovered"]
-    composite_state: _Digest
-    objects: list[_OpaqueRef] = Field(max_length=4096)
-    observed_at: datetime
-
-    _normalize_timestamp = field_validator("observed_at")(_utc_datetime)
 
 
 class _ReleaseObject(_ClosedModel):
@@ -122,7 +111,7 @@ class _ResultBase(_ClosedModel):
 class _ActivateResult(_ResultBase):
     operation: Literal["activate"]
     result_ref: _ResultRef
-    evidence: _TerminalEvidence
+    evidence: ExternalBootTerminalEvidenceV1
     activation_readiness_deadline: datetime
 
     _normalize_timestamp = field_validator("activation_readiness_deadline")(_utc_datetime)
@@ -131,7 +120,7 @@ class _ActivateResult(_ResultBase):
 class _RecoverResult(_ResultBase):
     operation: Literal["recover", "resolve-conflict"]
     result_ref: _ResultRef
-    evidence: _TerminalEvidence
+    evidence: ExternalBootTerminalEvidenceV1
 
 
 class _ReleaseResult(_ResultBase):
@@ -280,7 +269,7 @@ class ExternalBootAuthorityResultV1(BaseModel):
         allowed = {
             "activate": {"activate", "deadline", "fail"},
             "recover": {"recover", "deadline", "recovery-attempt", "fail"},
-            "resolve-conflict": {"resolve-conflict", "deadline", "fail"},
+            "resolve-conflict": {"resolve-conflict", "fail"},
             "release": {"release", "cleanup", "fail"},
             "teardown": {"teardown", "fail"},
         }
@@ -314,6 +303,11 @@ class ExternalBootAuthorityResultV1(BaseModel):
             evidence.activation_id != self.activation_id or evidence.system_id != self.system_id
         ):
             raise ValueError("lifecycle evidence ownership does not match authority binding")
+        if isinstance(evidence, ExternalBootTerminalEvidenceV1):
+            if len(evidence.objects) > 4096:
+                raise ValueError("terminal evidence has at most 4096 objects")
+            for provider_ref in evidence.objects:
+                _utf8_bytes(provider_ref.ref, 1024)
         if isinstance(result, _ActivateResult) and result.evidence.outcome != "active":
             raise ValueError("activate evidence outcome must be active")
         if isinstance(result, _RecoverResult) and result.evidence.outcome != "recovered":
