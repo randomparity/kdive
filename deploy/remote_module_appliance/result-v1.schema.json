@@ -123,7 +123,11 @@
                 "run_id",
                 "plan_identity",
                 "operation_nonce",
-                "appliance_image_digest"
+                "appliance_image_digest",
+                "release",
+                "root_volume_key",
+                "root_volume_identity",
+                "source_manifest"
               ]
             }
           }

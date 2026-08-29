@@ -60,7 +60,7 @@ def _valid_manifest_text(value: str) -> bool:
     return (
         unicodedata.normalize("NFC", value) == value
         and all(not 0xD800 <= ord(character) <= 0xDFFF for character in value)
-        and all(unicodedata.category(character) != "Cc" for character in value)
+        and "\0" not in value
     )
 
 
@@ -147,8 +147,8 @@ def _installed_metadata(path: str, metadata: os.stat_result) -> dict[str, object
     supported = True
     try:
         for name in sorted(os.listxattr(path, follow_symlinks=False)):
-            if unicodedata.normalize("NFC", name) != name:
-                raise ApplianceError("SOURCE_INVALID")
+            if not _valid_manifest_text(name):
+                raise ApplianceError("RECOVERY_CONFLICT")
             value = os.getxattr(path, name, follow_symlinks=False)
             attributes[name] = base64.b64encode(value).decode().rstrip("=")
     except OSError as error:
@@ -314,7 +314,7 @@ def _normalize_source_tree(root: Path) -> None:
             try:
                 os.removexattr(path, name, follow_symlinks=False)
             except PermissionError as error:
-                if os.geteuid() == 0 and name != "security.selinux":
+                if os.geteuid() == 0:
                     raise ApplianceError("FILESYSTEM_FAILURE") from error
             except OSError as error:
                 if error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}:
@@ -780,6 +780,8 @@ def _restore(document: dict[str, object]) -> dict[str, object]:
     destination_captured = _manifest_or_none(destination, "recovery")
     staged_captured = _stage_manifest(staged, staged_tree, "recovery")
     displaced_installed = _manifest_or_none(displaced, "installed")
+    if checkpoint.get("phase") == "restored" and _path_present(staged):
+        raise ApplianceError("RECOVERY_CONFLICT")
     if checkpoint.get("phase") == "restore-ready":
         if destination_installed == installed and displaced_installed is None:
             invalid_stage = (absent and staged_captured is not None) or (
@@ -880,8 +882,7 @@ def _poweroff(document: dict[str, object] | None) -> NoReturn:
 
 
 def _write_failure(document: dict[str, object] | None, error: ApplianceError) -> None:
-    if error.code == "IDENTITY_MISMATCH" and (SCRATCH / "result-v1.json").exists():
-        return
+    checkpoint_path = SCRATCH / "result-v1.json"
     failure: dict[str, object] = {
         "protocol": "remote-module-result-v1",
         "status": "failure",
@@ -892,6 +893,8 @@ def _write_failure(document: dict[str, object] | None, error: ApplianceError) ->
         try:
             checkpoint = _existing_checkpoint(document)
         except ApplianceError:
+            if checkpoint_path.exists():
+                return
             checkpoint = None
         if checkpoint is not None:
             failure.update(checkpoint)
@@ -947,6 +950,8 @@ def main() -> NoReturn:
     except ApplianceError as error:
         operation_error = error
     except OSError:
+        operation_error = ApplianceError("FILESYSTEM_FAILURE")
+    except Exception:
         operation_error = ApplianceError("FILESYSTEM_FAILURE")
     try:
         _finish_mounts(document, operation_error)

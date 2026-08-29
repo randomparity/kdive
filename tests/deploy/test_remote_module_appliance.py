@@ -108,6 +108,10 @@ def test_result_schema_has_stable_closed_errors_and_failure_coupling() -> None:
         "plan_identity": "sha256:" + "a" * 64,
         "operation_nonce": "b" * 32,
         "appliance_image_digest": "sha256:" + "e" * 64,
+        "release": _operation()["release"],
+        "root_volume_key": "root-1",
+        "root_volume_identity": "sha256:" + "c" * 64,
+        "source_manifest": "sha256:" + "d" * 64,
     }
     assert not list(validator.iter_errors(result))
     result.pop("error_code")
@@ -627,6 +631,25 @@ def test_identity_mismatch_preserves_the_prior_checkpoint(
     assert checkpoint_path.read_bytes() == before
 
 
+def test_recovery_conflict_preserves_malformed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(appliance, "SCRATCH", scratch)
+    checkpoint = scratch / "result-v1.json"
+    checkpoint.write_bytes(b"{malformed\n")
+    before = checkpoint.read_bytes()
+
+    appliance._write_failure(
+        appliance._validate_operation(_operation()),
+        appliance.ApplianceError("RECOVERY_CONFLICT"),
+    )
+
+    assert checkpoint.read_bytes() == before
+
+
 def test_checkpoint_write_reconciles_a_crash_temp(tmp_path: Path) -> None:
     appliance = _module()
     result = tmp_path / "result-v1.json"
@@ -655,6 +678,29 @@ def test_source_xattrs_are_discarded_before_install(
     assert "user.unverified" not in os.listxattr(destination / "new.ko", follow_symlinks=False)
 
 
+def test_source_xattr_removal_failure_stops_before_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    tree = tmp_path / "modules"
+    tree.mkdir()
+    (tree / "module.ko").write_bytes(b"module")
+    monkeypatch.setattr(appliance.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        appliance.os,
+        "listxattr",
+        lambda *_args, **_kwargs: ["security.selinux"],
+    )
+
+    def deny_remove(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(appliance.os, "removexattr", deny_remove)
+
+    with pytest.raises(appliance.ApplianceError, match="FILESYSTEM_FAILURE"):
+        appliance._normalize_source_tree(tree)
+
+
 def test_release_and_manifest_path_grammar_matches_v1(tmp_path: Path) -> None:
     appliance = _module()
     validator = Draft202012Validator(_json("operation-v1.schema.json"))
@@ -669,8 +715,51 @@ def test_release_and_manifest_path_grammar_matches_v1(tmp_path: Path) -> None:
     tree = tmp_path / "modules"
     tree.mkdir()
     (tree / "bad\nname.ko").write_bytes(b"module")
-    with pytest.raises(appliance.ApplianceError, match="SOURCE_INVALID"):
-        appliance._tree_manifest(tree)
+    manifest, count, size = appliance._tree_manifest(tree)
+    assert manifest.startswith("sha256:")
+    assert (count, size) == (1, 6)
+
+
+def test_undecodable_xattr_name_is_a_stable_recovery_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    tree = tmp_path / "modules"
+    tree.mkdir()
+    module = tree / "module.ko"
+    module.write_bytes(b"module")
+    original_listxattr = appliance.os.listxattr
+
+    def listxattr(path: object, **kwargs: object) -> list[str]:
+        if str(path).endswith("module.ko"):
+            return ["user.\udcff"]
+        return original_listxattr(path, **kwargs)
+
+    monkeypatch.setattr(appliance.os, "listxattr", listxattr)
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._tree_manifest(tree, "recovery")
+
+
+def test_restored_checkpoint_rejects_unclassified_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    installed = appliance.execute(appliance._validate_operation(operation))
+    restore = appliance._validate_operation(
+        {
+            **operation,
+            "operation": "restore",
+            "capture_manifest": installed["capture_manifest"],
+            "installed_manifest": installed["installed_manifest"],
+        }
+    )
+    appliance.execute(restore)
+    staged = old_tree.parent / f".kdive-{operation['operation_nonce']}-new"
+    staged.mkdir()
+    (staged / "junk").write_bytes(b"unclassified")
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance.execute(restore)
 
 
 def test_shutdown_failure_replaces_terminal_success(
@@ -722,6 +811,33 @@ def test_success_result_shapes_require_terminal_phase_fields() -> None:
     assert not list(validator.iter_errors(identity))
     accepted = {**identity, "phase": "accepted"}
     assert list(validator.iter_errors(accepted))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["release", "root_volume_key", "root_volume_identity", "source_manifest"],
+)
+def test_accepted_failure_requires_complete_operation_identity(field: str) -> None:
+    validator = Draft202012Validator(_json("result-v1.schema.json"))
+    operation = _operation()
+    root_volume = cast(dict[str, object], operation["root_volume"])
+    failure = {
+        "protocol": "remote-module-result-v1",
+        "status": "failure",
+        "phase": "accepted",
+        "error_code": "FILESYSTEM_FAILURE",
+        "system_id": operation["system_id"],
+        "run_id": operation["run_id"],
+        "plan_identity": operation["plan_identity"],
+        "operation_nonce": operation["operation_nonce"],
+        "release": operation["release"],
+        "root_volume_key": root_volume["key"],
+        "root_volume_identity": root_volume["identity"],
+        "source_manifest": operation["source_manifest"],
+        "appliance_image_digest": operation["appliance_image_digest"],
+    }
+    failure.pop(field)
+    assert list(validator.iter_errors(failure))
 
 
 @pytest.mark.parametrize("name", ["operation-v1.schema.json", "result-v1.schema.json"])
