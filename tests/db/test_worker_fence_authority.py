@@ -43,6 +43,10 @@ _BINDING_MAX_BYTES = 4096
 _PROTECTED_TABLES = {
     "capture_operation_cutoff",
     "capture_operations",
+    "external_boot_authorities",
+    "external_boot_authority_acknowledgements",
+    "external_boot_authority_audit",
+    "external_boot_authority_counters",
     "investigation_build_use_recoveries",
     "investigation_build_uses",
     "schema_migrations",
