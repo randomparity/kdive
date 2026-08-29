@@ -157,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist external boot evidence
 - Add external boot contracts
 - Bind verified remote root provenance
+- Materialize boot artifact volumes
 
 ### Changed
 
@@ -1526,6 +1527,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Isolate root publication attempts
 - Bound package inspection output
 - Preserve advisory malformed output handling
+- Classify volume rehash I/O faults
+- Publish boot volumes from owned partials
+- Finish artifact rehash streams
+- Isolate artifact transfer attempts
+- Verify staged boot artifact bytes
+- Verify published boot artifact bytes
+- Clean kernel after initrd failure
+- Clean failed final volume publication
 
 ### Security
 
