@@ -32,6 +32,7 @@ type _AdmittedOperation = Literal[
     "teardown",
     "deadline",
     "recovery-attempt",
+    "fail",
 ]
 
 
@@ -283,7 +284,7 @@ class ExternalBootAuthorityResultV1(BaseModel):
             "release": {"release", "cleanup", "fail"},
             "teardown": {"teardown", "fail"},
         }
-        if admitted_operation not in allowed[self.purpose] - {"fail"}:
+        if admitted_operation not in allowed[self.purpose]:
             raise ValueError("admitted operation does not match authority purpose")
         if operation != "fail" and operation != admitted_operation:
             raise ValueError("result operation does not match authority purpose")
