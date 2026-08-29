@@ -613,9 +613,9 @@ def _failure_category(exc: Exception) -> ErrorCategory:
 
 def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
     """Decode a persisted marker; malformed markers remain fenced from generic finalization."""
-    raw = job.payload.get("external_boot_authority_v1")
-    if raw is None:
+    if "external_boot_authority_v1" not in job.payload:
         return None
+    raw = job.payload["external_boot_authority_v1"]
     try:
         return ExternalBootAuthorityMarkerV1.model_validate(raw)
     except ValidationError:
@@ -641,7 +641,7 @@ def _authority_binding_matches(
         and marker.purpose == result.purpose
         and marker.provider_kind == result.provider_kind
         and marker.authority_instance == result.authority_instance
-        and marker.operation == result.result.operation
+        and marker.operation == result.admitted_operation
         and marker.operation_identity == result.operation_identity
     )
 

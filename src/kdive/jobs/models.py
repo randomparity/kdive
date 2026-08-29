@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -23,12 +23,28 @@ from kdive.domain.operations.jobs import Job, JobKind
 
 type _Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type _ResultRef = Annotated[str, Field(min_length=1, max_length=2048)] | None
+type _AdmittedOperation = Literal[
+    "activate",
+    "recover",
+    "resolve-conflict",
+    "release",
+    "cleanup",
+    "teardown",
+    "deadline",
+    "recovery-attempt",
+]
 
 
 def _utf8_bytes(value: str, maximum: int) -> str:
     if not 1 <= len(value.encode("utf-8")) <= maximum:
         raise ValueError(f"must be 1-{maximum} UTF-8 bytes")
     return value
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamp must include a UTC offset")
+    return value.astimezone(UTC)
 
 
 class _ClosedModel(BaseModel):
@@ -53,6 +69,8 @@ class _TerminalEvidence(_ClosedModel):
     objects: list[_OpaqueRef] = Field(max_length=4096)
     observed_at: datetime
 
+    _normalize_timestamp = field_validator("observed_at")(_utc_datetime)
+
 
 class _ReleaseObject(_ClosedModel):
     object: _OpaqueRef
@@ -70,6 +88,8 @@ class _ReleaseEvidence(_ClosedModel):
     objects: list[_ReleaseObject] = Field(max_length=1024)
     verified_at: datetime
 
+    _normalize_timestamp = field_validator("verified_at")(_utc_datetime)
+
 
 class _CleanupEvidence(_ClosedModel):
     schema_: Literal["external-boot-cleanup-evidence-v1"] = Field(alias="schema")
@@ -80,12 +100,16 @@ class _CleanupEvidence(_ClosedModel):
     teardown_identity: _Digest | None = None
     completed_at: datetime
 
+    _normalize_timestamp = field_validator("completed_at")(_utc_datetime)
+
 
 class _TeardownEvidence(_ClosedModel):
     schema_: Literal["external-boot-teardown-evidence-v1"] = Field(alias="schema")
     system_id: UUID
     system_state: Literal["torn_down"]
     observed_at: datetime
+
+    _normalize_timestamp = field_validator("observed_at")(_utc_datetime)
 
 
 class _ResultBase(_ClosedModel):
@@ -99,6 +123,8 @@ class _ActivateResult(_ResultBase):
     result_ref: _ResultRef
     evidence: _TerminalEvidence
     activation_readiness_deadline: datetime
+
+    _normalize_timestamp = field_validator("activation_readiness_deadline")(_utc_datetime)
 
 
 class _RecoverResult(_ResultBase):
@@ -131,12 +157,16 @@ class _DeadlineResult(_ResultBase):
     operation: Literal["deadline"]
     deadline: datetime
 
+    _normalize_timestamp = field_validator("deadline")(_utc_datetime)
+
 
 class _RecoveryAttemptResult(_ResultBase):
     operation: Literal["recovery-attempt"]
     attempt_id: UUID
     recovery_basis: Literal["recovery_point", "pre_recovery"]
     deadline: datetime
+
+    _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
 class _FailureContext(_ClosedModel):
@@ -215,6 +245,7 @@ class ExternalBootAuthorityResultV1(BaseModel):
     purpose: Literal["activate", "recover", "resolve-conflict", "release", "teardown"]
     provider_kind: Literal["local-libvirt", "remote-libvirt"]
     authority_instance: str = Field(min_length=1, max_length=255)
+    admitted_operation: _AdmittedOperation
     operation_identity: str = Field(min_length=1, max_length=255)
     operation_digest: str
     journal_sequence: int = Field(gt=0)
@@ -244,6 +275,7 @@ class ExternalBootAuthorityResultV1(BaseModel):
     @model_validator(mode="after")
     def _operation_matches_purpose(self) -> ExternalBootAuthorityResultV1:
         operation = self.result.operation
+        admitted_operation = self.admitted_operation
         allowed = {
             "activate": {"activate", "deadline", "fail"},
             "recover": {"recover", "deadline", "recovery-attempt", "fail"},
@@ -251,7 +283,9 @@ class ExternalBootAuthorityResultV1(BaseModel):
             "release": {"release", "cleanup", "fail"},
             "teardown": {"teardown", "fail"},
         }
-        if operation not in allowed[self.purpose]:
+        if admitted_operation not in allowed[self.purpose] - {"fail"}:
+            raise ValueError("admitted operation does not match authority purpose")
+        if operation != "fail" and operation != admitted_operation:
             raise ValueError("result operation does not match authority purpose")
         result_ref = getattr(self.result, "result_ref", None)
         if result_ref is not None:

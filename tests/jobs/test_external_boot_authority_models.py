@@ -25,6 +25,7 @@ _DIGEST = "sha256:" + "a" * 64
 
 
 def _carrier(result: dict[str, object]) -> dict[str, object]:
+    operation = result.get("operation")
     return {
         "authority_id": uuid4(),
         "generation": 1,
@@ -35,6 +36,7 @@ def _carrier(result: dict[str, object]) -> dict[str, object]:
         "purpose": "activate",
         "provider_kind": "local-libvirt",
         "authority_instance": "provider-1",
+        "admitted_operation": "activate" if operation == "fail" else operation,
         "operation_identity": "activate-1",
         "operation_digest": _DIGEST,
         "journal_sequence": 1,
@@ -134,7 +136,7 @@ def _marker(
         "purpose": carrier.purpose,
         "provider_kind": carrier.provider_kind,
         "authority_instance": carrier.authority_instance,
-        "operation": carrier.result.operation,
+        "operation": carrier.admitted_operation,
         "operation_identity": carrier.operation_identity,
     }
 
@@ -407,6 +409,31 @@ def test_carrier_rejects_evidence_list_over_cardinality_bound() -> None:
         ExternalBootAuthoritySuccessV1.model_validate(data)
 
 
+def test_carrier_rejects_naive_timestamp() -> None:
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "deadline",
+            "deadline": "2026-08-29T00:01:00",
+        }
+    )
+    with pytest.raises(ValidationError, match="UTC offset"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_carrier_normalizes_offset_timestamp_to_utc_z() -> None:
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "deadline",
+            "deadline": "2026-08-28T17:01:00-07:00",
+        }
+    )
+    carrier = ExternalBootAuthoritySuccessV1.model_validate(data)
+    serialized = carrier.result.model_dump(mode="json", by_alias=True)
+    assert serialized["deadline"] == "2026-08-29T00:01:00Z"
+
+
 def test_release_rejects_foreign_evidence_and_unsorted_objects() -> None:
     activation_id = uuid4()
     system_id = uuid4()
@@ -503,6 +530,78 @@ def test_worker_marked_job_without_typed_carrier_fails_closed(monkeypatch, marke
         monkeypatch.setattr(queue, "complete", generic)
         await _worker()._finalize_handler(_job(marker), _span(), _task_result(None))
         authority.assert_not_awaited()
+        generic.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("as_exception", [False, True])
+def test_present_null_marker_fails_closed_on_success_and_exception(
+    monkeypatch, as_exception: bool
+) -> None:
+    async def exercise() -> None:
+        success = _success()
+        failure = _failure(terminal=True)
+        authority_success = AsyncMock()
+        authority_failure = AsyncMock()
+        generic_success = AsyncMock()
+        generic_failure = AsyncMock()
+        monkeypatch.setattr(queue, "complete_external_boot", authority_success)
+        monkeypatch.setattr(queue, "fail_external_boot", authority_failure)
+        monkeypatch.setattr(queue, "complete", generic_success)
+        monkeypatch.setattr(queue, "fail", generic_failure)
+        task = (
+            _task_result(error=ExternalBootAuthorityFailure(failure))
+            if as_exception
+            else _task_result(success)
+        )
+        await _worker()._finalize_handler(_job(None), _span(), task)
+        authority_success.assert_not_awaited()
+        authority_failure.assert_not_awaited()
+        generic_success.assert_not_awaited()
+        generic_failure.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("admitted_operation", "purpose"),
+    [
+        ("activate", "activate"),
+        ("recover", "recover"),
+        ("resolve-conflict", "resolve-conflict"),
+        ("release", "release"),
+        ("cleanup", "release"),
+        ("teardown", "teardown"),
+        ("deadline", "activate"),
+        ("recovery-attempt", "recover"),
+    ],
+)
+def test_every_admitted_operation_routes_failure_to_authority_adapter(
+    monkeypatch, admitted_operation: str, purpose: str
+) -> None:
+    async def exercise() -> None:
+        data = _carrier(
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "fail",
+                "error_category": "boot_timeout",
+                "failure_context": {"phase": "provider-call"},
+                "terminal": True,
+            }
+        )
+        data.update({"admitted_operation": admitted_operation, "purpose": purpose})
+        carrier = ExternalBootAuthorityFailureV1.model_validate(data)
+        authority = AsyncMock(return_value=SimpleNamespace(state=JobState.FAILED))
+        generic = AsyncMock()
+        monkeypatch.setattr(queue, "fail_external_boot", authority)
+        monkeypatch.setattr(queue, "fail", generic)
+        await _worker()._finalize_handler(
+            _job(_marker(carrier)),
+            _span(),
+            _task_result(error=ExternalBootAuthorityFailure(carrier)),
+        )
+        authority.assert_awaited_once()
         generic.assert_not_awaited()
 
     asyncio.run(exercise())
