@@ -5,7 +5,7 @@ from contextlib import AbstractAsyncContextManager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -245,6 +245,232 @@ def test_authority_provider_exception_is_categorized() -> None:
     error = ExternalBootAuthorityFailure(_failure(terminal=True))
     assert error.category.value == "boot_timeout"
     assert error.terminal is True
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("activation_id", uuid4()),
+        ("run_id", uuid4()),
+        ("system_id", uuid4()),
+        ("plan_identity", "sha256:" + "c" * 64),
+        ("purpose", "recover"),
+        ("provider_kind", "remote-libvirt"),
+        ("authority_instance", "provider-2"),
+        ("operation", "fail"),
+        ("operation_identity", "activate-2"),
+    ],
+)
+def test_worker_rejects_every_marker_carrier_binding_mismatch(
+    monkeypatch, field: str, replacement: str | UUID
+) -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        marker = _marker(carrier)
+        marker[field] = str(replacement)
+        authority = AsyncMock()
+        generic = AsyncMock()
+        monkeypatch.setattr(queue, "complete_external_boot", authority)
+        monkeypatch.setattr(queue, "complete", generic)
+        await _worker()._finalize_handler(_job(marker), _span(), _task_result(carrier))
+        authority.assert_not_awaited()
+        generic.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_carrier_rejects_foreign_evidence_ownership_and_wrong_outcome() -> None:
+    activation_id = uuid4()
+    system_id = uuid4()
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": None,
+            "evidence": {
+                "schema": "external-boot-terminal-evidence-v1",
+                "activation_id": uuid4(),
+                "system_id": system_id,
+                "outcome": "recovered",
+                "composite_state": _DIGEST,
+                "objects": [],
+                "observed_at": "2026-08-29T00:00:00Z",
+            },
+            "activation_readiness_deadline": "2026-08-29T00:01:00Z",
+        }
+    )
+    data.update({"activation_id": activation_id, "system_id": system_id})
+    with pytest.raises(ValidationError, match="ownership|outcome"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_carrier_rejects_teardown_evidence_with_foreign_owner_or_mode() -> None:
+    data = _teardown().model_dump(mode="json", by_alias=True)
+    data["result"]["cleanup_evidence"]["mode"] = "ordinary"
+    data["result"]["teardown_evidence"]["system_id"] = str(uuid4())
+    with pytest.raises(ValidationError, match="ownership or mode"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("authority_instance", "é" * 128),
+        ("operation_identity", "é" * 128),
+    ],
+)
+def test_carrier_rejects_multibyte_identity_over_byte_limit(field: str, value: str) -> None:
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "deadline",
+            "deadline": "2026-08-29T00:01:00Z",
+        }
+    )
+    data[field] = value
+    with pytest.raises(ValidationError, match="UTF-8 bytes"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_carrier_rejects_oversize_evidence_and_opaque_reference() -> None:
+    activation_id = uuid4()
+    system_id = uuid4()
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": None,
+            "evidence": {
+                "schema": "external-boot-terminal-evidence-v1",
+                "activation_id": activation_id,
+                "system_id": system_id,
+                "outcome": "active",
+                "composite_state": _DIGEST,
+                "objects": [{"ref": "é" * 513}],
+                "observed_at": "2026-08-29T00:00:00Z",
+            },
+            "activation_readiness_deadline": "2026-08-29T00:01:00Z",
+        }
+    )
+    data.update({"activation_id": activation_id, "system_id": system_id})
+    with pytest.raises(ValidationError, match="UTF-8 bytes"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_carrier_rejects_total_evidence_over_64_kib() -> None:
+    activation_id = uuid4()
+    system_id = uuid4()
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": None,
+            "evidence": {
+                "schema": "external-boot-terminal-evidence-v1",
+                "activation_id": activation_id,
+                "system_id": system_id,
+                "outcome": "active",
+                "composite_state": _DIGEST,
+                "objects": [{"ref": f"{index:04d}-" + "x" * 995} for index in range(70)],
+                "observed_at": "2026-08-29T00:00:00Z",
+            },
+            "activation_readiness_deadline": "2026-08-29T00:01:00Z",
+        }
+    )
+    data.update({"activation_id": activation_id, "system_id": system_id})
+    with pytest.raises(ValidationError, match="64 KiB"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_carrier_rejects_evidence_list_over_cardinality_bound() -> None:
+    activation_id = uuid4()
+    system_id = uuid4()
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": None,
+            "evidence": {
+                "schema": "external-boot-terminal-evidence-v1",
+                "activation_id": activation_id,
+                "system_id": system_id,
+                "outcome": "active",
+                "composite_state": _DIGEST,
+                "objects": [{"ref": "x"} for _ in range(4097)],
+                "observed_at": "2026-08-29T00:00:00Z",
+            },
+            "activation_readiness_deadline": "2026-08-29T00:01:00Z",
+        }
+    )
+    data.update({"activation_id": activation_id, "system_id": system_id})
+    with pytest.raises(ValidationError, match="at most 4096"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_release_rejects_foreign_evidence_and_unsorted_objects() -> None:
+    activation_id = uuid4()
+    system_id = uuid4()
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "release",
+            "result_ref": None,
+            "release_identity": _DIGEST,
+            "evidence": {
+                "schema": "external-boot-release-evidence-v1",
+                "activation_id": uuid4(),
+                "system_id": system_id,
+                "store_identity": {"ref": "store"},
+                "owner_key": {"ref": "owner"},
+                "reserved_bytes": 1,
+                "enumeration_complete": True,
+                "objects": [
+                    {"object": {"ref": "z"}, "absent": True},
+                    {"object": {"ref": "a"}, "absent": True},
+                ],
+                "verified_at": "2026-08-29T00:00:00Z",
+            },
+        }
+    )
+    data.update({"activation_id": activation_id, "system_id": system_id, "purpose": "release"})
+    with pytest.raises(ValidationError, match="ownership|sorted"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_cleanup_rejects_foreign_owner_and_inconsistent_mode() -> None:
+    activation_id = uuid4()
+    system_id = uuid4()
+    data = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "cleanup",
+            "result_ref": None,
+            "evidence": {
+                "schema": "external-boot-cleanup-evidence-v1",
+                "activation_id": uuid4(),
+                "system_id": system_id,
+                "release_identity": _DIGEST,
+                "mode": "ordinary",
+                "teardown_identity": _DIGEST,
+                "completed_at": "2026-08-29T00:00:00Z",
+            },
+        }
+    )
+    data.update({"activation_id": activation_id, "system_id": system_id, "purpose": "release"})
+    with pytest.raises(ValidationError, match="ownership|ordinary cleanup"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+def test_malformed_marker_with_typed_carrier_still_calls_no_adapter(monkeypatch) -> None:
+    async def exercise() -> None:
+        authority = AsyncMock()
+        monkeypatch.setattr(queue, "complete_external_boot", authority)
+        await _worker()._finalize_handler(
+            _job({"bad": "marker"}), _span(), _task_result(_success())
+        )
+        authority.assert_not_awaited()
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("terminal", [False, True])
