@@ -247,6 +247,13 @@ def _materialize_one(
         if published is not None:
             with contextlib.suppress(libvirt.libvirtError):
                 published.delete(0)
+        else:
+            # createXMLFrom can leave a named destination behind before reporting a clone fault.
+            # The initial absence check and the caller's System lock make that destination ours.
+            with contextlib.suppress(libvirt.libvirtError):
+                failed_final = _lookup(pool, name)
+                if failed_final is not None:
+                    failed_final.delete(0)
         if staged is not None:
             with contextlib.suppress(libvirt.libvirtError):
                 staged.delete(0)
