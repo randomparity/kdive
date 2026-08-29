@@ -8,11 +8,13 @@ from typing import TypedDict
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 
 from kdive.db.external_boot_activations import (
     CasStatus,
     ExternalBootActivationRepository,
 )
+from kdive.db.locks import LockScope, advisory_xact_lock, try_advisory_xact_lock
 from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
     ExternalBootActivationState,
@@ -31,6 +33,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RecoveryPoint,
 )
+from tests.db_waits import wait_until_backend_waiting
 
 _AT = datetime(2026, 8, 28, tzinfo=UTC)
 _PLAN = "sha256:" + "a" * 64
@@ -165,6 +168,24 @@ def _authority(activation: ExternalBootActivation) -> _AuthorityArgs:
     }
 
 
+async def _ledger_snapshot(conn: psycopg.AsyncConnection) -> tuple[str | None, ...]:
+    snapshots: list[str | None] = []
+    for table, order in (
+        ("external_boot_activations", "id"),
+        ("external_boot_reservations", "activation_id"),
+        ("external_boot_reservation_releases", "activation_id"),
+        ("external_boot_recovery_attempts", "activation_id, attempt_number"),
+    ):
+        cur = await conn.execute(
+            f"SELECT jsonb_agg(to_jsonb(row_value) ORDER BY {order})::text "  # noqa: S608
+            f"FROM {table} row_value"  # noqa: S608
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        snapshots.append(row[0])
+    return tuple(snapshots)
+
+
 def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None:
     async def _run() -> None:
         repo = ExternalBootActivationRepository()
@@ -179,6 +200,7 @@ def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None
             materialization = _materialization(activation)
             stale_authority = _authority(activation)
             stale_authority["authority_generation"] = 6
+            before = await _ledger_snapshot(conn)
             stale = await repo.record_materialization(
                 conn,
                 **stale_authority,
@@ -186,6 +208,7 @@ def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None
                 materialization=materialization,
             )
             assert stale.status is CasStatus.SUPERSEDED
+            assert await _ledger_snapshot(conn) == before
             unchanged = await repo.get(conn, activation.id)
             assert unchanged is not None and unchanged.materialization is None
 
@@ -199,6 +222,85 @@ def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None
             assert applied.activation is not None
             assert applied.activation.materialization == materialization
             await conn.commit()
+
+    asyncio.run(_run())
+
+
+def test_capacity_exact_cap_and_over_cap_across_systems(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            first_system, first_run = await _seed(conn)
+            second_system, second_run = await _seed(conn)
+            first, first_reservation = _records(first_system, first_run)
+            second, second_reservation = _records(second_system, second_run)
+            second_reservation = second_reservation.model_copy(
+                update={"store_identity": first_reservation.store_identity}
+            )
+            await repo.create(conn, first, first_reservation)
+            await repo.create(conn, second, second_reservation)
+            assert (
+                await repo.mark_reservation_ready(
+                    conn,
+                    **_authority(first),
+                    expected_state=ExternalBootActivationState.PREPARING,
+                    recovery_max_bytes=first_reservation.reserved_bytes,
+                )
+            ).status is CasStatus.APPLIED
+            before = await _ledger_snapshot(conn)
+            assert (
+                await repo.mark_reservation_ready(
+                    conn,
+                    **_authority(second),
+                    expected_state=ExternalBootActivationState.PREPARING,
+                    recovery_max_bytes=first_reservation.reserved_bytes,
+                )
+            ).status is CasStatus.CAPACITY_EXHAUSTED
+            assert await _ledger_snapshot(conn) == before
+            pending = await repo.get_reservation(conn, second.id)
+            assert pending is not None
+            assert pending.state is ExternalBootReservationState.PENDING
+            await conn.commit()
+
+    asyncio.run(_run())
+
+
+def test_capacity_write_takes_system_before_recovery_store_lock(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with (
+            await psycopg.AsyncConnection.connect(migrated_url) as setup,
+            await psycopg.AsyncConnection.connect(migrated_url) as holder,
+            await psycopg.AsyncConnection.connect(migrated_url) as waiter,
+            await psycopg.AsyncConnection.connect(migrated_url) as probe,
+        ):
+            system_id, run_id = await _seed(setup)
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(setup, activation, reservation)
+            await setup.commit()
+
+            async def admit() -> CasStatus:
+                async with waiter.transaction():
+                    result = await repo.mark_reservation_ready(
+                        waiter,
+                        **_authority(activation),
+                        expected_state=ExternalBootActivationState.PREPARING,
+                        recovery_max_bytes=reservation.reserved_bytes,
+                    )
+                    return result.status
+
+            async with (
+                holder.transaction(),
+                advisory_xact_lock(holder, LockScope.RECOVERY_STORE, reservation.store_identity),
+            ):
+                task = asyncio.create_task(admit())
+                await wait_until_backend_waiting(
+                    holder, waiter.info.backend_pid, locktype="advisory"
+                )
+                async with probe.transaction():
+                    assert not await try_advisory_xact_lock(probe, LockScope.SYSTEM, system_id)
+                assert not task.done()
+            assert await asyncio.wait_for(task, timeout=5) is CasStatus.APPLIED
 
     asyncio.run(_run())
 
@@ -449,6 +551,18 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
                 acknowledged_composite_state=_DIGEST,
             )
             assert begun.status is CasStatus.APPLIED
+            assert (
+                await repo.begin_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                    attempt_id=second_attempt,
+                    recovery_readiness_deadline=_AT + timedelta(minutes=10),
+                    resolution_operation="accept-observed-state",
+                    resolution_identity="sha256:" + "c" * 64,
+                    acknowledged_composite_state=_DIGEST,
+                )
+            ).status is CasStatus.APPLIED
             current_attempt = await repo.get_current_recovery_attempt(conn, activation.id)
             assert current_attempt is not None
             assert current_attempt.attempt_id == second_attempt
@@ -470,6 +584,16 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
                 terminal_evidence=terminal,
             )
             assert finished.status is CasStatus.APPLIED
+            assert (
+                await repo.finish_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERING,
+                    attempt_id=second_attempt,
+                    new_state=ExternalBootActivationState.RECOVERED,
+                    terminal_evidence=terminal,
+                )
+            ).status is CasStatus.APPLIED
             attempts = await repo.list_recovery_attempts(conn, activation.id, limit=10)
             assert [item.attempt_id for item in attempts] == [second_attempt, first_attempt]
             assert attempts[0].recovery_basis == "pre_recovery"
@@ -480,7 +604,16 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
     asyncio.run(_run())
 
 
-def test_teardown_cleanup_releases_capacity_and_fences_conflict(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "cleanup_state",
+    [
+        ExternalBootActivationState.RECOVERY_CONFLICT,
+        ExternalBootActivationState.RECOVERY_FAILED,
+    ],
+)
+def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
+    migrated_url: str, cleanup_state: ExternalBootActivationState
+) -> None:
     async def _run() -> None:
         repo = ExternalBootActivationRepository()
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
@@ -529,6 +662,34 @@ def test_teardown_cleanup_releases_capacity_and_fences_conflict(migrated_url: st
                 attempt_id=uuid4(),
                 evidence=conflict,
             )
+            if cleanup_state is ExternalBootActivationState.RECOVERY_FAILED:
+                attempt_id = uuid4()
+                await repo.begin_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                    attempt_id=attempt_id,
+                    recovery_readiness_deadline=_AT + timedelta(minutes=10),
+                    resolution_operation="accept-observed-state",
+                    resolution_identity="sha256:" + "c" * 64,
+                    acknowledged_composite_state=_DIGEST,
+                )
+                failure = ExternalBootTerminalEvidenceV1(
+                    activation_id=activation.id,
+                    system_id=system_id,
+                    outcome="recovery_failed",
+                    composite_state=_DIGEST,
+                    objects=(),
+                    observed_at=_AT,
+                )
+                await repo.finish_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERING,
+                    attempt_id=attempt_id,
+                    new_state=ExternalBootActivationState.RECOVERY_FAILED,
+                    terminal_evidence=failure,
+                )
             await conn.execute("UPDATE systems SET state = 'torn_down' WHERE id = %s", (system_id,))
             refs = tuple(
                 ExternalBootReleaseObject(object=OpaqueProviderRef(ref=value))
@@ -547,7 +708,7 @@ def test_teardown_cleanup_releases_capacity_and_fences_conflict(migrated_url: st
             released = await repo.release_reservation(
                 conn,
                 **_authority(activation),
-                expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                expected_state=cleanup_state,
                 release_evidence=release,
                 teardown_evidence=teardown,
             )
@@ -563,7 +724,7 @@ def test_teardown_cleanup_releases_capacity_and_fences_conflict(migrated_url: st
             cleaned = await repo.mark_cleanup_complete(
                 conn,
                 **_authority(activation),
-                expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                expected_state=cleanup_state,
                 cleanup_evidence=cleanup,
             )
             assert cleaned.status is CasStatus.APPLIED

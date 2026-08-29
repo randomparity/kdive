@@ -529,12 +529,13 @@ class ExternalBootActivationRepository:
         authority_generation: int,
         expected_state: ExternalBootActivationState,
         attempt_id: UUID,
-        recovery_readiness_deadline: Any,
+        recovery_readiness_deadline: datetime,
         resolution_operation: str | None = None,
         resolution_identity: str | None = None,
         acknowledged_composite_state: str | None = None,
     ) -> CasResult:
         ensure_transition(expected_state, ExternalBootActivationState.RECOVERING)
+        _require_utc(recovery_readiness_deadline, "recovery_readiness_deadline")
         resolution = (resolution_operation, resolution_identity, acknowledged_composite_state)
         if expected_state is ExternalBootActivationState.RECOVERY_CONFLICT:
             if not all(value is not None for value in resolution):
@@ -542,6 +543,24 @@ class ExternalBootActivationRepository:
         elif any(value is not None for value in resolution):
             raise ValueError("ordinary recovery forbids resolution fields")
         async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            current = await self.get_current_recovery_attempt(conn, activation_id)
+            current_activation = await self.get(conn, activation_id)
+            if (
+                current is not None
+                and current_activation is not None
+                and current.attempt_id == attempt_id
+                and current.state is ExternalBootRecoveryAttemptState.RECOVERING
+                and current.recovery_readiness_deadline == recovery_readiness_deadline
+                and current.resolution_operation == resolution_operation
+                and current.resolution_identity == resolution_identity
+                and current.acknowledged_composite_state == acknowledged_composite_state
+                and current_activation.state is ExternalBootActivationState.RECOVERING
+                and current_activation.system_id == system_id
+                and current_activation.operation_owner_id == operation_owner_id
+                and current_activation.authority_generation == authority_generation
+                and not current_activation.cleanup_complete
+            ):
+                return CasResult(CasStatus.APPLIED, current_activation)
             row = await self._authorized_row(
                 conn,
                 system_id=system_id,
@@ -641,6 +660,22 @@ class ExternalBootActivationRepository:
         ):
             raise ValueError("attempt evidence ownership does not match the activation")
         async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            current = await self.get_current_recovery_attempt(conn, activation_id)
+            current_activation = await self.get(conn, activation_id)
+            if (
+                current is not None
+                and current_activation is not None
+                and current.attempt_id == attempt_id
+                and current.state is states[new_state]
+                and current.conflict_evidence == conflict_evidence
+                and current.terminal_evidence == terminal_evidence
+                and current_activation.state is new_state
+                and current_activation.system_id == system_id
+                and current_activation.operation_owner_id == operation_owner_id
+                and current_activation.authority_generation == authority_generation
+                and not current_activation.cleanup_complete
+            ):
+                return CasResult(CasStatus.APPLIED, current_activation)
             row = await self._authorized_row(
                 conn,
                 system_id=system_id,
@@ -892,6 +927,25 @@ class ExternalBootActivationRepository:
             advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
             conn.cursor(row_factory=dict_row) as cur,
         ):
+            await cur.execute(
+                "SELECT * FROM external_boot_activations WHERE id = %s AND system_id = %s "
+                "AND operation_owner_id = %s AND authority_generation = %s AND state = %s",
+                (
+                    activation_id,
+                    system_id,
+                    operation_owner_id,
+                    authority_generation,
+                    expected_state,
+                ),
+            )
+            existing_row = await cur.fetchone()
+            existing = _activation(existing_row)
+            if (
+                existing is not None
+                and existing.cleanup_complete
+                and existing.cleanup_evidence == cleanup_evidence
+            ):
+                return CasResult(CasStatus.APPLIED, existing)
             await cur.execute(
                 "SELECT rel.* FROM external_boot_reservation_releases rel "
                 "JOIN external_boot_activations a ON a.id = rel.activation_id "
