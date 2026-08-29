@@ -25,6 +25,8 @@ from kdive.inventory.model import ImageEntry, InventoryDoc, RemoteLibvirtInstanc
 from kdive.inventory.path import systems_toml_path
 from kdive.providers.remote_libvirt.connection.uri_validation import validate_remote_uri
 from kdive.providers.remote_libvirt.settings import (
+    REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES,
+    REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL,
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_NETWORK,
     REMOTE_LIBVIRT_STORAGE_POOL,
@@ -68,6 +70,8 @@ class RemoteLibvirtConfig:
     storage_pool: str = _DEFAULT_STORAGE_POOL
     network: str = _DEFAULT_NETWORK
     machine: str = _DEFAULT_MACHINE
+    boot_artifact_pool: str = "kdive-boot-artifacts"
+    boot_artifact_max_bytes: int = 10 * 1024 * 1024 * 1024
     gdb_addr: str | None = None
     gdb_port_min: int = 47000
     gdb_port_max: int = 47099
@@ -346,6 +350,12 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
         storage_pool=config.get(REMOTE_LIBVIRT_STORAGE_POOL) or _DEFAULT_STORAGE_POOL,
         network=config.get(REMOTE_LIBVIRT_NETWORK) or _DEFAULT_NETWORK,
         machine=config.get(REMOTE_LIBVIRT_MACHINE) or _DEFAULT_MACHINE,
+        boot_artifact_pool=(
+            config.get(REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL) or "kdive-boot-artifacts"
+        ),
+        boot_artifact_max_bytes=(
+            config.get(REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES) or 10 * 1024 * 1024 * 1024
+        ),
         gdb_addr=instance.gdb_addr,
         gdb_port_min=gdb_port_min,
         gdb_port_max=gdb_port_max,
