@@ -369,6 +369,12 @@ def _acknowledge(
     quiescence_digest: str = _QUIESCENCE,
     generation: int | None = None,
     operation_digest: str | None = None,
+    plan_identity: str = _PLAN,
+    job_id: UUID | None = None,
+    worker_incarnation: str | None = None,
+    operation_identity: str | None = None,
+    journal_sequence: int = 1,
+    authority_id: UUID | None = None,
 ) -> str:
     row = provider.execute(
         "SELECT status, journal_sequence, journal_digest, positive_quiescence_digest, "
@@ -376,23 +382,23 @@ def _acknowledge(
         "%s, %s, %s, %s, %s, %s, %s, %s, %s, "
         "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
-            authority.authority_id,
+            authority_id or authority.authority_id,
             generation or authority.generation,
             case.allocation_id,
             case.activation_id,
             case.run_id,
             case.system_id,
-            _PLAN,
-            case.job_id,
+            plan_identity,
+            job_id or case.job_id,
             case.attempt,
             case.purpose,
             case.provider_kind,
             case.authority_instance,
-            case.worker_id,
+            worker_incarnation or case.worker_id,
             case.operation,
-            case.operation_identity,
+            operation_identity or case.operation_identity,
             operation_digest or authority.operation_digest,
-            1,
+            journal_sequence,
             journal_digest,
             quiescence_digest,
         ),
@@ -416,26 +422,32 @@ def _commit(
     generation: int | None = None,
     operation_digest: str | None = None,
     journal_digest: str = _JOURNAL,
+    credential: bytes | None = None,
+    job_id: UUID | None = None,
+    authority_id: UUID | None = None,
+    plan_identity: str = _PLAN,
+    operation_identity: str | None = None,
+    journal_sequence: int = 1,
 ) -> tuple[str, str | None]:
     row = worker.execute(
         "SELECT status, job_state FROM commit_external_boot_authority_result("
         "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
-            case.credential,
-            case.job_id,
+            credential or case.credential,
+            job_id or case.job_id,
             case.attempt,
-            authority.authority_id,
+            authority_id or authority.authority_id,
             generation or authority.generation,
             case.activation_id,
             run_id or case.run_id,
             case.system_id,
-            _PLAN,
+            plan_identity,
             case.purpose,
             case.provider_kind,
             case.authority_instance,
-            case.operation_identity,
+            operation_identity or case.operation_identity,
             operation_digest or authority.operation_digest,
-            1,
+            journal_sequence,
             journal_digest,
             Jsonb(result),
         ),
@@ -512,41 +524,30 @@ def _result_state_snapshot(
     return tuple(row)
 
 
-def _durable_surface_snapshot(conn: psycopg.Connection, case: _AuthorityCase) -> tuple[object, ...]:
+def _durable_surface_snapshot(
+    conn: psycopg.Connection, _case: _AuthorityCase
+) -> tuple[object, ...]:
     row = conn.execute(
         "SELECT "
-        "(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM external_boot_activations AS e "
-        "WHERE e.system_id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(al) ORDER BY al.id) FROM allocations AS al), "
+        "(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM systems AS s), "
+        "(SELECT jsonb_agg(to_jsonb(rn) ORDER BY rn.id) FROM runs AS rn), "
+        "(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM external_boot_activations AS e), "
         "(SELECT jsonb_agg(to_jsonb(ra) ORDER BY ra.attempt_number) "
-        "FROM external_boot_recovery_attempts AS ra WHERE ra.activation_id=%s), "
+        "FROM external_boot_recovery_attempts AS ra), "
         "(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.activation_id) "
-        "FROM external_boot_reservations AS r "
-        "WHERE r.activation_id=%s), "
+        "FROM external_boot_reservations AS r), "
         "(SELECT jsonb_agg(to_jsonb(rr) ORDER BY rr.activation_id) "
-        "FROM external_boot_reservation_releases AS rr WHERE rr.activation_id=%s), "
-        "(SELECT to_jsonb(s) FROM systems AS s WHERE s.id=%s), "
-        "(SELECT to_jsonb(rn) FROM runs AS rn WHERE rn.id=%s), "
-        "(SELECT to_jsonb(j) FROM jobs AS j WHERE j.id=%s), "
+        "FROM external_boot_reservation_releases AS rr), "
+        "(SELECT jsonb_agg(to_jsonb(j) ORDER BY j.id) FROM jobs AS j), "
         "(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.generation) "
-        "FROM external_boot_authorities AS a WHERE a.system_id=%s), "
+        "FROM external_boot_authorities AS a), "
         "(SELECT jsonb_agg(to_jsonb(ack) ORDER BY ack.generation) "
-        "FROM external_boot_authority_acknowledgements AS ack WHERE ack.system_id=%s), "
-        "(SELECT to_jsonb(c) FROM external_boot_authority_counters AS c WHERE c.system_id=%s), "
+        "FROM external_boot_authority_acknowledgements AS ack), "
+        "(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.system_id) "
+        "FROM external_boot_authority_counters AS c), "
         "(SELECT jsonb_agg(to_jsonb(audit) ORDER BY audit.id) "
-        "FROM external_boot_authority_audit AS audit WHERE audit.system_id=%s)",
-        (
-            case.system_id,
-            case.activation_id,
-            case.activation_id,
-            case.activation_id,
-            case.system_id,
-            case.run_id,
-            case.job_id,
-            case.system_id,
-            case.system_id,
-            case.system_id,
-            case.system_id,
-        ),
+        "FROM external_boot_authority_audit AS audit)",
     ).fetchone()
     assert row is not None
     return tuple(row)
@@ -562,7 +563,10 @@ def _durable_surface_snapshot(conn: psycopg.Connection, case: _AuthorityCase) ->
         "purpose",
         "provider",
         "authority_instance",
-        "operation",
+        "plan",
+        "job",
+        "worker_credential",
+        "operation_identity",
     ],
 )
 def test_allocation_cross_binding_mismatch_changes_no_durable_surface(
@@ -580,7 +584,10 @@ def test_allocation_cross_binding_mismatch_changes_no_durable_surface(
         "purpose": replace(case, purpose="recover"),
         "provider": replace(case, provider_kind="remote-libvirt"),
         "authority_instance": replace(case, authority_instance=other.authority_instance),
-        "operation": replace(case, operation_identity=other.operation_identity),
+        "plan": case,
+        "job": replace(case, job_id=other.job_id),
+        "worker_credential": replace(case, credential=other.credential),
+        "operation_identity": replace(case, operation_identity=other.operation_identity),
     }[mismatch]
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         row = worker.execute(
@@ -592,7 +599,7 @@ def test_allocation_cross_binding_mismatch_changes_no_durable_surface(
                 changed.activation_id,
                 changed.run_id,
                 changed.system_id,
-                _PLAN,
+                "sha256:" + "e" * 64 if mismatch == "plan" else _PLAN,
                 changed.purpose,
                 changed.provider_kind,
                 changed.authority_instance,
@@ -616,8 +623,16 @@ def test_allocation_cross_binding_mismatch_changes_no_durable_surface(
         "provider",
         "authority_instance",
         "operation",
+        "plan",
+        "job",
+        "authority",
+        "worker_incarnation",
+        "operation_identity",
+        "operation_digest",
         "generation",
-        "acknowledgement",
+        "journal_sequence",
+        "journal_digest",
+        "positive_quiescence",
     ],
 )
 def test_acknowledgement_cross_binding_mismatch_changes_no_durable_surface(
@@ -638,10 +653,18 @@ def test_acknowledgement_cross_binding_mismatch_changes_no_durable_surface(
         "provider": replace(case, provider_kind="remote-libvirt"),
         "authority_instance": replace(case, authority_instance=other.authority_instance),
         "operation": replace(case, operation="recover"),
+        "plan": case,
+        "job": case,
+        "authority": case,
+        "worker_incarnation": case,
+        "operation_identity": case,
+        "operation_digest": case,
         "generation": case,
-        "acknowledgement": case,
+        "journal_sequence": case,
+        "journal_digest": case,
+        "positive_quiescence": case,
     }[mismatch]
-    if mismatch == "acknowledgement":
+    if mismatch in {"journal_sequence", "journal_digest", "positive_quiescence"}:
         with psycopg.connect(
             authority_role_dsns("kdive_provider_authority"), autocommit=True
         ) as host:
@@ -655,7 +678,19 @@ def test_acknowledgement_cross_binding_mismatch_changes_no_durable_surface(
                 changed,
                 authority,
                 generation=authority.generation + 1 if mismatch == "generation" else None,
-                journal_digest=_EVIDENCE_DIGEST if mismatch == "acknowledgement" else _JOURNAL,
+                operation_digest=(_EVIDENCE_DIGEST if mismatch == "operation_digest" else None),
+                plan_identity="sha256:" + "e" * 64 if mismatch == "plan" else _PLAN,
+                job_id=other.job_id if mismatch == "job" else None,
+                authority_id=other.job_id if mismatch == "authority" else None,
+                worker_incarnation=(other.worker_id if mismatch == "worker_incarnation" else None),
+                operation_identity=(
+                    other.operation_identity if mismatch == "operation_identity" else None
+                ),
+                journal_sequence=2 if mismatch == "journal_sequence" else 1,
+                journal_digest=_EVIDENCE_DIGEST if mismatch == "journal_digest" else _JOURNAL,
+                quiescence_digest=(
+                    _EVIDENCE_DIGEST if mismatch == "positive_quiescence" else _QUIESCENCE
+                ),
             )
             == "superseded"
         )
@@ -674,8 +709,15 @@ def test_acknowledgement_cross_binding_mismatch_changes_no_durable_surface(
         "provider",
         "authority_instance",
         "operation",
+        "plan",
+        "job",
+        "authority",
+        "worker_credential",
+        "operation_identity",
+        "operation_digest",
         "generation",
-        "acknowledgement",
+        "journal_sequence",
+        "journal_digest",
     ],
 )
 def test_result_cross_binding_mismatch_changes_no_durable_surface(
@@ -702,8 +744,15 @@ def test_result_cross_binding_mismatch_changes_no_durable_surface(
         "provider": replace(case, provider_kind="remote-libvirt"),
         "authority_instance": replace(case, authority_instance=other.authority_instance),
         "operation": case,
+        "plan": case,
+        "job": case,
+        "authority": case,
+        "worker_credential": case,
+        "operation_identity": case,
+        "operation_digest": case,
         "generation": case,
-        "acknowledgement": case,
+        "journal_sequence": case,
+        "journal_digest": case,
     }[mismatch]
     result = {
         "schema": "external-boot-authority-result-v1",
@@ -721,7 +770,16 @@ def test_result_cross_binding_mismatch_changes_no_durable_surface(
             authority,
             result,
             generation=authority.generation + 1 if mismatch == "generation" else None,
-            journal_digest=_EVIDENCE_DIGEST if mismatch == "acknowledgement" else _JOURNAL,
+            operation_digest=_EVIDENCE_DIGEST if mismatch == "operation_digest" else None,
+            journal_digest=_EVIDENCE_DIGEST if mismatch == "journal_digest" else _JOURNAL,
+            credential=other.credential if mismatch == "worker_credential" else None,
+            job_id=other.job_id if mismatch == "job" else None,
+            authority_id=other.job_id if mismatch == "authority" else None,
+            plan_identity="sha256:" + "e" * 64 if mismatch == "plan" else _PLAN,
+            operation_identity=(
+                other.operation_identity if mismatch == "operation_identity" else None
+            ),
+            journal_sequence=2 if mismatch == "journal_sequence" else 1,
         ) == ("superseded", None)
     with psycopg.connect(migrated_url) as conn:
         assert _durable_surface_snapshot(conn, case) == before
