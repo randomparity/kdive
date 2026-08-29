@@ -23,7 +23,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -489,7 +489,7 @@ class Worker:
         async with self._pool.connection() as conn:
             await conn.set_autocommit(True)
             try:
-                return cast(JobHandlerResult, await handler(conn, job))
+                return await handler(conn, job)
             finally:
                 await conn.set_autocommit(False)
 
@@ -503,7 +503,8 @@ class Worker:
         try:
             result_ref = await handler_task
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
-            if _external_marker(job) is not None:
+            marker = _external_marker(job)
+            if marker is not None:
                 if isinstance(exc, ExternalBootAuthorityFailure):
                     await self._commit_external_result(job, exc.result)
                 else:
@@ -528,7 +529,8 @@ class Worker:
                 self._telemetry.record_job_retry(job.kind.value)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
-        if _external_marker(job) is not None:
+        marker = _external_marker(job)
+        if marker is not None:
             if isinstance(result_ref, ExternalBootAuthorityResultV1):
                 await self._commit_external_result(job, result_ref)
             else:
