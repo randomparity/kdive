@@ -21,7 +21,8 @@ generation per System and is never decremented or deleted by application roles.
 attempt, purpose, provider, authority-instance, worker-incarnation, operation identity, and digest
 binding plus its `allocating|current|superseded|retired` state. A partial unique index permits one
 current row per System. `external_boot_authority_journal_heads` stores the trusted
-per-authority-instance/System journal sequence, record digest, phase, and operation identity. The
+per-authority-instance/System journal sequence, record digest, phase, operation identity, authority
+UUID, and generation. The
 provider role advances it by monotonic compare-and-set from the exact prior sequence and digest;
 neither truncation nor a longer uncommitted suffix can move it.
 `external_boot_authority_acknowledgements` stores the provider-authority principal's
@@ -31,10 +32,18 @@ takeover and commit outcomes with identity references only. Allocation creates a
 genesis head, bound to the System and authority instance, at sequence zero with the protocol's fixed
 empty-journal SHA-256 digest and phase `empty`. The provider role has no direct table INSERT grant;
 its first append must compare-and-set that exact genesis head to sequence one and `admitted`.
-CAS enforces the closed phase graph `empty -> admitted -> mutation-started -> provider-returned ->
-observed -> terminal`; it permits no skips, repeats, or backward edges. System, authority instance,
-generation, and operation identity are immutable across the lane, and each new digest must bind the
-prior digest and the complete immutable lane identity.
+CAS enforces the closed per-operation phase graph `admitted -> mutation-started ->
+provider-returned -> observed -> terminal`; it permits no skips, repeats, or backward edges. A new
+lane admits its first newest `allocating` generation from `empty`. After `terminal`, the same
+System/authority lane may admit only the newest `allocating` generation and a new operation identity,
+continuing at the next sequence and binding the prior terminal digest; it never resets sequence or
+digest continuity. The CAS takes the System lock, checks that generation against the counter, and
+binds the `admitted` head before acknowledgement. Exact acknowledgement of that head is the only
+transition that promotes the generation to `current`; admission alone authorizes no provider commit.
+System and authority instance are immutable across the lane. Generation, authority UUID, and
+operation identity are immutable from one `admitted` record through its `terminal` record, and each
+digest binds the prior digest plus the complete record identity. CAS requires the authority UUID and
+generation to match the exact newest allocating row at admission and preserves them through terminal.
 
 `allocate_external_boot_authority` authenticates the worker credential, resolves project and
 Allocation from the activation without trusting that first read, then acquires advisory locks in the
@@ -43,16 +52,19 @@ requires the Allocation to be active, the System and Run to be in the purpose-sp
 states, and the exact job attempt still running. It requires the locked job to carry a versioned persisted
 `external_boot_authority_v1` admission marker plus the exact activation, Run, System, plan, purpose, provider,
 authority-instance, operation identity, and operation digest binding. It increments the counter,
-supersedes any current authority, inserts the allocating binding, and appends a takeover audit record
-in one transaction. The generation is database-generated and never caller-selected.
+supersedes every prior `allocating` or `current` authority for the System, inserts the allocating
+binding, and appends a takeover audit record in one transaction. The generation is database-generated
+and never caller-selected.
 The purpose-to-kind mapping is closed: `activate`, `recover`, `resolve-conflict`, and `release` use
 `boot` jobs whose admission marker names that purpose; `teardown` uses a `teardown` job. Reconcilers
 must enqueue one of those durable jobs and cannot allocate or commit directly. Every retry or later
 Run is a newly charged exact attempt and receives a distinct generation.
 
 `acknowledge_external_boot_authority` is callable only by the provider-authority role. It locks the
-System and authority, requires the complete immutable binding and positive quiescence fields, writes
-the acknowledgement once, and promotes only that allocating generation to current. Replays with
+System and authority, requires the complete immutable binding and positive quiescence fields, and
+requires the generation to equal the System counter's latest value before writing the
+acknowledgement and promoting that allocating generation to current. A delayed acknowledgement for
+any older generation returns `superseded`. Replays with
 identical facts are idempotent; mismatches affect zero rows.
 An identical replay after promotion returns `applied` with the existing acknowledgement, including
 after response loss; a concurrent or later replay with any differing fact returns `superseded` and
@@ -67,7 +79,10 @@ generation, acknowledgement, job attempt ownership, activation/Run/System/plan b
 provider, authority instance, journal sequence/digest, and operation digest. Its requested operation
 is a closed enum covering activation state/evidence transition, activation deadline update,
 recovery-attempt creation or state/evidence transition, exact job completion, exact job
-failure/requeue with Run compensation, reservation release, and cleanup completion. Each variant
+failure/requeue with Run compensation, reservation release, System teardown transition, and cleanup
+completion. The teardown variant requires terminal provider evidence under the current `teardown`
+generation and changes `SystemState` to `torn_down` only in the same transaction as the accepted job
+result and audit row; the handler performs no pre-provider terminal transition. Each variant
 accepts only the columns it owns, checks the legal lifecycle edge, and commits its mutation and audit
 row atomically. Any mismatch returns `superseded` without changing lifecycle, job, cleanup, or audit
 rows. Existing direct repository methods remain server-only admission/preparation operations;
@@ -83,23 +98,27 @@ the existing `str | None` result or a typed
 discriminator and mandatory
 activation, System, Run, plan, authority-reference, generation, purpose, provider,
 authority-instance, operation, journal sequence/digest, operation digest, and result reference
-fields. The failure variant additionally carries the stable error category and the bounded, redacted
-failure context. Provider adapters attach the immutable authority facts to categorized exceptions,
+fields. Each success/failure operation variant also carries its mandatory versioned ADR-0583
+lifecycle-evidence object: activation materialization/terminal evidence, recovery conflict/terminal
+evidence, release evidence, cleanup evidence, or teardown terminal evidence as appropriate. There is
+no generic evidence variant and a result reference cannot substitute for evidence. The failure
+variant additionally carries the stable error category and the bounded, redacted failure context.
+Provider adapters attach the immutable authority facts and operation-specific evidence to categorized exceptions,
 so response loss, timeout, and provider rejection reach the same authority-bound failure path. The
 boot handler must return or raise the typed carrier whenever the Run's durable boot contract is
 external; missing or malformed authority facts leave the marked job running for reclaim and emit
 only a bounded local diagnostic, with no generic completion/failure. The Python queue layer accepts
 only the typed carrier for authority-bound completion/failure.
 
-migration 0122 changes the existing worker-authentication, claim, heartbeat, complete, fail, and
-related active-incarnation functions from exact protocol 3 to minimum supported protocol 3, while
-making generic complete/fail affect zero rows for a job carrying the external marker. Enqueue of
-marked jobs stays disabled until active worker incarnations advertise fence protocol 4; claim
-excludes marked jobs for older protocols. Protocol-4 workers process ordinary jobs through the
-compatible generic functions. Deployment is
-migration first, then protocol-4 workers, then external enqueue enablement. Rollback disables new
-external enqueue but never re-enables generic finalization for an already-marked job. All other job
-kinds retain their existing exact-attempt fence.
+migration 0122 preserves migration 0113 and ADR-0559's exact protocol-4 worker-authentication,
+claim, heartbeat, completion, failure, capture, and publication gates. It changes only generic
+complete/fail so they affect zero rows for a job carrying the external marker. Enqueue of marked
+jobs remains unavailable in this slice. The later provider-host authority/deployment owner must drain
+or replace incompatible workers and explicitly enable external enqueue only after installing the
+mutation authority; migration 0122 supplies no readiness switch that could be enabled prematurely.
+Protocol-3 incarnations remain unable to authenticate or claim any work. Rollback never re-enables
+generic finalization for an already-marked job. All ordinary jobs retain their existing exact-attempt
+fence and behavior.
 
 Every text input is measured in UTF-8 bytes before mutation. Provider kind, purpose, phase, and
 operation are closed enums; authority instance and operation identity are 1–255 bytes; opaque
@@ -112,11 +131,15 @@ rows carry no caller-supplied free text.
 
 Lifecycle evidence is not generic JSON. Each operation accepts the existing versioned ADR-0583
 evidence schema for that state edge and verifies its required ownership, outcome, identity, and
-state-specific fields in SQL before mutation. The operation digest binds canonical JSON (sorted
-object keys, UTF-8, no insignificant whitespace) of the immutable operation and evidence identity;
-the security-definer function recomputes it. A bounded object that is missing a required key,
-contains a foreign ownership identity, names the wrong outcome, or hashes differently raises
-`22023` before any durable write.
+state-specific fields in SQL before mutation. The allocation function, not Python or a provider,
+mints the operation digest from the locked relational binding using one PostgreSQL expression over
+fixed text/UUID/integer fields and stores it on the authority row. The returned digest is an opaque
+identity that provider acknowledgements and result commits must echo exactly; neither side
+re-serializes lifecycle evidence to recompute it. Evidence is validated directly from parsed
+`jsonb`, whose parser has already rejected duplicate keys into one deterministic value, and its
+state-specific scalar fields are compared with locked relational truth. A bounded object missing a
+required key, carrying foreign ownership, naming the wrong outcome, or paired with a different
+stored operation digest raises `22023` before any durable write.
 
 ## Failure contract
 
@@ -150,18 +173,35 @@ SQL or provider ACLs; ADR-0584 explicitly excludes that bypass from generation f
 journal integrity and mutation serialization are outside this slice and must be proved by the
 provider-host authority implementation before external-boot v1 is advertised.
 
+This issue's journal tests cover only PostgreSQL trusted-head genesis, monotonic CAS, immutable
+identity, sequence/digest continuity, and zero-row rejection using bounded synthetic record metadata.
+They do not implement or claim proof of provider append/fsync, process restart, surviving provider
+calls, local-journal truncation recovery, mutation serialization, deployment ACLs, or live providers.
+
 ## Verification
 
 Migration tests race allocations and prove strictly increasing generations. They exercise every
 purpose-to-job-kind mapping; pre-claim admission to post-claim authority handoff; genesis journal
 head initialization, first CAS, restart, truncation, and foreign-head rejection; every cross-binding
 mismatch; inactive credentials; acknowledgement mismatch; stale takeover; exact idempotent replay;
-later-Run denial; cleanup and audit zero-row behavior; old-worker generic-finalization rejection;
+delayed acknowledgement after a newer allocation; mixed old/new protocol-4 workers and the separate
+external-enqueue absence; later-Run denial; cleanup and audit zero-row behavior; old-worker
+generic-finalization rejection; foreign authority/generation journal heads;
 malformed success/failure carriers; semantically invalid evidence; grants; and absence of credentials
-or provider secrets in persisted rows. They also prove the complete journal phase graph rejects
-skips, repeats, foreign identities, and cross-operation heads; allocation racing Allocation release
+or provider secrets in persisted rows. They also prove external teardown cannot set the System
+terminal before accepted provider evidence and stale teardown affects zero System/job/audit rows;
+the complete journal phase graph rejects
+skips, repeats, foreign identities, and cross-operation heads while allowing sequential current
+generations on one authority instance only through terminal-to-admitted continuity; allocation racing Allocation release
 mints no authority after release begins; and protocol-4 workers claim, heartbeat, complete, retry,
-and fail ordinary jobs. Queue/worker tests prove external-boot success and failure
+and fail ordinary jobs while protocol-3 workers remain rejected from claim, heartbeat, capture,
+success, retry, and failure. Queue/worker tests prove external-boot success and failure
 finalization use the authority-bound contract and stale results are dropped, while ordinary jobs
 keep the existing path. `just lint`, `just type`, focused database/job tests, and `just ci` remain
 the guardrails.
+
+Digest tests prove PostgreSQL mints the same value for one immutable relational binding regardless
+of Python/provider JSON serialization, rejects any changed binding, and requires exact opaque echo
+through acknowledgement and commit.
+Carrier tests reject missing, foreign, malformed, wrong-operation, and semantically incomplete
+lifecycle evidence before the queue adapter calls SQL.
