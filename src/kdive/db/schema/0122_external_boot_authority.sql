@@ -729,6 +729,7 @@ DECLARE
     v_deadline timestamptz;
     v_evidence jsonb;
     v_failure_context jsonb;
+    v_has_forbidden_key boolean;
     v_incarnation text;
     v_job public.jobs%ROWTYPE;
     v_marker jsonb;
@@ -874,6 +875,200 @@ BEGIN
        ) THEN
         RETURN QUERY SELECT 'superseded'::text, NULL::text;
         RETURN;
+    END IF;
+
+    WITH RECURSIVE result_nodes(value) AS (
+        SELECT p_result
+        UNION ALL
+        SELECT child.value
+        FROM result_nodes AS node
+        CROSS JOIN LATERAL (
+            SELECT member.value
+            FROM jsonb_each(
+                CASE WHEN jsonb_typeof(node.value) = 'object'
+                     THEN node.value ELSE '{}'::jsonb END
+            ) AS member
+            UNION ALL
+            SELECT member.value
+            FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(node.value) = 'array'
+                     THEN node.value ELSE '[]'::jsonb END
+            ) AS member
+        ) AS child
+    )
+    SELECT EXISTS (
+        SELECT 1
+        FROM result_nodes AS node
+        CROSS JOIN LATERAL jsonb_object_keys(
+            CASE WHEN jsonb_typeof(node.value) = 'object'
+                 THEN node.value ELSE '{}'::jsonb END
+        ) AS member(key)
+        WHERE regexp_replace(lower(member.key), '[^a-z0-9]', '', 'g') ~
+            '(credential|secret|password|token|apikey|privatekey|sshkey|command|argv|path|url|definition|xml)'
+    ) INTO v_has_forbidden_key;
+    IF v_has_forbidden_key THEN
+        RAISE EXCEPTION 'external boot authority result contains forbidden fields'
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF (v_operation = 'activate' AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY[
+               'schema', 'operation', 'result_ref', 'evidence',
+               'activation_readiness_deadline'
+           ])
+       ))
+       OR (v_operation IN ('recover', 'resolve-conflict', 'cleanup') AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY['schema', 'operation', 'result_ref', 'evidence'])
+       ))
+       OR (v_operation = 'release' AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY[
+               'schema', 'operation', 'result_ref', 'release_identity', 'evidence'
+           ])
+       ))
+       OR (v_operation = 'teardown' AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY[
+               'schema', 'operation', 'result_ref', 'teardown_evidence', 'cleanup_evidence'
+           ])
+       ))
+       OR (v_operation = 'deadline' AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY['schema', 'operation', 'deadline'])
+       ))
+       OR (v_operation = 'recovery-attempt' AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY[
+               'schema', 'operation', 'attempt_id', 'recovery_basis', 'deadline'
+           ])
+       ))
+       OR (v_operation = 'fail' AND EXISTS (
+           SELECT 1 FROM jsonb_object_keys(p_result) AS field
+           WHERE field <> ALL (ARRAY[
+               'schema', 'operation', 'error_category', 'failure_context', 'terminal'
+           ])
+       )) THEN
+        RAISE EXCEPTION 'external boot authority result has unexpected fields'
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF v_operation IN ('activate', 'recover', 'resolve-conflict', 'release', 'cleanup')
+       AND EXISTS (
+           SELECT 1
+           FROM jsonb_object_keys(
+               CASE WHEN jsonb_typeof(p_result -> 'evidence') = 'object'
+                    THEN p_result -> 'evidence' ELSE '{}'::jsonb END
+           ) AS field
+           WHERE field <> ALL (
+               CASE
+                   WHEN v_operation = 'release' THEN ARRAY[
+                       'schema', 'activation_id', 'system_id', 'store_identity', 'owner_key',
+                       'reserved_bytes', 'enumeration_complete', 'objects', 'verified_at'
+                   ]
+                   WHEN v_operation = 'cleanup' THEN ARRAY[
+                       'schema', 'activation_id', 'system_id', 'release_identity', 'mode',
+                       'teardown_identity', 'completed_at'
+                   ]
+                   ELSE ARRAY[
+                       'schema', 'activation_id', 'system_id', 'outcome', 'composite_state',
+                       'objects', 'observed_at'
+                   ]
+               END
+           )
+       ) THEN
+        RAISE EXCEPTION 'external boot authority evidence has unexpected fields'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_operation = 'teardown'
+       AND (
+           EXISTS (
+               SELECT 1
+               FROM jsonb_object_keys(p_result -> 'teardown_evidence') AS field
+               WHERE field <> ALL (ARRAY['schema', 'system_id', 'system_state', 'observed_at'])
+           )
+           OR EXISTS (
+               SELECT 1
+               FROM jsonb_object_keys(p_result -> 'cleanup_evidence') AS field
+               WHERE field <> ALL (ARRAY[
+                   'schema', 'activation_id', 'system_id', 'release_identity', 'mode',
+                   'teardown_identity', 'completed_at'
+               ])
+           )
+       ) THEN
+        RAISE EXCEPTION 'external boot teardown evidence has unexpected fields'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_operation IN ('activate', 'recover', 'resolve-conflict')
+       AND EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(p_result #> '{evidence,objects}') = 'array'
+                    THEN p_result #> '{evidence,objects}' ELSE '[]'::jsonb END
+           ) AS item(value)
+           WHERE jsonb_typeof(item.value) <> 'object'
+              OR jsonb_typeof(item.value -> 'ref') IS DISTINCT FROM 'string'
+              OR octet_length(item.value ->> 'ref') NOT BETWEEN 1 AND 1024
+              OR EXISTS (
+                  SELECT 1
+                  FROM jsonb_object_keys(
+                      CASE WHEN jsonb_typeof(item.value) = 'object'
+                           THEN item.value ELSE '{}'::jsonb END
+                  ) AS field
+                  WHERE field <> 'ref'
+              )
+       ) THEN
+        RAISE EXCEPTION 'external boot authority object evidence is invalid'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_operation = 'release'
+       AND (
+           EXISTS (
+               SELECT 1
+               FROM jsonb_object_keys(
+                   CASE WHEN jsonb_typeof(p_result #> '{evidence,store_identity}') = 'object'
+                        THEN p_result #> '{evidence,store_identity}' ELSE '{}'::jsonb END
+               ) AS field
+               WHERE field <> 'ref'
+           )
+           OR EXISTS (
+               SELECT 1
+               FROM jsonb_object_keys(
+                   CASE WHEN jsonb_typeof(p_result #> '{evidence,owner_key}') = 'object'
+                        THEN p_result #> '{evidence,owner_key}' ELSE '{}'::jsonb END
+               ) AS field
+               WHERE field <> 'ref'
+           )
+           OR EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(
+                   CASE WHEN jsonb_typeof(p_result #> '{evidence,objects}') = 'array'
+                        THEN p_result #> '{evidence,objects}' ELSE '[]'::jsonb END
+               ) AS item(value)
+               WHERE jsonb_typeof(item.value) <> 'object'
+                  OR item.value ->> 'absent' IS DISTINCT FROM 'true'
+                  OR EXISTS (
+                      SELECT 1
+                      FROM jsonb_object_keys(
+                          CASE WHEN jsonb_typeof(item.value) = 'object'
+                               THEN item.value ELSE '{}'::jsonb END
+                      ) AS field
+                      WHERE field <> ALL (ARRAY['object', 'absent'])
+                  )
+                  OR jsonb_typeof(item.value -> 'object') IS DISTINCT FROM 'object'
+                  OR EXISTS (
+                      SELECT 1
+                      FROM jsonb_object_keys(
+                          CASE WHEN jsonb_typeof(item.value -> 'object') = 'object'
+                               THEN item.value -> 'object' ELSE '{}'::jsonb END
+                      ) AS field
+                      WHERE field <> 'ref'
+                  )
+           )
+       ) THEN
+        RAISE EXCEPTION 'external boot release object evidence is invalid'
+            USING ERRCODE = '22023';
     END IF;
 
     IF v_operation = 'cleanup' THEN
