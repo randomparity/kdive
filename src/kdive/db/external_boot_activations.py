@@ -887,6 +887,7 @@ class ExternalBootActivationRepository:
         release_evidence: ExternalBootReleaseEvidenceV1,
         teardown_evidence: ExternalBootTeardownEvidenceV1 | None = None,
     ) -> CasResult:
+        release_identity = release_evidence.identity
         if (release_evidence.activation_id, release_evidence.system_id) != (
             activation_id,
             system_id,
@@ -1005,7 +1006,7 @@ class ExternalBootActivationRepository:
                         reservation.store_identity,
                         reservation.owner_key,
                         reservation.reserved_bytes,
-                        release_evidence.identity,
+                        release_identity,
                         _json(release_evidence),
                         _json(teardown_evidence) if teardown_evidence else None,
                     ),

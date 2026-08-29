@@ -463,6 +463,43 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_oversized_release_fails_before_live_debit_delete(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(conn, activation, reservation)
+            objects = tuple(
+                ExternalBootReleaseObject(
+                    object=OpaqueProviderRef(ref=f"objects/{index:03d}-" + "x" * 1000)
+                )
+                for index in range(70)
+            )
+            oversized = ExternalBootReleaseEvidenceV1.model_construct(
+                activation_id=activation.id,
+                system_id=system_id,
+                store_identity=OpaqueProviderRef(ref=reservation.store_identity),
+                owner_key=OpaqueProviderRef(ref=reservation.owner_key),
+                reserved_bytes=reservation.reserved_bytes,
+                enumeration_complete=True,
+                objects=objects,
+                verified_at=_AT,
+            )
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="65536"):
+                await repo.release_reservation(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.ABANDONED,
+                    release_evidence=oversized,
+                )
+            await conn.commit()
+            assert await _ledger_snapshot(conn) == before
+
+    asyncio.run(_run())
+
+
 def test_cleanup_rejects_release_evidence_for_another_system(migrated_url: str) -> None:
     async def _run() -> None:
         repo = ExternalBootActivationRepository()

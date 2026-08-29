@@ -73,6 +73,11 @@ class _ClosedEvidence(BaseModel):
         payload = self._identity_prefix + b"\0" + self.to_canonical_json()
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
+    @model_validator(mode="after")
+    def _canonical_size_is_bounded(self) -> Self:
+        self.to_canonical_json()
+        return self
+
 
 def _canonical_refs(values: tuple[OpaqueProviderRef, ...]) -> tuple[OpaqueProviderRef, ...]:
     encoded = [value.to_canonical_json() for value in values]
