@@ -40,6 +40,7 @@ type OsReleaseProbeSeam = Callable[[Path], str | None]
 type RootBootProbeSeam = Callable[[Path, Architecture, str], RootSpecV1]
 
 ROOT_INSPECTION_MAX_OUTPUT_BYTES = 1024 * 1024
+PACKAGE_INSPECTION_MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 def _kill_inspector_group(process: subprocess.Popen[bytes]) -> None:
@@ -76,42 +77,36 @@ def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no 
             ``INFRASTRUCTURE_FAILURE`` on timeout or a non-zero exit.
     """
     argv = ["virt-inspector", "--no-icon", "-a", str(qcow2_path)]
+    stdout, _ = _run_bounded_inspector(
+        argv,
+        timeout_s=_VIRT_INSPECTOR_TIMEOUT_S,
+        max_output_bytes=PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
+        stage="package-version-inspection",
+        failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv; image path is data  # nosec B603
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=_VIRT_INSPECTOR_TIMEOUT_S,
-            check=False,
-        )
-    except FileNotFoundError as exc:
+        return parse_virt_inspector_versions(stdout.decode())
+    except (ParseError, UnicodeDecodeError, ValueError) as exc:
         raise CategorizedError(
-            "virt-inspector is not installed; cannot capture package versions",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"tool": "virt-inspector"},
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "virt-inspector exceeded its timeout",
+            "virt-inspector output is malformed",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": _VIRT_INSPECTOR_TIMEOUT_S},
+            details={"stage": "package-version-inspection", "reason": "malformed_output"},
         ) from exc
-    if result.returncode != 0:
-        raise CategorizedError(
-            "virt-inspector failed",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"stderr": result.stderr[-2000:]},
-        )
-    return parse_virt_inspector_versions(result.stdout)
 
 
 DEFAULT_VERSION_INSPECT: VersionInspectSeam = inspect_package_versions
 
 
 def _run_bounded_inspector(
-    argv: list[str], *, timeout_s: float, max_output_bytes: int = ROOT_INSPECTION_MAX_OUTPUT_BYTES
+    argv: list[str],
+    *,
+    timeout_s: float,
+    max_output_bytes: int = ROOT_INSPECTION_MAX_OUTPUT_BYTES,
+    stage: str = "root-inspection",
+    failure_category: ErrorCategory = ErrorCategory.PROVISIONING_FAILURE,
 ) -> tuple[bytes, bytes]:
     """Run fixed argv while bounding combined output and elapsed monotonic time."""
+    details: dict[str, object]
     try:
         process = subprocess.Popen(  # noqa: S603 - fixed argv supplied by provider  # nosec B603
             argv,
@@ -120,8 +115,13 @@ def _run_bounded_inspector(
             start_new_session=True,
         )
     except FileNotFoundError as exc:
+        purpose = (
+            "capture package versions"
+            if stage == "package-version-inspection"
+            else "inspect root boot facts"
+        )
         raise CategorizedError(
-            "virt-inspector is not installed; cannot inspect root boot facts",
+            f"virt-inspector is not installed; cannot {purpose}",
             category=ErrorCategory.MISSING_DEPENDENCY,
             details={"tool": argv[0]},
         ) from exc
@@ -155,10 +155,22 @@ def _run_bounded_inspector(
     except (TimeoutError, OverflowError) as exc:
         _kill_inspector_group(process)
         reason = "timeout" if isinstance(exc, TimeoutError) else "output_limit"
+        if stage == "package-version-inspection":
+            details = (
+                {"timeout_s": timeout_s}
+                if reason == "timeout"
+                else {"max_output_bytes": max_output_bytes}
+            )
+            message = f"virt-inspector exceeded its {reason.replace('_', ' ')}"
+        else:
+            details = {"stage": stage, "reason": reason}
+            message = (
+                "root boot inspection exceeded its bounded execution contract; rebuild and retry"
+            )
         raise CategorizedError(
-            "root boot inspection exceeded its bounded execution contract; rebuild and retry",
-            category=ErrorCategory.PROVISIONING_FAILURE,
-            details={"stage": "root-inspection", "reason": reason},
+            message,
+            category=failure_category,
+            details=details,
         ) from exc
     finally:
         selector.close()
@@ -166,17 +178,31 @@ def _run_bounded_inspector(
         returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
         _kill_inspector_group(process)
+        if stage == "package-version-inspection":
+            message = "virt-inspector exceeded its timeout"
+            details = {"timeout_s": timeout_s}
+        else:
+            message = (
+                "root boot inspection exceeded its bounded execution contract; rebuild and retry"
+            )
+            details = {"stage": stage, "reason": "timeout"}
         raise CategorizedError(
-            "root boot inspection exceeded its bounded execution contract; rebuild and retry",
-            category=ErrorCategory.PROVISIONING_FAILURE,
-            details={"stage": "root-inspection", "reason": "timeout"},
+            message,
+            category=failure_category,
+            details=details,
         ) from exc
     stdout, stderr = (bytes(streams[process.stdout]), bytes(streams[process.stderr]))
     if returncode != 0:
+        if stage == "package-version-inspection":
+            message = "virt-inspector failed"
+            details = {"stderr": stderr.decode(errors="replace")[-2000:]}
+        else:
+            message = "root boot inspection failed; rebuild and retry"
+            details = {"stage": stage, "reason": "tool_failure"}
         raise CategorizedError(
-            "root boot inspection failed; rebuild and retry",
-            category=ErrorCategory.PROVISIONING_FAILURE,
-            details={"stage": "root-inspection", "reason": "tool_failure"},
+            message,
+            category=failure_category,
+            details=details,
         )
     return stdout, stderr
 
