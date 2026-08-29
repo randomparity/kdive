@@ -367,6 +367,8 @@ def _acknowledge(
     *,
     journal_digest: str = _JOURNAL,
     quiescence_digest: str = _QUIESCENCE,
+    generation: int | None = None,
+    operation_digest: str | None = None,
 ) -> str:
     row = provider.execute(
         "SELECT status, journal_sequence, journal_digest, positive_quiescence_digest, "
@@ -375,7 +377,7 @@ def _acknowledge(
         "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             authority.authority_id,
-            authority.generation,
+            generation or authority.generation,
             case.allocation_id,
             case.activation_id,
             case.run_id,
@@ -389,7 +391,7 @@ def _acknowledge(
             case.worker_id,
             case.operation,
             case.operation_identity,
-            authority.operation_digest,
+            operation_digest or authority.operation_digest,
             1,
             journal_digest,
             quiescence_digest,
@@ -411,6 +413,9 @@ def _commit(
     result: Mapping[str, object],
     *,
     run_id: UUID | None = None,
+    generation: int | None = None,
+    operation_digest: str | None = None,
+    journal_digest: str = _JOURNAL,
 ) -> tuple[str, str | None]:
     row = worker.execute(
         "SELECT status, job_state FROM commit_external_boot_authority_result("
@@ -420,7 +425,7 @@ def _commit(
             case.job_id,
             case.attempt,
             authority.authority_id,
-            authority.generation,
+            generation or authority.generation,
             case.activation_id,
             run_id or case.run_id,
             case.system_id,
@@ -429,9 +434,9 @@ def _commit(
             case.provider_kind,
             case.authority_instance,
             case.operation_identity,
-            authority.operation_digest,
+            operation_digest or authority.operation_digest,
             1,
-            _JOURNAL,
+            journal_digest,
             Jsonb(result),
         ),
     ).fetchone()
@@ -505,6 +510,221 @@ def _result_state_snapshot(
     ).fetchone()
     assert row is not None
     return tuple(row)
+
+
+def _durable_surface_snapshot(conn: psycopg.Connection, case: _AuthorityCase) -> tuple[object, ...]:
+    row = conn.execute(
+        "SELECT "
+        "(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM external_boot_activations AS e "
+        "WHERE e.system_id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(ra) ORDER BY ra.attempt_number) "
+        "FROM external_boot_recovery_attempts AS ra WHERE ra.activation_id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.activation_id) "
+        "FROM external_boot_reservations AS r "
+        "WHERE r.activation_id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(rr) ORDER BY rr.activation_id) "
+        "FROM external_boot_reservation_releases AS rr WHERE rr.activation_id=%s), "
+        "(SELECT to_jsonb(s) FROM systems AS s WHERE s.id=%s), "
+        "(SELECT to_jsonb(rn) FROM runs AS rn WHERE rn.id=%s), "
+        "(SELECT to_jsonb(j) FROM jobs AS j WHERE j.id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.generation) "
+        "FROM external_boot_authorities AS a WHERE a.system_id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(ack) ORDER BY ack.generation) "
+        "FROM external_boot_authority_acknowledgements AS ack WHERE ack.system_id=%s), "
+        "(SELECT to_jsonb(c) FROM external_boot_authority_counters AS c WHERE c.system_id=%s), "
+        "(SELECT jsonb_agg(to_jsonb(audit) ORDER BY audit.id) "
+        "FROM external_boot_authority_audit AS audit WHERE audit.system_id=%s)",
+        (
+            case.system_id,
+            case.activation_id,
+            case.activation_id,
+            case.activation_id,
+            case.system_id,
+            case.run_id,
+            case.job_id,
+            case.system_id,
+            case.system_id,
+            case.system_id,
+            case.system_id,
+        ),
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "system_allocation",
+        "run",
+        "activation",
+        "attempt",
+        "purpose",
+        "provider",
+        "authority_instance",
+        "operation",
+    ],
+)
+def test_allocation_cross_binding_mismatch_changes_no_durable_surface(
+    migrated_url: str, authority_role_dsns: _RoleDsns, mismatch: str
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix="m")
+        other = _seed_case(conn, worker_suffix="n")
+        before = _durable_surface_snapshot(conn, case)
+    changed = {
+        "system_allocation": replace(case, system_id=other.system_id),
+        "run": replace(case, run_id=other.run_id),
+        "activation": replace(case, activation_id=other.activation_id),
+        "attempt": replace(case, attempt=case.attempt + 1),
+        "purpose": replace(case, purpose="recover"),
+        "provider": replace(case, provider_kind="remote-libvirt"),
+        "authority_instance": replace(case, authority_instance=other.authority_instance),
+        "operation": replace(case, operation_identity=other.operation_identity),
+    }[mismatch]
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        row = worker.execute(
+            "SELECT status FROM allocate_external_boot_authority(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                changed.credential,
+                changed.job_id,
+                changed.attempt,
+                changed.activation_id,
+                changed.run_id,
+                changed.system_id,
+                _PLAN,
+                changed.purpose,
+                changed.provider_kind,
+                changed.authority_instance,
+                changed.operation_identity,
+            ),
+        ).fetchone()
+        assert row == ("superseded",)
+    with psycopg.connect(migrated_url) as conn:
+        assert _durable_surface_snapshot(conn, case) == before
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "system",
+        "allocation",
+        "run",
+        "activation",
+        "attempt",
+        "purpose",
+        "provider",
+        "authority_instance",
+        "operation",
+        "generation",
+        "acknowledgement",
+    ],
+)
+def test_acknowledgement_cross_binding_mismatch_changes_no_durable_surface(
+    migrated_url: str, authority_role_dsns: _RoleDsns, mismatch: str
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix="o")
+        other = _seed_case(conn, worker_suffix="p")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    changed = {
+        "system": replace(case, system_id=other.system_id),
+        "allocation": replace(case, allocation_id=other.allocation_id),
+        "run": replace(case, run_id=other.run_id),
+        "activation": replace(case, activation_id=other.activation_id),
+        "attempt": replace(case, attempt=case.attempt + 1),
+        "purpose": replace(case, purpose="recover"),
+        "provider": replace(case, provider_kind="remote-libvirt"),
+        "authority_instance": replace(case, authority_instance=other.authority_instance),
+        "operation": replace(case, operation="recover"),
+        "generation": case,
+        "acknowledgement": case,
+    }[mismatch]
+    if mismatch == "acknowledgement":
+        with psycopg.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as host:
+            assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        before = _durable_surface_snapshot(conn, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert (
+            _acknowledge(
+                host,
+                changed,
+                authority,
+                generation=authority.generation + 1 if mismatch == "generation" else None,
+                journal_digest=_EVIDENCE_DIGEST if mismatch == "acknowledgement" else _JOURNAL,
+            )
+            == "superseded"
+        )
+    with psycopg.connect(migrated_url) as conn:
+        assert _durable_surface_snapshot(conn, case) == before
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "system",
+        "run",
+        "activation",
+        "attempt",
+        "purpose",
+        "provider",
+        "authority_instance",
+        "operation",
+        "generation",
+        "acknowledgement",
+    ],
+)
+def test_result_cross_binding_mismatch_changes_no_durable_surface(
+    migrated_url: str, authority_role_dsns: _RoleDsns, mismatch: str
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix="q")
+        other = _seed_case(conn, worker_suffix="r")
+        conn.execute(
+            "UPDATE external_boot_activations SET state='activating', "
+            "activation_readiness_deadline=now() WHERE id=%s",
+            (case.activation_id,),
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    changed = {
+        "system": replace(case, system_id=other.system_id),
+        "run": replace(case, run_id=other.run_id),
+        "activation": replace(case, activation_id=other.activation_id),
+        "attempt": replace(case, attempt=case.attempt + 1),
+        "purpose": replace(case, purpose="recover"),
+        "provider": replace(case, provider_kind="remote-libvirt"),
+        "authority_instance": replace(case, authority_instance=other.authority_instance),
+        "operation": case,
+        "generation": case,
+        "acknowledgement": case,
+    }[mismatch]
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "recover" if mismatch == "operation" else "activate",
+        "result_ref": _EVIDENCE_DIGEST,
+        "evidence": _terminal_evidence(case, "active"),
+        "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
+    }
+    with psycopg.connect(migrated_url) as conn:
+        before = _durable_surface_snapshot(conn, case)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            changed,
+            authority,
+            result,
+            generation=authority.generation + 1 if mismatch == "generation" else None,
+            journal_digest=_EVIDENCE_DIGEST if mismatch == "acknowledgement" else _JOURNAL,
+        ) == ("superseded", None)
+    with psycopg.connect(migrated_url) as conn:
+        assert _durable_surface_snapshot(conn, case) == before
 
 
 def test_migration_creates_four_authority_tables_and_exact_role_grants(
