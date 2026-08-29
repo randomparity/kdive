@@ -201,6 +201,15 @@ def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None
             stale_authority = _authority(activation)
             stale_authority["authority_generation"] = 6
             before = await _ledger_snapshot(conn)
+            stale_capacity = await repo.mark_reservation_ready(
+                conn,
+                **stale_authority,
+                expected_state=ExternalBootActivationState.PREPARING,
+                recovery_max_bytes=reservation.reserved_bytes,
+            )
+            assert stale_capacity.status is CasStatus.SUPERSEDED
+            assert await _ledger_snapshot(conn) == before
+            before = await _ledger_snapshot(conn)
             stale = await repo.record_materialization(
                 conn,
                 **stale_authority,
