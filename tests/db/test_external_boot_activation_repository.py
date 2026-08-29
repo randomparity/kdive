@@ -363,6 +363,10 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
             )
             assert released.status is CasStatus.APPLIED
             assert await repo.get_reservation(conn, activation.id) is None
+            assert (await repo.create(conn, activation, reservation)).state is (
+                ExternalBootActivationState.ABANDONED
+            )
+            assert await repo.get_reservation(conn, activation.id) is None
 
             cleanup = ExternalBootCleanupEvidenceV1(
                 activation_id=activation.id,
@@ -378,13 +382,8 @@ def test_capacity_release_cleanup_and_post_cleanup_fence(migrated_url: str) -> N
                 cleanup_evidence=cleanup,
             )
             assert cleaned.status is CasStatus.APPLIED
-            fenced = await repo.record_materialization(
-                conn,
-                **_authority(activation),
-                expected_state=ExternalBootActivationState.ABANDONED,
-                materialization=_materialization(activation),
-            )
-            assert fenced.status is CasStatus.SUPERSEDED
+            assert (await repo.create(conn, activation, reservation)).cleanup_complete
+            assert await repo.get_reservation(conn, activation.id) is None
             await conn.commit()
 
     asyncio.run(_run())
@@ -399,12 +398,6 @@ def test_prepared_activation_deadline_and_terminal_evidence_round_trip(
             system_id, run_id = await _seed(conn)
             activation, reservation = _records(system_id, run_id)
             await repo.create(conn, activation, reservation)
-            await repo.mark_reservation_ready(
-                conn,
-                **_authority(activation),
-                expected_state=ExternalBootActivationState.PREPARING,
-                recovery_max_bytes=reservation.reserved_bytes,
-            )
             materialization = _materialization(activation)
             await repo.record_materialization(
                 conn,
@@ -413,6 +406,20 @@ def test_prepared_activation_deadline_and_terminal_evidence_round_trip(
                 materialization=materialization,
             )
             recovery_point = _recovery_point(activation, materialization)
+            pending = await repo.transition(
+                conn,
+                **_authority(activation),
+                expected_state=ExternalBootActivationState.PREPARING,
+                new_state=ExternalBootActivationState.PREPARED,
+                recovery_point=recovery_point,
+            )
+            assert pending.status is CasStatus.SUPERSEDED
+            await repo.mark_reservation_ready(
+                conn,
+                **_authority(activation),
+                expected_state=ExternalBootActivationState.PREPARING,
+                recovery_max_bytes=reservation.reserved_bytes,
+            )
             prepared = await repo.transition(
                 conn,
                 **_authority(activation),
@@ -491,6 +498,55 @@ def test_pre_recovery_evidence_requires_materialization(migrated_url: str) -> No
                 evidence=evidence,
             )
             assert accepted.status is CasStatus.APPLIED
+            await conn.commit()
+
+    asyncio.run(_run())
+
+
+def test_materialization_and_pre_recovery_bind_the_run_and_plan(migrated_url: str) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(conn, activation, reservation)
+            materialization_values = _materialization(activation).model_dump(by_alias=True)
+            materialization_values["ownership"]["run_id"] = str(uuid4())
+            wrong_run = ExternalBootMaterialization.model_validate(materialization_values)
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="ownership"):
+                await repo.record_materialization(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.PREPARING,
+                    materialization=wrong_run,
+                )
+            assert await _ledger_snapshot(conn) == before
+
+            await repo.record_materialization(
+                conn,
+                **_authority(activation),
+                expected_state=ExternalBootActivationState.PREPARING,
+                materialization=_materialization(activation),
+            )
+            wrong_plan = ExternalBootPreRecoveryEvidenceV1(
+                activation_id=activation.id,
+                system_id=system_id,
+                run_id=run_id,
+                plan_identity="sha256:" + "f" * 64,
+                recovery_object=OpaqueProviderRef(ref="objects/recovery"),
+                source_composite_state=_DIGEST,
+                observed_at=_AT,
+            )
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="Run and plan"):
+                await repo.record_pre_recovery_evidence(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.PREPARING,
+                    evidence=wrong_plan,
+                )
+            assert await _ledger_snapshot(conn) == before
             await conn.commit()
 
     asyncio.run(_run())
@@ -584,6 +640,18 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
                 objects=(),
                 observed_at=_AT + timedelta(minutes=1),
             )
+            wrong_terminal = terminal.model_copy(update={"outcome": "recovery_failed"})
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="outcome"):
+                await repo.finish_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERING,
+                    attempt_id=second_attempt,
+                    new_state=ExternalBootActivationState.RECOVERED,
+                    terminal_evidence=wrong_terminal,
+                )
+            assert await _ledger_snapshot(conn) == before
             finished = await repo.finish_recovery_attempt(
                 conn,
                 **_authority(activation),
@@ -739,7 +807,20 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
             assert cleaned.status is CasStatus.APPLIED
             assert cleaned.activation is not None and cleaned.activation.cleanup_complete
             assert cleaned.activation.pre_recovery_evidence == pre_recovery
+            assert cleaned.activation.teardown_evidence == teardown
             assert cleaned.activation.current_attempt_id is not None
+            if cleanup_state is ExternalBootActivationState.RECOVERY_CONFLICT:
+                fenced = await repo.begin_recovery_attempt(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.RECOVERY_CONFLICT,
+                    attempt_id=uuid4(),
+                    recovery_readiness_deadline=_AT + timedelta(minutes=20),
+                    resolution_operation="accept-observed-state",
+                    resolution_identity="sha256:" + "d" * 64,
+                    acknowledged_composite_state=_DIGEST,
+                )
+                assert fenced.status is CasStatus.SUPERSEDED
             await conn.commit()
 
     asyncio.run(_run())

@@ -35,6 +35,35 @@ CREATE TABLE external_boot_activations (
     CONSTRAINT external_boot_activation_deadline
         CHECK (state NOT IN ('activating', 'active')
                OR activation_readiness_deadline IS NOT NULL),
+    CONSTRAINT external_boot_activation_state_evidence CHECK (
+        state = 'preparing'
+        OR (state = 'prepared'
+            AND materialization IS NOT NULL AND recovery_point IS NOT NULL)
+        OR (state = 'activating'
+            AND materialization IS NOT NULL AND recovery_point IS NOT NULL)
+        OR (state = 'active'
+            AND materialization IS NOT NULL AND recovery_point IS NOT NULL
+            AND terminal_evidence ->> 'outcome' = 'active')
+        OR (state IN ('recovering', 'recovery_conflict', 'recovery_failed', 'recovered')
+            AND materialization IS NOT NULL AND current_attempt_id IS NOT NULL
+            AND (recovery_point IS NOT NULL OR pre_recovery_evidence IS NOT NULL))
+        OR (state = 'abandoned' AND terminal_evidence ->> 'outcome' = 'abandoned')
+    ),
+    CONSTRAINT external_boot_activation_cleanup_evidence CHECK (
+        NOT cleanup_complete
+        OR (
+            cleanup_evidence IS NOT NULL
+            AND (
+                (state IN ('recovered', 'abandoned')
+                 AND cleanup_evidence ->> 'mode' = 'ordinary'
+                 AND teardown_evidence IS NULL)
+                OR
+                (state IN ('recovery_conflict', 'recovery_failed')
+                 AND cleanup_evidence ->> 'mode' = 'system_teardown'
+                 AND teardown_evidence IS NOT NULL)
+            )
+        )
+    ),
     CONSTRAINT external_boot_activation_evidence_size CHECK (
         (materialization IS NULL OR pg_column_size(materialization) <= 65536)
         AND (recovery_point IS NULL OR pg_column_size(recovery_point) <= 65536)

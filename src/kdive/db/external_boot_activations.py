@@ -135,6 +135,7 @@ class ExternalBootActivationRepository:
                 ),
             )
             row = await cur.fetchone()
+            inserted = row is not None
             if row is None:
                 await cur.execute(
                     "SELECT * FROM external_boot_activations "
@@ -153,23 +154,34 @@ class ExternalBootActivationRepository:
                     activation.authority_generation,
                 ):
                     raise ValueError("activation retry key is already owned by another operation")
-            await cur.execute(
-                "INSERT INTO external_boot_reservations "
-                "(activation_id, store_identity, owner_key, reserved_bytes, state) "
-                "VALUES (%s, %s, %s, %s, 'pending') "
-                "ON CONFLICT (activation_id) DO NOTHING",
-                (
-                    reservation.activation_id,
-                    reservation.store_identity,
-                    reservation.owner_key,
-                    reservation.reserved_bytes,
-                ),
-            )
+            if inserted:
+                await cur.execute(
+                    "INSERT INTO external_boot_reservations "
+                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                    "VALUES (%s, %s, %s, %s, 'pending')",
+                    (
+                        reservation.activation_id,
+                        reservation.store_identity,
+                        reservation.owner_key,
+                        reservation.reserved_bytes,
+                    ),
+                )
             await cur.execute(
                 "SELECT * FROM external_boot_reservations WHERE activation_id = %s",
                 (activation.id,),
             )
             reservation_row = await cur.fetchone()
+            if reservation_row is None:
+                await cur.execute(
+                    "SELECT 1 FROM external_boot_reservation_releases WHERE activation_id = %s",
+                    (activation.id,),
+                )
+                if await cur.fetchone() is not None:
+                    current = _activation(row)
+                    if current is None:
+                        raise RuntimeError("activation retry returned no row")
+                    return current
+                raise ValueError("activation retry has neither a live debit nor release tombstone")
             current_reservation = ExternalBootReservation.model_validate(reservation_row)
             if (
                 current_reservation.store_identity,
@@ -185,6 +197,10 @@ class ExternalBootActivationRepository:
         if current is None:
             raise RuntimeError("activation create returned no row")
         return current
+
+    async def _require_ready_reservation(self, conn: AsyncConnection, activation_id: UUID) -> bool:
+        reservation = await self.get_reservation(conn, activation_id)
+        return reservation is not None and reservation.state.value == "ready"
 
     async def get(
         self, conn: AsyncConnection, activation_id: UUID
@@ -250,28 +266,42 @@ class ExternalBootActivationRepository:
         expected_state: ExternalBootActivationState,
         materialization: ExternalBootMaterialization,
     ) -> CasResult:
-        if str(system_id) != materialization.ownership.system_id:
-            raise ValueError("materialization System does not match the activation")
-        async with (
-            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute(
-                "UPDATE external_boot_activations SET materialization = %s "
-                "WHERE id = %s AND system_id = %s AND operation_owner_id = %s "
-                "AND authority_generation = %s AND state = %s AND NOT cleanup_complete "
-                "AND (materialization IS NULL OR materialization = %s) RETURNING *",
-                (
-                    _json(materialization),
-                    activation_id,
-                    system_id,
-                    operation_owner_id,
-                    authority_generation,
-                    expected_state,
-                    _json(materialization),
-                ),
+        if expected_state is not ExternalBootActivationState.PREPARING:
+            raise ValueError("materialization may be recorded only while preparing")
+        async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            current = await self._authorized_row(
+                conn,
+                system_id=system_id,
+                activation_id=activation_id,
+                operation_owner_id=operation_owner_id,
+                authority_generation=authority_generation,
+                expected_state=expected_state,
             )
-            row = await cur.fetchone()
+            if current is None:
+                return await self._miss(conn, activation_id)
+            if (
+                materialization.ownership.system_id != str(system_id)
+                or materialization.ownership.run_id != str(current["run_id"])
+                or materialization.plan_identity != current["plan_identity"]
+            ):
+                raise ValueError("materialization ownership does not match the activation")
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "UPDATE external_boot_activations SET materialization = %s "
+                    "WHERE id = %s AND system_id = %s AND operation_owner_id = %s "
+                    "AND authority_generation = %s AND state = %s AND NOT cleanup_complete "
+                    "AND (materialization IS NULL OR materialization = %s) RETURNING *",
+                    (
+                        _json(materialization),
+                        activation_id,
+                        system_id,
+                        operation_owner_id,
+                        authority_generation,
+                        expected_state,
+                        _json(materialization),
+                    ),
+                )
+                row = await cur.fetchone()
         if row is None:
             return await self._miss(conn, activation_id)
         return CasResult(CasStatus.APPLIED, _activation(row))
@@ -287,29 +317,44 @@ class ExternalBootActivationRepository:
         expected_state: ExternalBootActivationState,
         evidence: ExternalBootPreRecoveryEvidenceV1,
     ) -> CasResult:
+        if expected_state is not ExternalBootActivationState.PREPARING:
+            raise ValueError("pre-recovery evidence may be recorded only while preparing")
         if (evidence.activation_id, evidence.system_id) != (activation_id, system_id):
             raise ValueError("pre-recovery evidence ownership does not match the activation")
-        async with (
-            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute(
-                "UPDATE external_boot_activations SET pre_recovery_evidence = %s "
-                "WHERE id = %s AND system_id = %s AND operation_owner_id = %s "
-                "AND authority_generation = %s AND state = %s AND NOT cleanup_complete "
-                "AND materialization IS NOT NULL "
-                "AND (pre_recovery_evidence IS NULL OR pre_recovery_evidence = %s) RETURNING *",
-                (
-                    _json(evidence),
-                    activation_id,
-                    system_id,
-                    operation_owner_id,
-                    authority_generation,
-                    expected_state,
-                    _json(evidence),
-                ),
+        async with advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            current = await self._authorized_row(
+                conn,
+                system_id=system_id,
+                activation_id=activation_id,
+                operation_owner_id=operation_owner_id,
+                authority_generation=authority_generation,
+                expected_state=expected_state,
             )
-            row = await cur.fetchone()
+            if current is None:
+                return await self._miss(conn, activation_id)
+            if (
+                evidence.run_id != current["run_id"]
+                or evidence.plan_identity != current["plan_identity"]
+            ):
+                raise ValueError("pre-recovery evidence does not match the Run and plan")
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "UPDATE external_boot_activations SET pre_recovery_evidence = %s "
+                    "WHERE id = %s AND system_id = %s AND operation_owner_id = %s "
+                    "AND authority_generation = %s AND state = %s AND NOT cleanup_complete "
+                    "AND materialization IS NOT NULL "
+                    "AND (pre_recovery_evidence IS NULL OR pre_recovery_evidence = %s) RETURNING *",
+                    (
+                        _json(evidence),
+                        activation_id,
+                        system_id,
+                        operation_owner_id,
+                        authority_generation,
+                        expected_state,
+                        _json(evidence),
+                    ),
+                )
+                row = await cur.fetchone()
         if row is None:
             return await self._miss(conn, activation_id)
         return CasResult(CasStatus.APPLIED, _activation(row))
@@ -363,6 +408,9 @@ class ExternalBootActivationRepository:
             )
             if current is None:
                 return await self._miss(conn, activation_id)
+            reservation_ready = await self._require_ready_reservation(conn, activation_id)
+            if new_state is not ExternalBootActivationState.ABANDONED and not reservation_ready:
+                return CasResult(CasStatus.SUPERSEDED)
             if new_state is ExternalBootActivationState.PREPARED:
                 if current["materialization"] is None or recovery_point is None:
                     return CasResult(CasStatus.SUPERSEDED)
@@ -466,6 +514,8 @@ class ExternalBootActivationRepository:
             )
             if row is None:
                 return await self._miss(conn, activation_id)
+            if not await self._require_ready_reservation(conn, activation_id):
+                return CasResult(CasStatus.SUPERSEDED)
             if row["materialization"] is None:
                 return CasResult(CasStatus.SUPERSEDED)
             if expected_state is ExternalBootActivationState.PREPARING:
@@ -571,6 +621,8 @@ class ExternalBootActivationRepository:
             )
             if row is None:
                 return await self._miss(conn, activation_id)
+            if not await self._require_ready_reservation(conn, activation_id):
+                return CasResult(CasStatus.SUPERSEDED)
             basis = "recovery_point" if row["recovery_point"] is not None else "pre_recovery"
             if basis == "pre_recovery" and (
                 expected_state is not ExternalBootActivationState.RECOVERY_CONFLICT
@@ -653,6 +705,14 @@ class ExternalBootActivationRepository:
                 raise ValueError("recovery conflict requires only conflict evidence")
         elif terminal_evidence is None or conflict_evidence is not None:
             raise ValueError("terminal recovery requires only terminal evidence")
+        elif (
+            terminal_evidence.outcome
+            != {
+                ExternalBootActivationState.RECOVERED: "recovered",
+                ExternalBootActivationState.RECOVERY_FAILED: "recovery_failed",
+            }[new_state]
+        ):
+            raise ValueError("terminal evidence outcome does not match recovery state")
         evidence = conflict_evidence or terminal_evidence
         if evidence is not None and (evidence.activation_id, evidence.system_id) != (
             activation_id,
@@ -686,6 +746,8 @@ class ExternalBootActivationRepository:
             )
             if row is None or row["current_attempt_id"] != attempt_id:
                 return await self._miss(conn, activation_id)
+            if not await self._require_ready_reservation(conn, activation_id):
+                return CasResult(CasStatus.SUPERSEDED)
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "UPDATE external_boot_recovery_attempts SET state = %s, "
@@ -765,9 +827,18 @@ class ExternalBootActivationRepository:
                 if used + reservation.reserved_bytes > recovery_max_bytes:
                     return CasResult(CasStatus.CAPACITY_EXHAUSTED, _activation(activation_row))
                 await conn.execute(
-                    "UPDATE external_boot_reservations SET state = 'ready', ready_at = now() "
-                    "WHERE activation_id = %s AND state = 'pending'",
-                    (activation_id,),
+                    "UPDATE external_boot_reservations r SET state = 'ready', ready_at = now() "
+                    "FROM external_boot_activations a WHERE r.activation_id = a.id "
+                    "AND a.id = %s AND a.system_id = %s AND a.operation_owner_id = %s "
+                    "AND a.authority_generation = %s AND a.state = %s "
+                    "AND NOT a.cleanup_complete AND r.state = 'pending'",
+                    (
+                        activation_id,
+                        system_id,
+                        operation_owner_id,
+                        authority_generation,
+                        expected_state,
+                    ),
                 )
         return CasResult(CasStatus.APPLIED, _activation(activation_row))
 
@@ -833,7 +904,10 @@ class ExternalBootActivationRepository:
                 if release_row is None:
                     return CasResult(CasStatus.SUPERSEDED)
                 release = ExternalBootReservationRelease.model_validate(release_row)
-                if release.release_evidence != release_evidence:
+                if (
+                    release.release_evidence != release_evidence
+                    or release.teardown_evidence != teardown_evidence
+                ):
                     return CasResult(CasStatus.SUPERSEDED)
                 return CasResult(CasStatus.APPLIED, _activation(activation_row), release)
             if (
@@ -854,9 +928,38 @@ class ExternalBootActivationRepository:
                 advisory_xact_lock(conn, LockScope.RECOVERY_STORE, reservation.store_identity),
                 conn.cursor(row_factory=dict_row) as cur,
             ):
+                if teardown_evidence is not None:
+                    await cur.execute(
+                        "UPDATE external_boot_activations SET teardown_evidence = "
+                        "COALESCE(teardown_evidence, %s) WHERE id = %s AND system_id = %s "
+                        "AND operation_owner_id = %s AND authority_generation = %s "
+                        "AND state = %s AND NOT cleanup_complete "
+                        "AND (teardown_evidence IS NULL OR teardown_evidence = %s) RETURNING *",
+                        (
+                            _json(teardown_evidence),
+                            activation_id,
+                            system_id,
+                            operation_owner_id,
+                            authority_generation,
+                            expected_state,
+                            _json(teardown_evidence),
+                        ),
+                    )
+                    activation_row = await cur.fetchone()
+                    if activation_row is None:
+                        return CasResult(CasStatus.SUPERSEDED)
                 await cur.execute(
-                    "DELETE FROM external_boot_reservations WHERE activation_id = %s",
-                    (activation_id,),
+                    "DELETE FROM external_boot_reservations r USING external_boot_activations a "
+                    "WHERE r.activation_id = a.id AND a.id = %s AND a.system_id = %s "
+                    "AND a.operation_owner_id = %s AND a.authority_generation = %s "
+                    "AND a.state = %s AND NOT a.cleanup_complete",
+                    (
+                        activation_id,
+                        system_id,
+                        operation_owner_id,
+                        authority_generation,
+                        expected_state,
+                    ),
                 )
                 await cur.execute(
                     "INSERT INTO external_boot_reservation_releases "

@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 
 def _seed_run(conn: psycopg.Connection) -> tuple[UUID, UUID]:
@@ -50,10 +51,35 @@ def _insert_activation(
     cleanup_complete: bool = False,
 ) -> tuple[UUID, UUID]:
     activation_id, owner_id = uuid4(), uuid4()
+    recovery_states = {"recovering", "recovered", "recovery_conflict", "recovery_failed"}
+    attempt_id = uuid4() if state in recovery_states else None
+    evidence_states = recovery_states | {"prepared", "activating", "active"}
+    materialization = {} if state in evidence_states else None
+    recovery_point = {} if state in {"prepared", "activating", "active"} else None
+    pre_recovery = {} if state in recovery_states else None
+    terminal = {"outcome": state} if state in {"active", "abandoned"} else None
+    teardown_states = {"recovery_conflict", "recovery_failed"}
+    teardown = {} if cleanup_complete and state in teardown_states else None
+    cleanup = (
+        {
+            "mode": (
+                "system_teardown"
+                if state in {"recovery_conflict", "recovery_failed"}
+                else "ordinary"
+            )
+        }
+        if cleanup_complete
+        else None
+    )
     conn.execute(
         "INSERT INTO external_boot_activations "
         "(id, system_id, run_id, plan_identity, operation_owner_id, authority_generation, "
-        "state, cleanup_complete) VALUES (%s, %s, %s, %s, %s, 1, %s, %s)",
+        "state, cleanup_complete, activation_readiness_deadline, materialization, "
+        "recovery_point, pre_recovery_evidence, terminal_evidence, teardown_evidence, "
+        "cleanup_evidence, current_attempt_id) VALUES "
+        "(%s, %s, %s, %s, %s, 1, %s, %s, "
+        "CASE WHEN %s IN ('activating', 'active') THEN now() ELSE NULL END, "
+        "%s, %s, %s, %s, %s, %s, %s)",
         (
             activation_id,
             system_id,
@@ -62,8 +88,38 @@ def _insert_activation(
             owner_id,
             state,
             cleanup_complete,
+            state,
+            Jsonb(materialization) if materialization is not None else None,
+            Jsonb(recovery_point) if recovery_point is not None else None,
+            Jsonb(pre_recovery) if pre_recovery is not None else None,
+            Jsonb(terminal) if terminal is not None else None,
+            Jsonb(teardown) if teardown is not None else None,
+            Jsonb(cleanup) if cleanup is not None else None,
+            attempt_id,
         ),
     )
+    if attempt_id is not None:
+        attempt_state = {
+            "recovering": "recovering",
+            "recovered": "recovered",
+            "recovery_conflict": "conflict",
+            "recovery_failed": "failed",
+        }[state]
+        conn.execute(
+            "INSERT INTO external_boot_recovery_attempts "
+            "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
+            "recovery_readiness_deadline, state, conflict_evidence, terminal_evidence) "
+            "VALUES (%s, 1, %s, 1, 'pre_recovery', "
+            "CASE WHEN %s = 'recovering' THEN now() ELSE NULL END, %s, %s, %s)",
+            (
+                activation_id,
+                attempt_id,
+                attempt_state,
+                attempt_state,
+                Jsonb({}) if attempt_state == "conflict" else None,
+                Jsonb({}) if attempt_state in {"failed", "recovered"} else None,
+            ),
+        )
     return activation_id, owner_id
 
 
@@ -128,8 +184,54 @@ def test_clean_teardown_terminal_stays_in_partial_uniqueness(migrated_url: str, 
 def test_cleanup_matrix_rejects_non_cleanup_state(migrated_url: str) -> None:
     with psycopg.connect(migrated_url) as conn:
         system_id, run_id = _seed_run(conn)
-        with pytest.raises(psycopg.errors.CheckViolation, match="cleanup_state"):
+        with pytest.raises(psycopg.errors.CheckViolation, match="cleanup_"):
             _insert_activation(conn, system_id, run_id, cleanup_complete=True)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "prepared",
+        "activating",
+        "active",
+        "recovering",
+        "recovery_conflict",
+        "recovery_failed",
+        "recovered",
+    ],
+)
+def test_state_matrix_rejects_missing_evidence(migrated_url: str, state: str) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        system_id, run_id = _seed_run(conn)
+        with pytest.raises(psycopg.errors.CheckViolation, match="state_evidence"):
+            conn.execute(
+                "INSERT INTO external_boot_activations "
+                "(id, system_id, run_id, plan_identity, operation_owner_id, "
+                "authority_generation, state, activation_readiness_deadline) "
+                "VALUES (%s, %s, %s, %s, %s, 1, %s, "
+                "CASE WHEN %s IN ('activating', 'active') THEN now() ELSE NULL END)",
+                (uuid4(), system_id, run_id, "sha256:" + "e" * 64, uuid4(), state, state),
+            )
+
+
+def test_cleanup_requires_mode_evidence(migrated_url: str) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        system_id, run_id = _seed_run(conn)
+        with pytest.raises(psycopg.errors.CheckViolation, match="cleanup_evidence"):
+            conn.execute(
+                "INSERT INTO external_boot_activations "
+                "(id, system_id, run_id, plan_identity, operation_owner_id, "
+                "authority_generation, state, cleanup_complete, terminal_evidence) "
+                "VALUES (%s, %s, %s, %s, %s, 1, 'abandoned', true, %s)",
+                (
+                    uuid4(),
+                    system_id,
+                    run_id,
+                    "sha256:" + "e" * 64,
+                    uuid4(),
+                    Jsonb({"outcome": "abandoned"}),
+                ),
+            )
 
 
 def test_reservation_state_and_immutable_identities(migrated_url: str) -> None:
