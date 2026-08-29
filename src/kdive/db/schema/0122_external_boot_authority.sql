@@ -426,6 +426,10 @@ BEGIN
 
     v_marker := v_job.payload -> 'external_boot_authority_v1';
     v_operation := v_marker ->> 'operation';
+    IF v_operation IS NULL THEN
+        RAISE EXCEPTION 'external boot authority marker operation is invalid'
+            USING ERRCODE = '22023';
+    END IF;
     IF jsonb_typeof(v_marker) IS DISTINCT FROM 'object'
        OR v_operation NOT IN (
            'activate', 'recover', 'resolve-conflict', 'release', 'cleanup', 'teardown',
@@ -730,6 +734,7 @@ DECLARE
     v_evidence jsonb;
     v_failure_context jsonb;
     v_has_forbidden_key boolean;
+    v_has_unknown_ref boolean;
     v_incarnation text;
     v_job public.jobs%ROWTYPE;
     v_marker jsonb;
@@ -737,7 +742,10 @@ DECLARE
     v_outcome text := 'result_committed';
     v_release public.external_boot_reservation_releases%ROWTYPE;
     v_result_ref text;
+    v_run public.runs%ROWTYPE;
+    v_system public.systems%ROWTYPE;
     v_terminal boolean;
+    v_timestamp_text text;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
@@ -764,6 +772,7 @@ BEGIN
        OR p_result IS NULL OR jsonb_typeof(p_result) <> 'object'
        OR pg_column_size(p_result) > 131072
        OR p_result ->> 'schema' IS DISTINCT FROM 'external-boot-authority-result-v1'
+       OR jsonb_typeof(p_result -> 'operation') IS DISTINCT FROM 'string'
        OR p_result ->> 'operation' NOT IN (
            'activate', 'recover', 'resolve-conflict', 'release', 'cleanup', 'teardown',
            'deadline', 'recovery-attempt', 'fail'
@@ -775,7 +784,14 @@ BEGIN
     v_result_ref := p_result ->> 'result_ref';
     IF (p_result ? 'result_ref'
         AND jsonb_typeof(p_result -> 'result_ref') NOT IN ('string', 'null'))
-       OR (v_result_ref IS NOT NULL AND octet_length(v_result_ref) NOT BETWEEN 1 AND 2048)
+       OR (v_result_ref IS NOT NULL AND (
+           octet_length(v_result_ref) NOT BETWEEN 1 AND 2048
+           OR (
+               v_result_ref !~ '^sha256:[0-9a-f]{64}$'
+               AND v_result_ref
+                   !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+           )
+       ))
        OR (p_result ? 'evidence' AND (
            jsonb_typeof(p_result -> 'evidence') <> 'object'
            OR pg_column_size(p_result -> 'evidence') > 65536
@@ -813,6 +829,10 @@ BEGIN
       AND w.state = 'active'
       AND w.fence_protocol = 4
     FOR UPDATE;
+    SELECT s.* INTO v_system
+    FROM public.systems AS s WHERE s.id = p_system_id FOR UPDATE;
+    SELECT r.* INTO v_run
+    FROM public.runs AS r WHERE r.id = p_run_id FOR UPDATE;
     SELECT j.* INTO v_job FROM public.jobs AS j WHERE j.id = p_job_id FOR UPDATE;
     SELECT a.* INTO v_authority
     FROM public.external_boot_authorities AS a WHERE a.id = p_authority_id FOR UPDATE;
@@ -835,8 +855,12 @@ BEGIN
     FOR UPDATE;
     v_marker := v_job.payload -> 'external_boot_authority_v1';
 
-    IF v_incarnation IS NULL OR v_job.id IS NULL OR v_authority.id IS NULL
+    IF v_incarnation IS NULL OR v_system.id IS NULL OR v_run.id IS NULL
+       OR v_job.id IS NULL OR v_authority.id IS NULL
        OR v_activation.id IS NULL OR v_ack.authority_id IS NULL
+       OR v_system.id <> p_system_id
+       OR v_system.allocation_id <> v_authority.allocation_id
+       OR v_run.id <> p_run_id OR v_run.system_id <> p_system_id
        OR v_job.state <> 'running' OR v_job.worker_id <> v_incarnation
        OR v_job.attempt <> p_attempt
        OR v_authority.state <> 'current'
@@ -1071,6 +1095,200 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
+    WITH RECURSIVE result_nodes(value) AS (
+        SELECT p_result
+        UNION ALL
+        SELECT child.value
+        FROM result_nodes AS node
+        CROSS JOIN LATERAL (
+            SELECT member.value
+            FROM jsonb_each(
+                CASE WHEN jsonb_typeof(node.value) = 'object'
+                     THEN node.value ELSE '{}'::jsonb END
+            ) AS member
+            UNION ALL
+            SELECT member.value
+            FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(node.value) = 'array'
+                     THEN node.value ELSE '[]'::jsonb END
+            ) AS member
+        ) AS child
+    ), known_nodes(value) AS (
+        SELECT seed.value
+        FROM (
+            VALUES
+                (v_activation.materialization),
+                (v_activation.recovery_point),
+                (v_activation.pre_recovery_evidence),
+                (v_activation.terminal_evidence)
+        ) AS seed(value)
+        UNION ALL
+        SELECT child.value
+        FROM known_nodes AS node
+        CROSS JOIN LATERAL (
+            SELECT member.value
+            FROM jsonb_each(
+                CASE WHEN jsonb_typeof(node.value) = 'object'
+                     THEN node.value ELSE '{}'::jsonb END
+            ) AS member
+            UNION ALL
+            SELECT member.value
+            FROM jsonb_array_elements(
+                CASE WHEN jsonb_typeof(node.value) = 'array'
+                     THEN node.value ELSE '[]'::jsonb END
+            ) AS member
+        ) AS child
+    ), known_refs(ref) AS (
+        SELECT node.value ->> 'ref'
+        FROM known_nodes AS node
+        WHERE jsonb_typeof(node.value) = 'object'
+          AND jsonb_typeof(node.value -> 'ref') = 'string'
+        UNION
+        SELECT reservation.store_identity
+        FROM public.external_boot_reservations AS reservation
+        WHERE reservation.activation_id = p_activation_id
+        UNION
+        SELECT reservation.owner_key
+        FROM public.external_boot_reservations AS reservation
+        WHERE reservation.activation_id = p_activation_id
+        UNION
+        SELECT release.store_identity
+        FROM public.external_boot_reservation_releases AS release
+        WHERE release.activation_id = p_activation_id
+        UNION
+        SELECT release.owner_key
+        FROM public.external_boot_reservation_releases AS release
+        WHERE release.activation_id = p_activation_id
+    )
+    SELECT EXISTS (
+        SELECT 1
+        FROM result_nodes AS node
+        WHERE jsonb_typeof(node.value) = 'object'
+          AND jsonb_typeof(node.value -> 'ref') = 'string'
+          AND NOT EXISTS (
+              SELECT 1 FROM known_refs WHERE known_refs.ref = node.value ->> 'ref'
+          )
+    ) INTO v_has_unknown_ref;
+    IF v_has_unknown_ref THEN
+        RAISE EXCEPTION 'external boot authority result contains an unknown reference'
+            USING ERRCODE = '22023';
+    END IF;
+
+    FOR v_timestamp_text IN
+        SELECT timestamp_value
+        FROM (
+            VALUES
+                (CASE
+                    WHEN v_operation IN ('activate', 'recover', 'resolve-conflict')
+                        THEN p_result #>> '{evidence,observed_at}'
+                    WHEN v_operation = 'release'
+                        THEN p_result #>> '{evidence,verified_at}'
+                    WHEN v_operation = 'cleanup'
+                        THEN p_result #>> '{evidence,completed_at}'
+                    WHEN v_operation = 'teardown'
+                        THEN p_result #>> '{teardown_evidence,observed_at}'
+                    ELSE NULL
+                END),
+                (CASE WHEN v_operation = 'teardown'
+                    THEN p_result #>> '{cleanup_evidence,completed_at}' ELSE NULL END)
+        ) AS timestamps(timestamp_value)
+        WHERE timestamp_value IS NOT NULL
+    LOOP
+        IF v_timestamp_text !~ (
+            '^[0-9]{4}-(0[1-9]|1[0-2])-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'
+            || '(\.[0-9]{1,6})?Z$'
+        ) THEN
+            RAISE EXCEPTION 'external boot evidence timestamp is invalid'
+                USING ERRCODE = '22023';
+        END IF;
+        BEGIN
+            PERFORM v_timestamp_text::timestamptz;
+        EXCEPTION
+            WHEN invalid_datetime_format OR datetime_field_overflow
+                OR invalid_text_representation THEN
+                RAISE EXCEPTION 'external boot evidence timestamp is invalid'
+                    USING ERRCODE = '22023';
+        END;
+    END LOOP;
+
+    IF (v_operation = 'activate' AND (
+           v_system.state IS DISTINCT FROM 'ready'
+           OR v_run.state IS DISTINCT FROM 'running'
+           OR v_activation.state IS DISTINCT FROM 'activating'
+       ))
+       OR (v_operation IN ('recover', 'resolve-conflict') AND (
+           v_system.state NOT IN ('ready', 'crashed')
+           OR v_run.state IS DISTINCT FROM 'running'
+           OR v_activation.state IS DISTINCT FROM 'recovering'
+           OR v_attempt.state IS DISTINCT FROM 'recovering'
+       ))
+       OR (v_operation = 'release' AND (
+           v_activation.state NOT IN (
+               'active', 'recovered', 'abandoned', 'recovery_conflict', 'recovery_failed'
+           )
+           OR v_release.activation_id IS NOT NULL
+       ))
+       OR (v_operation = 'cleanup' AND (
+           v_activation.state NOT IN (
+               'recovered', 'abandoned', 'recovery_conflict', 'recovery_failed'
+           )
+           OR v_activation.cleanup_complete
+       ))
+       OR (v_operation = 'teardown' AND (
+           v_system.state IS DISTINCT FROM 'failed'
+           OR v_activation.state NOT IN ('recovery_conflict', 'recovery_failed')
+           OR v_activation.cleanup_complete
+       ))
+       OR (v_operation = 'deadline' AND (
+           (p_purpose = 'activate' AND (
+               v_system.state IS DISTINCT FROM 'ready'
+               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_activation.state IS DISTINCT FROM 'activating'
+           ))
+           OR (p_purpose <> 'activate' AND (
+               v_system.state NOT IN ('ready', 'crashed')
+               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_activation.state IS DISTINCT FROM 'recovering'
+               OR v_attempt.state IS DISTINCT FROM 'recovering'
+           ))
+       ))
+       OR (v_operation = 'recovery-attempt' AND (
+           v_system.state NOT IN ('ready', 'crashed')
+           OR v_run.state IS DISTINCT FROM 'running'
+           OR v_activation.state IS DISTINCT FROM 'active'
+       ))
+       OR (v_operation = 'fail' AND (
+           (p_purpose = 'activate' AND (
+               v_system.state IS DISTINCT FROM 'ready'
+               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_activation.state NOT IN ('prepared', 'activating')
+           ))
+           OR (p_purpose = 'recover' AND (
+               v_system.state NOT IN ('ready', 'crashed')
+               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_activation.state NOT IN ('active', 'recovering')
+           ))
+           OR (p_purpose = 'resolve-conflict' AND (
+               v_system.state NOT IN ('ready', 'crashed', 'failed')
+               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_activation.state IS DISTINCT FROM 'recovery_conflict'
+           ))
+           OR (p_purpose = 'release' AND (
+               v_run.state IS DISTINCT FROM 'running'
+               OR v_activation.state NOT IN (
+                   'active', 'recovered', 'abandoned',
+                   'recovery_conflict', 'recovery_failed'
+               )
+           ))
+           OR (p_purpose = 'teardown' AND (
+               v_system.state IS DISTINCT FROM 'failed'
+               OR v_activation.state NOT IN ('recovery_conflict', 'recovery_failed')
+           ))
+       )) THEN
+        RETURN QUERY SELECT 'superseded'::text, NULL::text;
+        RETURN;
+    END IF;
+
     IF v_operation = 'cleanup' THEN
         v_evidence := p_result -> 'evidence';
         IF p_purpose <> 'release'
@@ -1198,6 +1416,7 @@ BEGIN
     ELSIF v_operation = 'release' THEN
         v_evidence := p_result -> 'evidence';
         IF p_purpose <> 'release'
+           OR p_result ->> 'release_identity' IS NULL
            OR p_result ->> 'release_identity' !~ '^sha256:[0-9a-f]{64}$'
            OR v_evidence ->> 'schema'
                 IS DISTINCT FROM 'external-boot-release-evidence-v1'
@@ -1266,7 +1485,8 @@ BEGIN
         END IF;
     ELSIF v_operation = 'recovery-attempt' THEN
         BEGIN
-            IF p_result ->> 'recovery_basis' NOT IN ('recovery_point', 'pre_recovery')
+            IF p_result ->> 'recovery_basis' IS NULL
+               OR p_result ->> 'recovery_basis' NOT IN ('recovery_point', 'pre_recovery')
                OR p_result ->> 'attempt_id' IS NULL
                OR p_result ->> 'deadline' IS NULL THEN
                 RAISE invalid_parameter_value;
@@ -1299,23 +1519,37 @@ BEGIN
         WHERE id = p_activation_id;
     ELSIF v_operation = 'fail' THEN
         v_failure_context := p_result -> 'failure_context';
-        IF p_result ->> 'error_category' NOT IN (
+        IF NOT (p_result ? 'error_category')
+           OR jsonb_typeof(p_result -> 'error_category') IS DISTINCT FROM 'string'
+           OR p_result ->> 'error_category' NOT IN (
                'configuration_error', 'missing_dependency', 'build_failure', 'boot_timeout',
                'readiness_failure', 'debug_attach_failure', 'infrastructure_failure',
                'stale_handle', 'transport_conflict', 'not_implemented', 'allocation_denied',
                'lease_expired', 'provisioning_failure', 'install_failure',
                'transport_failure', 'control_failure', 'authorization_denied'
            )
-           OR jsonb_typeof(v_failure_context) <> 'object'
+           OR NOT (p_result ? 'failure_context')
+           OR jsonb_typeof(v_failure_context) IS DISTINCT FROM 'object'
            OR pg_column_size(v_failure_context) > 32768
-           OR jsonb_typeof(p_result -> 'terminal') <> 'boolean'
+           OR NOT (p_result ? 'terminal')
+           OR jsonb_typeof(p_result -> 'terminal') IS DISTINCT FROM 'boolean'
            OR EXISTS (
-               SELECT 1 FROM jsonb_each(v_failure_context) AS item(key, value)
-               WHERE octet_length(item.key) NOT BETWEEN 1 AND 64
-                  OR jsonb_typeof(item.value) <> 'string'
-                  OR octet_length(item.value #>> '{}') > 1024
+               SELECT 1
+               FROM jsonb_object_keys(
+                   CASE WHEN jsonb_typeof(v_failure_context) = 'object'
+                        THEN v_failure_context ELSE '{}'::jsonb END
+               ) AS field
+               WHERE field <> 'phase'
            )
-           OR (SELECT count(*) FROM jsonb_each(v_failure_context)) > 32 THEN
+           OR (
+               v_failure_context ? 'phase'
+               AND (
+                   jsonb_typeof(v_failure_context -> 'phase') IS DISTINCT FROM 'string'
+                   OR v_failure_context ->> 'phase' NOT IN (
+                       'admission', 'preparation', 'provider-call', 'observation', 'commit'
+                   )
+               )
+           ) THEN
             RAISE EXCEPTION 'external boot failure context is invalid'
                 USING ERRCODE = '22023';
         END IF;
