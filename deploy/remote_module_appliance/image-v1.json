@@ -1,0 +1,17 @@
+{
+  "format": "kdive-remote-module-appliance-v1",
+  "architectures": ["x86_64", "ppc64le"],
+  "kernel_path": "image/vmlinuz",
+  "initramfs_path": "image/initramfs.cpio",
+  "init_path": "/init",
+  "fixed_executables": [
+    "/usr/bin/python3",
+    "/sbin/depmod"
+  ],
+  "operation_path": "/mnt/source/operation-v1.json",
+  "result_path": "/mnt/scratch/result-v1.json",
+  "source_date_epoch": 0,
+  "entry_limit": 200000,
+  "content_byte_limit": 8589934592,
+  "scratch_capacity_bytes": 10737418240
+}

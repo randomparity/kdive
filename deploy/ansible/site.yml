@@ -20,6 +20,14 @@
   roles:
     - libvirt_pool_net
 
+- name: Install pinned remote module-restoration appliance images
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: false
+  roles:
+    - role: remote_libvirt_module_appliance
+      when: remote_libvirt_module_appliance_enabled | bool
+
 - name: Apply the gdbstub-port ACL
   hosts: remote_libvirt_hosts
   become: true

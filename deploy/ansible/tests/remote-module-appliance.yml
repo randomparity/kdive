@@ -1,0 +1,7 @@
+---
+- name: Exercise remote module-appliance installation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - remote_libvirt_module_appliance
