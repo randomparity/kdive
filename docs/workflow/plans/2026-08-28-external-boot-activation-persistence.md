@@ -168,7 +168,7 @@ Red:
    identity, release-evidence bytes, activation/System/store/owner/byte bindings, tombstone
    presence, and durable System state one axis at a time. Every rejection leaves activation,
    reservation, tombstone, attempts, and evidence unchanged.
-8. Run the focused repository test and observe failure.
+8. Run the focused repository and lock tests and observe both fail before implementation.
 
 Green:
 
