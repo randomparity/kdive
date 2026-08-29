@@ -80,6 +80,7 @@ _ORDINARY_TABLES = {
     "snapshots",
     "system_bootstrap_keys",
     "system_object_sweep_cursors",
+    "system_root_provenance",
     "system_shapes",
     "systems",
     "tool_invocation",
@@ -104,6 +105,7 @@ _SERVER_MUTATIONS = {
         "ledger",
         "platform_audit_log",
         "system_object_sweep_cursors",
+        "system_root_provenance",
         "tool_invocation",
     },
     "DELETE": {
@@ -196,7 +198,12 @@ _WORKER_MUTATIONS = {
         "upload_manifests",
     },
 }
-_RECONCILER_SELECT = _ORDINARY_TABLES - {"audit_log", "platform_audit_log", "tool_invocation"}
+_RECONCILER_SELECT = _ORDINARY_TABLES - {
+    "audit_log",
+    "platform_audit_log",
+    "system_root_provenance",
+    "tool_invocation",
+}
 _RECONCILER_MUTATIONS = {
     "INSERT": {
         "artifacts",

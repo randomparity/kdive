@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO, cast
+from xml.etree.ElementTree import ParseError
 from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  # nosec B405
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -152,7 +153,16 @@ def _run_bounded_inspector(
         ) from exc
     finally:
         selector.close()
-    returncode = process.wait()
+    try:
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        raise CategorizedError(
+            "root boot inspection exceeded its bounded execution contract; rebuild and retry",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stage": "root-inspection", "reason": "timeout"},
+        ) from exc
     stdout, stderr = (bytes(streams[process.stdout]), bytes(streams[process.stderr]))
     if returncode != 0:
         raise CategorizedError(
@@ -198,7 +208,7 @@ def inspect_root_boot(
     )
     try:
         return _parse_root_boot(stdout, architecture, image_digest)
-    except (ValueError, TypeError) as exc:
+    except (ParseError, ValueError, TypeError) as exc:
         raise CategorizedError(
             "root boot inspection output is malformed; rebuild and retry",
             category=ErrorCategory.PROVISIONING_FAILURE,

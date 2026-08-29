@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from xml.etree.ElementTree import ParseError
 
 import pytest
@@ -12,6 +13,7 @@ from kdive.images.planes.provenance_probes import (
     ROOT_INSPECTION_MAX_OUTPUT_BYTES,
     _parse_root_boot,
     _run_bounded_inspector,
+    inspect_root_boot,
 )
 
 
@@ -43,6 +45,13 @@ def test_bounded_runner_kills_partial_output_then_timeout() -> None:
     assert exc.value.details["reason"] == "timeout"
 
 
+def test_bounded_runner_keeps_deadline_after_output_closes() -> None:
+    code = "import os,time; os.close(1); os.close(2); time.sleep(5)"
+    with pytest.raises(CategorizedError) as exc:
+        _run_bounded_inspector([sys.executable, "-c", code], timeout_s=0.01)
+    assert exc.value.details["reason"] == "timeout"
+
+
 def test_parser_builds_digest_bound_root_spec() -> None:
     xml = b"""<operatingsystems><operatingsystem><mountpoints>
       <mountpoint dev='/dev/sda2'>/</mountpoint></mountpoints><filesystems>
@@ -57,3 +66,16 @@ def test_parser_builds_digest_bound_root_spec() -> None:
 def test_parser_rejects_malformed_or_incomplete_output(xml: bytes) -> None:
     with pytest.raises((ValueError, ParseError)):
         _parse_root_boot(xml, "x86_64", "sha256:" + "a" * 64)
+
+
+def test_inspector_maps_malformed_xml_to_provisioning_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "kdive.images.planes.provenance_probes._run_bounded_inspector",
+        lambda *_args, **_kwargs: (b"not xml", b""),
+    )
+    with pytest.raises(CategorizedError) as exc:
+        inspect_root_boot(tmp_path / "root.qcow2", "x86_64", "sha256:" + "a" * 64)
+    assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert exc.value.details["reason"] == "malformed_output"

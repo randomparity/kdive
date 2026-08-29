@@ -21,3 +21,6 @@ $$;
 CREATE TRIGGER system_root_provenance_immutable
     BEFORE UPDATE ON system_root_provenance
     FOR EACH ROW EXECUTE FUNCTION reject_system_root_provenance_update();
+
+-- Admission runs as the server. Other runtime roles receive no direct snapshot authority.
+GRANT SELECT, INSERT ON TABLE public.system_root_provenance TO kdive_server;
