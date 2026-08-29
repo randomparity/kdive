@@ -116,19 +116,41 @@
         "required": ["error_code"],
         "allOf": [
           {
-            "if": {"properties": {"error_code": {"not": {"const": "INVALID_DOCUMENT"}}}},
+            "if": {
+              "properties": {
+                "error_code": {
+                  "enum": [
+                    "INVALID_DOCUMENT",
+                    "ROOT_DISCOVERY_FAILED",
+                    "FILESYSTEM_FAILURE",
+                    "FLUSH_FAILURE",
+                    "SHUTDOWN_FAILURE"
+                  ]
+                }
+              }
+            },
             "then": {
-              "required": [
-                "system_id",
-                "run_id",
-                "plan_identity",
-                "operation_nonce",
-                "appliance_image_digest",
-                "release",
-                "root_volume_key",
-                "root_volume_identity",
-                "source_manifest"
+              "oneOf": [
+                {
+                  "not": {
+                    "anyOf": [
+                      {"required": ["system_id"]},
+                      {"required": ["run_id"]},
+                      {"required": ["plan_identity"]},
+                      {"required": ["operation_nonce"]},
+                      {"required": ["appliance_image_digest"]},
+                      {"required": ["release"]},
+                      {"required": ["root_volume_key"]},
+                      {"required": ["root_volume_identity"]},
+                      {"required": ["source_manifest"]}
+                    ]
+                  }
+                },
+                {"$ref": "#/$defs/complete_identity"}
               ]
+            },
+            "else": {
+              "$ref": "#/$defs/complete_identity"
             }
           }
         ]
@@ -136,6 +158,19 @@
     }
   ],
   "$defs": {
+    "complete_identity": {
+      "required": [
+        "system_id",
+        "run_id",
+        "plan_identity",
+        "operation_nonce",
+        "appliance_image_digest",
+        "release",
+        "root_volume_key",
+        "root_volume_identity",
+        "source_manifest"
+      ]
+    },
     "capture": {
       "oneOf": [
         {

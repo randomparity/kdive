@@ -650,6 +650,23 @@ def test_recovery_conflict_preserves_malformed_evidence(
     assert checkpoint.read_bytes() == before
 
 
+def test_accepted_failure_restarts_before_the_first_durable_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    partial_capture = scratch / "capture"
+    partial_capture.mkdir()
+    (partial_capture / "partial").write_bytes(b"incomplete")
+    document = appliance._validate_operation(operation)
+    appliance._write_failure(document, appliance.ApplianceError("FILESYSTEM_FAILURE"))
+
+    result = appliance.execute(document)
+
+    assert result["phase"] == "installed"
+    assert (destination / "new.ko").read_bytes() == b"new"
+    assert not (partial_capture / "partial").exists()
+
+
 def test_checkpoint_write_reconciles_a_crash_temp(tmp_path: Path) -> None:
     appliance = _module()
     result = tmp_path / "result-v1.json"
@@ -837,6 +854,19 @@ def test_accepted_failure_requires_complete_operation_identity(field: str) -> No
         "appliance_image_digest": operation["appliance_image_digest"],
     }
     failure.pop(field)
+    assert list(validator.iter_errors(failure))
+
+
+def test_preacceptance_shutdown_failure_is_closed_and_identity_free() -> None:
+    validator = Draft202012Validator(_json("result-v1.schema.json"))
+    failure = {
+        "protocol": "remote-module-result-v1",
+        "status": "failure",
+        "phase": "accepted",
+        "error_code": "SHUTDOWN_FAILURE",
+    }
+    assert not list(validator.iter_errors(failure))
+    failure["system_id"] = _operation()["system_id"]
     assert list(validator.iter_errors(failure))
 
 

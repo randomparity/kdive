@@ -471,6 +471,7 @@ def _existing_checkpoint(document: dict[str, object]) -> dict[str, object] | Non
         or checkpoint.get("protocol") != "remote-module-result-v1"
         or checkpoint.get("phase")
         not in {
+            "accepted",
             "captured",
             "staging-intent",
             "replacement-ready",
@@ -690,6 +691,8 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
         raise ApplianceError("SOURCE_INVALID")
     checkpoint = _existing_checkpoint(document)
     capture = SCRATCH / "capture"
+    if checkpoint is not None and checkpoint.get("phase") == "accepted":
+        checkpoint = None
     if checkpoint is None:
         if _path_present(staged) or _manifest_or_none(displaced, "recovery") is not None:
             raise ApplianceError("RECOVERY_CONFLICT")
