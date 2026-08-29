@@ -584,8 +584,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-    v_activation public.external_boot_activations%ROWTYPE;
-    v_attempt public.external_boot_recovery_attempts%ROWTYPE;
     v_authority public.external_boot_authorities%ROWTYPE;
     v_existing public.external_boot_authority_acknowledgements%ROWTYPE;
     v_acknowledged_at timestamptz;
@@ -641,20 +639,6 @@ BEGIN
     FROM public.external_boot_authority_acknowledgements AS ack
     WHERE ack.authority_id = p_authority_id
     FOR UPDATE;
-    IF p_purpose = 'resolve-conflict' THEN
-        SELECT e.* INTO v_activation
-        FROM public.external_boot_activations AS e
-        WHERE e.id = p_activation_id
-        FOR UPDATE;
-        IF v_activation.current_attempt_id IS NOT NULL THEN
-            SELECT ra.* INTO v_attempt
-            FROM public.external_boot_recovery_attempts AS ra
-            WHERE ra.activation_id = p_activation_id
-              AND ra.attempt_id = v_activation.current_attempt_id
-            FOR UPDATE;
-        END IF;
-    END IF;
-
     IF v_latest IS NULL OR v_authority.id IS NULL
        OR v_latest <> p_generation
        OR v_authority.generation <> p_generation
@@ -703,14 +687,6 @@ BEGIN
             'superseded'::text, NULL::bigint, NULL::text, NULL::text, NULL::timestamptz;
         RETURN;
     END IF;
-    IF p_purpose = 'resolve-conflict' AND (
-        v_activation.state IS DISTINCT FROM 'recovery_conflict'
-        OR v_attempt.state IS DISTINCT FROM 'conflict'
-    ) THEN
-        RETURN QUERY SELECT
-            'superseded'::text, NULL::bigint, NULL::text, NULL::text, NULL::timestamptz;
-        RETURN;
-    END IF;
     v_acknowledged_at := clock_timestamp();
     INSERT INTO public.external_boot_authority_acknowledgements (
         authority_id, system_id, generation, authority_instance, operation_identity,
@@ -724,20 +700,6 @@ BEGIN
     UPDATE public.external_boot_authorities
     SET state = 'current', acknowledged_at = v_acknowledged_at
     WHERE id = p_authority_id AND state = 'allocating';
-    IF p_purpose = 'resolve-conflict' THEN
-        UPDATE public.external_boot_recovery_attempts
-        SET state = 'recovering', conflict_evidence = NULL,
-            authority_generation = p_generation,
-            resolution_operation = p_operation_identity,
-            resolution_identity = p_operation_digest,
-            acknowledged_composite_state = p_positive_quiescence_digest
-        WHERE activation_id = p_activation_id
-          AND attempt_id = v_attempt.attempt_id
-          AND state = 'conflict';
-        UPDATE public.external_boot_activations
-        SET state = 'recovering'
-        WHERE id = p_activation_id AND state = 'recovery_conflict';
-    END IF;
     INSERT INTO public.external_boot_authority_audit (
         authority_id, system_id, allocation_id, activation_id, run_id, plan_identity, job_id,
         job_attempt, worker_incarnation, generation, purpose, provider_kind,
@@ -1317,11 +1279,17 @@ BEGIN
            OR v_run.state IS DISTINCT FROM 'succeeded'
            OR v_activation.state IS DISTINCT FROM 'activating'
        ))
-       OR (v_operation IN ('recover', 'resolve-conflict') AND (
+       OR (v_operation = 'recover' AND (
            v_system.state NOT IN ('ready', 'crashed')
            OR v_run.state IS DISTINCT FROM 'succeeded'
            OR v_activation.state IS DISTINCT FROM 'recovering'
            OR v_attempt.state IS DISTINCT FROM 'recovering'
+       ))
+       OR (v_operation = 'resolve-conflict' AND (
+           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state IS DISTINCT FROM 'succeeded'
+           OR v_activation.state IS DISTINCT FROM 'recovery_conflict'
+           OR v_attempt.state IS DISTINCT FROM 'conflict'
        ))
        OR (v_operation = 'release' AND (
            v_activation.state NOT IN (
@@ -1512,7 +1480,14 @@ BEGIN
         END IF;
         UPDATE public.external_boot_recovery_attempts
         SET state = 'recovered', terminal_evidence = v_evidence,
-            conflict_evidence = NULL, recovery_readiness_deadline = NULL
+            conflict_evidence = NULL, recovery_readiness_deadline = NULL,
+            authority_generation = p_generation,
+            resolution_operation = CASE WHEN v_operation = 'resolve-conflict'
+                THEN p_operation_identity ELSE resolution_operation END,
+            resolution_identity = CASE WHEN v_operation = 'resolve-conflict'
+                THEN p_operation_digest ELSE resolution_identity END,
+            acknowledged_composite_state = CASE WHEN v_operation = 'resolve-conflict'
+                THEN v_ack.positive_quiescence_digest ELSE acknowledged_composite_state END
         WHERE activation_id = p_activation_id AND attempt_id = v_attempt.attempt_id;
         UPDATE public.external_boot_activations
         SET state = 'recovered', terminal_evidence = v_evidence

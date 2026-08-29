@@ -744,7 +744,7 @@ def test_allocation_after_retirement_links_the_prior_generation(
         ).fetchone() == (first.generation,)
 
 
-def test_resolve_conflict_acknowledgement_fences_transition_before_result(
+def test_resolve_conflict_acknowledgement_cannot_mutate_lifecycle_before_result(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     with psycopg.connect(migrated_url) as conn:
@@ -752,24 +752,29 @@ def test_resolve_conflict_acknowledgement_fences_transition_before_result(
         _prepare_purpose_state(conn, case, "resolve-conflict")
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         authority = _allocate(worker, case)
-    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
-        assert _acknowledge(host, case, authority) == "applied"
-        assert _acknowledge(host, case, authority) == "applied"
     with psycopg.connect(migrated_url) as conn:
-        assert conn.execute(
-            "SELECT e.state, ra.state, ra.authority_generation, ra.resolution_operation, "
-            "ra.resolution_identity, ra.acknowledged_composite_state "
+        before = conn.execute(
+            "SELECT e.state, ra.state, ra.authority_generation, ra.conflict_evidence, "
+            "ra.resolution_operation, ra.resolution_identity, ra.acknowledged_composite_state "
             "FROM external_boot_activations AS e "
             "JOIN external_boot_recovery_attempts AS ra "
             "ON ra.activation_id=e.id AND ra.attempt_id=e.current_attempt_id WHERE e.id=%s",
             (case.activation_id,),
-        ).fetchone() == (
-            "recovering",
-            "recovering",
-            authority.generation,
-            case.operation_identity,
-            authority.operation_digest,
-            _QUIESCENCE,
+        ).fetchone()
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+        assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        assert (
+            conn.execute(
+                "SELECT e.state, ra.state, ra.authority_generation, ra.conflict_evidence, "
+                "ra.resolution_operation, ra.resolution_identity, ra.acknowledged_composite_state "
+                "FROM external_boot_activations AS e "
+                "JOIN external_boot_recovery_attempts AS ra "
+                "ON ra.activation_id=e.id AND ra.attempt_id=e.current_attempt_id WHERE e.id=%s",
+                (case.activation_id,),
+            ).fetchone()
+            == before
         )
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         assert _commit(
@@ -783,6 +788,41 @@ def test_resolve_conflict_acknowledgement_fences_transition_before_result(
                 "evidence": _terminal_evidence(case, "recovered"),
             },
         ) == ("applied", "succeeded")
+
+
+def test_resolve_conflict_failure_applies_after_evidence_only_acknowledgement(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="resolve-conflict", operation="fail", worker_suffix="f")
+        _prepare_purpose_state(conn, case, "resolve-conflict")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "fail",
+                "error_category": "transport_conflict",
+                "failure_context": {"phase": "provider-call"},
+                "terminal": False,
+            },
+        ) == ("applied", "queued")
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT e.state, ra.state, j.state, a.state "
+            "FROM external_boot_activations AS e "
+            "JOIN external_boot_recovery_attempts AS ra "
+            "ON ra.activation_id=e.id AND ra.attempt_id=e.current_attempt_id "
+            "JOIN jobs AS j ON j.id=%s "
+            "JOIN external_boot_authorities AS a ON a.id=%s WHERE e.id=%s",
+            (case.job_id, authority.authority_id, case.activation_id),
+        ).fetchone() == ("recovery_conflict", "conflict", "queued", "retired")
 
 
 @pytest.mark.parametrize(
