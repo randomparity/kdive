@@ -107,7 +107,7 @@ class _Conn:
 
 def test_materializes_kernel_and_optional_initrd_with_opaque_deterministic_refs() -> None:
     pool = _Pool()
-    conn = _Conn(pool, [_Stream(), _Stream(), _Stream(), _Stream()])
+    conn = _Conn(pool, [_Stream(), _Stream(), _Stream(), _Stream(), _Stream(), _Stream()])
 
     result = materialize_boot_artifacts(
         conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"kernel", initrd=b"initrd"

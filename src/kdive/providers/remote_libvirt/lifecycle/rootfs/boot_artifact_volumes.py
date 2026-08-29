@@ -214,6 +214,7 @@ def _materialize_one(
         return ref
     partial_name = artifact_partial_volume_name(kind, system_id, run_id, payload, attempt_id)
     staged: _ArtifactVolume | None = None
+    published: _ArtifactVolume | None = None
     try:
         partial = _lookup(pool, partial_name)
         if partial is not None:
@@ -223,9 +224,11 @@ def _materialize_one(
         staged = _upload_volume(conn, pool, partial_name, payload, kind=kind, pool_name=pool_name)
         if not _rehash_volume(conn, staged, payload):
             raise _infra("verifying the staged artifact", kind=kind, pool=pool_name)
-        pool.createXMLFrom(
+        published = pool.createXMLFrom(
             render_boot_artifact_volume_xml(name, capacity_bytes=len(payload)), staged
         )
+        if not _rehash_volume(conn, published, payload):
+            raise _infra("verifying the published artifact", kind=kind, pool=pool_name)
         try:
             staged.delete(0)
         except libvirt.libvirtError as exc:
@@ -233,11 +236,17 @@ def _materialize_one(
             # retry while surfacing the cleanup fault as infrastructure failure.
             raise _infra("cleaning the staged artifact", kind=kind, pool=pool_name) from exc
     except CategorizedError:
+        if published is not None:
+            with contextlib.suppress(libvirt.libvirtError):
+                published.delete(0)
         if staged is not None:
             with contextlib.suppress(libvirt.libvirtError):
                 staged.delete(0)
         raise
     except (libvirt.libvirtError, OSError, RuntimeError) as exc:
+        if published is not None:
+            with contextlib.suppress(libvirt.libvirtError):
+                published.delete(0)
         if staged is not None:
             with contextlib.suppress(libvirt.libvirtError):
                 staged.delete(0)
