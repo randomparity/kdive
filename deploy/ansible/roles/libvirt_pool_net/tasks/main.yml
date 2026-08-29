@@ -15,6 +15,48 @@
     state: active
     autostart: true
 
+- name: Create the confined external-boot artifact pool directory
+  ansible.builtin.file:
+    path: "{{ libvirt_pool_net_boot_artifact_pool_target }}"
+    state: directory
+    owner: "{{ libvirt_pool_net_boot_artifact_pool_owner }}"
+    group: "{{ libvirt_pool_net_boot_artifact_pool_group }}"
+    mode: "{{ libvirt_pool_net_boot_artifact_pool_mode }}"
+
+- name: Define the external-boot artifact storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_boot_artifact_pool_name }}"
+    command: define
+    xml: |
+      <pool type='dir'>
+        <name>{{ libvirt_pool_net_boot_artifact_pool_name }}</name>
+        <target><path>{{ libvirt_pool_net_boot_artifact_pool_target }}</path></target>
+      </pool>
+
+- name: Build the external-boot artifact storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_boot_artifact_pool_name }}"
+    state: active
+    autostart: true
+
+- name: Verify external-boot artifact pool confinement and permissions
+  ansible.builtin.stat:
+    path: "{{ libvirt_pool_net_boot_artifact_pool_target }}"
+  register: libvirt_pool_net_boot_artifact_pool_stat
+
+- name: Assert external-boot artifact pool directory is private and usable
+  ansible.builtin.assert:
+    that:
+      - libvirt_pool_net_boot_artifact_pool_stat.stat.isdir
+      - libvirt_pool_net_boot_artifact_pool_stat.stat.mode == libvirt_pool_net_boot_artifact_pool_mode
+      - libvirt_pool_net_boot_artifact_pool_stat.stat.pw_name == libvirt_pool_net_boot_artifact_pool_owner
+      - libvirt_pool_net_boot_artifact_pool_stat.stat.gr_name == libvirt_pool_net_boot_artifact_pool_group
+    fail_msg: >-
+      External-boot artifact pool {{ libvirt_pool_net_boot_artifact_pool_target }} is not a
+      confined {{ libvirt_pool_net_boot_artifact_pool_mode }} directory owned by
+      {{ libvirt_pool_net_boot_artifact_pool_owner }}:
+      {{ libvirt_pool_net_boot_artifact_pool_stat.stat | default({}) }}
+
 - name: Ensure the default network is active and autostarted
   community.libvirt.virt_net:
     name: "{{ libvirt_network }}"

@@ -25,6 +25,8 @@ from kdive.providers.ports.external_boot import OpaqueProviderRef
 
 type BootArtifactKind = Literal["kernel", "initrd"]
 
+BOOT_ARTIFACT_METADATA_NS = "urn:kdive:remote-libvirt:boot-artifact"
+
 
 class _ArtifactStream(Protocol):
     def sendAll(self, callback: Callable[[object, int, object], bytes], opaque: object) -> None: ...  # noqa: N802
@@ -90,11 +92,41 @@ def artifact_volume_ref(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -
     return OpaqueProviderRef(ref=f"{kind}/{system_id}/{run_id}")
 
 
-def render_boot_artifact_volume_xml(name: str, *, capacity_bytes: int) -> str:
-    """Render an independent raw volume whose capacity is the exact transferred byte count."""
+def render_boot_artifact_volume_xml(
+    name: str,
+    *,
+    capacity_bytes: int,
+    kind: BootArtifactKind | None = None,
+    system_id: UUID | None = None,
+    run_id: UUID | None = None,
+    payload_digest: str | None = None,
+    attempt_id: UUID | None = None,
+) -> str:
+    """Render a raw volume, optionally carrying its closed ownership identity.
+
+    Ownership metadata is included for boot-artifact volumes so the reconciler can distinguish a
+    KDIVE object from a foreign volume before it attempts a delete.  The four identity fields are
+    all-or-nothing; callers that render a generic volume retain the old minimal XML.
+    """
+    identity = (kind, system_id, run_id, payload_digest)
+    if any(value is not None for value in identity) and not all(
+        value is not None for value in identity
+    ):
+        raise ValueError("boot-artifact metadata requires kind, System, Run, and digest")
+    if attempt_id is not None and kind is None:
+        raise ValueError("boot-artifact attempt metadata requires an artifact identity")
     volume = ET.Element("volume")
     ET.SubElement(volume, "name").text = name
     ET.SubElement(volume, "capacity").text = str(capacity_bytes)
+    if kind is not None:
+        metadata = ET.SubElement(volume, "metadata")
+        marker = ET.SubElement(metadata, f"{{{BOOT_ARTIFACT_METADATA_NS}}}artifact")
+        marker.set("kind", kind)
+        marker.set("system-id", str(system_id))
+        marker.set("run-id", str(run_id))
+        marker.set("sha256", payload_digest or "")
+        if attempt_id is not None:
+            marker.set("attempt-id", str(attempt_id))
     target = ET.SubElement(volume, "target")
     ET.SubElement(target, "format", type="raw")
     return ET.tostring(volume, encoding="unicode")
@@ -106,6 +138,25 @@ def _infra(operation: str, *, kind: BootArtifactKind, pool: str) -> CategorizedE
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         details={"kind": kind, "pool": pool},
     )
+
+
+def require_boot_artifact_capacity(
+    kernel_bytes: int, initrd_bytes: int = 0, *, max_bytes: int
+) -> None:
+    """Reject a request larger than this provider instance's reserved artifact capacity.
+
+    The durable activation reservation performs the cross-Run atomic debit. This preflight keeps a
+    provider call from mutating the host when the request itself cannot fit the configured bound.
+    """
+    if kernel_bytes <= 0 or initrd_bytes < 0 or max_bytes <= 0:
+        raise ValueError("artifact sizes and capacity must be positive (initrd may be zero)")
+    requested = kernel_bytes + initrd_bytes
+    if requested > max_bytes:
+        raise CategorizedError(
+            "remote-libvirt boot artifacts exceed the configured storage capacity",
+            category=ErrorCategory.CAPACITY_EXHAUSTED,
+            details={"requested_bytes": requested, "capacity_bytes": max_bytes},
+        )
 
 
 def _conflict(kind: BootArtifactKind, pool: str) -> CategorizedError:
@@ -155,11 +206,25 @@ def _upload_volume(
     *,
     kind: BootArtifactKind,
     pool_name: str,
+    system_id: UUID,
+    run_id: UUID,
+    payload_digest: str,
+    attempt_id: UUID,
 ) -> _ArtifactVolume:
     volume: _ArtifactVolume | None = None
     stream: _ArtifactStream | None = None
     try:
-        volume = pool.createXML(render_boot_artifact_volume_xml(name, capacity_bytes=len(payload)))
+        volume = pool.createXML(
+            render_boot_artifact_volume_xml(
+                name,
+                capacity_bytes=len(payload),
+                kind=kind,
+                system_id=system_id,
+                run_id=run_id,
+                payload_digest=payload_digest,
+                attempt_id=attempt_id,
+            )
+        )
         stream = conn.newStream(0)
         volume.upload(stream, 0, len(payload), 0)
         sent = hashlib.sha256()
@@ -221,11 +286,31 @@ def _materialize_one(
             # A partial with this deterministic ownership key can only be from an earlier attempt
             # of this exact artifact.  It is never a published volume and is safe to replace.
             partial.delete(0)
-        staged = _upload_volume(conn, pool, partial_name, payload, kind=kind, pool_name=pool_name)
+        payload_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        staged = _upload_volume(
+            conn,
+            pool,
+            partial_name,
+            payload,
+            kind=kind,
+            pool_name=pool_name,
+            system_id=system_id,
+            run_id=run_id,
+            payload_digest=payload_digest,
+            attempt_id=attempt_id,
+        )
         if not _rehash_volume(conn, staged, payload):
             raise _infra("verifying the staged artifact", kind=kind, pool=pool_name)
         published = pool.createXMLFrom(
-            render_boot_artifact_volume_xml(name, capacity_bytes=len(payload)), staged
+            render_boot_artifact_volume_xml(
+                name,
+                capacity_bytes=len(payload),
+                kind=kind,
+                system_id=system_id,
+                run_id=run_id,
+                payload_digest=payload_digest,
+            ),
+            staged,
         )
         if not _rehash_volume(conn, published, payload):
             raise _infra("verifying the published artifact", kind=kind, pool=pool_name)
@@ -316,6 +401,7 @@ def materialize_boot_artifacts(
     kernel: bytes | bytearray | memoryview | Path,
     initrd: bytes | bytearray | memoryview | Path | None,
     attempt_id: UUID | None = None,
+    max_bytes: int | None = None,
 ) -> MaterializedBootArtifacts:
     """Transfer exact kernel and optional initrd bytes over the existing mTLS connection.
 
@@ -332,6 +418,10 @@ def materialize_boot_artifacts(
         )
     attempt = attempt_id or uuid4()
     initrd_payload = _read_payload(initrd) if initrd is not None else None
+    if max_bytes is not None:
+        require_boot_artifact_capacity(
+            len(kernel_payload), len(initrd_payload or b""), max_bytes=max_bytes
+        )
     kernel_ref, kernel_created = _materialize_one(
         conn, pool_name, system_id, run_id, "kernel", kernel_payload, attempt
     )

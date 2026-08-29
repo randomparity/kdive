@@ -32,10 +32,29 @@ def test_machine_setting_fields() -> None:
     assert s.processes == _RT
 
 
+def test_boot_artifact_pool_setting_fields() -> None:
+    s = settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL
+    assert s.name == "KDIVE_REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL"
+    assert s.default == "kdive-boot-artifacts"
+    assert s.group == "remote-libvirt"
+    assert s.processes == _RT
+
+
+def test_boot_artifact_capacity_setting_fields() -> None:
+    s = settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES
+    assert s.name == "KDIVE_REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES"
+    assert s.default == "10737418240"
+    assert s.group == "remote-libvirt"
+    assert s.processes == _RT
+    assert s.parse("6") == 6
+
+
 def test_settings_list_is_the_declared_settings_in_order() -> None:
     assert settings.SETTINGS == [
         settings.REMOTE_LIBVIRT_STORAGE_POOL,
         settings.REMOTE_LIBVIRT_NETWORK,
         settings.REMOTE_LIBVIRT_MACHINE,
+        settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL,
+        settings.REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES,
         settings.REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS,
     ]

@@ -12,6 +12,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
     materialize_boot_artifacts,
+    require_boot_artifact_capacity,
 )
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
@@ -164,3 +165,22 @@ def test_failed_attempt_deletes_only_its_partial_volume() -> None:
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert pool.created is not None
     assert pool.created.deleted
+
+
+def test_capacity_preflight_rejects_before_opening_or_mutating_the_pool() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        materialize_boot_artifacts(
+            _Conn(_Pool(), []),
+            "images",
+            system_id=SYSTEM,
+            run_id=RUN,
+            kernel=b"kernel",
+            initrd=b"initrd",
+            max_bytes=5,
+        )
+
+    assert exc.value.category is ErrorCategory.CAPACITY_EXHAUSTED
+
+
+def test_capacity_preflight_accepts_exact_bound() -> None:
+    require_boot_artifact_capacity(5, 1, max_bytes=6)

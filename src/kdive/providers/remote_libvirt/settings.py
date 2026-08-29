@@ -59,6 +59,28 @@ REMOTE_LIBVIRT_MACHINE = Setting(
     processes=_RT,
     help="QEMU machine type (pc/i440fx by default; q35 opt-in).",
 )
+REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL = Setting(
+    name="KDIVE_REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL",
+    parse=str,
+    default="kdive-boot-artifacts",
+    group="remote-libvirt",
+    processes=_RT,
+    help="Dedicated libvirt directory pool for external-boot kernel and initrd artifacts.",
+)
+REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES = Setting(
+    name="KDIVE_REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES",
+    parse=_positive_int,
+    default="10737418240",
+    group="remote-libvirt",
+    processes=_RT,
+    help=(
+        "Maximum bytes reserved by one remote-libvirt artifact pool instance. The unit is bytes, "
+        "the scope is per provider instance across external-boot attempts, and the reservation "
+        "is debited atomically before provider mutation; over-cap requests fail without writing. "
+        "Release follows verified owner-and-digest deletion, and retries reuse the same debit."
+    ),
+    suggest="a positive integer number of bytes, e.g. 10737418240",
+)
 
 REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS = Setting(
     name="KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS",
@@ -88,5 +110,7 @@ SETTINGS = [
     REMOTE_LIBVIRT_STORAGE_POOL,
     REMOTE_LIBVIRT_NETWORK,
     REMOTE_LIBVIRT_MACHINE,
+    REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL,
+    REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES,
     REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS,
 ]
