@@ -164,6 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence external boot activation writes
 - Persist activation recovery and cleanup
 - Account and reap boot artifacts
+- Fence external boot authority results
+- Route external boot authority results
 
 ### Changed
 
@@ -979,6 +981,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Order activation lock proofs
 - Require red activation lock proof
 - Remove unversioned activation evidence
+- Specify external boot authority fence
+- Settle authority fence review
+- Keep journal work in provider issue
+- Make journal evidence opaque
+- State current authority cardinality
 
 ### Fixed
 
@@ -1573,6 +1580,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject oversized evidence before mutation
 - Verify artifact bytes before reaping
 - Classify reaper enumeration failures
+- Reject unsafe external boot results
+- Close external boot result boundary
+- Harden external boot authority migration
+- Close authority lifecycle gaps
+- Confine provider authority writes
+- Align authority issuance predicates
+- Fence authority acknowledgement allocation
+- Close authority result contracts
+- Validate authority result bindings
+- Preserve admitted authority operation
+- Align authority result adapter
+- Represent fail authority operation
+- Align authority evidence contracts
 
 ### Security
 
