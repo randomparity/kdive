@@ -23,7 +23,7 @@ from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.runs import registrar as runs_registrar
-from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.models import HandlerRegistry, JobHandlerResult
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -194,7 +194,7 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
     conn = cast(AsyncConnection, object())
     job = cast(Job, object())
 
-    def _dispatch(kind: JobKind) -> str | None:
+    def _dispatch(kind: JobKind) -> JobHandlerResult:
         handler = registry.get(kind)
         assert handler is not None
         return asyncio.run(handler(conn, job))

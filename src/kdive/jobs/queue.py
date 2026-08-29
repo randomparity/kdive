@@ -35,7 +35,6 @@ from kdive.domain.operations.jobs import (
 )
 from kdive.jobs.models import (
     ExternalBootAuthorityFailureV1,
-    ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
 )
@@ -265,39 +264,6 @@ async def complete(
     return None if row is None else Job.model_validate(row)
 
 
-async def allocate_external_boot_authority(
-    conn: AsyncConnection,
-    job: Job,
-    marker: ExternalBootAuthorityMarkerV1,
-    *,
-    incarnation_credential: SecretStr,
-) -> tuple[UUID, int, str] | None:
-    """Mint authority for the exact claimed attempt, or return ``None`` when superseded."""
-    async with conn.transaction(), conn.cursor() as cur:
-        await cur.execute(
-            "SELECT status, authority_id, generation, operation_digest "
-            "FROM public.allocate_external_boot_authority("
-            "sha256(convert_to(%s, 'UTF8')), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                incarnation_credential.get_secret_value(),
-                job.id,
-                job.attempt,
-                marker.activation_id,
-                marker.run_id,
-                marker.system_id,
-                marker.plan_identity,
-                marker.purpose,
-                marker.provider_kind,
-                marker.authority_instance,
-                marker.operation_identity,
-            ),
-        )
-        row = await cur.fetchone()
-    if row is None or row[0] != "allocated":
-        return None
-    return row[1], int(row[2]), str(row[3])
-
-
 async def commit_external_boot_authority_result(
     conn: AsyncConnection,
     job: Job,
@@ -328,7 +294,7 @@ async def commit_external_boot_authority_result(
                 result.operation_digest,
                 result.journal_sequence,
                 result.journal_digest,
-                Jsonb(result.result),
+                Jsonb(result.result.model_dump(mode="json", exclude_none=True)),
             ),
         )
         status_row = await cur.fetchone()
