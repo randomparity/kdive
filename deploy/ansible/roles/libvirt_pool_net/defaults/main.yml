@@ -1,0 +1,6 @@
+---
+libvirt_pool_net_boot_artifact_pool_name: kdive-boot-artifacts
+libvirt_pool_net_boot_artifact_pool_target: /var/lib/libvirt/kdive/boot-artifacts
+libvirt_pool_net_boot_artifact_pool_owner: root
+libvirt_pool_net_boot_artifact_pool_group: libvirt
+libvirt_pool_net_boot_artifact_pool_mode: "0770"
