@@ -18,8 +18,9 @@ release, teardown, and cleanup evidence.
 - Every write predicates on System id, activation id, operation owner id, positive authority
   generation, expected state, and `cleanup_complete=false` where it changes lifecycle truth.
 - Every repository write acquires `LockScope.SYSTEM` inside the caller's open transaction. Recovery
-  store capacity operations additionally use one deterministic store-scoped advisory lock without
-  adding an independently callable runtime surface.
+  store capacity operations additionally acquire a dedicated `LockScope.RECOVERY_STORE` keyed by
+  stable store identity, always in `SYSTEM -> RECOVERY_STORE` order. No code path takes the reverse
+  order or exposes a new runtime operation.
 - Persist typed values as validated `jsonb`; reject noncanonical byte input before SQL and
   revalidate semantic values on load.
 - First executable implementation action is a failing focused test. Commit each green task and
@@ -98,7 +99,9 @@ Green:
 
 Files:
 
+- Modify `src/kdive/db/locks.py`.
 - Add `src/kdive/db/external_boot_activations.py`.
+- Modify `tests/db/test_locks.py`.
 - Add `tests/db/test_external_boot_activation_repository.py`.
 
 Red:
@@ -112,7 +115,11 @@ Red:
 4. For each mutator, test wrong System, activation, owner, generation, expected state, and cleaned
    state. Snapshot all four tables before a stale-generation call and prove every row/evidence value
    remains byte-for-byte unchanged afterward.
-5. Run the focused repository test and observe failure.
+5. Add deterministic two-connection tests that hold the exact System lock and prove a lifecycle
+   mutator waits, then hold the exact recovery-store lock and prove a dual-lock capacity mutator
+   waits only after taking its System lock. Pin the `SYSTEM -> RECOVERY_STORE` order in the lock
+   module documentation and tests.
+6. Run the focused repository and lock tests and observe failure.
 
 Green:
 
@@ -121,9 +128,11 @@ Green:
 2. Implement create and read operations with typed `jsonb` conversion and revalidation.
 3. Implement one System-lock helper and use it in every mutator; keep the SQL CAS predicate
    load-bearing after lock acquisition.
-4. Implement idempotent evidence fills and transition writes, rejecting illegal domain edges before
+4. Add the dedicated recovery-store scope to the shared lock enum and use the shared advisory-lock
+   helper for both acquisitions rather than raw lock SQL or a borrowed namespace.
+5. Implement idempotent evidence fills and transition writes, rejecting illegal domain edges before
    SQL. Direct conflict atomically creates a conflict-attempt row and advances the activation.
-5. Rerun focused tests, `just lint`, and `just type`; simplify repeated SQL only after the third
+6. Rerun focused tests, `just lint`, and `just type`; simplify repeated SQL only after the third
    occurrence.
 
 ## Task 4: Capacity, recovery attempts, terminalization, and cleanup
@@ -149,7 +158,15 @@ Red:
 5. Test authorized teardown from `recovery_failed` and `recovery_conflict`: the System must be
    durably `torn_down`, release capacity, retain all prior evidence, and reject every later
    lifecycle transition. Test missing/corrupt ownership evidence retains capacity.
-6. Run the focused repository test and observe failure.
+6. Apply the full wrong-System/activation/owner/generation/expected-state/cleaned-state matrix to
+   `mark_reservation_ready`, `begin_recovery_attempt`, `finish_recovery_attempt`,
+   `release_reservation`, and `mark_cleanup_complete`. Add a stale current-attempt completion case.
+   For representative stale calls, compare all four tables byte-for-byte before and after.
+7. Add table-driven cleanup-completion negatives varying release identity, cleanup mode, teardown
+   identity, release-evidence bytes, activation/System/store/owner/byte bindings, tombstone
+   presence, and durable System state one axis at a time. Every rejection leaves activation,
+   reservation, tombstone, attempts, and evidence unchanged.
+8. Run the focused repository test and observe failure.
 
 Green:
 
@@ -160,7 +177,7 @@ Green:
    inserts/returns the immutable tombstone.
 4. Implement cleanup completion under the System lock, including the released-cleanup-pending
    intermediate state and teardown-specific System/evidence predicates.
-5. Rerun focused domain/database tests, `just lint`, and `just type`; refactor after green.
+5. Rerun focused domain/database/lock tests, `just lint`, and `just type`; refactor after green.
 
 ## Task 5: Verification and handoff preparation
 
@@ -171,13 +188,14 @@ Files:
 Steps:
 
 1. Verify new tests bite with controlled faults to one transition edge, the authority-generation
-   SQL predicate, and the post-cleanup fence; observe red and revert each fault.
+   SQL predicate in a Task-4 mutator, and the post-cleanup fence; observe red and revert each fault.
 2. Run `just test-verbose tests/domain/test_external_boot_activation.py`.
 3. Run `just test-verbose tests/db/test_external_boot_activation_migration.py`.
 4. Run `just test-verbose tests/db/test_external_boot_activation_repository.py`.
-5. Run `just lint`, `just type`, and `just ci` bare.
+5. Run `just lint` and `just type` bare.
 6. Run whole-branch adversarial review, the diff-scoped security review, and the simplification
-   pass. Fix defensible findings in separate commits and repeat affected guardrails.
-7. Push the branch, create the issue-linked PR using a body file checked by `just check-pr-body`,
+   pass. Fix defensible findings in separate commits and repeat affected focused guardrails.
+7. Run `just ci` bare on the final reviewed local HEAD immediately before push.
+8. Push the branch, create the issue-linked PR using a body file checked by `just check-pr-body`,
    wait for required checks, and stop only at a green mergeable PR with the exact `MERGE-READY`
    trajectory handshake. Do not merge.
