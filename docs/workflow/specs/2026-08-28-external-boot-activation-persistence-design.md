@@ -85,37 +85,42 @@ the history required to understand an earlier attempt. A direct edge from `prepa
 with no recovery deadline. This gives every conflict observation an immutable identity without
 pretending that recovery began.
 
-Safety-bearing evidence is a closed, frozen, versioned domain value rather than arbitrary JSON:
+Safety-bearing evidence is a closed, frozen, versioned domain value rather than arbitrary JSON.
+Each row below fixes the class, schema literal, ASCII identity prefix, and complete field set:
 
-- `ExternalBootConflictEvidenceV1` binds its schema name, activation and System identities,
-  provider-neutral observation identity, observed composite-state digest, object identities, and
-  UTC observation time;
-- `ExternalBootPreRecoveryEvidenceV1` binds schema `external-boot-pre-recovery-evidence-v1`,
-  activation, System, Run, and plan identities, the stable provider-owned recovery-object identity,
-  its source composite-state digest, and UTC observation time. Its identity prefix is
-  `kdive-external-boot-pre-recovery-evidence-v1`;
-- `ExternalBootTerminalEvidenceV1` binds its schema name, activation and System identities,
-  `active | abandoned | recovered | recovery_failed` outcome, observed composite-state digest,
-  object identities, and UTC observation time;
-- `ExternalBootReleaseEvidenceV1` binds its schema name, activation and System identities, store,
-  owner key, reserved byte count, the complete sorted set of activation-owned object identities,
-  an `absent` literal true for every object, and UTC verification time;
-- `ExternalBootTeardownEvidenceV1` binds its schema name, System identity, durable System state
-  literal `torn_down`, and UTC observation time; and
-- `ExternalBootCleanupEvidenceV1` binds its schema name, activation and System identities, release
-  tombstone identity, cleanup mode (`ordinary | system_teardown`), optional matching teardown
-  evidence identity, and UTC completion time.
+| Model | `schema` literal and identity prefix | Remaining fields |
+|---|---|---|
+| `ExternalBootConflictEvidenceV1` | `external-boot-conflict-evidence-v1`; `kdive-external-boot-conflict-evidence-v1` | `activation_id`, `system_id`, `observation_id`, `composite_state`, sorted `objects`, `observed_at` |
+| `ExternalBootPreRecoveryEvidenceV1` | `external-boot-pre-recovery-evidence-v1`; `kdive-external-boot-pre-recovery-evidence-v1` | `activation_id`, `system_id`, `run_id`, `plan_identity`, `recovery_object`, `source_composite_state`, `observed_at` |
+| `ExternalBootTerminalEvidenceV1` | `external-boot-terminal-evidence-v1`; `kdive-external-boot-terminal-evidence-v1` | `activation_id`, `system_id`, `outcome`, `composite_state`, sorted `objects`, `observed_at` |
+| `ExternalBootReleaseEvidenceV1` | `external-boot-release-evidence-v1`; `kdive-external-boot-release-evidence-v1` | `activation_id`, `system_id`, `store_identity`, `owner_key`, `reserved_bytes`, sorted `objects` containing `object` and literal `absent=true`, `verified_at` |
+| `ExternalBootTeardownEvidenceV1` | `external-boot-teardown-evidence-v1`; `kdive-external-boot-teardown-evidence-v1` | `system_id`, literal `system_state=torn_down`, `observed_at` |
+| `ExternalBootCleanupEvidenceV1` | `external-boot-cleanup-evidence-v1`; `kdive-external-boot-cleanup-evidence-v1` | `activation_id`, `system_id`, `release_identity`, `mode`, optional `teardown_identity`, `completed_at` |
 
-Each evidence identity is a `sha256:` digest of its domain prefix plus canonical bytes. UUIDs,
-digests, positive byte counts, bounded opaque provider references, and timezone-aware UTC values
-are the only accepted leaves. Models forbid extra fields, canonicalize as compact sorted UTF-8
-JSON, and reject documents above 65,536 bytes. Repository inputs are typed models or canonical
-bytes; byte inputs are reserialized and rejected before SQL if they differ. PostgreSQL stores the
-validated semantic object as `jsonb`; row loads revalidate the closed model and reconstruct
-canonical bytes before computing or checking the domain-prefixed identity. The schema therefore
-does not claim that `jsonb` preserves caller key order or whitespace. Consequently a
-bare `{\"absent\": true}`, a cross-activation/store proof, a path/URL/secret-shaped extra field, or
-an incomplete object set cannot satisfy repository validation.
+`outcome` is exactly `active | abandoned | recovered | recovery_failed`; `mode` is exactly
+`ordinary | system_teardown`. Those values, every `schema`, `system_state=torn_down`, and
+`absent=true` are closed literals, not variable leaves. Variable leaves are canonical UUIDs,
+`sha256:` digests, positive byte counts, bounded `OpaqueProviderRef` values, and timezone-aware UTC
+values. Tuples are nonempty, sorted by canonical object bytes, and duplicate-free.
+
+Every evidence identity is exactly
+`sha256(ASCII-prefix || 0x00 || compact-sorted-UTF-8-canonical-JSON)`, rendered as lowercase
+`sha256:` hex. Models forbid extra fields and reject documents above 65,536 bytes. Repository
+inputs are typed models or canonical bytes; byte inputs are reserialized and rejected before SQL
+if they differ. PostgreSQL stores the validated semantic object as `jsonb`; row loads revalidate
+the closed model and reconstruct canonical bytes before checking the identity. The schema does not
+claim that `jsonb` preserves caller key order or whitespace. Consequently a bare
+`{\"absent\": true}`, a cross-activation/store proof, a path/URL/secret-shaped extra field, or an
+incomplete object set cannot satisfy repository validation.
+
+The pre-recovery fixed vector uses these canonical bytes:
+
+```json
+{"activation_id":"11111111-1111-1111-1111-111111111111","observed_at":"2026-08-28T00:00:00Z","plan_identity":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","recovery_object":{"ref":"recovery/object-1"},"run_id":"33333333-3333-3333-3333-333333333333","schema":"external-boot-pre-recovery-evidence-v1","source_composite_state":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","system_id":"22222222-2222-2222-2222-222222222222"}
+```
+
+With prefix `kdive-external-boot-pre-recovery-evidence-v1` and the required NUL separator, its
+identity is `sha256:76aa7c43e0423a3dbf594c556dccbac8b98aed727d7e1978b47a96486015ad35`.
 
 ## Schema
 
@@ -130,9 +135,9 @@ failed state unconditionally and includes `recovered` or `abandoned` only while 
 This matches ADR-0583: teardown cleanup may release capacity for a failed/conflicted activation but
 does not make that activation a reusable rollback baseline. A unique
 `(system_id, run_id, plan_identity)` key makes creation retryable without permitting a rollback
-stack. Checks enforce positive generations, digest grammar, closed state values, terminal-only
-cleanup, timezone-aware deadlines, document byte bounds, and the row-local parts of the state
-matrix below.
+stack. Checks enforce positive generations, digest grammar, closed state values, the exact cleanup
+matrix, timezone-aware deadlines, document byte bounds, and the row-local parts of the state matrix
+below.
 
 `external_boot_reservations` is keyed by `activation_id`, carries the stable store identity,
 deterministic owner key, positive reserved byte count, state, readiness evidence, and timestamps. A
@@ -181,11 +186,14 @@ and grants those roles `EXECUTE`, never direct table mutation authority.
 
 ### State invariant matrix
 
-All states require `cleanup_complete=false` except `recovered` and `abandoned`, which may become
-clean after the normal cross-row cleanup predicate succeeds, and `recovery_failed` or
-`recovery_conflict`, which may become clean only with teardown cleanup evidence proving the System
-is torn down and all provably owned objects are absent. The live-reservation requirements below
-mean a matching `ready` reservation row exists and no release tombstone exists.
+The cleanup matrix is exact. `cleanup_complete=false` is valid in every lifecycle state.
+`cleanup_complete=true` is valid only for `recovered` or `abandoned` after ordinary cleanup, or for
+`recovery_failed` or `recovery_conflict` after authorized System-teardown cleanup. Every cleaned
+row requires reservation absence, a matching immutable release tombstone, and typed cleanup
+evidence; teardown cleanup additionally requires matching teardown evidence and a durably
+`torn_down` System. A cleaned activation has no lifecycle exits, including the otherwise legal
+`recovery_conflict -> recovering` edge. The live-reservation requirements below mean a matching
+`ready` reservation row exists and no release tombstone exists.
 
 | State | Required durable evidence | Deadline and reservation requirements |
 |---|---|---|
@@ -195,7 +203,7 @@ mean a matching `ready` reservation row exists and no release tombstone exists.
 | `active` | materialization, recovery point, terminal activation proof | ready live reservation; activation deadline retained |
 | `recovering` | materialization, current recovering-attempt row, and either a recovery point or conflict-resolution pre-recovery evidence | ready live reservation; current attempt deadline required and immutable |
 | `recovery_conflict` | current conflict-attempt row and typed conflict evidence; immutable pre-recovery evidence additionally required when entered from `preparing`; materialization and recovery point retained when the source state required them | ready live reservation unless authorized teardown cleanup completed; prior attempt deadlines retained |
-| `recovery_failed` | current failed-attempt evidence and its immutable recovery basis: materialization plus recovery point for `recovery_point`, or matching pre-recovery evidence for `pre_recovery` | ready live reservation; attempt deadline retained |
+| `recovery_failed` | current failed-attempt evidence and its immutable recovery basis: materialization plus recovery point for `recovery_point`, or matching pre-recovery evidence for `pre_recovery` | ready live reservation unless authorized teardown cleanup completed; attempt deadline retained |
 | `recovered` | current recovered-attempt evidence and its immutable recovery basis: materialization plus recovery point for `recovery_point`, or matching pre-recovery evidence for `pre_recovery` | ready live reservation until release; attempt deadline retained |
 | `abandoned` | abandonment terminal evidence | pending or ready reservation until release; populated evidence remains immutable |
 
@@ -249,7 +257,8 @@ cross-row reservation rules and evidence immutability.
   System-locked transaction. On `recovery_conflict -> recovering`, it requires the resolution
   operation, idempotency identity, acknowledged composite state, and either the full recovery point
   or pre-recovery evidence, recording the corresponding immutable recovery basis; on every other
-  source state those resolution fields are forbidden;
+  source state those resolution fields are forbidden. It requires `cleanup_complete=false` for
+  every source, so teardown-cleaned conflict rows cannot re-enter recovery;
 - `finish_recovery_attempt(...)`, which atomically changes the current attempt and activation from
   `recovering` to `recovery_conflict`, `recovery_failed`, or `recovered`, retaining typed evidence
   and accepting either terminal outcome for a valid pre-recovery-basis attempt;
@@ -263,7 +272,8 @@ Every mutating method takes the exact `system_id`, `activation_id`, `operation_o
 `authority_generation`. The query filters on all four plus its expected state. It returns a tagged
 result: `applied` with the current row, `superseded` when no row matches the complete predicate,
 or `not_found` only when the activation identifier does not exist. `superseded` deliberately does
-not reveal which authority component mismatched.
+not reveal which authority component mismatched. Every lifecycle mutation also predicates on
+`cleanup_complete=false`; once cleanup succeeds, state and attempt truth are permanently fenced.
 
 Repository methods never allocate or advance authority generations. That authenticated operation
 belongs to issue #2125. This slice persists the current values and proves a stale value affects zero
@@ -366,7 +376,7 @@ ownership durable and stale compare-and-set writes impossible through this repos
 - Property tests generate all same-enum state pairs and prove the transition table is complete.
 - Migration tests prove every positive/negative state-matrix constraint, the composite Run/System
   foreign key, JSON bounds, partial uniqueness, stable reservation ownership, recovery-attempt
-  identity, immutable release tombstones, and runtime-role grants.
+  identity, immutable release tombstones, the exact cleanup matrix, and runtime-role grants.
 - Repository tests prove round trips, every state-matrix prerequisite, immutable deadlines/evidence,
   concurrent two-System capacity admission, exact-cap and over-cap behavior, cleanup ordering,
   idempotent reservation release, successful and retained-capacity teardown branches, two distinct
@@ -376,7 +386,8 @@ ownership durable and stale compare-and-set writes impossible through this repos
   rejection of missing resolution identity/operation, restart reads of current and paginated prior
   attempts, materialization idempotency, release before verified object absence, unknown/missing/
   cross-activation/cross-store evidence fields, path- or secret-shaped extras, teardown release
-  before durable System state is `torn_down`, wrong-System/owner/generation rejection, and that a
-  stale-generation compare-and-set changes no activation, reservation, recovery attempt, release
-  tombstone, or evidence value.
+  before durable System state is `torn_down`, post-cleanup lifecycle mutation, the pinned
+  pre-recovery canonical vector, wrong-System/owner/generation rejection, and that a stale-generation
+  compare-and-set changes no activation, reservation, recovery attempt, release tombstone, or
+  evidence value.
 - `just lint`, `just type`, focused domain/database tests, and `just ci` are the required guardrails.
