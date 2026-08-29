@@ -72,7 +72,7 @@ tombstone; absence plus the tombstone is the durable proof that capacity was cre
 - lifecycle state and cleanup flag;
 - optional activation and recovery deadlines;
 - canonical materialization and recovery-point evidence;
-- release-request, recovery, terminal, and cleanup evidence; and
+- pre-recovery, recovery-attempt, terminal, release, teardown, and cleanup evidence; and
 - database timestamps.
 
 `ExternalBootReservation` is a strict row model for the separate live debit row.
@@ -130,7 +130,8 @@ on `runs(id, system_id)`.
 
 `external_boot_activations` has a foreign key to `systems` and a composite foreign key from
 `(run_id, system_id)` to `runs(id, system_id)`, a canonical plan digest,
-the current operation owner and generation, the lifecycle state, deadlines, JSON evidence fields,
+the current operation owner and generation, the lifecycle state, deadlines, and the typed
+materialization, recovery-point, pre-recovery, terminal, teardown, and cleanup JSON slots,
 `cleanup_complete`, and timestamps. A partial unique index includes every nonterminal/conflict/
 failed state unconditionally and includes `recovered` or `abandoned` only while cleanup is false.
 This matches ADR-0583: teardown cleanup may release capacity for a failed/conflicted activation but
@@ -141,9 +142,9 @@ matrix, timezone-aware deadlines, document byte bounds, and the row-local parts 
 below.
 
 `external_boot_reservations` is keyed by `activation_id`, carries the stable store identity,
-deterministic owner key, positive reserved byte count, state, readiness evidence, and timestamps. A
-unique `(store_identity, owner_key)` key makes retry lookup deterministic. Checks enforce the closed
-state set and require `ready_at` plus byte-bounded evidence in `ready`.
+deterministic owner key, positive reserved byte count, state, `ready_at`, and timestamps. A unique
+`(store_identity, owner_key)` key makes retry lookup deterministic. Checks enforce the closed state
+set and require `ready_at` exactly in `ready`; no separate readiness document is persisted.
 
 `external_boot_reservation_releases` is keyed by `activation_id` and repeats the immutable store,
 owner, and byte identities beside bounded release evidence and `released_at`. Creation and deletion
