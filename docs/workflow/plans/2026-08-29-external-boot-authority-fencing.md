@@ -28,9 +28,11 @@ Interfaces: SQL functions consume the existing `worker_incarnations`, `jobs`, `s
 created here.
 
 1. Write PostgreSQL tests for role grants, strictly ordered concurrent per-System allocation,
-   immutable bindings, journal-head compare-and-set, response-loss acknowledgement replay,
+   immutable bindings, journal-head compare-and-set, response-loss and delayed acknowledgement
+   replay,
    positive-quiescence acknowledgement, stale/cross-binding zero-row results, cleanup/job/audit
-   atomicity, later-Run denial, protocol-3 generic-finalization denial, and redaction-safe audit rows.
+   atomicity, later-Run denial, protocol-3 authentication/claim/finalization denial, fenced System
+   teardown, absence of external enqueue/readiness activation, and redaction-safe audit rows.
 2. Run `just test-verbose tests/db/test_external_boot_authority_migration.py`; expect failures because
    migration 0122 and its functions do not exist.
 3. Add the five authority tables, constraints/indexes, role grants, and security-definer functions.
@@ -54,12 +56,15 @@ for ordinary jobs but SQL rejects marked external jobs.
 
 1. Write worker tests that assert external-boot success, exception, terminal failure, and retry call
    the authority-bound adapter; missing/malformed carriers fail closed without generic fallback; a
-   stale response produces no Run or job transition; a later Run cannot reuse earlier authority;
-   and protocol-3 workers cannot claim marked jobs.
+   stale response produces no Run or job transition; a stale teardown produces no System/job/audit
+   transition; a later Run cannot reuse earlier authority; and protocol-3 workers cannot
+   authenticate or claim jobs.
 2. Run the focused test file; expect the new assertions to fail on the existing generic completion.
 3. Add the typed carrier, queue adapters, and worker dispatch branch required by the persisted
    authority result contract. Preserve fresh finalize connections and the System, Run, then row-lock
-   order. Carry authority facts on categorized provider exceptions without logging secrets.
+   order. Carry authority facts on categorized provider exceptions without logging secrets. Move
+   external teardown's `SystemState.TORN_DOWN` transition after provider evidence into the
+   authority-bound result transaction.
 4. Re-run focused tests; expect all tests to pass. Commit the worker routing separately.
 
 Acceptance: external-boot finalization never falls back to the generic fence when authority facts
