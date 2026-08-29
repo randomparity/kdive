@@ -1524,6 +1524,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close provenance admission gaps
 - Reject conflicting root evidence
 - Isolate root publication attempts
+- Bound package inspection output
+- Preserve advisory malformed output handling
 
 ### Security
 
