@@ -28,14 +28,14 @@ Interfaces: SQL functions consume the existing `worker_incarnations`, `jobs`, `s
 created here.
 
 1. Write PostgreSQL tests for role grants, strictly ordered concurrent per-System allocation,
-   immutable bindings, journal-head compare-and-set, response-loss and delayed acknowledgement
+   immutable bindings, opaque acknowledgement persistence, response-loss and delayed acknowledgement
    replay,
    positive-quiescence acknowledgement, stale/cross-binding zero-row results, cleanup/job/audit
    atomicity, later-Run denial, protocol-3 authentication/claim/finalization denial, fenced System
    teardown, absence of external enqueue/readiness activation, and redaction-safe audit rows.
 2. Run `just test-verbose tests/db/test_external_boot_authority_migration.py`; expect failures because
    migration 0122 and its functions do not exist.
-3. Add the five authority tables, constraints/indexes, role grants, and security-definer functions.
+3. Add the four authority tables, constraints/indexes, role grants, and security-definer functions.
    Revoke direct worker/reconciler mutations and validate every bounded input before writes.
 4. Update every explicit migration-tail expectation with `(\"0122\",
    \"0122_external_boot_authority.sql\")`.
