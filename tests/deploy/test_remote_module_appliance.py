@@ -120,7 +120,10 @@ def test_result_schema_has_stable_closed_errors_and_failure_coupling() -> None:
     assert not list(validator.iter_errors(invalid_document))
 
 
-def test_image_build_is_reproducible_and_excludes_shell_and_network(tmp_path: Path) -> None:
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_image_build_is_reproducible_and_excludes_shell_and_network(
+    tmp_path: Path, architecture: str
+) -> None:
     kernel = tmp_path / "vmlinuz"
     kernel.write_bytes(b"kernel\n")
     runtime = tmp_path / "runtime"
@@ -144,7 +147,7 @@ def test_image_build_is_reproducible_and_excludes_shell_and_network(tmp_path: Pa
                 sys.executable,
                 str(APPLIANCE / "build_image.py"),
                 "--architecture",
-                "x86_64",
+                architecture,
                 "--kernel",
                 str(kernel),
                 "--runtime-root",

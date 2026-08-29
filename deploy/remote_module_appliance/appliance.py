@@ -552,6 +552,7 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
     if checkpoint is None:
         if staged.exists() or _manifest_or_none(displaced, "recovery") is not None:
             raise ApplianceError("RECOVERY_CONFLICT")
+        _remove_owned_tree(capture)
         original = _manifest_or_none(destination, "recovery")
         if original is None:
             (SCRATCH / "capture-absent").write_bytes(b"")
