@@ -16,18 +16,18 @@
   <devices>
     <disk type="volume" device="disk">
       <driver name="qemu" type="qcow2" cache="none" io="native"/>
-      <source pool="KDIVE_ROOT_POOL" volume="KDIVE_ROOT_VOLUME"/>
+      <source pool="ROOT_POOL" volume="ROOT_VOLUME"/>
       <target dev="vda" bus="virtio"/>
     </disk>
     <disk type="volume" device="disk">
       <driver name="qemu" type="raw" cache="none" io="native"/>
-      <source pool="KDIVE_SOURCE_POOL" volume="KDIVE_SOURCE_VOLUME"/>
+      <source pool="SOURCE_POOL" volume="SOURCE_VOLUME"/>
       <target dev="vdb" bus="virtio"/>
       <readonly/>
     </disk>
     <disk type="volume" device="disk">
       <driver name="qemu" type="raw" cache="none" io="native"/>
-      <source pool="KDIVE_SCRATCH_POOL" volume="KDIVE_SCRATCH_VOLUME"/>
+      <source pool="SCRATCH_POOL" volume="SCRATCH_VOLUME"/>
       <target dev="vdc" bus="virtio"/>
     </disk>
     <console type="pty"><target type="virtio" port="0"/></console>
