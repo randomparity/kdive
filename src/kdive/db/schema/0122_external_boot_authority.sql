@@ -502,11 +502,12 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT max(a.generation) INTO v_prior_generation
-    FROM public.external_boot_authorities AS a
-    WHERE a.system_id = p_system_id AND a.state IN ('allocating', 'current');
     INSERT INTO public.external_boot_authority_counters (system_id, last_generation)
     VALUES (p_system_id, 0) ON CONFLICT (system_id) DO NOTHING;
+    SELECT NULLIF(c.last_generation, 0) INTO v_prior_generation
+    FROM public.external_boot_authority_counters AS c
+    WHERE c.system_id = p_system_id
+    FOR UPDATE;
     UPDATE public.external_boot_authority_counters
     SET last_generation = last_generation + 1, updated_at = clock_timestamp()
     WHERE system_id = p_system_id AND last_generation < 9223372036854775807
@@ -583,6 +584,8 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+    v_activation public.external_boot_activations%ROWTYPE;
+    v_attempt public.external_boot_recovery_attempts%ROWTYPE;
     v_authority public.external_boot_authorities%ROWTYPE;
     v_existing public.external_boot_authority_acknowledgements%ROWTYPE;
     v_acknowledged_at timestamptz;
@@ -638,6 +641,19 @@ BEGIN
     FROM public.external_boot_authority_acknowledgements AS ack
     WHERE ack.authority_id = p_authority_id
     FOR UPDATE;
+    IF p_purpose = 'resolve-conflict' THEN
+        SELECT e.* INTO v_activation
+        FROM public.external_boot_activations AS e
+        WHERE e.id = p_activation_id
+        FOR UPDATE;
+        IF v_activation.current_attempt_id IS NOT NULL THEN
+            SELECT ra.* INTO v_attempt
+            FROM public.external_boot_recovery_attempts AS ra
+            WHERE ra.activation_id = p_activation_id
+              AND ra.attempt_id = v_activation.current_attempt_id
+            FOR UPDATE;
+        END IF;
+    END IF;
 
     IF v_latest IS NULL OR v_authority.id IS NULL
        OR v_latest <> p_generation
@@ -687,6 +703,14 @@ BEGIN
             'superseded'::text, NULL::bigint, NULL::text, NULL::text, NULL::timestamptz;
         RETURN;
     END IF;
+    IF p_purpose = 'resolve-conflict' AND (
+        v_activation.state IS DISTINCT FROM 'recovery_conflict'
+        OR v_attempt.state IS DISTINCT FROM 'conflict'
+    ) THEN
+        RETURN QUERY SELECT
+            'superseded'::text, NULL::bigint, NULL::text, NULL::text, NULL::timestamptz;
+        RETURN;
+    END IF;
     v_acknowledged_at := clock_timestamp();
     INSERT INTO public.external_boot_authority_acknowledgements (
         authority_id, system_id, generation, authority_instance, operation_identity,
@@ -700,6 +724,20 @@ BEGIN
     UPDATE public.external_boot_authorities
     SET state = 'current', acknowledged_at = v_acknowledged_at
     WHERE id = p_authority_id AND state = 'allocating';
+    IF p_purpose = 'resolve-conflict' THEN
+        UPDATE public.external_boot_recovery_attempts
+        SET state = 'recovering', conflict_evidence = NULL,
+            authority_generation = p_generation,
+            resolution_operation = p_operation_identity,
+            resolution_identity = p_operation_digest,
+            acknowledged_composite_state = p_positive_quiescence_digest
+        WHERE activation_id = p_activation_id
+          AND attempt_id = v_attempt.attempt_id
+          AND state = 'conflict';
+        UPDATE public.external_boot_activations
+        SET state = 'recovering'
+        WHERE id = p_activation_id AND state = 'recovery_conflict';
+    END IF;
     INSERT INTO public.external_boot_authority_audit (
         authority_id, system_id, allocation_id, activation_id, run_id, plan_identity, job_id,
         job_attempt, worker_incarnation, generation, purpose, provider_kind,
@@ -743,6 +781,7 @@ SET search_path = ''
 AS $$
 DECLARE
     v_ack public.external_boot_authority_acknowledgements%ROWTYPE;
+    v_allocation public.allocations%ROWTYPE;
     v_activation public.external_boot_activations%ROWTYPE;
     v_attempt public.external_boot_recovery_attempts%ROWTYPE;
     v_authority public.external_boot_authorities%ROWTYPE;
@@ -831,6 +870,17 @@ BEGIN
         RETURN QUERY SELECT 'superseded'::text, NULL::text;
         RETURN;
     END IF;
+    SELECT al.* INTO v_allocation
+    FROM public.external_boot_authorities AS au
+    JOIN public.allocations AS al ON al.id = au.allocation_id
+    WHERE au.id = p_authority_id;
+    IF v_allocation.id IS NULL THEN
+        RETURN QUERY SELECT 'superseded'::text, NULL::text;
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('kdive:allocation:' || v_allocation.id::text, 2125)
+    );
     PERFORM pg_advisory_xact_lock(
         hashtextextended('kdive:system:' || p_system_id::text, 2125)
     );
@@ -845,6 +895,8 @@ BEGIN
       AND w.state = 'active'
       AND w.fence_protocol = 4
     FOR UPDATE;
+    SELECT al.* INTO v_allocation
+    FROM public.allocations AS al WHERE al.id = v_allocation.id FOR UPDATE;
     SELECT s.* INTO v_system
     FROM public.systems AS s WHERE s.id = p_system_id FOR UPDATE;
     SELECT r.* INTO v_run
@@ -874,6 +926,9 @@ BEGIN
     IF v_incarnation IS NULL OR v_system.id IS NULL OR v_run.id IS NULL
        OR v_job.id IS NULL OR v_authority.id IS NULL
        OR v_activation.id IS NULL OR v_ack.authority_id IS NULL
+       OR v_allocation.id IS NULL OR v_allocation.state <> 'active'
+       OR v_allocation.id <> v_authority.allocation_id
+       OR v_system.allocation_id <> v_allocation.id
        OR v_system.id <> p_system_id
        OR v_system.allocation_id <> v_authority.allocation_id
        OR v_run.id <> p_run_id OR v_run.system_id <> p_system_id

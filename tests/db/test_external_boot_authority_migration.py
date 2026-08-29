@@ -334,7 +334,8 @@ def _prepare_purpose_state(conn: psycopg.Connection, case: _AuthorityCase, purpo
         conn.execute(
             "INSERT INTO external_boot_recovery_attempts "
             "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
-            "state, conflict_evidence) VALUES (%s, 1, %s, 1, 'recovery_point', 'conflict', %s)",
+            "recovery_readiness_deadline, state, conflict_evidence) "
+            "VALUES (%s, 1, %s, 1, 'recovery_point', now(), 'conflict', %s)",
             (
                 case.activation_id,
                 attempt_id,
@@ -662,6 +663,126 @@ def test_allocation_release_wins_before_a_waiting_authority_can_mint(
         assert future.result(timeout=5) == ("superseded",)
     with psycopg.connect(migrated_url) as conn:
         assert conn.execute("SELECT count(*) FROM external_boot_authorities").fetchone() == (0,)
+
+
+def test_result_waits_for_allocation_release_and_is_superseded_without_writes(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix="v")
+        conn.execute(
+            "UPDATE external_boot_activations SET state='activating', "
+            "activation_readiness_deadline=now() WHERE id=%s",
+            (case.activation_id,),
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "activate",
+        "result_ref": _EVIDENCE_DIGEST,
+        "evidence": _terminal_evidence(case, "active"),
+        "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
+    }
+    connected = Event()
+    committer_pid: list[int] = []
+
+    def commit() -> tuple[str, str | None]:
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            committer_pid.append(worker.info.backend_pid)
+            connected.set()
+            return _commit(worker, case, authority, result)
+
+    with psycopg.connect(migrated_url) as conn:
+        before = list(_result_state_snapshot(conn, case, authority))
+    with (
+        psycopg.connect(migrated_url) as releasing,
+        psycopg.connect(migrated_url, autocommit=True) as observer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        releasing.execute(
+            "UPDATE allocations SET state='releasing' WHERE id=%s", (case.allocation_id,)
+        )
+        future = executor.submit(commit)
+        assert connected.wait(timeout=5)
+        wait_until_blocked_by(
+            observer,
+            waiter_pid=committer_pid[0],
+            blocker_pid=releasing.info.backend_pid,
+            future=future,
+            expectation="result commit did not wait for the releasing Allocation",
+        )
+        releasing.commit()
+        assert future.result(timeout=5) == ("superseded", None)
+    with psycopg.connect(migrated_url) as conn:
+        assert _result_state_snapshot(conn, case, authority) == tuple(before)
+
+
+def test_allocation_after_retirement_links_the_prior_generation(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix="n")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        first = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, first) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE external_boot_authorities SET state='retired', retired_at=now() WHERE id=%s",
+            (first.authority_id,),
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        second = _allocate(worker, case)
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT prior_generation FROM external_boot_authority_audit WHERE authority_id=%s "
+            "AND outcome='takeover_allocated'",
+            (second.authority_id,),
+        ).fetchone() == (first.generation,)
+
+
+def test_resolve_conflict_acknowledgement_fences_transition_before_result(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="resolve-conflict", worker_suffix="o")
+        _prepare_purpose_state(conn, case, "resolve-conflict")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+        assert _acknowledge(host, case, authority) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT e.state, ra.state, ra.authority_generation, ra.resolution_operation, "
+            "ra.resolution_identity, ra.acknowledged_composite_state "
+            "FROM external_boot_activations AS e "
+            "JOIN external_boot_recovery_attempts AS ra "
+            "ON ra.activation_id=e.id AND ra.attempt_id=e.current_attempt_id WHERE e.id=%s",
+            (case.activation_id,),
+        ).fetchone() == (
+            "recovering",
+            "recovering",
+            authority.generation,
+            case.operation_identity,
+            authority.operation_digest,
+            _QUIESCENCE,
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "resolve-conflict",
+                "result_ref": _EVIDENCE_DIGEST,
+                "evidence": _terminal_evidence(case, "recovered"),
+            },
+        ) == ("applied", "succeeded")
 
 
 @pytest.mark.parametrize(
