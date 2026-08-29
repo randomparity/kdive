@@ -59,6 +59,13 @@ def test_run_scope_key_is_distinct_from_other_scopes() -> None:
     assert _lock_key(LockScope.RUN, key) == run_key  # deterministic
 
 
+def test_recovery_store_scope_is_distinct_and_string_keyed() -> None:
+    key = "stores/main"
+    store_key = _lock_key(LockScope.RECOVERY_STORE, key)
+    assert store_key == _lock_key(LockScope.RECOVERY_STORE, key)
+    assert store_key != _lock_key(LockScope.SYSTEM, key)
+
+
 def test_project_scope_keyed_by_string_is_deterministic_and_distinct() -> None:
     # PROJECT is keyed by the `project` string (ADR-0040), not a UUID. Distinct
     # projects get distinct keys; the same project is deterministic; the value fits
