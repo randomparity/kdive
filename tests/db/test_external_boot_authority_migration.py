@@ -720,6 +720,66 @@ def test_result_waits_for_allocation_release_and_is_superseded_without_writes(
         assert _result_state_snapshot(conn, case, authority) == tuple(before)
 
 
+def test_acknowledgement_waits_for_allocation_release_and_writes_nothing(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix="k")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    connected = Event()
+    acknowledger_pid: list[int] = []
+
+    def acknowledge() -> str:
+        with psycopg.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as host:
+            acknowledger_pid.append(host.info.backend_pid)
+            connected.set()
+            return _acknowledge(host, case, authority)
+
+    with psycopg.connect(migrated_url) as conn:
+        before = conn.execute(
+            "SELECT a.state, a.acknowledged_at, "
+            "(SELECT count(*) FROM external_boot_authority_acknowledgements "
+            "WHERE authority_id=%s), "
+            "(SELECT count(*) FROM external_boot_authority_audit WHERE authority_id=%s) "
+            "FROM external_boot_authorities AS a WHERE a.id=%s",
+            (authority.authority_id, authority.authority_id, authority.authority_id),
+        ).fetchone()
+    with (
+        psycopg.connect(migrated_url) as releasing,
+        psycopg.connect(migrated_url, autocommit=True) as observer,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        releasing.execute(
+            "UPDATE allocations SET state='releasing' WHERE id=%s", (case.allocation_id,)
+        )
+        future = executor.submit(acknowledge)
+        assert connected.wait(timeout=5)
+        wait_until_blocked_by(
+            observer,
+            waiter_pid=acknowledger_pid[0],
+            blocker_pid=releasing.info.backend_pid,
+            future=future,
+            expectation="authority acknowledgement did not wait for Allocation release",
+        )
+        releasing.commit()
+        assert future.result(timeout=5) == "superseded"
+    with psycopg.connect(migrated_url) as conn:
+        assert (
+            conn.execute(
+                "SELECT a.state, a.acknowledged_at, "
+                "(SELECT count(*) FROM external_boot_authority_acknowledgements "
+                "WHERE authority_id=%s), "
+                "(SELECT count(*) FROM external_boot_authority_audit WHERE authority_id=%s) "
+                "FROM external_boot_authorities AS a WHERE a.id=%s",
+                (authority.authority_id, authority.authority_id, authority.authority_id),
+            ).fetchone()
+            == before
+        )
+
+
 def test_allocation_after_retirement_links_the_prior_generation(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:

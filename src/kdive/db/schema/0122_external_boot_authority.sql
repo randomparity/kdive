@@ -585,6 +585,7 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+    v_allocation public.allocations%ROWTYPE;
     v_authority public.external_boot_authorities%ROWTYPE;
     v_existing public.external_boot_authority_acknowledgements%ROWTYPE;
     v_acknowledged_at timestamptz;
@@ -626,8 +627,15 @@ BEGIN
     END IF;
 
     PERFORM pg_advisory_xact_lock(
+        hashtextextended('kdive:allocation:' || p_allocation_id::text, 2125)
+    );
+    PERFORM pg_advisory_xact_lock(
         hashtextextended('kdive:system:' || p_system_id::text, 2125)
     );
+    SELECT al.* INTO v_allocation
+    FROM public.allocations AS al
+    WHERE al.id = p_allocation_id
+    FOR UPDATE;
     SELECT c.last_generation INTO v_latest
     FROM public.external_boot_authority_counters AS c
     WHERE c.system_id = p_system_id
@@ -640,7 +648,8 @@ BEGIN
     FROM public.external_boot_authority_acknowledgements AS ack
     WHERE ack.authority_id = p_authority_id
     FOR UPDATE;
-    IF v_latest IS NULL OR v_authority.id IS NULL
+    IF v_allocation.id IS NULL OR v_allocation.state <> 'active'
+       OR v_latest IS NULL OR v_authority.id IS NULL
        OR v_latest <> p_generation
        OR v_authority.generation <> p_generation
        OR v_authority.allocation_id <> p_allocation_id
