@@ -54,24 +54,20 @@ def test_inspect_package_versions_missing_executable(monkeypatch: pytest.MonkeyP
     assert caught.value.details == {"tool": "virt-inspector"}
 
 
-def test_inspect_package_versions_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        probes,
-        "_run_bounded_inspector",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            CategorizedError(
-                "bounded",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"timeout_s": probes._VIRT_INSPECTOR_TIMEOUT_S},
-            )
-        ),
-    )
+def test_package_inspection_kills_timeout() -> None:
+    timeout_s = 0.01
 
     with pytest.raises(CategorizedError) as caught:
-        probes.inspect_package_versions(Path("image.qcow2"))
+        probes._run_bounded_inspector(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            timeout_s=timeout_s,
+            max_output_bytes=probes.PACKAGE_INSPECTION_MAX_OUTPUT_BYTES,
+            stage="package-version-inspection",
+            failure_category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert caught.value.details == {"timeout_s": probes._VIRT_INSPECTOR_TIMEOUT_S}
+    assert caught.value.details == {"timeout_s": timeout_s}
 
 
 def test_inspect_package_versions_nonzero_exit_reports_stderr_tail(
