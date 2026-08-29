@@ -131,6 +131,7 @@ def test_image_build_is_reproducible_and_excludes_shell_and_network(tmp_path: Pa
         "usr/lib/python3.14/json/__init__.py": b"json",
         "usr/lib/python3.14/socket.py": b"network",
         "usr/lib/python3.14/lib-dynload/_socket.so": b"network-extension",
+        "usr/lib/python3.14/lib-dynload/_socket.cpython-314-x86_64-linux-musl.so": b"network-abi",
         "bin/sh": b"shell",
     }.items():
         path = runtime / relative
@@ -212,6 +213,9 @@ def test_ansible_requires_both_architectures_and_verifies_digest() -> None:
     assert "checksum_algorithm: sha256" in tasks
     assert "remote_libvirt_module_appliance_install_dir" in tasks
     assert 'mode: "0444"' in tasks
+    site = (ROOT / "deploy" / "ansible" / "site.yml").read_text(encoding="utf-8")
+    assert "role: remote_libvirt_module_appliance" in site
+    assert "remote_libvirt_module_appliance_enabled | bool" in site
 
 
 def test_image_config_closes_architectures_bounds_and_paths() -> None:
@@ -327,6 +331,229 @@ def test_capture_retry_resumes_after_durable_capture(
 
     assert result["phase"] == "installed"
     assert (old_tree / "new.ko").read_bytes() == b"new"
+
+
+def _appliance_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, dict[str, object], Path, Path]:
+    appliance = _module()
+    root = tmp_path / "root"
+    source = tmp_path / "source"
+    scratch = tmp_path / "scratch"
+    release = str(_operation()["release"])
+    old_tree = root / "lib" / "modules" / release
+    new_tree = source / "modules"
+    old_tree.mkdir(parents=True)
+    new_tree.mkdir(parents=True)
+    (old_tree / "old.ko").write_bytes(b"old")
+    (new_tree / "new.ko").write_bytes(b"new")
+    scratch.mkdir()
+    monkeypatch.setattr(appliance, "ROOT", root)
+    monkeypatch.setattr(appliance, "SOURCE", source)
+    monkeypatch.setattr(appliance, "SCRATCH", scratch)
+
+    def depmod(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        base = Path(arguments[2])
+        staged_tree = base / "lib" / "modules" / release
+        assert (staged_tree / "new.ko").read_bytes() == b"new"
+        (staged_tree / "modules.dep").write_bytes(b"new.ko:\n")
+        return subprocess.CompletedProcess(arguments, 0)
+
+    monkeypatch.setattr(appliance.subprocess, "run", depmod)
+    operation = _operation()
+    operation["source_manifest"] = appliance._tree_manifest(new_tree)[0]
+    return appliance, operation, old_tree, scratch
+
+
+def test_depmod_indexes_the_staged_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+
+    result = appliance.execute(appliance._validate_operation(operation))
+
+    assert result["phase"] == "installed"
+    assert (old_tree / "modules.dep").read_bytes() == b"new.ko:\n"
+
+
+@pytest.mark.parametrize("interrupted_phase", ["replacement-ready", "installed"])
+def test_install_retry_reconciles_every_durable_terminal_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_phase: str
+) -> None:
+    appliance, operation, old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    original_checkpoint = appliance._checkpoint
+    interrupted = False
+
+    def interrupt_after_checkpoint(
+        document: dict[str, object], phase: str, **fields: object
+    ) -> dict[str, object]:
+        nonlocal interrupted
+        result = original_checkpoint(document, phase, **fields)
+        if phase == interrupted_phase and not interrupted:
+            interrupted = True
+            raise appliance.ApplianceError("FILESYSTEM_FAILURE")
+        return result
+
+    monkeypatch.setattr(appliance, "_checkpoint", interrupt_after_checkpoint)
+    with pytest.raises(appliance.ApplianceError):
+        appliance.execute(appliance._validate_operation(operation))
+    monkeypatch.setattr(appliance, "_checkpoint", original_checkpoint)
+
+    result = appliance.execute(appliance._validate_operation(operation))
+
+    assert result["phase"] == "installed"
+    assert (old_tree / "new.ko").read_bytes() == b"new"
+    assert not any(path.name.endswith("-old") for path in old_tree.parent.iterdir())
+
+
+@pytest.mark.parametrize("interrupted_phase", ["restore-ready", "restored"])
+def test_restore_retry_reconciles_every_durable_terminal_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_phase: str
+) -> None:
+    appliance, operation, old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    installed = appliance.execute(appliance._validate_operation(operation))
+    restore = appliance._validate_operation(
+        {
+            **operation,
+            "operation": "restore",
+            "capture_manifest": installed["capture_manifest"],
+            "installed_manifest": installed["installed_manifest"],
+        }
+    )
+    original_checkpoint = appliance._checkpoint
+    interrupted = False
+
+    def interrupt_after_ready(
+        document: dict[str, object], phase: str, **fields: object
+    ) -> dict[str, object]:
+        nonlocal interrupted
+        result = original_checkpoint(document, phase, **fields)
+        if phase == interrupted_phase and not interrupted:
+            interrupted = True
+            raise appliance.ApplianceError("FILESYSTEM_FAILURE")
+        return result
+
+    monkeypatch.setattr(appliance, "_checkpoint", interrupt_after_ready)
+    with pytest.raises(appliance.ApplianceError):
+        appliance.execute(restore)
+    monkeypatch.setattr(appliance, "_checkpoint", original_checkpoint)
+
+    result = appliance.execute(restore)
+
+    assert result["phase"] == "restored"
+    assert (old_tree / "old.ko").read_bytes() == b"old"
+
+
+def test_absent_capture_install_and_restore_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, destination, _scratch = _appliance_fixture(tmp_path, monkeypatch)
+    (destination / "old.ko").unlink()
+    destination.rmdir()
+
+    installed = appliance.execute(appliance._validate_operation(operation))
+
+    assert installed["capture_absent"] is True
+    assert (destination / "new.ko").read_bytes() == b"new"
+    restore = appliance._validate_operation(
+        {
+            **operation,
+            "operation": "restore",
+            "capture_absent": True,
+            "installed_manifest": installed["installed_manifest"],
+        }
+    )
+    restored = appliance.execute(restore)
+    assert restored["phase"] == "restored"
+    assert not destination.exists()
+
+
+def test_guest_symlink_cannot_redirect_module_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    source = tmp_path / "source"
+    scratch = tmp_path / "scratch"
+    (root / "lib").mkdir(parents=True)
+    outside.mkdir()
+    (outside / "sentinel").write_bytes(b"unchanged")
+    (root / "lib" / "modules").symlink_to(outside, target_is_directory=True)
+    (source / "modules").mkdir(parents=True)
+    (source / "modules" / "new.ko").write_bytes(b"new")
+    scratch.mkdir()
+    monkeypatch.setattr(appliance, "ROOT", root)
+    monkeypatch.setattr(appliance, "SOURCE", source)
+    monkeypatch.setattr(appliance, "SCRATCH", scratch)
+    operation = _operation()
+    operation["source_manifest"] = appliance._tree_manifest(source / "modules")[0]
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance.execute(appliance._validate_operation(operation))
+
+    assert (outside / "sentinel").read_bytes() == b"unchanged"
+    assert not (outside / str(operation["release"])).exists()
+
+
+def test_unmount_failure_replaces_success_with_flush_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    source = tmp_path / "source"
+    scratch = tmp_path / "scratch"
+    for path in (root, source, scratch):
+        path.mkdir()
+    monkeypatch.setattr(appliance, "ROOT", root)
+    monkeypatch.setattr(appliance, "SOURCE", source)
+    monkeypatch.setattr(appliance, "SCRATCH", scratch)
+    mounted = {root, source, scratch}
+    monkeypatch.setattr(Path, "is_mount", lambda path: path in mounted)
+    monkeypatch.setattr(appliance, "_sync_path", lambda _path: None)
+
+    def unmount(path: Path) -> None:
+        if path == root:
+            raise OSError("busy")
+        mounted.remove(path)
+
+    monkeypatch.setattr(appliance, "_unmount", unmount)
+    document = appliance._validate_operation(_operation())
+
+    result = appliance._finish_mounts(document, None)
+
+    assert result is not None and result.code == "FLUSH_FAILURE"
+    persisted = json.loads((scratch / "result-v1.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "failure"
+    assert persisted["error_code"] == "FLUSH_FAILURE"
+
+
+def test_success_result_shapes_require_terminal_phase_fields() -> None:
+    validator = Draft202012Validator(_json("result-v1.schema.json"))
+    operation = _operation()
+    root_volume = cast(dict[str, object], operation["root_volume"])
+    identity = {
+        "protocol": "remote-module-result-v1",
+        "status": "success",
+        "phase": "installed",
+        "system_id": operation["system_id"],
+        "run_id": operation["run_id"],
+        "plan_identity": operation["plan_identity"],
+        "operation_nonce": operation["operation_nonce"],
+        "release": operation["release"],
+        "root_volume_key": "root-1",
+        "root_volume_identity": root_volume["identity"],
+        "source_manifest": operation["source_manifest"],
+        "appliance_image_digest": operation["appliance_image_digest"],
+    }
+    assert list(validator.iter_errors(identity))
+    identity["installed_manifest"] = "sha256:" + "f" * 64
+    identity["capture_absent"] = True
+    identity["entry_count"] = 1
+    identity["content_bytes"] = 3
+    assert not list(validator.iter_errors(identity))
+    accepted = {**identity, "phase": "accepted"}
+    assert list(validator.iter_errors(accepted))
 
 
 @pytest.mark.parametrize("name", ["operation-v1.schema.json", "result-v1.schema.json"])

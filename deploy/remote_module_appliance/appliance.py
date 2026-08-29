@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import base64
-import contextlib
 import ctypes
 import errno
 import hashlib
@@ -253,11 +252,18 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
 
 
 def _remove_owned_tree(path: Path) -> None:
-    if not path.exists():
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
         return
-    if path.is_symlink() or not path.is_dir():
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
+    if not stat.S_ISDIR(metadata.st_mode):
         raise ApplianceError("RECOVERY_CONFLICT")
-    shutil.rmtree(path)
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
 
 
 def _normalize_source_tree(root: Path) -> None:
@@ -287,7 +293,37 @@ def _copy_tree(source: Path, destination: Path, kind: str = "source") -> tuple[s
         _normalize_source_tree(destination)
     if _tree_manifest(destination, kind) != expected:
         raise ApplianceError("FILESYSTEM_FAILURE")
+    _sync_tree(destination)
     return expected
+
+
+def _sync_tree(root: Path) -> None:
+    try:
+        directories: list[Path] = []
+        for directory, subdirectories, files in os.walk(root, followlinks=False):
+            current = Path(directory)
+            directories.append(current)
+            for name in files:
+                path = current / name
+                if path.is_symlink():
+                    continue
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            subdirectories[:] = [
+                name for name in subdirectories if not (current / name).is_symlink()
+            ]
+        for directory in reversed(directories):
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _sync_path(root)
+    except OSError as error:
+        raise ApplianceError("FLUSH_FAILURE") from error
 
 
 def _sync_path(path: Path) -> None:
@@ -372,103 +408,263 @@ def _capture_fields(checkpoint: dict[str, object]) -> dict[str, object]:
     raise ApplianceError("RECOVERY_CONFLICT")
 
 
-def _capture_install(document: dict[str, object]) -> dict[str, object]:
+def _module_paths(document: dict[str, object]) -> tuple[Path, Path, Path, Path]:
     release = str(document["release"])
-    destination = ROOT / "lib" / "modules" / release
-    source = SOURCE / "modules"
     nonce = str(document["operation_nonce"])
-    staged = destination.parent / f".kdive-{nonce}-new"
-    displaced = destination.parent / f".kdive-{nonce}-old"
-    if not source.is_dir() or _tree_manifest(source)[0] != document["source_manifest"]:
+    descriptors: list[int] = []
+    try:
+        descriptor = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(descriptor)
+        for component in ("lib", "modules"):
+            descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            descriptors.append(descriptor)
+    except OSError as error:
+        raise ApplianceError("RECOVERY_CONFLICT") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    parent = ROOT / "lib" / "modules"
+    staged = parent / f".kdive-{nonce}-new"
+    staged_tree = staged / "lib" / "modules" / release
+    displaced = parent / f".kdive-{nonce}-old"
+    return parent / release, staged, staged_tree, displaced
+
+
+def _manifest_or_none(path: Path, kind: str) -> str | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    return _tree_manifest(path, kind)[0]
+
+
+def _capture_material(checkpoint: dict[str, object]) -> dict[str, object]:
+    fields = _capture_fields(checkpoint)
+    capture = SCRATCH / "capture"
+    if "capture_manifest" in fields:
+        if _manifest_or_none(capture, "recovery") != fields["capture_manifest"]:
+            raise ApplianceError("RECOVERY_CONFLICT")
+    elif _manifest_or_none(capture, "recovery") is not None:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    return fields
+
+
+def _original_manifest(fields: dict[str, object]) -> str | None:
+    value = fields.get("capture_manifest")
+    return str(value) if value is not None else None
+
+
+def _transition_replacement(
+    document: dict[str, object], checkpoint: dict[str, object]
+) -> dict[str, object]:
+    destination, staged, staged_tree, displaced = _module_paths(document)
+    fields = _capture_material(checkpoint)
+    original = _original_manifest(fields)
+    installed = checkpoint.get("installed_manifest")
+    if not isinstance(installed, str) or not DIGEST_RE.fullmatch(installed):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    destination_installed = _manifest_or_none(destination, "installed")
+    destination_original = _manifest_or_none(destination, "recovery")
+    staged_manifest = _manifest_or_none(staged_tree, "installed")
+    displaced_manifest = _manifest_or_none(displaced, "recovery")
+
+    if (
+        destination_original == original
+        and staged_manifest == installed
+        and displaced_manifest is None
+    ):
+        if destination_original is not None:
+            destination.rename(displaced)
+            _sync_path(destination.parent)
+    elif destination_installed == installed:
+        pass
+    elif not (
+        destination_original is None
+        and staged_manifest == installed
+        and displaced_manifest == original
+    ):
+        raise ApplianceError("RECOVERY_CONFLICT")
+
+    if _manifest_or_none(destination, "installed") is None:
+        staged_tree.rename(destination)
+        _remove_owned_tree(staged)
+        _sync_path(destination.parent)
+    if _manifest_or_none(destination, "installed") != installed:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    if _manifest_or_none(displaced, "recovery") != original:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    result = _checkpoint(
+        document,
+        "installed",
+        installed_manifest=installed,
+        entry_count=checkpoint["entry_count"],
+        content_bytes=checkpoint["content_bytes"],
+        **fields,
+    )
+    _remove_owned_tree(displaced)
+    _sync_path(destination.parent)
+    return result
+
+
+def _finish_installed(
+    document: dict[str, object], checkpoint: dict[str, object]
+) -> dict[str, object]:
+    destination, staged, staged_tree, displaced = _module_paths(document)
+    fields = _capture_material(checkpoint)
+    installed = checkpoint.get("installed_manifest")
+    if not isinstance(installed, str) or _manifest_or_none(destination, "installed") != installed:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    if _manifest_or_none(staged_tree, "installed") is not None:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    if staged.exists():
+        _remove_owned_tree(staged)
+    displaced_manifest = _manifest_or_none(displaced, "recovery")
+    if displaced_manifest not in {None, _original_manifest(fields)}:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    result = _checkpoint(
+        document,
+        "installed",
+        installed_manifest=installed,
+        entry_count=checkpoint["entry_count"],
+        content_bytes=checkpoint["content_bytes"],
+        **fields,
+    )
+    _remove_owned_tree(displaced)
+    _sync_path(destination.parent)
+    return result
+
+
+def _capture_install(document: dict[str, object]) -> dict[str, object]:
+    destination, staged, staged_tree, displaced = _module_paths(document)
+    source = SOURCE / "modules"
+    if _manifest_or_none(source, "source") != document["source_manifest"]:
         raise ApplianceError("SOURCE_INVALID")
     checkpoint = _existing_checkpoint(document)
     capture = SCRATCH / "capture"
-    if checkpoint is not None:
-        if checkpoint.get("phase") not in {"captured", "staging-intent"}:
+    if checkpoint is None:
+        if staged.exists() or _manifest_or_none(displaced, "recovery") is not None:
             raise ApplianceError("RECOVERY_CONFLICT")
-        capture_fields = _capture_fields(checkpoint)
-        if "capture_manifest" in capture_fields and (
-            not capture.is_dir()
-            or _tree_manifest(capture, "recovery")[0] != capture_fields["capture_manifest"]
-        ):
-            raise ApplianceError("RECOVERY_CONFLICT")
-    elif destination.exists():
-        capture_manifest, count, size = _copy_tree(destination, capture, "recovery")
-        capture_fields = {"capture_manifest": capture_manifest}
-        _checkpoint(document, "captured", entry_count=count, content_bytes=size, **capture_fields)
-    else:
-        (SCRATCH / "capture-absent").write_bytes(b"")
-        _sync_path(SCRATCH)
-        capture_fields = {"capture_absent": True}
-        _checkpoint(document, "captured", entry_count=0, content_bytes=0, **capture_fields)
-    _checkpoint(document, "staging-intent", **capture_fields)
+        original = _manifest_or_none(destination, "recovery")
+        if original is None:
+            (SCRATCH / "capture-absent").write_bytes(b"")
+            _sync_path(SCRATCH)
+            fields: dict[str, object] = {"capture_absent": True}
+            checkpoint = _checkpoint(document, "captured", entry_count=0, content_bytes=0, **fields)
+        else:
+            manifest, count, size = _copy_tree(destination, capture, "recovery")
+            fields = {"capture_manifest": manifest}
+            checkpoint = _checkpoint(
+                document, "captured", entry_count=count, content_bytes=size, **fields
+            )
+    phase = checkpoint.get("phase")
+    if phase == "installed":
+        return _finish_installed(document, checkpoint)
+    if phase == "replacement-ready":
+        return _transition_replacement(document, checkpoint)
+    if phase not in {"captured", "staging-intent"}:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    fields = _capture_material(checkpoint)
+    if _manifest_or_none(destination, "recovery") != _original_manifest(fields):
+        raise ApplianceError("RECOVERY_CONFLICT")
+    if _manifest_or_none(displaced, "recovery") is not None:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    if phase == "captured":
+        checkpoint = _checkpoint(document, "staging-intent", **fields)
     _remove_owned_tree(staged)
-    _copy_tree(source, staged)
+    staged_tree.parent.mkdir(parents=True)
+    _copy_tree(source, staged_tree)
     try:
         completed = subprocess.run(
-            [DEPMOD, "-b", str(ROOT), release], check=False, env={"PATH": "/sbin"}
+            [DEPMOD, "-b", str(staged), str(document["release"])],
+            check=False,
+            env={"PATH": "/sbin"},
         )
     except OSError as error:
         raise ApplianceError("DEPMOD_FAILURE") from error
     if completed.returncode != 0:
         raise ApplianceError("DEPMOD_FAILURE")
-    installed_manifest, count, size = _tree_manifest(staged, "installed")
-    _checkpoint(
+    _sync_tree(staged_tree)
+    _sync_path(staged)
+    installed, count, size = _tree_manifest(staged_tree, "installed")
+    checkpoint = _checkpoint(
         document,
         "replacement-ready",
-        installed_manifest=installed_manifest,
-        **capture_fields,
-    )
-    if destination.exists():
-        if displaced.exists():
-            raise ApplianceError("RECOVERY_CONFLICT")
-        destination.rename(displaced)
-        _sync_path(destination.parent)
-    staged.rename(destination)
-    _sync_path(destination.parent)
-    if _tree_manifest(destination, "installed")[0] != installed_manifest:
-        raise ApplianceError("FILESYSTEM_FAILURE")
-    _remove_owned_tree(displaced)
-    return _checkpoint(
-        document,
-        "installed",
-        installed_manifest=installed_manifest,
+        installed_manifest=installed,
         entry_count=count,
         content_bytes=size,
-        **capture_fields,
+        **fields,
     )
+    return _transition_replacement(document, checkpoint)
 
 
 def _restore(document: dict[str, object]) -> dict[str, object]:
-    release = str(document["release"])
-    destination = ROOT / "lib" / "modules" / release
-    nonce = str(document["operation_nonce"])
-    staged = destination.parent / f".kdive-{nonce}-new"
-    displaced = destination.parent / f".kdive-{nonce}-old"
-    if _tree_manifest(destination, "installed")[0] != document["installed_manifest"]:
+    destination, staged, staged_tree, displaced = _module_paths(document)
+    checkpoint = _existing_checkpoint(document)
+    if checkpoint is None or checkpoint.get("phase") not in {
+        "installed",
+        "restore-ready",
+        "restored",
+    }:
         raise ApplianceError("RECOVERY_CONFLICT")
-    _remove_owned_tree(staged)
     absent = document.get("capture_absent") is True
-    if not absent:
-        capture = SCRATCH / "capture"
-        if (
-            not capture.is_dir()
-            or _tree_manifest(capture, "recovery")[0] != document["capture_manifest"]
-        ):
-            raise ApplianceError("RECOVERY_CONFLICT")
-        _copy_tree(capture, staged, "recovery")
-    _checkpoint(document, "restore-ready")
-    if displaced.exists():
-        raise ApplianceError("RECOVERY_CONFLICT")
-    destination.rename(displaced)
-    if not absent:
-        staged.rename(destination)
-    _sync_path(destination.parent)
-    _remove_owned_tree(displaced)
     fields: dict[str, object] = (
         {"capture_absent": True} if absent else {"capture_manifest": document["capture_manifest"]}
     )
-    return _checkpoint(document, "restored", **fields)
+    installed = str(document["installed_manifest"])
+    capture = SCRATCH / "capture"
+    captured = None if absent else str(document["capture_manifest"])
+    if not absent and _manifest_or_none(capture, "recovery") != captured:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    if checkpoint.get("phase") == "installed":
+        if _manifest_or_none(destination, "installed") != installed:
+            raise ApplianceError("RECOVERY_CONFLICT")
+        if staged.exists() or _manifest_or_none(displaced, "installed") is not None:
+            raise ApplianceError("RECOVERY_CONFLICT")
+        if not absent:
+            staged_tree.parent.mkdir(parents=True)
+            _copy_tree(capture, staged_tree, "recovery")
+        checkpoint = _checkpoint(document, "restore-ready", installed_manifest=installed, **fields)
+    destination_installed = _manifest_or_none(destination, "installed")
+    destination_captured = _manifest_or_none(destination, "recovery")
+    staged_captured = _manifest_or_none(staged_tree, "recovery")
+    displaced_installed = _manifest_or_none(displaced, "installed")
+    if checkpoint.get("phase") == "restore-ready":
+        if destination_installed == installed and displaced_installed is None:
+            invalid_stage = (absent and staged_captured is not None) or (
+                not absent and staged_captured != captured
+            )
+            if invalid_stage:
+                raise ApplianceError("RECOVERY_CONFLICT")
+            destination.rename(displaced)
+            _sync_path(destination.parent)
+        elif not (destination_installed is None and displaced_installed == installed):
+            if not (destination_captured == captured and displaced_installed == installed):
+                raise ApplianceError("RECOVERY_CONFLICT")
+        if not absent and _manifest_or_none(destination, "recovery") is None:
+            staged_tree.rename(destination)
+            _remove_owned_tree(staged)
+            _sync_path(destination.parent)
+        if absent and _manifest_or_none(destination, "installed") is not None:
+            raise ApplianceError("RECOVERY_CONFLICT")
+        if _manifest_or_none(destination, "recovery") != captured:
+            raise ApplianceError("RECOVERY_CONFLICT")
+        checkpoint = _checkpoint(document, "restored", installed_manifest=installed, **fields)
+    if _manifest_or_none(destination, "recovery") != captured:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    displaced_manifest = _manifest_or_none(displaced, "installed")
+    if displaced_manifest not in {None, installed}:
+        raise ApplianceError("RECOVERY_CONFLICT")
+    _remove_owned_tree(displaced)
+    _sync_path(destination.parent)
+    return _checkpoint(document, "restored", installed_manifest=installed, **fields)
 
 
 def execute(document: dict[str, object]) -> dict[str, object]:
@@ -519,8 +715,62 @@ def _poweroff() -> NoReturn:
     raise ApplianceError("SHUTDOWN_FAILURE")
 
 
+def _write_failure(document: dict[str, object] | None, error: ApplianceError) -> None:
+    failure: dict[str, object] = {
+        "protocol": "remote-module-result-v1",
+        "status": "failure",
+        "phase": "accepted",
+        "error_code": error.code,
+    }
+    if document is not None:
+        try:
+            checkpoint = _existing_checkpoint(document)
+        except ApplianceError:
+            checkpoint = None
+        if checkpoint is not None:
+            failure.update(checkpoint)
+        else:
+            failure.update(_identity(document))
+        failure["status"] = "failure"
+        failure["error_code"] = error.code
+    _write_json(SCRATCH / "result-v1.json", failure)
+
+
+def _finish_mounts(
+    document: dict[str, object] | None, operation_error: ApplianceError | None
+) -> ApplianceError | None:
+    failure = operation_error
+    if failure is None:
+        for target in (ROOT, SCRATCH):
+            if target.is_mount():
+                try:
+                    _sync_path(target)
+                except ApplianceError as error:
+                    failure = error
+                    break
+    if failure is not None and SCRATCH.is_mount():
+        _write_failure(document, failure)
+    for target in (SOURCE, ROOT):
+        if not target.is_mount():
+            continue
+        try:
+            _unmount(target)
+        except OSError:
+            failure = ApplianceError("FLUSH_FAILURE")
+    if failure is not None and SCRATCH.is_mount():
+        _write_failure(document, failure)
+    if SCRATCH.is_mount():
+        try:
+            _unmount(SCRATCH)
+        except OSError:
+            failure = ApplianceError("FLUSH_FAILURE")
+            _write_failure(document, failure)
+    return failure
+
+
 def main() -> NoReturn:
     document: dict[str, object] | None = None
+    operation_error: ApplianceError | None = None
     try:
         _mount("devtmpfs", Path("/dev"), "devtmpfs", 2 | 4 | 8)
         _mount_root()
@@ -529,21 +779,12 @@ def main() -> NoReturn:
         document = _read_operation(SOURCE / "operation-v1.json")
         execute(document)
     except ApplianceError as error:
-        failure = {
-            "protocol": "remote-module-result-v1",
-            "status": "failure",
-            "phase": "accepted",
-            "error_code": error.code,
-        }
-        if document is not None:
-            failure.update(_identity(document))
-        if SCRATCH.is_mount():
-            _write_json(SCRATCH / "result-v1.json", failure)
+        operation_error = error
+    except OSError:
+        operation_error = ApplianceError("FILESYSTEM_FAILURE")
+    try:
+        _finish_mounts(document, operation_error)
     finally:
-        for target in (SOURCE, ROOT, SCRATCH):
-            if target.is_mount():
-                with contextlib.suppress(OSError):
-                    _unmount(target)
         _poweroff()
 
 

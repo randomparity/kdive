@@ -14,7 +14,13 @@ from pathlib import Path
 
 ARCHITECTURES = ("x86_64", "ppc64le")
 BLOCKED_PARTS = {"bin/sh", "bin/ash", "bin/bash", "usr/bin/sh", "usr/bin/bash"}
-BLOCKED_NAMES = {"_socket.so", "socket.py", "socketserver.py"}
+BLOCKED_NAMES = {"socket.py", "socket.pyc", "socketserver.py", "socketserver.pyc"}
+
+
+def _blocked_runtime_member(relative: str, name: str) -> bool:
+    if relative in BLOCKED_PARTS or name in BLOCKED_NAMES:
+        return True
+    return name.startswith("_socket.") and name.endswith(".so")
 
 
 def _sha256(data: bytes) -> str:
@@ -26,7 +32,7 @@ def _runtime_files(root: Path) -> list[tuple[str, bytes, int]]:
     required = {"usr/bin/python3", "sbin/depmod"}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
-        if relative in BLOCKED_PARTS or path.name in BLOCKED_NAMES:
+        if _blocked_runtime_member(relative, path.name):
             continue
         include = (
             relative in {"usr/bin/python3", "sbin/depmod"}

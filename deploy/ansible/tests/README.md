@@ -9,6 +9,7 @@ Regression harnesses for role logic that no unit test in `tests/` can reach, all
 | `run-github-runner-preflight.sh` | the `github_runner` host-contract preflight |
 | `run-guest-base-image-admission.sh` | the `guest_base_image` build-host admission gate (#1629) |
 | `run-remote-libvirt-facts-render.sh` | `remote_libvirt_facts` staged-volume confirmation (#1629) |
+| `run-remote-module-appliance.sh` | clean-host digest verification and idempotent extraction (#2128) |
 
 Each drives the **real** tasks — never a copy of the logic — in isolation.
 

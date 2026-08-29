@@ -18,8 +18,25 @@ path, device, mount option, command, environment variable, or destination.
 The appliance writes `result-v1.json` and durable phase checkpoints to the scratch volume. Results
 validate against `result-v1.schema.json`. A failure always carries exactly one stable error code;
 success never carries one. Console output contains only the phase, stable error code, identities,
-counts, and manifests represented in the result. The complete recovery and retry table remains the
-normative one in ADR-0585.
+counts, and manifests represented in the result.
+
+Every retry classifies the nonce-owned root-directory names before writing: `D` is the release
+destination, `N` the staged replacement, and `O` the displaced destination. These are the complete
+accepted states; any other phase/name/manifest combination is `RECOVERY_CONFLICT` and performs no
+further mutation.
+
+| Durable phase | Accepted durable state | Resume action |
+|---|---|---|
+| `captured` | original `D`; no `N` or `O` | write `staging-intent` |
+| `staging-intent` | original `D`; no `O`; absent or partial owned `N` | remove `N`, sync, rebuild and index it |
+| `replacement-ready` | original `D` + complete `N`; or absent `D` + original `O` + complete `N`; or installed `D` + original `O` | resume or finish the rename sequence, verify, write `installed` |
+| `installed` | installed `D`; no `N`; absent or matching original `O` | rewrite `installed`, then remove matching `O` |
+| `restore-ready` | installed `D` + complete captured `N`; or absent `D` + installed `O` + complete captured `N`; or captured `D` + installed `O` | resume or finish the reverse rename sequence, verify, write `restored` |
+| `restored` | exact captured `D`, or absent `D` for an absent capture; no `N`; absent or matching installed `O` | rewrite `restored`, then remove matching `O` |
+
+The absent-capture form uses the same states without a captured tree or original `O` during
+installation, and restores by removing the installed destination. `O` is never removed until the
+corresponding terminal checkpoint is durable.
 
 The entry and uncompressed-content ceilings are 200,000 entries and 8 GiB per tree. Scratch is a
 fixed 10 GiB volume per System/Run recovery point. A limit failure is terminal `LIMIT_EXCEEDED`;
@@ -36,6 +53,10 @@ includes no shell or socket module. Every archive member has fixed ownership, mo
 timestamp, so identical inputs produce identical bytes. The output SHA-256 is the appliance image
 identity stored in operation and result documents.
 
-The `remote_libvirt_module_appliance` Ansible role installs both architecture bundles from
-operator-pinned HTTPS URLs. A 64-character SHA-256 is mandatory for each image; Ansible verifies it
-during download and again from the installed file before publishing the read-only artifact.
+The `remote_libvirt_module_appliance` Ansible role is wired into `deploy/ansible/site.yml` behind
+`remote_libvirt_module_appliance_enabled`. Enabling it requires an immutable URL and a lowercase
+64-character SHA-256 for both architecture bundles. Production inventories normally use HTTPS;
+an operator may instead stage immutable bundles on each host and use `file://` URLs. This split is
+intentional: the repository owns the deterministic build and pinned installation contract, while
+artifact publication remains an operator/release action. Ansible verifies every digest during
+acquisition and again from the installed read-only file before the artifact is usable.

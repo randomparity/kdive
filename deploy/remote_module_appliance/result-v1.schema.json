@@ -48,9 +48,64 @@
           "run_id",
           "plan_identity",
           "operation_nonce",
-          "appliance_image_digest"
+          "appliance_image_digest",
+          "release",
+          "root_volume_key",
+          "root_volume_identity",
+          "source_manifest"
         ],
-        "not": {"required": ["error_code"]}
+        "not": {"required": ["error_code"]},
+        "oneOf": [
+          {
+            "properties": {"phase": {"const": "captured"}},
+            "required": ["entry_count", "content_bytes"],
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {"required": ["installed_manifest"]}
+          },
+          {
+            "properties": {"phase": {"const": "staging-intent"}},
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {
+              "anyOf": [
+                {"required": ["installed_manifest"]},
+                {"required": ["entry_count"]},
+                {"required": ["content_bytes"]}
+              ]
+            }
+          },
+          {
+            "properties": {"phase": {"const": "replacement-ready"}},
+            "required": ["installed_manifest", "entry_count", "content_bytes"],
+            "allOf": [{"$ref": "#/$defs/capture"}]
+          },
+          {
+            "properties": {"phase": {"const": "installed"}},
+            "required": ["installed_manifest", "entry_count", "content_bytes"],
+            "allOf": [{"$ref": "#/$defs/capture"}]
+          },
+          {
+            "properties": {"phase": {"const": "restore-ready"}},
+            "required": ["installed_manifest"],
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {
+              "anyOf": [
+                {"required": ["entry_count"]},
+                {"required": ["content_bytes"]}
+              ]
+            }
+          },
+          {
+            "properties": {"phase": {"const": "restored"}},
+            "required": ["installed_manifest"],
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {
+              "anyOf": [
+                {"required": ["entry_count"]},
+                {"required": ["content_bytes"]}
+              ]
+            }
+          }
+        ]
       },
       "else": {
         "required": ["error_code"],
@@ -72,6 +127,19 @@
     }
   ],
   "$defs": {
+    "capture": {
+      "oneOf": [
+        {
+          "required": ["capture_manifest"],
+          "not": {"required": ["capture_absent"]}
+        },
+        {
+          "properties": {"capture_absent": {"const": true}},
+          "required": ["capture_absent"],
+          "not": {"required": ["capture_manifest"]}
+        }
+      ]
+    },
     "error_code": {
       "enum": [
         "INVALID_DOCUMENT",
