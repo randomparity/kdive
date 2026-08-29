@@ -744,6 +744,102 @@ def test_allocation_after_retirement_links_the_prior_generation(
         ).fetchone() == (first.generation,)
 
 
+def test_resolve_conflict_allocation_rejects_non_succeeded_run_without_writes(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="resolve-conflict", worker_suffix="i")
+        _prepare_purpose_state(conn, case, "resolve-conflict")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        first = _allocate(worker, case)
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("UPDATE runs SET state='failed' WHERE id=%s", (case.run_id,))
+        before = conn.execute(
+            "SELECT c.last_generation, a.state, "
+            "(SELECT count(*) FROM external_boot_authority_audit WHERE system_id=%s) "
+            "FROM external_boot_authority_counters AS c "
+            "JOIN external_boot_authorities AS a ON a.id=%s WHERE c.system_id=%s",
+            (case.system_id, first.authority_id, case.system_id),
+        ).fetchone()
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        row = worker.execute(
+            "SELECT status FROM allocate_external_boot_authority(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                case.activation_id,
+                case.run_id,
+                case.system_id,
+                _PLAN,
+                case.purpose,
+                case.provider_kind,
+                case.authority_instance,
+                case.operation_identity,
+            ),
+        ).fetchone()
+        assert row == ("superseded",)
+    with psycopg.connect(migrated_url) as conn:
+        assert (
+            conn.execute(
+                "SELECT c.last_generation, a.state, "
+                "(SELECT count(*) FROM external_boot_authority_audit WHERE system_id=%s) "
+                "FROM external_boot_authority_counters AS c "
+                "JOIN external_boot_authorities AS a ON a.id=%s WHERE c.system_id=%s",
+                (case.system_id, first.authority_id, case.system_id),
+            ).fetchone()
+            == before
+        )
+
+
+@pytest.mark.parametrize("system_state", ["ready", "crashed"])
+def test_teardown_allocation_rejects_non_failed_system_without_writes(
+    migrated_url: str, authority_role_dsns: _RoleDsns, system_state: str
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="teardown", worker_suffix="j")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        first = _allocate(worker, case)
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("UPDATE systems SET state=%s WHERE id=%s", (system_state, case.system_id))
+        before = conn.execute(
+            "SELECT c.last_generation, a.state, "
+            "(SELECT count(*) FROM external_boot_authority_audit WHERE system_id=%s) "
+            "FROM external_boot_authority_counters AS c "
+            "JOIN external_boot_authorities AS a ON a.id=%s WHERE c.system_id=%s",
+            (case.system_id, first.authority_id, case.system_id),
+        ).fetchone()
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        row = worker.execute(
+            "SELECT status FROM allocate_external_boot_authority(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                case.activation_id,
+                case.run_id,
+                case.system_id,
+                _PLAN,
+                case.purpose,
+                case.provider_kind,
+                case.authority_instance,
+                case.operation_identity,
+            ),
+        ).fetchone()
+        assert row == ("superseded",)
+    with psycopg.connect(migrated_url) as conn:
+        assert (
+            conn.execute(
+                "SELECT c.last_generation, a.state, "
+                "(SELECT count(*) FROM external_boot_authority_audit WHERE system_id=%s) "
+                "FROM external_boot_authority_counters AS c "
+                "JOIN external_boot_authorities AS a ON a.id=%s WHERE c.system_id=%s",
+                (case.system_id, first.authority_id, case.system_id),
+            ).fetchone()
+            == before
+        )
+
+
 def test_resolve_conflict_acknowledgement_cannot_mutate_lifecycle_before_result(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:

@@ -489,13 +489,14 @@ BEGIN
        ))
        OR (p_purpose = 'resolve-conflict' AND (
            v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state <> 'succeeded'
            OR v_activation.state <> 'recovery_conflict'
        ))
        OR (p_purpose = 'release' AND v_activation.state NOT IN (
            'active', 'recovered', 'abandoned', 'recovery_conflict', 'recovery_failed'
        ))
        OR (p_purpose = 'teardown' AND (
-           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           v_system.state <> 'failed'
            OR v_activation.state NOT IN ('recovery_conflict', 'recovery_failed')
        )) THEN
         RETURN QUERY SELECT 'superseded'::text, NULL::uuid, NULL::bigint, NULL::text;
