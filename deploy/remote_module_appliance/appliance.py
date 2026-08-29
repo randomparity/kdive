@@ -466,10 +466,23 @@ def _existing_checkpoint(document: dict[str, object]) -> dict[str, object] | Non
     valid_status = valid_status or (
         status == "failure" and checkpoint.get("error_code") in ERROR_CODES
     )
+    phase = checkpoint.get("phase")
+    accepted_fields = {
+        "installed_manifest",
+        "capture_manifest",
+        "capture_absent",
+        "entry_count",
+        "content_bytes",
+    }
+    valid_accepted = phase != "accepted" or (
+        status == "failure"
+        and checkpoint.get("error_code") in ERROR_CODES
+        and not accepted_fields.intersection(checkpoint)
+    )
     if (
         set(checkpoint) - allowed
         or checkpoint.get("protocol") != "remote-module-result-v1"
-        or checkpoint.get("phase")
+        or phase
         not in {
             "accepted",
             "captured",
@@ -480,6 +493,7 @@ def _existing_checkpoint(document: dict[str, object]) -> dict[str, object] | Non
             "restored",
         }
         or not valid_status
+        or not valid_accepted
     ):
         raise ApplianceError("RECOVERY_CONFLICT")
     expected = _identity(document)

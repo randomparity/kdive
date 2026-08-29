@@ -667,6 +667,36 @@ def test_accepted_failure_restarts_before_the_first_durable_checkpoint(
     assert not (partial_capture / "partial").exists()
 
 
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"status": "success", "error_code": None},
+        {"status": "failure", "error_code": "FILESYSTEM_FAILURE", "entry_count": 1},
+    ],
+)
+def test_accepted_retry_rejects_impossible_checkpoint_shapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_fields: dict[str, object],
+) -> None:
+    appliance, operation, _destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    document = appliance._validate_operation(operation)
+    checkpoint = {
+        "protocol": "remote-module-result-v1",
+        "status": "failure",
+        "phase": "accepted",
+        "error_code": "FILESYSTEM_FAILURE",
+        **appliance._identity(document),
+        **invalid_fields,
+    }
+    if checkpoint.get("error_code") is None:
+        checkpoint.pop("error_code")
+    (scratch / "result-v1.json").write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._existing_checkpoint(document)
+
+
 def test_checkpoint_write_reconciles_a_crash_temp(tmp_path: Path) -> None:
     appliance = _module()
     result = tmp_path / "result-v1.json"
