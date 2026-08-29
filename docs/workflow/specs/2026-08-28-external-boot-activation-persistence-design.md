@@ -169,7 +169,12 @@ cross-row reservation rules and evidence immutability.
 
 - `create(conn, activation, reservation)` to insert the `preparing` activation and `pending`
   reservation atomically under the System lock;
-- `get(conn, activation_id)` and `get_reservation(conn, activation_id)`;
+- `get(conn, activation_id)`, `get_reservation(conn, activation_id)`, and
+  `get_current_recovery_attempt(conn, activation_id)`. The current-attempt read joins through the
+  activation's exact current attempt identity and never returns another activation's row;
+- `list_recovery_attempts(conn, activation_id, before_attempt_number, limit)`, which returns prior
+  attempts in descending attempt-number order, uses an exclusive cursor, and accepts limits 1
+  through 100 so retained history cannot become an unbounded read;
 - `mark_reservation_ready(..., recovery_max_bytes)`, which takes the recovery-store advisory lock,
   sums existing `ready` debits for that store, and changes only `pending -> ready` when the new
   total is at most the positive operator-configured cap. `pending` is not a debit. Exact-cap is
@@ -180,6 +185,9 @@ cross-row reservation rules and evidence immutability.
   inserts or returns the immutable matching release tombstone;
 - `transition(...)`, which validates non-recovery domain edges before SQL and atomically persists
   the new state plus its immutable evidence or activation deadline;
+- `record_materialization(...)`, which uses the full System/activation/operation-owner/generation
+  compare-and-set to fill canonical materialization evidence exactly once while state remains
+  `preparing`; a byte-identical retry succeeds idempotently and a different value is a conflict;
 - `record_pre_recovery_evidence(...)`, which can fill the immutable preparation-owned evidence
   once while the activation is `preparing` and refuses a different retry value;
 - `begin_recovery_attempt(...)`, which validates an edge into `recovering`, inserts the next
@@ -221,17 +229,24 @@ new acknowledged identity, resolution operation, deadline, and subsequent confli
 without erasing earlier evidence.
 
 Cleanup ordering is enforced across the three rows: store-locked reservation deletion plus release
-tombstone creation is persisted before `cleanup_complete`. `mark_cleanup_complete` runs under the
-System lock, verifies reservation absence and the matching tombstone, records exact cleanup
-evidence, and sets the activation flag in one transaction. An interrupted cleanup therefore remains
-charged or leaves a terminal activation with `cleanup_complete=false`; neither state admits a
-replacement activation.
+tombstone creation is persisted before `cleanup_complete`. Every `release_reservation` call,
+including ordinary `recovered` and `abandoned` cleanup, requires one bounded release-evidence
+document binding activation, store, owner key, byte count, all deterministic materialization and
+recovery object identities, and verified absence of each object. The immutable tombstone stores
+that exact document in the same transaction that deletes the debit. A retry must reproduce the
+same document byte-for-byte.
 
-For `recovery_failed` and `recovery_conflict`, `release_reservation` additionally requires
-teardown evidence that identifies the torn-down System and proves every individually owned object
-absent. If ownership is missing, corrupt, or quarantined, it returns a retained-capacity result and
-changes neither live debit nor activation. Successful teardown cleanup preserves all conflict/
-failure and attempt evidence even after capacity is released.
+`mark_cleanup_complete` runs under the System lock, verifies reservation absence and the matching
+tombstone identities plus release-evidence document, records exact cleanup evidence referring to
+that proof, and sets the activation flag in one transaction. An interrupted cleanup therefore
+remains charged or leaves a terminal activation with `cleanup_complete=false`; neither state admits
+a replacement activation.
+
+For `recovery_failed` and `recovery_conflict`, the same object-absence proof additionally requires
+teardown evidence that identifies the torn-down System. If ownership is missing, corrupt, or
+quarantined, it returns a retained-capacity result and changes neither live debit nor activation.
+Successful teardown cleanup preserves all conflict/failure and attempt evidence even after capacity
+is released.
 
 ## Error handling
 
@@ -295,7 +310,8 @@ ownership durable and stale compare-and-set writes impossible through this repos
   concurrent two-System capacity admission, exact-cap and over-cap behavior, cleanup ordering,
   idempotent reservation release, successful and retained-capacity teardown branches, two distinct
   conflict-to-recovery attempts, a preparing conflict resolved without a fabricated recovery point,
-  rejection of missing resolution identity/operation, wrong-System/owner/generation rejection, and
-  that a stale-generation compare-and-set changes no activation, reservation, recovery attempt,
-  release tombstone, or evidence value.
+  rejection of missing resolution identity/operation, restart reads of current and paginated prior
+  attempts, materialization idempotency, release before verified object absence, wrong-System/owner/
+  generation rejection, and that a stale-generation compare-and-set changes no activation,
+  reservation, recovery attempt, release tombstone, or evidence value.
 - `just lint`, `just type`, focused domain/database tests, and `just ci` are the required guardrails.
