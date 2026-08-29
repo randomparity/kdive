@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import selectors
 import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
+import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO, cast
 from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  # nosec B405
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.external_boot import Architecture, RootSource, RootSpecV1
 
 # The in-guest marker file a debug build writes ``makedumpfile --version`` into, read back into
 # ``provenance["makedumpfile_version"]`` (ADR-0253). Lives outside a family module so the build
@@ -29,6 +33,9 @@ type DrgnProbeSeam = Callable[[Path], str | None]
 type KernelConfigProbeSeam = Callable[[Path, str], bytes | None]
 type BootEntriesProbeSeam = Callable[[Path], list[str] | None]
 type OsReleaseProbeSeam = Callable[[Path], str | None]
+type RootBootProbeSeam = Callable[[Path, Architecture, str], RootSpecV1]
+
+ROOT_INSPECTION_MAX_OUTPUT_BYTES = 1024 * 1024
 
 
 def parse_virt_inspector_versions(xml: str) -> dict[str, str]:
@@ -88,6 +95,113 @@ def inspect_package_versions(qcow2_path: Path) -> dict[str, str]:  # pragma: no 
 
 
 DEFAULT_VERSION_INSPECT: VersionInspectSeam = inspect_package_versions
+
+
+def _run_bounded_inspector(
+    argv: list[str], *, timeout_s: float, max_output_bytes: int = ROOT_INSPECTION_MAX_OUTPUT_BYTES
+) -> tuple[bytes, bytes]:
+    """Run fixed argv while bounding combined output and elapsed monotonic time."""
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv supplied by provider  # nosec B603
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            "virt-inspector is not installed; cannot inspect root boot facts",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": argv[0]},
+        ) from exc
+    assert process.stdout is not None and process.stderr is not None
+    streams = {process.stdout: bytearray(), process.stderr: bytearray()}
+    deadline = time.monotonic() + timeout_s
+    selector = selectors.DefaultSelector()
+    for stream in streams:
+        selector.register(stream, selectors.EVENT_READ)
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            events = selector.select(remaining)
+            if not events:
+                raise TimeoutError
+            for key, _ in events:
+                stream = cast("BinaryIO", key.fileobj)
+                chunk = stream.read(65_536)
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                streams[stream].extend(chunk)
+                if sum(len(value) for value in streams.values()) > max_output_bytes:
+                    raise OverflowError
+    except (TimeoutError, OverflowError) as exc:
+        process.kill()
+        process.wait()
+        reason = "timeout" if isinstance(exc, TimeoutError) else "output_limit"
+        raise CategorizedError(
+            "root boot inspection exceeded its bounded execution contract; rebuild and retry",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stage": "root-inspection", "reason": reason},
+        ) from exc
+    finally:
+        selector.close()
+    returncode = process.wait()
+    stdout, stderr = (bytes(streams[process.stdout]), bytes(streams[process.stderr]))
+    if returncode != 0:
+        raise CategorizedError(
+            "root boot inspection failed; rebuild and retry",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stage": "root-inspection", "reason": "tool_failure"},
+        )
+    return stdout, stderr
+
+
+def _parse_root_boot(xml: bytes, architecture: Architecture, image_digest: str) -> RootSpecV1:
+    """Parse one root mount from bounded virt-inspector XML into #2115's closed value."""
+    if b"<!DOCTYPE" in xml:
+        raise ValueError("DOCTYPE is not allowed in root inspection output")
+    document = _xml_fromstring(xml)  # noqa: S314 - DTD rejected above  # nosec B314
+    roots = [node.get("dev") for node in document.iter("mountpoint") if node.text == "/"]
+    if len(roots) != 1 or roots[0] is None:
+        raise ValueError("root inspection must identify exactly one root mount")
+    filesystems = [node for node in document.iter("filesystem") if node.get("dev") == roots[0]]
+    if len(filesystems) != 1:
+        raise ValueError("root inspection must identify exactly one root filesystem")
+    uuid = filesystems[0].findtext("uuid")
+    filesystem_type = filesystems[0].findtext("type")
+    if not uuid or not filesystem_type:
+        raise ValueError("root filesystem UUID and type are required")
+    root = f"UUID={uuid}"
+    return RootSpecV1(
+        architecture=architecture,
+        root=root,
+        arguments=(f"root={root}", f"rootfstype={filesystem_type}"),
+        authority="stage-inspection",
+        source=RootSource(kind="staged-image", identity=image_digest),
+    )
+
+
+def inspect_root_boot(
+    qcow2_path: Path, architecture: Architecture, image_digest: str
+) -> RootSpecV1:
+    """Inspect a qcow2 without guest execution and return its authoritative root value."""
+    stdout, _ = _run_bounded_inspector(
+        ["virt-inspector", "--no-icon", "-a", str(qcow2_path)],
+        timeout_s=_VIRT_INSPECTOR_TIMEOUT_S,
+    )
+    try:
+        return _parse_root_boot(stdout, architecture, image_digest)
+    except (ValueError, TypeError) as exc:
+        raise CategorizedError(
+            "root boot inspection output is malformed; rebuild and retry",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stage": "root-inspection", "reason": "malformed_output"},
+        ) from exc
+
+
+DEFAULT_ROOT_BOOT_INSPECT: RootBootProbeSeam = inspect_root_boot
 
 
 def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - live_vm

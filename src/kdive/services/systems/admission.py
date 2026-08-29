@@ -58,6 +58,11 @@ from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue, safe_error_details
 from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.job_ports import ProvisionJobPort
+from kdive.services.systems.root_provenance import (
+    RootProvenanceSnapshot,
+    insert_root_provenance,
+    resolve_root_provenance,
+)
 from kdive.services.systems.validation import (
     RootfsValidator,
     require_fadump_supported,
@@ -730,6 +735,7 @@ async def _insert_system_and_activate(
     resolved_cpu: dict[str, JsonValue] | None,
     label: str | None = None,
     investigation_id: UUID | None = None,
+    root_provenance: RootProvenanceSnapshot | None = None,
 ) -> System:
     now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
     system = await SYSTEMS.insert(
@@ -751,6 +757,8 @@ async def _insert_system_and_activate(
             investigation_id=investigation_id,
         ),
     )
+    if root_provenance is not None:
+        await insert_root_provenance(conn, system.id, root_provenance)
     await audit.record(
         conn,
         ctx,
@@ -804,6 +812,10 @@ async def _insert_provisioning_system(
     )
     if blocked is not None:
         return blocked
+    try:
+        root_provenance = await resolve_root_provenance(conn, profile, alloc.project)
+    except CategorizedError as exc:
+        return _failure_from_error(alloc.id, exc)
     timeout.reschedule(None)  # mutation boundary: the insert+enqueue runs unbounded (ADR-0126)
     system = await _insert_system_and_activate(
         conn,
@@ -817,6 +829,7 @@ async def _insert_provisioning_system(
         resolved_cpu=resolved_cpu,
         label=label,
         investigation_id=investigation_id,
+        root_provenance=root_provenance,
     )
     return await _enqueue_provision_job(
         conn,

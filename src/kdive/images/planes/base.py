@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from kdive.domain.catalog.images import Capability
+from kdive.providers.ports.external_boot import RootSpecV1
 
 PROVENANCE_BOOT_KERNEL_COUNT = "boot_kernel_count"
 PROVENANCE_DEFAULT_KERNEL_VERSION = "default_kernel_version"
@@ -82,6 +83,7 @@ class RootfsBuildProvenance:
     boot_kernel_count: int | None = None
     default_kernel_version: str | None = None
     os_release: dict[str, str] | None = None
+    root_spec: RootSpecV1 | None = None
 
     @classmethod
     def local_libvirt(
@@ -131,6 +133,7 @@ class RootfsBuildProvenance:
         boot_method: str,
         guest_access_seam: str,
         package_versions: dict[str, str],
+        root_spec: RootSpecV1,
     ) -> RootfsBuildProvenance:
         """Build remote-libvirt provenance from the remote disk-image build operands."""
         return cls(
@@ -144,6 +147,7 @@ class RootfsBuildProvenance:
             image_size=image_size,
             guest_access_seam=guest_access_seam,
             package_versions=package_versions,
+            root_spec=root_spec,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -172,6 +176,8 @@ class RootfsBuildProvenance:
         self._put_if_present(record, PROVENANCE_DEFAULT_KERNEL_VERSION, self.default_kernel_version)
         if self.os_release:
             record[PROVENANCE_OS_RELEASE] = dict(self.os_release)
+        if self.root_spec is not None:
+            record["root_spec"] = self.root_spec.model_dump(mode="json", by_alias=True)
         return record
 
     @staticmethod

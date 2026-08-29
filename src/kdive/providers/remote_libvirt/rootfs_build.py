@@ -32,6 +32,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes._build_common import (
@@ -42,7 +43,13 @@ from kdive.images.planes._build_common import (
     validate_image_name,
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildProvenance, RootfsBuildSpec
-from kdive.images.planes.provenance_probes import DEFAULT_VERSION_INSPECT, VersionInspectSeam
+from kdive.images.planes.provenance_probes import (
+    DEFAULT_ROOT_BOOT_INSPECT,
+    DEFAULT_VERSION_INSPECT,
+    RootBootProbeSeam,
+    VersionInspectSeam,
+)
+from kdive.providers.ports.external_boot import Architecture, RootSpecV1
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _log = logging.getLogger(__name__)
@@ -109,6 +116,7 @@ class RemoteRootfsBuildTools:
 
     virt_builder: VirtBuilder = _real_virt_builder
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
+    inspect_root_boot: RootBootProbeSeam = DEFAULT_ROOT_BOOT_INSPECT
 
 
 class RemoteLibvirtRootfsBuildPlane:
@@ -155,8 +163,24 @@ class RemoteLibvirtRootfsBuildPlane:
                     details={"stage": "virt-builder"},
                 )
             package_versions = self._capture_versions(scratch, spec.packages)
+            image_digest = digest_file(scratch)
+            root_spec = self._tools.inspect_root_boot(
+                scratch, cast("Architecture", spec.arch), image_digest
+            )
+            if not isinstance(root_spec, RootSpecV1):
+                raise CategorizedError(
+                    "root boot inspection returned an invalid value; rebuild and retry",
+                    category=ErrorCategory.PROVISIONING_FAILURE,
+                    details={"stage": "root-inspection", "reason": "invalid_result"},
+                )
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=scratch)
         digest = digest_file(qcow2)
+        if digest != image_digest:
+            raise CategorizedError(
+                "published image identity changed after root inspection; rebuild and retry",
+                category=ErrorCategory.PROVISIONING_FAILURE,
+                details={"stage": "root-inspection", "reason": "identity_changed"},
+            )
         return RootfsBuildOutput(
             qcow2_path=qcow2,
             digest=digest,
@@ -167,6 +191,7 @@ class RemoteLibvirtRootfsBuildPlane:
                 boot_method="disk-image",
                 guest_access_seam="qemu-guest-agent",
                 package_versions=package_versions,
+                root_spec=root_spec,
             ).to_dict(),
         )
 

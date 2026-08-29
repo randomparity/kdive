@@ -12,6 +12,7 @@ from kdive.images.planes.base import (
     RootfsBuildProvenance,
     RootfsBuildSpec,
 )
+from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 
 
 def _spec() -> RootfsBuildSpec:
@@ -79,6 +80,13 @@ def test_remote_provenance_omits_absent_optional_operands() -> None:
         boot_method="disk-image",
         guest_access_seam="qemu-guest-agent",
         package_versions={},
+        root_spec=RootSpecV1(
+            architecture="x86_64",
+            root="UUID=x",
+            arguments=("root=UUID=x",),
+            authority="stage-inspection",
+            source=RootSource(kind="staged-image", identity="sha256:" + "0" * 64),
+        ),
     ).to_dict()
 
     assert provenance == {
@@ -91,4 +99,12 @@ def test_remote_provenance_omits_absent_optional_operands() -> None:
         "arch": "x86_64",
         "image_size": "10G",
         "guest_access_seam": "qemu-guest-agent",
+        "root_spec": {
+            "schema": "root-spec-v1",
+            "architecture": "x86_64",
+            "root": "UUID=x",
+            "arguments": ["root=UUID=x"],
+            "authority": "stage-inspection",
+            "source": {"kind": "staged-image", "identity": "sha256:" + "0" * 64},
+        },
     }

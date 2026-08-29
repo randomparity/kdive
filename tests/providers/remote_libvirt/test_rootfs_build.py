@@ -29,6 +29,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes import _build_common
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
+from kdive.providers.ports.external_boot import Architecture, RootSource, RootSpecV1
 from kdive.providers.remote_libvirt.rootfs_build import (
     RemoteLibvirtRootfsBuildPlane,
     RemoteRootfsBuildTools,
@@ -172,6 +173,17 @@ def _no_versions(_qcow2: Path) -> dict[str, str]:
     return {}
 
 
+def _root_boot(_qcow2: Path, architecture: Architecture, image_digest: str) -> RootSpecV1:
+    root = "UUID=11111111-2222-3333-4444-555555555555"
+    return RootSpecV1(
+        architecture=architecture,
+        root=root,
+        arguments=(f"root={root}", "rootfstype=xfs"),
+        authority="stage-inspection",
+        source=RootSource(kind="staged-image", identity=image_digest),
+    )
+
+
 @dataclass
 class _Recorder:
     """A ``virt_builder`` stub recording its calls; writes the scratch qcow2 unless told not to."""
@@ -196,6 +208,7 @@ def _tools(rec: _Recorder, inspect_versions: object = _no_versions) -> RemoteRoo
     return RemoteRootfsBuildTools(
         virt_builder=rec.virt_builder,
         inspect_versions=inspect_versions,  # ty: ignore[invalid-argument-type]
+        inspect_root_boot=_root_boot,
     )
 
 
@@ -262,6 +275,28 @@ def test_build_missing_output_raises_provisioning_failure(tmp_path: Path) -> Non
     assert exc.value.details == {"stage": "virt-builder"}
 
 
+def test_root_inspection_failure_publishes_no_image(tmp_path: Path) -> None:
+    rec = _Recorder()
+
+    def fail_root(_path: Path, _arch: Architecture, _digest: str) -> NoReturn:
+        raise CategorizedError(
+            "inspection limit",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stage": "root-inspection", "reason": "output_limit"},
+        )
+
+    tools = RemoteRootfsBuildTools(
+        virt_builder=rec.virt_builder,
+        inspect_versions=_no_versions,
+        inspect_root_boot=fail_root,
+    )
+    workspace = tmp_path / "work"
+    with pytest.raises(CategorizedError) as exc:
+        RemoteLibvirtRootfsBuildPlane(workspace=workspace, tools=tools).build(_spec())
+    assert exc.value.details["reason"] == "output_limit"
+    assert not (workspace / "fedora-remote-43.qcow2").exists()
+
+
 @pytest.mark.parametrize(
     "category",
     [ErrorCategory.MISSING_DEPENDENCY, ErrorCategory.INFRASTRUCTURE_FAILURE],
@@ -296,6 +331,20 @@ def test_provenance_full_shape(tmp_path: Path) -> None:
         "arch": "x86_64",
         "image_size": "10G",
         "guest_access_seam": "qemu-guest-agent",
+        "root_spec": {
+            "schema": "root-spec-v1",
+            "architecture": "x86_64",
+            "root": "UUID=11111111-2222-3333-4444-555555555555",
+            "arguments": [
+                "root=UUID=11111111-2222-3333-4444-555555555555",
+                "rootfstype=xfs",
+            ],
+            "authority": "stage-inspection",
+            "source": {
+                "kind": "staged-image",
+                "identity": "sha256:" + hashlib.sha256(b"remote-qcow2-bytes").hexdigest(),
+            },
+        },
     }
 
 
