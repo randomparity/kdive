@@ -97,6 +97,32 @@ def test_creates_all_tables(pg_conn: psycopg.Connection) -> None:
     tables = _tables(pg_conn)
     assert tables >= OBJECT_TABLES
     assert "schema_migrations" in tables
+    assert "system_root_provenance" in tables
+
+
+def test_system_root_provenance_schema_is_immutable_snapshot(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    columns = {
+        row[0]
+        for row in pg_conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'system_root_provenance'"
+        ).fetchall()
+    }
+    assert columns == {
+        "system_id",
+        "source_image_id",
+        "project",
+        "architecture",
+        "image_digest",
+        "root_spec",
+        "created_at",
+    }
+    triggers = pg_conn.execute(
+        "SELECT trigger_name FROM information_schema.triggers "
+        "WHERE event_object_schema = 'public' AND event_object_table = 'system_root_provenance'"
+    ).fetchall()
+    assert ("system_root_provenance_immutable",) in triggers
 
 
 def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
@@ -220,6 +246,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0117",
         "0118",
         "0119",
+        "0120",
     ]
     assert second == []
 
@@ -230,7 +257,7 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
     versions = [migration.version for migration in migrations]
 
     assert len(versions) == len(set(versions))
-    assert [(migration.version, migration.filename) for migration in migrations[-22:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-23:]] == [
         ("0098", "0098_investigation_build_safety.sql"),
         ("0099", "0099_investigation_build_use_recovery.sql"),
         ("0100", "0100_build_use_recovery_bounds.sql"),
@@ -253,6 +280,7 @@ def test_investigation_build_migration_tail_is_unique_and_monotonic() -> None:
         ("0117", "0117_worker_bootstrap_key_insert.sql"),
         ("0118", "0118_worker_audit_log_insert.sql"),
         ("0119", "0119_drop_obsolete_build_gc_cursors.sql"),
+        ("0120", "0120_system_root_provenance.sql"),
     ]
 
 
@@ -959,6 +987,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0117",
         "0118",
         "0119",
+        "0120",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1355,6 +1384,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0117",
         "0118",
         "0119",
+        "0120",
     ]
 
 
