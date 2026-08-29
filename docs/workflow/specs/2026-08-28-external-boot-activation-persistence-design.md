@@ -90,6 +90,10 @@ Safety-bearing evidence is a closed, frozen, versioned domain value rather than 
 - `ExternalBootConflictEvidenceV1` binds its schema name, activation and System identities,
   provider-neutral observation identity, observed composite-state digest, object identities, and
   UTC observation time;
+- `ExternalBootPreRecoveryEvidenceV1` binds schema `external-boot-pre-recovery-evidence-v1`,
+  activation, System, Run, and plan identities, the stable provider-owned recovery-object identity,
+  its source composite-state digest, and UTC observation time. Its identity prefix is
+  `kdive-external-boot-pre-recovery-evidence-v1`;
 - `ExternalBootTerminalEvidenceV1` binds its schema name, activation and System identities,
   `active | abandoned | recovered | recovery_failed` outcome, observed composite-state digest,
   object identities, and UTC observation time;
@@ -105,7 +109,11 @@ Safety-bearing evidence is a closed, frozen, versioned domain value rather than 
 Each evidence identity is a `sha256:` digest of its domain prefix plus canonical bytes. UUIDs,
 digests, positive byte counts, bounded opaque provider references, and timezone-aware UTC values
 are the only accepted leaves. Models forbid extra fields, canonicalize as compact sorted UTF-8
-JSON, reject noncanonical bytes on load, and reject documents above 65,536 bytes. Consequently a
+JSON, and reject documents above 65,536 bytes. Repository inputs are typed models or canonical
+bytes; byte inputs are reserialized and rejected before SQL if they differ. PostgreSQL stores the
+validated semantic object as `jsonb`; row loads revalidate the closed model and reconstruct
+canonical bytes before computing or checking the domain-prefixed identity. The schema therefore
+does not claim that `jsonb` preserves caller key order or whitespace. Consequently a
 bare `{\"absent\": true}`, a cross-activation/store proof, a path/URL/secret-shaped extra field, or
 an incomplete object set cannot satisfy repository validation.
 
@@ -137,7 +145,8 @@ of the matching live reservation happen in one store-locked transaction. A repea
 the existing tombstone only when all immutable identities match; a mismatch is a conflict.
 
 `external_boot_recovery_attempts` is keyed by `(activation_id, attempt_number)` and has a unique
-`attempt_id`. It records the authority generation that began the attempt, the optional
+`attempt_id`. It records the authority generation that began the attempt, its recovery basis
+(`recovery_point | pre_recovery`), the optional
 administrator resolution operation and acknowledged composite identity, one absolute recovery
 deadline, a closed `recovering | conflict | failed | recovered` state, and bounded conflict or
 terminal evidence. The activation stores the current `attempt_id`; foreign-key and repository
@@ -159,7 +168,9 @@ An activation also has immutable `pre_recovery_evidence`, written while preparat
 provider recovery object but before the complete canonical `RecoveryPoint` can be published. A
 `preparing -> recovery_conflict` row requires that evidence. It identifies the recorded source,
 provider-owned recovery object, and conflicting observation without claiming that source and target
-identities were both prepared.
+identities were both prepared. The slot stores `ExternalBootPreRecoveryEvidenceV1`; its activation,
+System, Run, and plan identities must equal the activation row, and its object identity joins the
+complete owned-object set used by release validation.
 
 Only the table-owning migration role and `kdive_server` receive direct mutation grants in 0121.
 `kdive_server` receives `SELECT`, `INSERT`, and `UPDATE` on activation, live-reservation, and
@@ -184,8 +195,8 @@ mean a matching `ready` reservation row exists and no release tombstone exists.
 | `active` | materialization, recovery point, terminal activation proof | ready live reservation; activation deadline retained |
 | `recovering` | materialization, current recovering-attempt row, and either a recovery point or conflict-resolution pre-recovery evidence | ready live reservation; current attempt deadline required and immutable |
 | `recovery_conflict` | current conflict-attempt row and typed conflict evidence; immutable pre-recovery evidence additionally required when entered from `preparing`; materialization and recovery point retained when the source state required them | ready live reservation unless authorized teardown cleanup completed; prior attempt deadlines retained |
-| `recovery_failed` | materialization, recovery point, and current failed-attempt evidence | ready live reservation; attempt deadline retained |
-| `recovered` | materialization, recovery point, and current recovered-attempt evidence | ready live reservation until release; attempt deadline retained |
+| `recovery_failed` | current failed-attempt evidence and its immutable recovery basis: materialization plus recovery point for `recovery_point`, or matching pre-recovery evidence for `pre_recovery` | ready live reservation; attempt deadline retained |
+| `recovered` | current recovered-attempt evidence and its immutable recovery basis: materialization plus recovery point for `recovery_point`, or matching pre-recovery evidence for `pre_recovery` | ready live reservation until release; attempt deadline retained |
 | `abandoned` | abandonment terminal evidence | pending or ready reservation until release; populated evidence remains immutable |
 
 `prepared`, `activating`, `active`, ordinary `recovering`, `recovery_failed`, and `recovered`
@@ -194,9 +205,11 @@ from `preparing`, so that edge requires exact pre-recovery ownership and observa
 not a recovery point that may never have been completed. Direct conflict from `prepared`,
 `activating`, or `active` retains the complete evidence already required in the source state. A
 conflict-resolution recovery may use pre-recovery evidence only with its mandatory resolution
-operation, idempotency identity, and acknowledged composite state. Row-local checks enforce
-evidence/deadline presence. Repository transaction predicates enforce the cross-row reservation
-rules and evidence immutability.
+operation, idempotency identity, and acknowledged composite state. Its attempt records
+`recovery_basis=pre_recovery`, which permits both `recovered` and `recovery_failed`
+terminalization without fabricating a recovery point; that basis is immutable for the attempt.
+Row-local checks enforce evidence/deadline presence. Repository transaction predicates enforce the
+cross-row reservation rules and evidence immutability.
 
 ## Repository interface
 
@@ -235,9 +248,11 @@ rules and evidence immutability.
   attempt with its absolute deadline and updates the activation's current attempt in the same
   System-locked transaction. On `recovery_conflict -> recovering`, it requires the resolution
   operation, idempotency identity, acknowledged composite state, and either the full recovery point
-  or pre-recovery evidence; on every other source state those resolution fields are forbidden;
+  or pre-recovery evidence, recording the corresponding immutable recovery basis; on every other
+  source state those resolution fields are forbidden;
 - `finish_recovery_attempt(...)`, which atomically changes the current attempt and activation from
-  `recovering` to `recovery_conflict`, `recovery_failed`, or `recovered`, retaining bounded evidence;
+  `recovering` to `recovery_conflict`, `recovery_failed`, or `recovered`, retaining typed evidence
+  and accepting either terminal outcome for a valid pre-recovery-basis attempt;
   and
 - `mark_cleanup_complete(...)`, which requires `recovered` or `abandoned` for ordinary cleanup, or
   `recovery_failed`/`recovery_conflict` plus teardown evidence for teardown cleanup, no live
@@ -357,6 +372,7 @@ ownership durable and stale compare-and-set writes impossible through this repos
   idempotent reservation release, successful and retained-capacity teardown branches, two distinct
   conflict-to-recovery attempts, a preparing conflict resolved without a fabricated recovery point,
   direct conflict persistence from each of `preparing`, `prepared`, `activating`, and `active`,
+  successful and failed terminalization of a pre-recovery-basis attempt without a recovery point,
   rejection of missing resolution identity/operation, restart reads of current and paginated prior
   attempts, materialization idempotency, release before verified object absence, unknown/missing/
   cross-activation/cross-store evidence fields, path- or secret-shaped extras, teardown release
