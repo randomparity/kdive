@@ -20,6 +20,7 @@ generation per System and is never decremented or deleted by application roles.
 `external_boot_authorities` stores the immutable System, Allocation, activation, Run, plan, job,
 attempt, purpose, provider, authority-instance, worker-incarnation, operation identity, and digest
 binding plus its `allocating|current|superseded|retired` state. A partial unique index permits one
+`current` authority per System.
 `external_boot_authority_acknowledgements` stores the provider-authority principal's
 acknowledgement, journal sequence/digest, operation digest, and positive-quiescence digest, and
 promotion requires an exact match to the newest allocating authority's immutable binding.
