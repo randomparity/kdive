@@ -103,14 +103,14 @@ Protocol-3 incarnations remain unable to authenticate or claim any work. Rollbac
 generic finalization for an already-marked job. All ordinary jobs retain their existing exact-attempt
 fence and behavior.
 
-Every text input is measured in UTF-8 bytes before mutation. Provider kind, purpose, phase, and
-operation are closed enums; authority instance and operation identity are 1–255 bytes; opaque
-authority references are UUIDs; plan, operation, record, previous-record, and quiescence digests use
-`sha256:` plus 64 lowercase hex digits; result references are null or 1–2048 bytes; failure context
+Every text input is measured in UTF-8 bytes before mutation. Provider kind, purpose, and operation
+are closed enums; authority instance and operation identity are 1–255 bytes; opaque authority
+references are UUIDs; plan, operation, journal, and quiescence digests use `sha256:` plus 64 lowercase
+hex digits; result references are null or 1–2048 bytes; failure context
 is a JSON object of at most 32 string entries, each key 1–64 bytes and value at most 1024 bytes, with
-total PostgreSQL size at most 32 KiB; lifecycle evidence is a JSON object at most 64 KiB. Journal
-sequence is positive and must increase by exactly one. Audit outcome text is a closed enum and audit
-rows carry no caller-supplied free text.
+total PostgreSQL size at most 32 KiB; lifecycle evidence is a JSON object at most 64 KiB. The opaque
+journal sequence is positive; #2126 owns continuity validation. Audit outcome text is a closed enum
+and audit rows carry no caller-supplied free text.
 
 Lifecycle evidence is not generic JSON. Each operation accepts the existing versioned ADR-0583
 evidence schema for that state edge and verifies its required ownership, outcome, identity, and
