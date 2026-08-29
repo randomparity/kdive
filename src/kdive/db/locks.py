@@ -37,7 +37,8 @@ class LockScope(StrEnum):
     """The advisory-lock scopes the platform serializes on (ADR-0016, ADR-0040).
 
     Operations that hold more than one scope at once acquire them in the fixed global
-    total order ``PROJECT → RESOURCE → ALLOCATION → SYSTEM → INVESTIGATION → RUN`` to avoid
+    total order ``PROJECT → RESOURCE → ALLOCATION → SYSTEM → RECOVERY_STORE → INVESTIGATION → RUN``
+    to avoid
     deadlock; e.g. ``allocations.request`` takes ``PROJECT`` then ``RESOURCE`` (ADR-0040 §1)
     and ``runs.create`` takes ``SYSTEM`` then ``INVESTIGATION`` (ADR-0027).
 
@@ -66,6 +67,7 @@ class LockScope(StrEnum):
     PROJECT = "project"
     ALLOCATION = "allocation"
     SYSTEM = "system"
+    RECOVERY_STORE = "recovery_store"
     RESOURCE = "resource"
     INVESTIGATION = "investigation"
     RUN = "run"

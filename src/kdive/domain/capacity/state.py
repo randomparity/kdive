@@ -178,6 +178,27 @@ class JobState(StrEnum):
     CANCELED = "canceled"
 
 
+class ExternalBootActivationState(StrEnum):
+    """Durable external-boot activation lifecycle (ADR-0583)."""
+
+    PREPARING = "preparing"
+    PREPARED = "prepared"
+    ACTIVATING = "activating"
+    ACTIVE = "active"
+    RECOVERING = "recovering"
+    RECOVERED = "recovered"
+    RECOVERY_CONFLICT = "recovery_conflict"
+    RECOVERY_FAILED = "recovery_failed"
+    ABANDONED = "abandoned"
+
+
+class ExternalBootReservationState(StrEnum):
+    """Recovery-store capacity reservation lifecycle (ADR-0583)."""
+
+    PENDING = "pending"
+    READY = "ready"
+
+
 class IllegalTransition(ValueError):
     """Raised when a state change is not permitted by the guard table.
 
@@ -284,6 +305,52 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
         JobState.SUCCEEDED: frozenset(),
         JobState.FAILED: frozenset(),
         JobState.CANCELED: frozenset(),
+    },
+    ExternalBootActivationState: {
+        ExternalBootActivationState.PREPARING: frozenset(
+            {
+                ExternalBootActivationState.PREPARED,
+                ExternalBootActivationState.ABANDONED,
+                ExternalBootActivationState.RECOVERY_CONFLICT,
+            }
+        ),
+        ExternalBootActivationState.PREPARED: frozenset(
+            {
+                ExternalBootActivationState.ACTIVATING,
+                ExternalBootActivationState.RECOVERING,
+                ExternalBootActivationState.RECOVERY_CONFLICT,
+            }
+        ),
+        ExternalBootActivationState.ACTIVATING: frozenset(
+            {
+                ExternalBootActivationState.ACTIVE,
+                ExternalBootActivationState.RECOVERING,
+                ExternalBootActivationState.RECOVERY_CONFLICT,
+            }
+        ),
+        ExternalBootActivationState.ACTIVE: frozenset(
+            {
+                ExternalBootActivationState.RECOVERING,
+                ExternalBootActivationState.RECOVERY_CONFLICT,
+            }
+        ),
+        ExternalBootActivationState.RECOVERING: frozenset(
+            {
+                ExternalBootActivationState.RECOVERED,
+                ExternalBootActivationState.RECOVERY_FAILED,
+                ExternalBootActivationState.RECOVERY_CONFLICT,
+            }
+        ),
+        ExternalBootActivationState.RECOVERY_CONFLICT: frozenset(
+            {ExternalBootActivationState.RECOVERING}
+        ),
+        ExternalBootActivationState.RECOVERED: frozenset(),
+        ExternalBootActivationState.RECOVERY_FAILED: frozenset(),
+        ExternalBootActivationState.ABANDONED: frozenset(),
+    },
+    ExternalBootReservationState: {
+        ExternalBootReservationState.PENDING: frozenset({ExternalBootReservationState.READY}),
+        ExternalBootReservationState.READY: frozenset(),
     },
 }
 
