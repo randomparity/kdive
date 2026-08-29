@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import selectors
 import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import IO, cast
 from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  # nosec B405
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -118,6 +119,7 @@ def _run_bounded_inspector(
     deadline = time.monotonic() + timeout_s
     selector = selectors.DefaultSelector()
     for stream in streams:
+        os.set_blocking(stream.fileno(), False)
         selector.register(stream, selectors.EVENT_READ)
     try:
         while selector.get_map():
@@ -128,8 +130,11 @@ def _run_bounded_inspector(
             if not events:
                 raise TimeoutError
             for key, _ in events:
-                stream = cast("BinaryIO", key.fileobj)
-                chunk = stream.read(65_536)
+                stream = cast("IO[bytes]", key.fileobj)
+                try:
+                    chunk = os.read(stream.fileno(), 65_536)
+                except BlockingIOError:
+                    continue
                 if not chunk:
                     selector.unregister(stream)
                     continue

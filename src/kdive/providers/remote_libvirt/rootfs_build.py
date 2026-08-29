@@ -176,6 +176,7 @@ class RemoteLibvirtRootfsBuildPlane:
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=scratch)
         digest = digest_file(qcow2)
         if digest != image_digest:
+            qcow2.unlink(missing_ok=True)
             raise CategorizedError(
                 "published image identity changed after root inspection; rebuild and retry",
                 category=ErrorCategory.PROVISIONING_FAILURE,

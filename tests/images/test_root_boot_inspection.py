@@ -36,6 +36,13 @@ def test_bounded_runner_kills_timeout() -> None:
     assert exc.value.details["reason"] == "timeout"
 
 
+def test_bounded_runner_kills_partial_output_then_timeout() -> None:
+    code = "import os,time; os.write(1,b'prefix'); time.sleep(5)"
+    with pytest.raises(CategorizedError) as exc:
+        _run_bounded_inspector([sys.executable, "-c", code], timeout_s=0.01)
+    assert exc.value.details["reason"] == "timeout"
+
+
 def test_parser_builds_digest_bound_root_spec() -> None:
     xml = b"""<operatingsystems><operatingsystem><mountpoints>
       <mountpoint dev='/dev/sda2'>/</mountpoint></mountpoints><filesystems>

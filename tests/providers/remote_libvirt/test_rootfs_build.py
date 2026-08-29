@@ -297,6 +297,22 @@ def test_root_inspection_failure_publishes_no_image(tmp_path: Path) -> None:
     assert not (workspace / "fedora-remote-43.qcow2").exists()
 
 
+def test_post_publish_identity_mismatch_removes_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rec = _Recorder()
+    real_digest = "sha256:" + hashlib.sha256(rec.payload).hexdigest()
+    calls = iter((real_digest, "sha256:" + "b" * 64))
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.rootfs_build.digest_file", lambda _p: next(calls)
+    )
+    workspace = tmp_path / "work"
+    with pytest.raises(CategorizedError) as exc:
+        _plane(tmp_path, rec).build(_spec())
+    assert exc.value.details["reason"] == "identity_changed"
+    assert not (workspace / "fedora-remote-43.qcow2").exists()
+
+
 @pytest.mark.parametrize(
     "category",
     [ErrorCategory.MISSING_DEPENDENCY, ErrorCategory.INFRASTRUCTURE_FAILURE],
