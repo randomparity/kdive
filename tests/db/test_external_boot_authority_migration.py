@@ -14,6 +14,8 @@ from psycopg.conninfo import make_conninfo
 from psycopg.sql import SQL, Identifier, Literal
 from psycopg.types.json import Jsonb
 
+from kdive.db import migrate
+from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from tests.db_waits import wait_until_blocked_by
 
 _LOGIN_PASSWORD = "external-boot-authority-test"  # pragma: allowlist secret
@@ -71,6 +73,17 @@ class _Allocated:
     authority_id: UUID
     generation: int
     operation_digest: str
+
+
+def _apply_through(conn: psycopg.Connection, version: str) -> None:
+    for migration in migrate.discover_migrations():
+        if migration.version <= version:
+            conn.execute(migration.sql.encode())
+
+
+def _apply_version(conn: psycopg.Connection, version: str) -> None:
+    migration = next(item for item in migrate.discover_migrations() if item.version == version)
+    conn.execute(migration.sql.encode())
 
 
 @pytest.fixture
@@ -161,7 +174,7 @@ def _seed_case(
     conn.execute(
         "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, build_profile, "
         "principal, project) VALUES (%s, %s, %s, 'local-libvirt', %s, '{}'::jsonb, 'p', 'proj')",
-        (run_id, investigation_id, system_id, "failed" if purpose == "teardown" else "running"),
+        (run_id, investigation_id, system_id, "failed" if purpose == "teardown" else "succeeded"),
     )
     materialization, recovery_point = _activation_evidence(system_id, run_id)
     if purpose == "teardown":
@@ -571,6 +584,33 @@ def test_concurrent_allocations_are_strictly_ordered_per_system(
         ).fetchall() == [("allocating", 1), ("superseded", 1)]
 
 
+def test_upgrade_counter_starts_above_existing_activation_and_recovery_generations(
+    pg_conn: psycopg.Connection,
+) -> None:
+    _apply_through(pg_conn, "0121")
+    case = _seed_case(pg_conn, worker_suffix="u")
+    pg_conn.execute(
+        "UPDATE external_boot_activations SET authority_generation=17 WHERE id=%s",
+        (case.activation_id,),
+    )
+    pg_conn.execute(
+        "INSERT INTO external_boot_recovery_attempts "
+        "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
+        "recovery_readiness_deadline, state) "
+        "VALUES (%s, 1, %s, 23, 'recovery_point', now(), 'recovering')",
+        (case.activation_id, uuid4()),
+    )
+
+    _apply_version(pg_conn, "0122")
+
+    authority = _allocate(pg_conn, case)
+    assert authority.generation == 24
+    assert pg_conn.execute(
+        "SELECT last_generation FROM external_boot_authority_counters WHERE system_id=%s",
+        (case.system_id,),
+    ).fetchone() == (24,)
+
+
 def test_allocation_release_wins_before_a_waiting_authority_can_mint(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
@@ -647,6 +687,151 @@ def test_every_purpose_maps_to_its_exact_running_job_kind(
         assert _allocate(worker, case).generation == 1
 
 
+@pytest.mark.parametrize("purpose", ["activate", "recover"])
+def test_succeeded_run_can_allocate_and_commit_activation_or_recovery(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    purpose: str,
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose=purpose, worker_suffix="h")
+        _prepare_purpose_state(conn, case, purpose)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+
+    if purpose == "activate":
+        with psycopg.connect(migrated_url) as conn:
+            conn.execute(
+                "UPDATE external_boot_activations "
+                "SET state='activating', activation_readiness_deadline=now() WHERE id=%s",
+                (case.activation_id,),
+            )
+        result = {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": _EVIDENCE_DIGEST,
+            "evidence": _terminal_evidence(case, "active"),
+            "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
+        }
+    else:
+        attempt_id = uuid4()
+        with psycopg.connect(migrated_url) as conn:
+            conn.execute(
+                "INSERT INTO external_boot_recovery_attempts "
+                "(activation_id, attempt_number, attempt_id, authority_generation, "
+                "recovery_basis, recovery_readiness_deadline, state) "
+                "VALUES (%s, 1, %s, %s, 'recovery_point', now(), 'recovering')",
+                (case.activation_id, attempt_id, authority.generation),
+            )
+            conn.execute(
+                "UPDATE external_boot_activations "
+                "SET state='recovering', current_attempt_id=%s WHERE id=%s",
+                (attempt_id, case.activation_id),
+            )
+        result = {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "recover",
+            "result_ref": _EVIDENCE_DIGEST,
+            "evidence": _terminal_evidence(case, "recovered"),
+        }
+
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(worker, case, authority, result) == ("applied", "succeeded")
+
+
+@pytest.mark.parametrize("purpose", ["activate", "recover"])
+def test_non_succeeded_run_cannot_allocate_activation_or_recovery(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    purpose: str,
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose=purpose, worker_suffix="i")
+        _prepare_purpose_state(conn, case, purpose)
+        conn.execute("UPDATE runs SET state='running' WHERE id=%s", (case.run_id,))
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        row = worker.execute(
+            "SELECT status FROM allocate_external_boot_authority(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                case.credential,
+                case.job_id,
+                case.attempt,
+                case.activation_id,
+                case.run_id,
+                case.system_id,
+                _PLAN,
+                case.purpose,
+                case.provider_kind,
+                case.authority_instance,
+                case.operation_identity,
+            ),
+        ).fetchone()
+    assert row == ("superseded",)
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute("SELECT count(*) FROM external_boot_authorities").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("purpose", ["activate", "recover"])
+def test_non_succeeded_run_supersedes_activation_or_recovery_commit_without_writes(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    purpose: str,
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose=purpose, worker_suffix="j")
+        _prepare_purpose_state(conn, case, purpose)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+
+    if purpose == "activate":
+        with psycopg.connect(migrated_url) as conn:
+            conn.execute(
+                "UPDATE external_boot_activations "
+                "SET state='activating', activation_readiness_deadline=now() WHERE id=%s",
+                (case.activation_id,),
+            )
+        result = {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": _EVIDENCE_DIGEST,
+            "evidence": _terminal_evidence(case, "active"),
+            "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
+        }
+    else:
+        attempt_id = uuid4()
+        with psycopg.connect(migrated_url) as conn:
+            conn.execute(
+                "INSERT INTO external_boot_recovery_attempts "
+                "(activation_id, attempt_number, attempt_id, authority_generation, "
+                "recovery_basis, recovery_readiness_deadline, state) "
+                "VALUES (%s, 1, %s, %s, 'recovery_point', now(), 'recovering')",
+                (case.activation_id, attempt_id, authority.generation),
+            )
+            conn.execute(
+                "UPDATE external_boot_activations "
+                "SET state='recovering', current_attempt_id=%s WHERE id=%s",
+                (attempt_id, case.activation_id),
+            )
+        result = {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "recover",
+            "result_ref": _EVIDENCE_DIGEST,
+            "evidence": _terminal_evidence(case, "recovered"),
+        }
+
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("UPDATE runs SET state='running' WHERE id=%s", (case.run_id,))
+        before = _result_state_snapshot(conn, case, authority)
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(worker, case, authority, result) == ("superseded", None)
+    with psycopg.connect(migrated_url) as conn:
+        assert _result_state_snapshot(conn, case, authority) == before
+
+
 def test_later_run_cannot_reuse_an_earlier_activation_binding(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
@@ -660,7 +845,7 @@ def test_later_run_cannot_reuse_an_earlier_activation_binding(
         conn.execute(
             "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, "
             "build_profile, principal, project) VALUES "
-            "(%s, %s, %s, 'local-libvirt', 'running', '{}'::jsonb, 'p', 'proj')",
+            "(%s, %s, %s, 'local-libvirt', 'succeeded', '{}'::jsonb, 'p', 'proj')",
             (later_run_id, investigation_id[0], case.system_id),
         )
         conn.execute(
@@ -1095,6 +1280,127 @@ def test_unrecognized_release_object_reference_is_rejected_without_writes(
         _commit(worker, case, authority, result)
     with psycopg.connect(migrated_url) as conn:
         assert _result_state_snapshot(conn, case, authority) == before
+
+
+@pytest.mark.parametrize(
+    "invalid_shape",
+    [
+        pytest.param("reserved-bytes-string", id="reserved-bytes-string"),
+        pytest.param("enumeration-complete-string", id="enumeration-complete-string"),
+        pytest.param("store-reference-integer", id="store-reference-integer"),
+        pytest.param("owner-reference-boolean", id="owner-reference-boolean"),
+        pytest.param("absent-string", id="absent-string"),
+        pytest.param("object-reference-integer", id="object-reference-integer"),
+        pytest.param("duplicate-objects", id="duplicate-objects"),
+        pytest.param("unordered-objects", id="unordered-objects"),
+    ],
+)
+def test_release_evidence_requires_exact_types_and_canonical_objects_without_writes(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    invalid_shape: str,
+) -> None:
+    first = {"object": {"ref": "owner"}, "absent": True}
+    second = {"object": {"ref": "store"}, "absent": True}
+    store_identity = "1" if invalid_shape == "store-reference-integer" else "store"
+    owner_key = "true" if invalid_shape == "owner-reference-boolean" else "owner"
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="release", worker_suffix="v")
+        _prepare_purpose_state(conn, case, "release")
+        conn.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
+            "VALUES (%s, %s, %s, 4096, 'ready', now())",
+            (case.activation_id, store_identity, owner_key),
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+
+    evidence = _release_evidence(case)
+    evidence["store_identity"] = {"ref": store_identity}
+    evidence["owner_key"] = {"ref": owner_key}
+    if invalid_shape == "reserved-bytes-string":
+        evidence["reserved_bytes"] = "4096"
+    elif invalid_shape == "enumeration-complete-string":
+        evidence["enumeration_complete"] = "true"
+    elif invalid_shape == "store-reference-integer":
+        evidence["store_identity"] = {"ref": 1}
+    elif invalid_shape == "owner-reference-boolean":
+        evidence["owner_key"] = {"ref": True}
+    elif invalid_shape == "absent-string":
+        evidence["objects"] = [{"object": {"ref": "owner"}, "absent": "true"}]
+    elif invalid_shape == "object-reference-integer":
+        evidence["objects"] = [{"object": {"ref": 1}, "absent": True}]
+    elif invalid_shape == "duplicate-objects":
+        evidence["objects"] = [first, first]
+    else:
+        evidence["objects"] = [second, first]
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "release",
+        "result_ref": _EVIDENCE_DIGEST,
+        "release_identity": _EVIDENCE_DIGEST,
+        "evidence": evidence,
+    }
+    with psycopg.connect(migrated_url) as conn:
+        before = _result_state_snapshot(conn, case, authority)
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InvalidParameterValue),
+    ):
+        _commit(worker, case, authority, result)
+    with psycopg.connect(migrated_url) as conn:
+        assert _result_state_snapshot(conn, case, authority) == before
+
+
+def test_canonical_release_evidence_round_trips_through_application_model(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="release", worker_suffix="w")
+        _prepare_purpose_state(conn, case, "release")
+        conn.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
+            "VALUES (%s, 'store', 'owner', 4096, 'ready', now())",
+            (case.activation_id,),
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+
+    evidence = _release_evidence(case)
+    evidence["objects"] = [
+        {"object": {"ref": "owner"}, "absent": True},
+        {"object": {"ref": "store"}, "absent": True},
+    ]
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "release",
+                "result_ref": _EVIDENCE_DIGEST,
+                "release_identity": _EVIDENCE_DIGEST,
+                "evidence": evidence,
+            },
+        ) == ("applied", "succeeded")
+    with psycopg.connect(migrated_url) as conn:
+        row = conn.execute(
+            "SELECT release_evidence FROM external_boot_reservation_releases "
+            "WHERE activation_id=%s",
+            (case.activation_id,),
+        ).fetchone()
+    assert row is not None
+    restored = ExternalBootReleaseEvidenceV1.model_validate(row[0])
+    assert [item.object.ref for item in restored.objects] == ["owner", "store"]
+    assert restored.reserved_bytes == 4096
+    assert restored.enumeration_complete is True
 
 
 def test_database_known_provider_reference_can_be_committed(
@@ -1605,6 +1911,52 @@ def test_retry_failure_requeues_job_and_audits_in_one_commit(
             "WHERE authority_id=%s ORDER BY created_at DESC LIMIT 1",
             (authority.authority_id,),
         ).fetchone() == ("result_requeued",)
+
+
+@pytest.mark.parametrize("release_identity_kind", ["missing", "null"])
+def test_teardown_requires_existing_release_and_present_identity_without_writes(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    release_identity_kind: str,
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, purpose="teardown", worker_suffix="x")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+
+    cleanup: dict[str, object] = {
+        "schema": "external-boot-cleanup-evidence-v1",
+        "activation_id": str(case.activation_id),
+        "system_id": str(case.system_id),
+        "mode": "system_teardown",
+        "teardown_identity": _EVIDENCE_DIGEST,
+        "completed_at": _OBSERVED_AT,
+    }
+    if release_identity_kind == "null":
+        cleanup["release_identity"] = None
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "teardown",
+        "result_ref": _EVIDENCE_DIGEST,
+        "teardown_evidence": {
+            "schema": "external-boot-teardown-evidence-v1",
+            "system_id": str(case.system_id),
+            "system_state": "torn_down",
+            "observed_at": _OBSERVED_AT,
+        },
+        "cleanup_evidence": cleanup,
+    }
+    with psycopg.connect(migrated_url) as conn:
+        before = _result_state_snapshot(conn, case, authority)
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InvalidParameterValue),
+    ):
+        _commit(worker, case, authority, result)
+    with psycopg.connect(migrated_url) as conn:
+        assert _result_state_snapshot(conn, case, authority) == before
 
 
 def test_teardown_is_terminal_only_inside_current_authority_commit(

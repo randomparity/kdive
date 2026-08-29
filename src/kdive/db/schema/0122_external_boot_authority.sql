@@ -62,6 +62,22 @@ CREATE TABLE public.external_boot_authority_counters (
     updated_at      timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+INSERT INTO public.external_boot_authority_counters (system_id, last_generation)
+SELECT
+    system_row.id,
+    coalesce(max(existing.generation), 0)
+FROM public.systems AS system_row
+LEFT JOIN (
+    SELECT activation.system_id, activation.authority_generation AS generation
+    FROM public.external_boot_activations AS activation
+    UNION ALL
+    SELECT activation.system_id, attempt.authority_generation AS generation
+    FROM public.external_boot_recovery_attempts AS attempt
+    JOIN public.external_boot_activations AS activation
+      ON activation.id = attempt.activation_id
+) AS existing ON existing.system_id = system_row.id
+GROUP BY system_row.id;
+
 CREATE TABLE public.external_boot_authorities (
     id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     system_id            uuid NOT NULL REFERENCES public.systems (id) ON DELETE RESTRICT,
@@ -464,11 +480,11 @@ BEGIN
        OR (p_purpose = 'release' AND v_operation NOT IN ('release', 'cleanup', 'fail'))
        OR (p_purpose = 'teardown' AND v_operation NOT IN ('teardown', 'fail'))
        OR (p_purpose = 'activate' AND (
-           v_system.state <> 'ready' OR v_run.state <> 'running'
+           v_system.state <> 'ready' OR v_run.state <> 'succeeded'
            OR v_activation.state NOT IN ('prepared', 'activating')
        ))
        OR (p_purpose = 'recover' AND (
-           v_system.state NOT IN ('ready', 'crashed') OR v_run.state <> 'running'
+           v_system.state NOT IN ('ready', 'crashed') OR v_run.state <> 'succeeded'
            OR v_activation.state NOT IN ('active', 'recovering')
        ))
        OR (p_purpose = 'resolve-conflict' AND (
@@ -1048,7 +1064,19 @@ BEGIN
     END IF;
     IF v_operation = 'release'
        AND (
-           EXISTS (
+           jsonb_typeof(p_result #> '{evidence,reserved_bytes}') IS DISTINCT FROM 'number'
+           OR (p_result #> '{evidence,reserved_bytes}')::text !~ '^[1-9][0-9]*$'
+           OR jsonb_typeof(p_result #> '{evidence,enumeration_complete}')
+                IS DISTINCT FROM 'boolean'
+           OR p_result #> '{evidence,enumeration_complete}' IS DISTINCT FROM 'true'::jsonb
+           OR jsonb_typeof(p_result #> '{evidence,store_identity}') IS DISTINCT FROM 'object'
+           OR jsonb_typeof(p_result #> '{evidence,store_identity,ref}')
+                IS DISTINCT FROM 'string'
+           OR octet_length(p_result #>> '{evidence,store_identity,ref}') NOT BETWEEN 1 AND 1024
+           OR jsonb_typeof(p_result #> '{evidence,owner_key}') IS DISTINCT FROM 'object'
+           OR jsonb_typeof(p_result #> '{evidence,owner_key,ref}') IS DISTINCT FROM 'string'
+           OR octet_length(p_result #>> '{evidence,owner_key,ref}') NOT BETWEEN 1 AND 1024
+           OR EXISTS (
                SELECT 1
                FROM jsonb_object_keys(
                    CASE WHEN jsonb_typeof(p_result #> '{evidence,store_identity}') = 'object'
@@ -1071,7 +1099,8 @@ BEGIN
                         THEN p_result #> '{evidence,objects}' ELSE '[]'::jsonb END
                ) AS item(value)
                WHERE jsonb_typeof(item.value) <> 'object'
-                  OR item.value ->> 'absent' IS DISTINCT FROM 'true'
+                  OR jsonb_typeof(item.value -> 'absent') IS DISTINCT FROM 'boolean'
+                  OR item.value -> 'absent' IS DISTINCT FROM 'true'::jsonb
                   OR EXISTS (
                       SELECT 1
                       FROM jsonb_object_keys(
@@ -1081,6 +1110,8 @@ BEGIN
                       WHERE field <> ALL (ARRAY['object', 'absent'])
                   )
                   OR jsonb_typeof(item.value -> 'object') IS DISTINCT FROM 'object'
+                  OR jsonb_typeof(item.value #> '{object,ref}') IS DISTINCT FROM 'string'
+                  OR octet_length(item.value #>> '{object,ref}') NOT BETWEEN 1 AND 1024
                   OR EXISTS (
                       SELECT 1
                       FROM jsonb_object_keys(
@@ -1089,6 +1120,21 @@ BEGIN
                       ) AS field
                       WHERE field <> 'ref'
                   )
+           )
+           OR EXISTS (
+               SELECT 1
+               FROM (
+                   SELECT
+                       to_jsonb(item.value #>> '{object,ref}')::text AS encoded_ref,
+                       lag(to_jsonb(item.value #>> '{object,ref}')::text) OVER (
+                           ORDER BY item.ordinality
+                       ) AS previous_encoded_ref
+                   FROM jsonb_array_elements(
+                       CASE WHEN jsonb_typeof(p_result #> '{evidence,objects}') = 'array'
+                            THEN p_result #> '{evidence,objects}' ELSE '[]'::jsonb END
+                   ) WITH ORDINALITY AS item(value, ordinality)
+               ) AS ordered_objects
+               WHERE (previous_encoded_ref COLLATE "C") >= (encoded_ref COLLATE "C")
            )
        ) THEN
         RAISE EXCEPTION 'external boot release object evidence is invalid'
@@ -1213,12 +1259,12 @@ BEGIN
 
     IF (v_operation = 'activate' AND (
            v_system.state IS DISTINCT FROM 'ready'
-           OR v_run.state IS DISTINCT FROM 'running'
+           OR v_run.state IS DISTINCT FROM 'succeeded'
            OR v_activation.state IS DISTINCT FROM 'activating'
        ))
        OR (v_operation IN ('recover', 'resolve-conflict') AND (
            v_system.state NOT IN ('ready', 'crashed')
-           OR v_run.state IS DISTINCT FROM 'running'
+           OR v_run.state IS DISTINCT FROM 'succeeded'
            OR v_activation.state IS DISTINCT FROM 'recovering'
            OR v_attempt.state IS DISTINCT FROM 'recovering'
        ))
@@ -1242,39 +1288,39 @@ BEGIN
        OR (v_operation = 'deadline' AND (
            (p_purpose = 'activate' AND (
                v_system.state IS DISTINCT FROM 'ready'
-               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state IS DISTINCT FROM 'activating'
            ))
            OR (p_purpose <> 'activate' AND (
                v_system.state NOT IN ('ready', 'crashed')
-               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state IS DISTINCT FROM 'recovering'
                OR v_attempt.state IS DISTINCT FROM 'recovering'
            ))
        ))
        OR (v_operation = 'recovery-attempt' AND (
            v_system.state NOT IN ('ready', 'crashed')
-           OR v_run.state IS DISTINCT FROM 'running'
+           OR v_run.state IS DISTINCT FROM 'succeeded'
            OR v_activation.state IS DISTINCT FROM 'active'
        ))
        OR (v_operation = 'fail' AND (
            (p_purpose = 'activate' AND (
                v_system.state IS DISTINCT FROM 'ready'
-               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state NOT IN ('prepared', 'activating')
            ))
            OR (p_purpose = 'recover' AND (
                v_system.state NOT IN ('ready', 'crashed')
-               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state NOT IN ('active', 'recovering')
            ))
            OR (p_purpose = 'resolve-conflict' AND (
                v_system.state NOT IN ('ready', 'crashed', 'failed')
-               OR v_run.state IS DISTINCT FROM 'running'
+               OR v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state IS DISTINCT FROM 'recovery_conflict'
            ))
            OR (p_purpose = 'release' AND (
-               v_run.state IS DISTINCT FROM 'running'
+               v_run.state IS DISTINCT FROM 'succeeded'
                OR v_activation.state NOT IN (
                    'active', 'recovered', 'abandoned',
                    'recovery_conflict', 'recovery_failed'
@@ -1327,6 +1373,9 @@ BEGIN
     ELSIF v_operation = 'teardown' THEN
         IF p_purpose <> 'teardown'
            OR v_activation.state NOT IN ('recovery_conflict', 'recovery_failed')
+           OR v_release.activation_id IS NULL
+           OR v_release.release_identity IS NULL
+           OR v_release.release_identity !~ '^sha256:[0-9a-f]{64}$'
            OR p_result -> 'teardown_evidence' ->> 'schema'
                 IS DISTINCT FROM 'external-boot-teardown-evidence-v1'
            OR p_result -> 'teardown_evidence' ->> 'system_id'
