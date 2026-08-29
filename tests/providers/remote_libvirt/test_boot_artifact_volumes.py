@@ -83,6 +83,12 @@ class _Pool:
         self.created = _Volume()
         return self.created
 
+    def createXMLFrom(self, xml: str, volume: object, flags: int = 0) -> _Volume:  # noqa: N802
+        del volume, flags
+        self.created_xml.append(xml)
+        self.created = _Volume()
+        return self.created
+
 
 class _Conn:
     def __init__(self, pool: _Pool, streams: list[_Stream]) -> None:
@@ -109,8 +115,11 @@ def test_materializes_kernel_and_optional_initrd_with_opaque_deterministic_refs(
     assert result.kernel.ref == f"kernel/{SYSTEM}/{RUN}"
     assert result.initrd is not None
     assert result.initrd.ref == f"initrd/{SYSTEM}/{RUN}"
-    assert len(pool.created_xml) == 2
+    assert len(pool.created_xml) == 4
     assert "kdive-kernel" in pool.created_xml[0]
+    assert "-partial-" in pool.created_xml[0]
+    assert "kdive-kernel" in pool.created_xml[1]
+    assert "-partial-" not in pool.created_xml[1]
 
 
 def test_retry_rehashes_existing_volume_and_reuses_matching_identity() -> None:

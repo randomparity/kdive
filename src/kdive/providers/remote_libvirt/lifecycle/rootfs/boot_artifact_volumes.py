@@ -44,6 +44,9 @@ class _ArtifactVolume(Protocol):
 class _ArtifactPool(Protocol):
     def storageVolLookupByName(self, name: str) -> _ArtifactVolume: ...  # noqa: N802
     def createXML(self, xml: str, flags: int = 0) -> _ArtifactVolume: ...  # noqa: N802
+    def createXMLFrom(
+        self, xml: str, volume: _ArtifactVolume, flags: int = 0
+    ) -> _ArtifactVolume: ...  # noqa: N802
 
 
 class BootArtifactVolumeConn(Protocol):
@@ -72,6 +75,14 @@ class BootArtifact:
 def artifact_volume_name(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -> str:
     """Return the deterministic final volume name for one owned boot artifact."""
     return f"kdive-{kind}-{system_id}-{run_id}"
+
+
+def artifact_partial_volume_name(
+    kind: BootArtifactKind, system_id: UUID, run_id: UUID, payload: bytes
+) -> str:
+    """Return the deterministic, attempt-owned staging volume name."""
+    digest = hashlib.sha256(payload).hexdigest()
+    return f"{artifact_volume_name(kind, system_id, run_id)}-partial-{digest}"
 
 
 def artifact_volume_ref(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -> OpaqueProviderRef:
@@ -143,7 +154,7 @@ def _upload_volume(
     *,
     kind: BootArtifactKind,
     pool_name: str,
-) -> None:
+) -> _ArtifactVolume:
     volume: _ArtifactVolume | None = None
     stream: _ArtifactStream | None = None
     try:
@@ -172,6 +183,8 @@ def _upload_volume(
             with contextlib.suppress(libvirt.libvirtError):
                 volume.delete(0)
         raise _infra("streaming the artifact", kind=kind, pool=pool_name) from exc
+    assert volume is not None
+    return volume
 
 
 def _materialize_one(
@@ -197,7 +210,29 @@ def _materialize_one(
         if not matches:
             raise _conflict(kind, pool_name)
         return ref, False
-    _upload_volume(conn, pool, name, payload, kind=kind, pool_name=pool_name)
+    partial_name = artifact_partial_volume_name(kind, system_id, run_id, payload)
+    staged: _ArtifactVolume | None = None
+    try:
+        partial = _lookup(pool, partial_name)
+        if partial is not None:
+            # A partial with this deterministic ownership key can only be from an earlier attempt
+            # of this exact artifact.  It is never a published volume and is safe to replace.
+            partial.delete(0)
+        staged = _upload_volume(conn, pool, partial_name, payload, kind=kind, pool_name=pool_name)
+        pool.createXMLFrom(
+            render_boot_artifact_volume_xml(name, capacity_bytes=len(payload)), staged
+        )
+        try:
+            staged.delete(0)
+        except libvirt.libvirtError as exc:
+            # The final copy is complete and immutable; leave it available for an identity-checking
+            # retry while surfacing the cleanup fault as infrastructure failure.
+            raise _infra("cleaning the staged artifact", kind=kind, pool=pool_name) from exc
+    except libvirt.libvirtError as exc:
+        if staged is not None:
+            with contextlib.suppress(libvirt.libvirtError):
+                staged.delete(0)
+        raise _infra("publishing the artifact", kind=kind, pool=pool_name) from exc
     return ref, True
 
 
