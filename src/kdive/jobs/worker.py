@@ -505,7 +505,9 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
             marker = _external_marker(job)
             if marker is not None:
-                if isinstance(exc, ExternalBootAuthorityFailure):
+                if isinstance(exc, ExternalBootAuthorityFailure) and _authority_binding_matches(
+                    marker, exc.result
+                ):
                     await self._commit_external_result(job, exc.result)
                 else:
                     _log.warning(
@@ -531,7 +533,9 @@ class Worker:
             return
         marker = _external_marker(job)
         if marker is not None:
-            if isinstance(result_ref, ExternalBootAuthorityResultV1):
+            if isinstance(result_ref, ExternalBootAuthorityResultV1) and _authority_binding_matches(
+                marker, result_ref
+            ):
                 await self._commit_external_result(job, result_ref)
             else:
                 _log.warning("marked external boot job %s returned no authority result", job.id)
@@ -621,6 +625,25 @@ def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
 
 
 _MALFORMED_EXTERNAL_MARKER = ExternalBootAuthorityMarkerV1.model_construct()
+
+
+def _authority_binding_matches(
+    marker: ExternalBootAuthorityMarkerV1, result: ExternalBootAuthorityResultV1
+) -> bool:
+    """Require exact immutable admission/result identity before crossing the SQL boundary."""
+    if marker is _MALFORMED_EXTERNAL_MARKER:
+        return False
+    return (
+        marker.activation_id == result.activation_id
+        and marker.run_id == result.run_id
+        and marker.system_id == result.system_id
+        and marker.plan_identity == result.plan_identity
+        and marker.purpose == result.purpose
+        and marker.provider_kind == result.provider_kind
+        and marker.authority_instance == result.authority_instance
+        and marker.operation == result.result.operation
+        and marker.operation_identity == result.operation_identity
+    )
 
 
 def _is_terminal(exc: Exception, category: ErrorCategory) -> bool:
