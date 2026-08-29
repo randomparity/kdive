@@ -73,13 +73,17 @@ tombstone; absence plus the tombstone is the durable proof that capacity was cre
 - database timestamps.
 
 `ExternalBootReservation` is a strict row model for the separate live debit row.
-`ExternalBootReservationRelease` is the immutable release tombstone. Evidence fields are bounded
-JSON objects. Database constraints cap every JSON evidence document at 65,536 bytes, matching the
+`ExternalBootReservationRelease` is the immutable release tombstone.
+`ExternalBootRecoveryAttempt` records one recovery attempt's identity, acknowledged starting
+state, resolution operation, absolute deadline, state, and conflict or terminal evidence. A new
+row is created for every `recovery_conflict -> recovering` edge, so later evidence never replaces
+the history required to understand an earlier attempt. Evidence fields are bounded JSON objects.
+Database constraints cap every JSON evidence document at 65,536 bytes, matching the
 provider-neutral canonical-value bound.
 
 ## Schema
 
-Migration `0121_external_boot_activations.sql` creates three tables and one supporting unique key
+Migration `0121_external_boot_activations.sql` creates four tables and one supporting unique key
 on `runs(id, system_id)`.
 
 `external_boot_activations` has a foreign key to `systems` and a composite foreign key from
@@ -102,11 +106,21 @@ owner, and byte identities beside bounded release evidence and `released_at`. Cr
 of the matching live reservation happen in one store-locked transaction. A repeated release returns
 the existing tombstone only when all immutable identities match; a mismatch is a conflict.
 
-Only the table-owning migration role and `kdive_server` receive direct mutation grants in 0121;
-`kdive_server` receives `SELECT`, `INSERT`, and `UPDATE` on activation and tombstone rows plus the
-`DELETE` needed only on live reservations. Worker and reconciler receive `SELECT` only. Issue #2125
-adds security-definer authority allocation and result-fencing functions and grants those roles
-`EXECUTE`, never direct table mutation authority.
+`external_boot_recovery_attempts` is keyed by `(activation_id, attempt_number)` and has a unique
+`attempt_id`. It records the authority generation that began the attempt, the optional
+administrator resolution operation and acknowledged composite identity, one absolute recovery
+deadline, a closed `recovering | conflict | failed | recovered` state, and bounded conflict or
+terminal evidence. The activation stores the current `attempt_id`; foreign-key and repository
+predicates keep it on the same activation. Attempt numbers increase by one under the System lock
+and are never reused. Existing attempt rows retain their deadline and evidence when a later attempt
+begins.
+
+Only the table-owning migration role and `kdive_server` receive direct mutation grants in 0121.
+`kdive_server` receives `SELECT`, `INSERT`, and `UPDATE` on activation, live-reservation, and
+recovery-attempt rows plus the `DELETE` needed only on live reservations. It receives only `SELECT`
+and `INSERT` on immutable release tombstones. Worker and reconciler receive `SELECT` only on all
+four tables. Issue #2125 adds security-definer authority allocation and result-fencing functions
+and grants those roles `EXECUTE`, never direct table mutation authority.
 
 ### State invariant matrix
 
@@ -120,10 +134,10 @@ a matching `ready` reservation row exists and no release tombstone exists.
 | `prepared` | materialization and recovery point | ready live reservation; no readiness deadline |
 | `activating` | materialization and recovery point | ready live reservation; activation deadline required and immutable |
 | `active` | materialization, recovery point, terminal activation proof | ready live reservation; activation deadline retained |
-| `recovering` | materialization and recovery point | ready live reservation; recovery deadline required and immutable for this attempt |
-| `recovery_conflict` | conflict evidence; materialization when one was published; recovery point when one was prepared | ready live reservation; prior deadlines retained if set |
-| `recovery_failed` | materialization, recovery point, and failure evidence | ready live reservation; recovery deadline required |
-| `recovered` | materialization, recovery point, and recovery terminal evidence | ready live reservation until release; recovery deadline retained |
+| `recovering` | materialization, recovery point, and current recovering-attempt row | ready live reservation; current attempt deadline required and immutable |
+| `recovery_conflict` | current conflict-attempt row and its conflict evidence; materialization when one was published; recovery point when one was prepared | ready live reservation; prior attempt deadlines retained |
+| `recovery_failed` | materialization, recovery point, and current failed-attempt evidence | ready live reservation; attempt deadline retained |
+| `recovered` | materialization, recovery point, and current recovered-attempt evidence | ready live reservation until release; attempt deadline retained |
 | `abandoned` | abandonment terminal evidence | pending or ready reservation until release; populated evidence remains immutable |
 
 `prepared`, `activating`, `active`, `recovering`, `recovery_failed`, and `recovered` therefore
@@ -139,12 +153,22 @@ transaction predicates enforce the cross-row reservation rules and evidence immu
 - `create(conn, activation, reservation)` to insert the `preparing` activation and `pending`
   reservation atomically under the System lock;
 - `get(conn, activation_id)` and `get_reservation(conn, activation_id)`;
-- `mark_reservation_ready(...)`, which changes only `pending -> ready` and writes debit evidence;
+- `mark_reservation_ready(..., recovery_max_bytes)`, which takes the recovery-store advisory lock,
+  sums existing `ready` debits for that store, and changes only `pending -> ready` when the new
+  total is at most the positive operator-configured cap. `pending` is not a debit. Exact-cap is
+  accepted; over-cap returns `capacity_exhausted` without changing the row; retry of an already-ready
+  matching reservation returns it without re-debiting or re-evaluating the cap;
 - `release_reservation(...)`, which runs under the recovery-store advisory lock, verifies exact
   activation ownership/generation and terminal cleanup eligibility, deletes the live debit, and
   inserts or returns the immutable matching release tombstone;
-- `transition(...)`, which validates the domain edge before SQL and atomically persists the new
-  state plus the state-specific evidence/deadline fields; and
+- `transition(...)`, which validates non-recovery domain edges before SQL and atomically persists
+  the new state plus its immutable evidence or activation deadline;
+- `begin_recovery_attempt(...)`, which validates an edge into `recovering`, inserts the next
+  attempt with its absolute deadline and optional conflict-resolution evidence, and updates the
+  activation's current attempt in the same System-locked transaction;
+- `finish_recovery_attempt(...)`, which atomically changes the current attempt and activation from
+  `recovering` to `recovery_conflict`, `recovery_failed`, or `recovered`, retaining bounded evidence;
+  and
 - `mark_cleanup_complete(...)`, which requires a terminal `recovered` or `abandoned` activation,
   no live reservation, a matching release tombstone, cleanup evidence, and the exact current
   owner/generation.
@@ -162,16 +186,17 @@ rows, which is the contract later security-definer functions consume.
 ## Deadline and evidence rules
 
 The repository accepts only absolute timezone-aware UTC datetimes. The first transition to
-`activating` sets `activation_readiness_deadline`; later writes may not change it. The first
-transition to `recovering` sets `recovery_readiness_deadline`; a `recovery_conflict -> recovering`
-transition may replace it because ADR-0583 defines that edge as a new recovery attempt. Other
-retries may not extend either deadline.
+`activating` sets `activation_readiness_deadline`; later writes may not change it. Every edge into
+`recovering` creates one attempt with its own immutable `recovery_readiness_deadline`.
+`recovery_conflict -> recovering` therefore starts a new attempt without rewriting the prior
+deadline. Ordinary retry resumes the same attempt and cannot extend it.
 
-`transition` uses explicit evidence slots instead of one polymorphic event log. Materialization,
-recovery point, conflict/recovery, and terminal evidence each have one durable current value owned
-by the activation. A retry may repeat byte-identical evidence; it may not replace a populated field
-with a different value. This keeps the persistence slice small while retaining the evidence later
-jobs and reconciliation need.
+Activation-wide materialization, recovery-point, activation, abandonment, and cleanup evidence use
+explicit immutable slots. Recovery conflict and terminal evidence is attempt-scoped instead: a
+retry may repeat byte-identical evidence on its current attempt, but it may not replace it with a
+different value. A later administrator resolution creates a new attempt and can therefore retain a
+new acknowledged identity, resolution operation, deadline, and subsequent conflict observation
+without erasing earlier evidence.
 
 Cleanup ordering is enforced across the three rows: store-locked reservation deletion plus release
 tombstone creation is persisted before `cleanup_complete`. `mark_cleanup_complete` runs under the
@@ -213,6 +238,8 @@ System-lock protocol are trusted. A database administrator is outside this bound
 - Pydantic closed models and PostgreSQL checks validate states, digests, timestamps, sizes, and
   evidence presence.
 - The per-System advisory transaction lock serializes supported writers.
+- The recovery-store advisory transaction lock makes capacity summation plus ready-state debit and
+  deletion plus release-tombstone creation atomic across Systems.
 - The complete SQL compare-and-set predicate denies stale operation owners and generations without
   partial writes.
 - Partial uniqueness denies concurrent unfinished activations even if a caller omits the read-side
@@ -234,10 +261,11 @@ ownership durable and stale compare-and-set writes impossible through this repos
 - Exhaustive table-driven tests prove every legal and illegal activation and reservation edge.
 - Property tests generate all same-enum state pairs and prove the transition table is complete.
 - Migration tests prove every positive/negative state-matrix constraint, the composite Run/System
-  foreign key, JSON bounds, partial uniqueness, stable reservation ownership, release tombstones,
-  and runtime-role grants.
+  foreign key, JSON bounds, partial uniqueness, stable reservation ownership, recovery-attempt
+  identity, immutable release tombstones, and runtime-role grants.
 - Repository tests prove round trips, every state-matrix prerequisite, immutable deadlines/evidence,
-  cleanup ordering, idempotent reservation release, wrong-System/owner/generation rejection, and
-  that a stale-generation compare-and-set changes no activation, reservation, release tombstone,
-  or evidence value.
+  concurrent two-System capacity admission, exact-cap and over-cap behavior, cleanup ordering,
+  idempotent reservation release, two distinct conflict-to-recovery attempts, wrong-System/owner/
+  generation rejection, and that a stale-generation compare-and-set changes no activation,
+  reservation, recovery attempt, release tombstone, or evidence value.
 - `just lint`, `just type`, focused domain/database tests, and `just ci` are the required guardrails.
