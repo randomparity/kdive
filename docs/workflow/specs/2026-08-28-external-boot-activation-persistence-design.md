@@ -55,7 +55,10 @@ The legal edges are the ADR-0583 graph:
 
 Cleanup is orthogonal to the lifecycle. `recovered` and `abandoned` first persist with
 `cleanup_complete=false`; only verified deletion and reservation release can set it true.
-`recovery_failed` and `recovery_conflict` retain their reservation and evidence.
+`recovery_failed` and `recovery_conflict` ordinarily retain their reservation and evidence, but an
+authorized System teardown may set cleanup complete after the System is durably torn down and every
+provably activation-owned object is verified absent. Missing or corrupt ownership evidence keeps
+the reservation charged and the cleanup flag false.
 
 `ExternalBootReservationState` is `pending -> ready`. A reservation is created with the activation
 so no live debit can exist without durable activation ownership. Its owner key, store identity, and
@@ -89,8 +92,10 @@ on `runs(id, system_id)`.
 `external_boot_activations` has a foreign key to `systems` and a composite foreign key from
 `(run_id, system_id)` to `runs(id, system_id)`, a canonical plan digest,
 the current operation owner and generation, the lifecycle state, deadlines, JSON evidence fields,
-`cleanup_complete`, and timestamps. A partial unique index on `system_id WHERE NOT
-cleanup_complete` enforces at most one activation whose cleanup is unfinished. A unique
+`cleanup_complete`, and timestamps. A partial unique index includes every nonterminal/conflict/
+failed state unconditionally and includes `recovered` or `abandoned` only while cleanup is false.
+This matches ADR-0583: teardown cleanup may release capacity for a failed/conflicted activation but
+does not make that activation a reusable rollback baseline. A unique
 `(system_id, run_id, plan_identity)` key makes creation retryable without permitting a rollback
 stack. Checks enforce positive generations, digest grammar, closed state values, terminal-only
 cleanup, timezone-aware deadlines, document byte bounds, and the row-local parts of the state
@@ -115,6 +120,14 @@ predicates keep it on the same activation. Attempt numbers increase by one under
 and are never reused. Existing attempt rows retain their deadline and evidence when a later attempt
 begins.
 
+The resolution operation, its idempotency identity, and acknowledged composite state are required
+on every `recovery_conflict -> recovering` attempt and forbidden on ordinary recovery entries.
+An activation also has immutable `pre_recovery_evidence`, written while preparation owns a stable
+provider recovery object but before the complete canonical `RecoveryPoint` can be published. A
+`preparing -> recovery_conflict` row requires that evidence. It identifies the recorded source,
+provider-owned recovery object, and conflicting observation without claiming that source and target
+identities were both prepared.
+
 Only the table-owning migration role and `kdive_server` receive direct mutation grants in 0121.
 `kdive_server` receives `SELECT`, `INSERT`, and `UPDATE` on activation, live-reservation, and
 recovery-attempt rows plus the `DELETE` needed only on live reservations. It receives only `SELECT`
@@ -125,8 +138,10 @@ and grants those roles `EXECUTE`, never direct table mutation authority.
 ### State invariant matrix
 
 All states require `cleanup_complete=false` except `recovered` and `abandoned`, which may become
-clean after the cross-row cleanup predicate succeeds. The live-reservation requirements below mean
-a matching `ready` reservation row exists and no release tombstone exists.
+clean after the normal cross-row cleanup predicate succeeds, and `recovery_failed` or
+`recovery_conflict`, which may become clean only with teardown cleanup evidence proving the System
+is torn down and all provably owned objects are absent. The live-reservation requirements below
+mean a matching `ready` reservation row exists and no release tombstone exists.
 
 | State | Required durable evidence | Deadline and reservation requirements |
 |---|---|---|
@@ -134,17 +149,19 @@ a matching `ready` reservation row exists and no release tombstone exists.
 | `prepared` | materialization and recovery point | ready live reservation; no readiness deadline |
 | `activating` | materialization and recovery point | ready live reservation; activation deadline required and immutable |
 | `active` | materialization, recovery point, terminal activation proof | ready live reservation; activation deadline retained |
-| `recovering` | materialization, recovery point, and current recovering-attempt row | ready live reservation; current attempt deadline required and immutable |
-| `recovery_conflict` | current conflict-attempt row and its conflict evidence; materialization when one was published; recovery point when one was prepared | ready live reservation; prior attempt deadlines retained |
+| `recovering` | materialization, current recovering-attempt row, and either a recovery point or conflict-resolution pre-recovery evidence | ready live reservation; current attempt deadline required and immutable |
+| `recovery_conflict` | current conflict-attempt row and its conflict evidence, or immutable pre-recovery evidence when conflict preceded an attempt; materialization when one was published; recovery point when one was prepared | ready live reservation unless authorized teardown cleanup completed; prior attempt deadlines retained |
 | `recovery_failed` | materialization, recovery point, and current failed-attempt evidence | ready live reservation; attempt deadline retained |
 | `recovered` | materialization, recovery point, and current recovered-attempt evidence | ready live reservation until release; attempt deadline retained |
 | `abandoned` | abandonment terminal evidence | pending or ready reservation until release; populated evidence remains immutable |
 
-`prepared`, `activating`, `active`, `recovering`, `recovery_failed`, and `recovered` therefore
+`prepared`, `activating`, `active`, ordinary `recovering`, `recovery_failed`, and `recovered` therefore
 cannot be persisted without the evidence needed to resume them. Conflict may be entered from
-`preparing`, so it requires the exact observation/conflict evidence but not a recovery point that
-may never have been completed. Row-local checks enforce evidence/deadline presence. Repository
-transaction predicates enforce the cross-row reservation rules and evidence immutability.
+`preparing`, so it requires exact pre-recovery ownership and observation evidence but not a recovery
+point that may never have been completed. A conflict-resolution recovery may use that evidence only
+with its mandatory resolution operation, idempotency identity, and acknowledged composite state.
+Row-local checks enforce evidence/deadline presence. Repository transaction predicates enforce the
+cross-row reservation rules and evidence immutability.
 
 ## Repository interface
 
@@ -163,14 +180,19 @@ transaction predicates enforce the cross-row reservation rules and evidence immu
   inserts or returns the immutable matching release tombstone;
 - `transition(...)`, which validates non-recovery domain edges before SQL and atomically persists
   the new state plus its immutable evidence or activation deadline;
+- `record_pre_recovery_evidence(...)`, which can fill the immutable preparation-owned evidence
+  once while the activation is `preparing` and refuses a different retry value;
 - `begin_recovery_attempt(...)`, which validates an edge into `recovering`, inserts the next
-  attempt with its absolute deadline and optional conflict-resolution evidence, and updates the
-  activation's current attempt in the same System-locked transaction;
+  attempt with its absolute deadline and updates the activation's current attempt in the same
+  System-locked transaction. On `recovery_conflict -> recovering`, it requires the resolution
+  operation, idempotency identity, acknowledged composite state, and either the full recovery point
+  or pre-recovery evidence; on every other source state those resolution fields are forbidden;
 - `finish_recovery_attempt(...)`, which atomically changes the current attempt and activation from
   `recovering` to `recovery_conflict`, `recovery_failed`, or `recovered`, retaining bounded evidence;
   and
-- `mark_cleanup_complete(...)`, which requires a terminal `recovered` or `abandoned` activation,
-  no live reservation, a matching release tombstone, cleanup evidence, and the exact current
+- `mark_cleanup_complete(...)`, which requires `recovered` or `abandoned` for ordinary cleanup, or
+  `recovery_failed`/`recovery_conflict` plus teardown evidence for teardown cleanup, no live
+  reservation, a matching release tombstone, cleanup evidence, and the exact current
   owner/generation.
 
 Every mutating method takes the exact `system_id`, `activation_id`, `operation_owner_id`, and
@@ -204,6 +226,12 @@ System lock, verifies reservation absence and the matching tombstone, records ex
 evidence, and sets the activation flag in one transaction. An interrupted cleanup therefore remains
 charged or leaves a terminal activation with `cleanup_complete=false`; neither state admits a
 replacement activation.
+
+For `recovery_failed` and `recovery_conflict`, `release_reservation` additionally requires
+teardown evidence that identifies the torn-down System and proves every individually owned object
+absent. If ownership is missing, corrupt, or quarantined, it returns a retained-capacity result and
+changes neither live debit nor activation. Successful teardown cleanup preserves all conflict/
+failure and attempt evidence even after capacity is released.
 
 ## Error handling
 
@@ -265,7 +293,9 @@ ownership durable and stale compare-and-set writes impossible through this repos
   identity, immutable release tombstones, and runtime-role grants.
 - Repository tests prove round trips, every state-matrix prerequisite, immutable deadlines/evidence,
   concurrent two-System capacity admission, exact-cap and over-cap behavior, cleanup ordering,
-  idempotent reservation release, two distinct conflict-to-recovery attempts, wrong-System/owner/
-  generation rejection, and that a stale-generation compare-and-set changes no activation,
-  reservation, recovery attempt, release tombstone, or evidence value.
+  idempotent reservation release, successful and retained-capacity teardown branches, two distinct
+  conflict-to-recovery attempts, a preparing conflict resolved without a fabricated recovery point,
+  rejection of missing resolution identity/operation, wrong-System/owner/generation rejection, and
+  that a stale-generation compare-and-set changes no activation, reservation, recovery attempt,
+  release tombstone, or evidence value.
 - `just lint`, `just type`, focused domain/database tests, and `just ci` are the required guardrails.
