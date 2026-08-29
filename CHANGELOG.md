@@ -156,6 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paginate operator job listings
 - Persist external boot evidence
 - Add external boot contracts
+- Bind verified remote root provenance
 
 ### Changed
 
@@ -956,6 +957,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Decide external-boot mutation authority
 - Anchor external-boot journal continuity
 - Expose finalization bounds
+- Specify remote root provenance
 
 ### Fixed
 
@@ -1518,6 +1520,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject invalid boot contract values
 - Bound external boot input parsing
 - Enforce canonical boot envelopes
+- Enforce root provenance failure bounds
+- Close provenance admission gaps
+- Reject conflicting root evidence
+- Isolate root publication attempts
 
 ### Security
 
