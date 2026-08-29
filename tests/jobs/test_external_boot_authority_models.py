@@ -626,6 +626,7 @@ def test_present_null_marker_fails_closed_on_success_and_exception(
         ("teardown", "teardown"),
         ("deadline", "activate"),
         ("recovery-attempt", "recover"),
+        ("fail", "activate"),
     ],
 )
 def test_every_admitted_operation_routes_failure_to_authority_adapter(
