@@ -163,6 +163,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist external boot activation ledgers
 - Fence external boot activation writes
 - Persist activation recovery and cleanup
+- Account and reap boot artifacts
 
 ### Changed
 
@@ -1570,6 +1571,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validate activation evidence on reload
 - Bind cleanup proof to system
 - Reject oversized evidence before mutation
+- Verify artifact bytes before reaping
+- Classify reaper enumeration failures
 
 ### Security
 
