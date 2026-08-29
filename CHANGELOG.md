@@ -159,6 +159,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind verified remote root provenance
 - Materialize boot artifact volumes
 - Add module restoration appliance
+- Model external boot activation state
+- Persist external boot activation ledgers
+- Fence external boot activation writes
+- Persist activation recovery and cleanup
 
 ### Changed
 
@@ -960,6 +964,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Anchor external-boot journal continuity
 - Expose finalization bounds
 - Specify remote root provenance
+- Design external boot activation persistence
+- Tighten activation persistence invariants
+- Specify reservation and recovery attempts
+- Cover teardown and pre-recovery evidence
+- Complete activation persistence interfaces
+- Close activation persistence evidence gaps
+- Define pre-recovery terminal evidence
+- Freeze activation evidence identities
+- Close activation cleanup interruption gaps
+- Plan activation persistence implementation
+- Strengthen activation persistence plan
+- Order activation lock proofs
+- Require red activation lock proof
+- Remove unversioned activation evidence
 
 ### Fixed
 
@@ -1546,6 +1564,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound appliance trust inputs
 - Bound appliance file reads
 - Secure absent capture marker
+- Enforce activation persistence invariants
+- Close activation evidence gaps
+- Bind conflict resolution evidence
+- Validate activation evidence on reload
+- Bind cleanup proof to system
+- Reject oversized evidence before mutation
 
 ### Security
 
