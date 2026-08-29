@@ -1,0 +1,35 @@
+<domain type="kvm">
+  <name>kdive-module-appliance-v1</name>
+  <memory unit="MiB">512</memory>
+  <vcpu placement="static">1</vcpu>
+  <os>
+    <type arch="ppc64le" machine="pseries">hvm</type>
+    <kernel>/var/lib/libvirt/kdive/module-appliance/v1/ppc64le/image/vmlinuz</kernel>
+    <initrd>/var/lib/libvirt/kdive/module-appliance/v1/ppc64le/image/initramfs.cpio</initrd>
+    <cmdline>console=hvc0 panic=-1</cmdline>
+  </os>
+  <clock offset="utc"/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>destroy</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type="volume" device="disk">
+      <driver name="qemu" type="qcow2" cache="none" io="native"/>
+      <source pool="ROOT_POOL" volume="ROOT_VOLUME"/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <disk type="volume" device="disk">
+      <driver name="qemu" type="raw" cache="none" io="native"/>
+      <source pool="SOURCE_POOL" volume="SOURCE_VOLUME"/>
+      <target dev="vdb" bus="virtio"/>
+      <readonly/>
+    </disk>
+    <disk type="volume" device="disk">
+      <driver name="qemu" type="raw" cache="none" io="native"/>
+      <source pool="SCRATCH_POOL" volume="SCRATCH_VOLUME"/>
+      <target dev="vdc" bus="virtio"/>
+    </disk>
+    <console type="pty"><target type="virtio" port="0"/></console>
+    <memballoon model="none"/>
+  </devices>
+</domain>

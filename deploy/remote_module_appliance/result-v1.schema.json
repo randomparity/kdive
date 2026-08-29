@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kdive.dev/schema/remote-module-result-v1",
+  "title": "remote-module-result-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "status",
+    "phase"
+  ],
+  "properties": {
+    "protocol": {"const": "remote-module-result-v1"},
+    "status": {"enum": ["success", "failure"]},
+    "phase": {
+      "enum": [
+        "accepted",
+        "captured",
+        "staging-intent",
+        "replacement-ready",
+        "installed",
+        "restore-ready",
+        "restored"
+      ]
+    },
+    "error_code": {"$ref": "#/$defs/error_code"},
+    "system_id": {"$ref": "#/$defs/uuid"},
+    "run_id": {"$ref": "#/$defs/uuid"},
+    "plan_identity": {"$ref": "#/$defs/sha256"},
+    "operation_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "appliance_image_digest": {"$ref": "#/$defs/sha256"},
+    "release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
+    "root_volume_key": {"type": "string", "minLength": 1, "maxLength": 255},
+    "root_volume_identity": {"$ref": "#/$defs/sha256"},
+    "source_manifest": {"$ref": "#/$defs/sha256"},
+    "installed_manifest": {"$ref": "#/$defs/sha256"},
+    "capture_manifest": {"$ref": "#/$defs/sha256"},
+    "capture_absent": {"type": "boolean"},
+    "entry_count": {"type": "integer", "minimum": 0, "maximum": 200000},
+    "content_bytes": {"type": "integer", "minimum": 0, "maximum": 8589934592}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "success"}}},
+      "then": {
+        "required": [
+          "system_id",
+          "run_id",
+          "plan_identity",
+          "operation_nonce",
+          "appliance_image_digest",
+          "release",
+          "root_volume_key",
+          "root_volume_identity",
+          "source_manifest"
+        ],
+        "not": {"required": ["error_code"]},
+        "oneOf": [
+          {
+            "properties": {"phase": {"const": "captured"}},
+            "required": ["entry_count", "content_bytes"],
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {"required": ["installed_manifest"]}
+          },
+          {
+            "properties": {"phase": {"const": "staging-intent"}},
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {
+              "anyOf": [
+                {"required": ["installed_manifest"]},
+                {"required": ["entry_count"]},
+                {"required": ["content_bytes"]}
+              ]
+            }
+          },
+          {
+            "properties": {"phase": {"const": "replacement-ready"}},
+            "required": ["installed_manifest", "entry_count", "content_bytes"],
+            "allOf": [{"$ref": "#/$defs/capture"}]
+          },
+          {
+            "properties": {"phase": {"const": "installed"}},
+            "required": ["installed_manifest", "entry_count", "content_bytes"],
+            "allOf": [{"$ref": "#/$defs/capture"}]
+          },
+          {
+            "properties": {"phase": {"const": "restore-ready"}},
+            "required": ["installed_manifest"],
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {
+              "anyOf": [
+                {"required": ["entry_count"]},
+                {"required": ["content_bytes"]}
+              ]
+            }
+          },
+          {
+            "properties": {"phase": {"const": "restored"}},
+            "required": ["installed_manifest"],
+            "allOf": [{"$ref": "#/$defs/capture"}],
+            "not": {
+              "anyOf": [
+                {"required": ["entry_count"]},
+                {"required": ["content_bytes"]}
+              ]
+            }
+          }
+        ]
+      },
+      "else": {
+        "required": ["error_code"],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "error_code": {
+                  "enum": [
+                    "INVALID_DOCUMENT",
+                    "ROOT_DISCOVERY_FAILED",
+                    "FILESYSTEM_FAILURE",
+                    "FLUSH_FAILURE",
+                    "SHUTDOWN_FAILURE"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "oneOf": [
+                {
+                  "not": {
+                    "anyOf": [
+                      {"required": ["system_id"]},
+                      {"required": ["run_id"]},
+                      {"required": ["plan_identity"]},
+                      {"required": ["operation_nonce"]},
+                      {"required": ["appliance_image_digest"]},
+                      {"required": ["release"]},
+                      {"required": ["root_volume_key"]},
+                      {"required": ["root_volume_identity"]},
+                      {"required": ["source_manifest"]}
+                    ]
+                  }
+                },
+                {"$ref": "#/$defs/complete_identity"}
+              ]
+            },
+            "else": {
+              "$ref": "#/$defs/complete_identity"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "complete_identity": {
+      "required": [
+        "system_id",
+        "run_id",
+        "plan_identity",
+        "operation_nonce",
+        "appliance_image_digest",
+        "release",
+        "root_volume_key",
+        "root_volume_identity",
+        "source_manifest"
+      ]
+    },
+    "capture": {
+      "oneOf": [
+        {
+          "required": ["capture_manifest"],
+          "not": {"required": ["capture_absent"]}
+        },
+        {
+          "properties": {"capture_absent": {"const": true}},
+          "required": ["capture_absent"],
+          "not": {"required": ["capture_manifest"]}
+        }
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "INVALID_DOCUMENT",
+        "IDENTITY_MISMATCH",
+        "LIMIT_EXCEEDED",
+        "SOURCE_INVALID",
+        "ROOT_DISCOVERY_FAILED",
+        "FILESYSTEM_FAILURE",
+        "RECOVERY_CONFLICT",
+        "DEPMOD_FAILURE",
+        "FLUSH_FAILURE",
+        "SHUTDOWN_FAILURE"
+      ]
+    },
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

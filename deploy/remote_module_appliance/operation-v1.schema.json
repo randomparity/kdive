@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kdive.dev/schema/remote-module-operation-v1",
+  "title": "remote-module-operation-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "operation",
+    "system_id",
+    "run_id",
+    "plan_identity",
+    "operation_nonce",
+    "release",
+    "root_volume",
+    "source_manifest",
+    "appliance_image_digest"
+  ],
+  "properties": {
+    "protocol": {"const": "remote-module-operation-v1"},
+    "operation": {"enum": ["capture_install", "restore"]},
+    "system_id": {"$ref": "#/$defs/uuid"},
+    "run_id": {"$ref": "#/$defs/uuid"},
+    "plan_identity": {"$ref": "#/$defs/sha256"},
+    "operation_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "release": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
+    "root_volume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "identity"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1, "maxLength": 255},
+        "identity": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source_manifest": {"$ref": "#/$defs/sha256"},
+    "capture_manifest": {"$ref": "#/$defs/sha256"},
+    "installed_manifest": {"$ref": "#/$defs/sha256"},
+    "capture_absent": {"type": "boolean"},
+    "appliance_image_digest": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "restore"}}},
+      "then": {
+        "required": ["installed_manifest"],
+        "oneOf": [
+          {"required": ["capture_manifest"], "not": {"required": ["capture_absent"]}},
+          {
+            "required": ["capture_absent"],
+            "properties": {"capture_absent": {"const": true}},
+            "not": {"required": ["capture_manifest"]}
+          }
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["capture_manifest"]},
+            {"required": ["installed_manifest"]},
+            {"required": ["capture_absent"]}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}
