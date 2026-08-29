@@ -448,6 +448,36 @@ def _write_json(path: Path, document: dict[str, object]) -> None:
         raise ApplianceError("FLUSH_FAILURE") from error
 
 
+def _write_absent_marker(path: Path) -> None:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+    except FileExistsError:
+        try:
+            descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+            try:
+                metadata = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            raise ApplianceError("RECOVERY_CONFLICT") from error
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != 0:
+            raise ApplianceError("RECOVERY_CONFLICT") from None
+    except OSError as error:
+        raise ApplianceError("FILESYSTEM_FAILURE") from error
+    else:
+        try:
+            os.fsync(descriptor)
+        except OSError as error:
+            raise ApplianceError("FLUSH_FAILURE") from error
+        finally:
+            os.close(descriptor)
+    _sync_path(path.parent)
+
+
 def _identity(document: dict[str, object]) -> dict[str, object]:
     root_volume = document["root_volume"]
     assert isinstance(root_volume, dict)
@@ -766,8 +796,7 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
         _remove_owned_tree(capture)
         original = _manifest_or_none(destination, "recovery")
         if original is None:
-            (SCRATCH / "capture-absent").write_bytes(b"")
-            _sync_path(SCRATCH)
+            _write_absent_marker(SCRATCH / "capture-absent")
             fields: dict[str, object] = {"capture_absent": True}
             checkpoint = _checkpoint(document, "captured", entry_count=0, content_bytes=0, **fields)
         else:

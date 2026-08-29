@@ -581,6 +581,22 @@ def test_absent_capture_install_and_restore_round_trip(
     assert not destination.exists()
 
 
+def test_absent_capture_marker_does_not_follow_retained_scratch_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    (destination / "old.ko").unlink()
+    destination.rmdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"unchanged")
+    (scratch / "capture-absent").symlink_to(outside)
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance.execute(appliance._validate_operation(operation))
+
+    assert outside.read_bytes() == b"unchanged"
+
+
 def test_guest_symlink_cannot_redirect_module_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
