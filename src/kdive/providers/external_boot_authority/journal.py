@@ -128,6 +128,10 @@ class FileAuthorityJournal:
                 if watermark is None or (
                     record.watermark_sequence != watermark.sequence
                     or record.watermark_digest != record_digest(watermark)
+                    or (
+                        record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.operation_identity != watermark.operation_identity
+                    )
                 ):
                     raise ValueError("authority journal takeover watermark link is invalid")
             prior_binding = operation_bindings.setdefault(
@@ -137,6 +141,8 @@ class FileAuthorityJournal:
                 raise ValueError("authority journal operation binding changed")
             operation_phases[record.operation_identity] = record.phase
             if record.phase is JournalPhase.WATERMARK_INSTALLED:
+                if record.generation in watermarks:
+                    raise ValueError("authority journal generation has multiple watermarks")
                 watermarks[record.generation] = record
             for item in record.recovery_objects:
                 current_owner = (str(item.system_id), str(item.activation_id))

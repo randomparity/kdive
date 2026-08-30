@@ -263,3 +263,52 @@ def test_append_rejects_mutation_evidence_drift_without_changing_bytes(
         journal.append(candidate)
 
     assert path.read_bytes() == before
+
+
+def test_duplicate_generation_watermark_is_rejected_on_load_and_append(tmp_path: Path) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record(operation_identity="takeover-a")
+    journal.append(first)
+    before = path.read_bytes()
+    duplicate = _record(
+        2,
+        record_digest(first),
+        operation_identity="takeover-b",
+        attempt_id=uuid4(),
+    )
+
+    with pytest.raises(ValueError, match="multiple watermarks"):
+        journal.append(duplicate)
+    assert path.read_bytes() == before
+
+    path.write_bytes(before + canonical_record_bytes(duplicate) + b"\n")
+    with pytest.raises(ValueError, match="multiple watermarks"):
+        journal.load()
+
+
+def test_acknowledgement_cannot_cross_link_another_same_generation_operation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record(operation_identity="takeover-a")
+    journal.append(first)
+    before = path.read_bytes()
+    other = _record(operation_identity="takeover-b", attempt_id=uuid4())
+    crossed = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        operation_identity="takeover-a",
+        watermark_sequence=other.sequence,
+        watermark_digest=record_digest(other),
+    )
+
+    with pytest.raises(ValueError, match="watermark link"):
+        journal.append(crossed)
+    assert path.read_bytes() == before
+
+    path.write_bytes(before + canonical_record_bytes(crossed) + b"\n")
+    with pytest.raises(ValueError, match="watermark link"):
+        journal.load()
