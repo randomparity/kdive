@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     JournalPhase,
+    JournalRecordV1,
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
@@ -180,6 +182,83 @@ async def test_mutation_requires_promotion_and_anchors_before_provider(tmp_path:
         JournalPhase.TERMINAL,
     ]
     assert adapter.calls == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
+async def test_mutation_reuses_one_validated_journal_scan_across_checkpoints(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    template = _mutation(takeover)
+    for index in range(8):
+        history_request = template.model_copy(
+            update={"operation_identity": f"history-{index}", "attempt_id": uuid4()}
+        )
+        await service.execute_mutation(peer, history_request)
+    path = tmp_path / f"{takeover.system_id}.journal"
+    factory_calls = 0
+    load_calls = 0
+    validation_calls = 0
+    history_length = len(repository.records)
+
+    class CountingJournal(FileAuthorityJournal):
+        @staticmethod
+        def _prepare_record(state: Any, record: JournalRecordV1) -> Any:
+            nonlocal validation_calls
+            validation_calls += 1
+            return FileAuthorityJournal._prepare_record(state, record)
+
+        def load(self) -> tuple[JournalRecordV1, ...]:
+            nonlocal load_calls
+            load_calls += 1
+            return super().load()
+
+    def journal_factory(_system_id: object) -> FileAuthorityJournal:
+        nonlocal factory_calls
+        factory_calls += 1
+        return CountingJournal(path)
+
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=journal_factory,
+        adapter=adapter,
+    )
+    request = template.model_copy(
+        update={"operation_identity": "after-restart", "attempt_id": uuid4()}
+    )
+    await restarted.execute_mutation(peer, request)
+
+    assert factory_calls == 1
+    assert load_calls == 1
+    assert validation_calls == history_length + 5
+    assert adapter.calls[-2:] == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
+async def test_mutation_detects_external_rewrite_before_next_phase_checkpoint(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    adapter.release.clear()
+    path = tmp_path / f"{takeover.system_id}.journal"
+    task = asyncio.create_task(service.execute_mutation(peer, _mutation(takeover)))
+    await adapter.entered.wait()
+    before = path.read_bytes()
+    rewritten = before.replace(b'"host-a"', b'"host-b"', 1)
+    assert len(rewritten) == len(before)
+    path.write_bytes(rewritten)
+    adapter.release.set()
+
+    with pytest.raises(ValueError, match="changed since validation"):
+        await task
+
+    assert path.read_bytes() == rewritten
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+    assert adapter.calls == ["commit:activate"]
 
 
 @pytest.mark.anyio
