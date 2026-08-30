@@ -111,6 +111,16 @@ class AuthorityServiceMetrics:
 class _Lane:
     lock: asyncio.Lock
     failed: bool = False
+    watermark_generation: int = 0
+    active: _ActiveOperation | None = None
+
+
+@dataclass(slots=True)
+class _ActiveOperation:
+    generation: int
+    phase: JournalPhase
+    done: asyncio.Event
+    stop_before_start: bool = False
 
 
 class ExternalBootAuthorityService:
@@ -212,7 +222,7 @@ class ExternalBootAuthorityService:
             binding = await self._repository.resolve_allocating(authenticated, request)
             if binding is None or not self._binding_matches(binding, request):
                 return False
-            await self._recover(binding, self._journal_factory(request.system_id))
+            records = await self._recover(binding, self._journal_factory(request.system_id))
         except AuthorityServiceError, OSError, ValueError:
             self.metrics.recovery_failed(request)
             self._logger.warning(
@@ -224,7 +234,17 @@ class ExternalBootAuthorityService:
                 },
             )
             return False
-        return True
+        phases_by_operation = {record.operation_identity: record.phase for record in records}
+        return not any(
+            phase
+            in {
+                JournalPhase.ADMITTED,
+                JournalPhase.MUTATION_STARTED,
+                JournalPhase.PROVIDER_RETURNED,
+                JournalPhase.OBSERVED,
+            }
+            for phase in phases_by_operation.values()
+        )
 
     @staticmethod
     def _record(
@@ -263,13 +283,57 @@ class ExternalBootAuthorityService:
             journal = self._journal_factory(request.system_id)
             try:
                 records = await self._recover(binding, journal)
+                if records and records[-1].phase is JournalPhase.WATERMARK_INSTALLED:
+                    prior = records[-1]
+                    if prior.generation >= request.generation:
+                        raise AuthorityServiceError("superseded")
+                    superseded = self._record(
+                        request,
+                        records,
+                        JournalPhase.TAKEOVER_SUPERSEDED,
+                        predecessor_generation=prior.generation,
+                        watermark_sequence=prior.sequence,
+                        watermark_digest=record_digest(prior),
+                    )
+                    records = await self._anchor(binding, journal, records, superseded)
                 watermark = self._record(request, records, JournalPhase.WATERMARK_INSTALLED)
                 records = await self._anchor(binding, journal, records, watermark)
-                if any(
-                    record.phase in {JournalPhase.ADMITTED, JournalPhase.MUTATION_STARTED}
-                    for record in records[:-1]
-                ):
+                lane.watermark_generation = request.generation
+                active = lane.active
+                phases_by_operation = {
+                    record.operation_identity: record.phase for record in records[:-1]
+                }
+                unresolved_restart = any(
+                    phase
+                    in {
+                        JournalPhase.ADMITTED,
+                        JournalPhase.MUTATION_STARTED,
+                        JournalPhase.PROVIDER_RETURNED,
+                        JournalPhase.OBSERVED,
+                    }
+                    for phase in phases_by_operation.values()
+                )
+                if unresolved_restart and active is None:
+                    self.metrics.unresolved[(request.provider_kind, request.authority_instance)] = 1
                     raise AuthorityServiceError("provider_conflict")
+                if active is not None and active.generation < request.generation:
+                    if active.phase is JournalPhase.ADMITTED:
+                        active.stop_before_start = True
+                    self.metrics.unresolved[(request.provider_kind, request.authority_instance)] = 1
+            except AuthorityServiceError as error:
+                lane.failed = error.category == "journal_conflict"
+                raise
+            except BaseException:
+                lane.failed = True
+                raise
+        if active is not None and active.generation < request.generation:
+            await active.done.wait()
+        await asyncio.sleep(0)
+        async with lane.lock:
+            try:
+                if lane.watermark_generation != request.generation:
+                    raise AuthorityServiceError("superseded")
+                records = await self._recover(binding, journal)
                 acknowledgement = self._record(
                     request,
                     records,
@@ -278,14 +342,27 @@ class ExternalBootAuthorityService:
                     watermark_digest=record_digest(watermark),
                 )
                 records = await self._anchor(binding, journal, records, acknowledgement)
+            except AuthorityServiceError as error:
+                lane.failed = error.category == "journal_conflict"
+                raise
             except BaseException:
                 lane.failed = True
                 raise
+            self.metrics.unresolved.pop((request.provider_kind, request.authority_instance), None)
             quiescence = json.dumps(
                 {
                     "authority_instance": request.authority_instance,
                     "generation": request.generation,
-                    "lower_operations": [],
+                    "lower_operations": [
+                        {
+                            "digest": record_digest(record),
+                            "outcome": record.outcome,
+                            "sequence": record.sequence,
+                        }
+                        for record in records
+                        if record.phase is JournalPhase.TERMINAL
+                        and record.generation < request.generation
+                    ],
                     "system_id": str(request.system_id),
                     "watermark_digest": record_digest(watermark),
                     "watermark_sequence": watermark.sequence,
@@ -309,78 +386,111 @@ class ExternalBootAuthorityService:
         lane = self._lane(request.system_id)
 
         async def run() -> AuthorityObservationV1:
-            async with lane.lock:
-                if lane.failed:
-                    raise AuthorityServiceError("journal_conflict")
-                journal = self._journal_factory(request.system_id)
-                records = journal.load()
-                acknowledgements = [
-                    record
-                    for record in records
-                    if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
-                    and record.generation == request.generation
-                ]
-                if not acknowledgements:
-                    raise AuthorityServiceError("superseded")
-                acknowledgement = acknowledgements[-1]
-                binding = await self._repository.resolve_current(
-                    authenticated,
-                    request,
-                    acknowledgement.sequence,
-                    record_digest(acknowledgement),
-                )
-                if binding is None or not self._binding_matches(binding, request):
-                    raise AuthorityServiceError("superseded")
-                records = await self._recover(binding, journal)
-                records = await self._anchor(
-                    binding, journal, records, self._record(request, records, JournalPhase.ADMITTED)
-                )
-                records = await self._anchor(
-                    binding,
-                    journal,
-                    records,
-                    self._record(request, records, JournalPhase.MUTATION_STARTED),
-                )
+            active = _ActiveOperation(request.generation, JournalPhase.ADMITTED, asyncio.Event())
+            try:
+                async with lane.lock:
+                    if lane.failed:
+                        raise AuthorityServiceError("journal_conflict")
+                    journal = self._journal_factory(request.system_id)
+                    records = journal.load()
+                    acknowledgements = [
+                        record
+                        for record in records
+                        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                        and record.generation == request.generation
+                    ]
+                    if not acknowledgements:
+                        raise AuthorityServiceError("superseded")
+                    acknowledgement = acknowledgements[-1]
+                    binding = await self._repository.resolve_current(
+                        authenticated,
+                        request,
+                        acknowledgement.sequence,
+                        record_digest(acknowledgement),
+                    )
+                    if binding is None or not self._binding_matches(binding, request):
+                        raise AuthorityServiceError("superseded")
+                    records = await self._recover(binding, journal)
+                    records = await self._anchor(
+                        binding,
+                        journal,
+                        records,
+                        self._record(request, records, JournalPhase.ADMITTED),
+                    )
+                    lane.active = active
+                await asyncio.sleep(0)
+                async with lane.lock:
+                    records = journal.load()
+                    if active.stop_before_start:
+                        await self._anchor(
+                            binding,
+                            journal,
+                            records,
+                            self._record(
+                                request,
+                                records,
+                                JournalPhase.TERMINAL,
+                                outcome="never-began",
+                            ),
+                        )
+                        raise AuthorityServiceError("superseded")
+                    records = await self._anchor(
+                        binding,
+                        journal,
+                        records,
+                        self._record(request, records, JournalPhase.MUTATION_STARTED),
+                    )
+                    active.phase = JournalPhase.MUTATION_STARTED
                 rechecked = await self._repository.resolve_current(
                     authenticated,
                     request,
                     acknowledgement.sequence,
                     record_digest(acknowledgement),
                 )
-                if rechecked is None or not self._binding_matches(rechecked, request):
-                    raise AuthorityServiceError("superseded")
-                await self._adapter.commit(request, request.operation)
-                records = await self._anchor(
-                    binding,
-                    journal,
-                    records,
-                    self._record(request, records, JournalPhase.PROVIDER_RETURNED),
-                )
-                observation = await self._adapter.observe(request)
-                records = await self._anchor(
-                    binding,
-                    journal,
-                    records,
-                    self._record(request, records, JournalPhase.OBSERVED, observation=observation),
-                )
-                outcome = (
-                    observation.category
-                    if observation.category in {"source", "target", "conflict"}
-                    else "conflict"
-                )
-                await self._anchor(
-                    binding,
-                    journal,
-                    records,
-                    self._record(
-                        request,
+                committed = rechecked is not None and self._binding_matches(rechecked, request)
+                if committed:
+                    await self._adapter.commit(request, request.operation)
+                async with lane.lock:
+                    records = journal.load()
+                    records = await self._anchor(
+                        binding,
+                        journal,
                         records,
-                        JournalPhase.TERMINAL,
-                        observation=observation,
-                        outcome=outcome,
-                    ),
-                )
-                return observation
+                        self._record(request, records, JournalPhase.PROVIDER_RETURNED),
+                    )
+                observation = await self._adapter.observe(request)
+                async with lane.lock:
+                    records = journal.load()
+                    records = await self._anchor(
+                        binding,
+                        journal,
+                        records,
+                        self._record(
+                            request, records, JournalPhase.OBSERVED, observation=observation
+                        ),
+                    )
+                    outcome = (
+                        observation.category
+                        if observation.category in {"source", "target", "conflict"}
+                        else "conflict"
+                    )
+                    await self._anchor(
+                        binding,
+                        journal,
+                        records,
+                        self._record(
+                            request,
+                            records,
+                            JournalPhase.TERMINAL,
+                            observation=observation,
+                            outcome=outcome,
+                        ),
+                    )
+                    return observation
+            finally:
+                active.done.set()
+                if lane.active is active:
+                    lane.active = None
 
         task = asyncio.create_task(run())
         return await asyncio.shield(task)
