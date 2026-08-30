@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -87,14 +88,23 @@ class _Repository:
         self.peer = peer
         self.request = request
         self.current = False
+        self.allocating_request = request
         self.head: JournalHead | None = None
         self.records: list[JournalRecordV1] = []
         self.advance_status: Literal["advanced", "superseded", "conflict"] = "advanced"
+        self.pause_phase: JournalPhase | None = None
+        self.phase_entered = asyncio.Event()
+        self.phase_release = asyncio.Event()
+        self.phase_release.set()
+        self.current_resolutions = 0
+        self.reject_resolution: int | None = None
 
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
     ) -> AuthorityBinding | None:
-        if peer != self.peer or request != self.request or self.current:
+        if peer != self.peer or request != self.allocating_request:
+            return None
+        if request == self.request and self.current:
             return None
         return _binding(peer, request, "allocating")
 
@@ -105,6 +115,9 @@ class _Repository:
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None:
+        self.current_resolutions += 1
+        if self.current_resolutions == self.reject_resolution:
+            return None
         if (
             peer != self.peer
             or not self.current
@@ -137,6 +150,9 @@ class _Repository:
         expected_digest: str,
         record: JournalRecordV1,
     ) -> Literal["advanced", "superseded", "conflict"]:
+        if record.phase is self.pause_phase:
+            self.phase_entered.set()
+            await self.phase_release.wait()
         if self.advance_status != "advanced":
             return self.advance_status
         self.records.append(record)
@@ -161,6 +177,8 @@ class _Adapter:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.release.set()
+        self.fail_commit = False
+        self.fail_observe = False
 
     async def commit(
         self, request: AuthorityMutationRequestV1, commit_point: str
@@ -168,10 +186,14 @@ class _Adapter:
         self.calls.append(f"commit:{commit_point}")
         self.entered.set()
         await self.release.wait()
+        if self.fail_commit:
+            raise RuntimeError("bounded commit failure")
         return self._observation("target")
 
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.calls.append("observe")
+        if self.fail_observe:
+            raise RuntimeError("bounded observation failure")
         return self._observation("target")
 
     @staticmethod
@@ -181,6 +203,11 @@ class _Adapter:
         return AuthorityObservationV1(
             observation_id=uuid4(), category=category, composite_state=_DIGEST_A
         )
+
+
+class _FailingAppendJournal(FileAuthorityJournal):
+    def append(self, record: JournalRecordV1) -> None:
+        raise OSError("injected append/fsync failure")
 
 
 def _service(
@@ -296,6 +323,21 @@ async def test_failed_checkpoint_never_reaches_provider_and_fails_closed(tmp_pat
     assert service.metrics.checkpoints == {}
 
 
+@pytest.mark.anyio
+async def test_failed_local_append_never_advances_checkpoint_or_provider(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    failing = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: _FailingAppendJournal(tmp_path / f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    with pytest.raises(OSError, match="append/fsync"):
+        await failing.acknowledge_takeover(peer, request)
+    assert repository.records == []
+    assert repository.head is None
+    assert adapter.calls == []
+
+
 def test_metric_labels_are_bounded_non_tenant_dimensions() -> None:
     metrics = AuthorityServiceMetrics.empty()
     request = _takeover()
@@ -303,3 +345,247 @@ def test_metric_labels_are_bounded_non_tenant_dimensions() -> None:
     assert set(metrics.rejections) == {
         (request.provider_kind, request.authority_instance, "superseded")
     }
+
+
+@pytest.mark.anyio
+async def test_takeover_terminalizes_admitted_operation_without_provider_access(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    repository.pause_phase = JournalPhase.ADMITTED
+    repository.phase_release.clear()
+    mutation_task = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await repository.phase_entered.wait()
+    successor = request.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "operation_identity": "takeover-b",
+        }
+    )
+    repository.allocating_request = successor
+    takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor))
+    repository.phase_release.set()
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await mutation_task
+    acknowledgement = await takeover_task
+    assert acknowledgement.generation == 2
+    assert adapter.calls == []
+    assert [record.phase for record in repository.records[-4:]] == [
+        JournalPhase.ADMITTED,
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TERMINAL,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+
+
+@pytest.mark.anyio
+async def test_takeover_waits_for_started_operation_positive_observation(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.release.clear()
+    mutation_task = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await adapter.entered.wait()
+    successor = request.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "operation_identity": "takeover-b",
+        }
+    )
+    repository.allocating_request = successor
+    takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor))
+    await asyncio.sleep(0)
+    assert not takeover_task.done()
+    adapter.release.set()
+    assert (await mutation_task).category == "target"
+    assert (await takeover_task).generation == 2
+    assert [record.phase for record in repository.records[-5:]] == [
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+
+
+@pytest.mark.anyio
+async def test_newer_takeover_supersedes_unacknowledged_watermark(tmp_path: Path) -> None:
+    service, repository, adapter, peer, first = _service(tmp_path)
+    repository.pause_phase = JournalPhase.WATERMARK_INSTALLED
+    repository.phase_release.clear()
+    first_task = asyncio.create_task(service.acknowledge_takeover(peer, first))
+    await repository.phase_entered.wait()
+    successor = first.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "operation_identity": "takeover-b",
+        }
+    )
+    repository.allocating_request = successor
+    repository.pause_phase = None
+    successor_task = asyncio.create_task(service.acknowledge_takeover(peer, successor))
+    repository.phase_release.set()
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await first_task
+    assert (await successor_task).generation == 2
+    assert [record.phase for record in repository.records] == [
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_SUPERSEDED,
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+    assert adapter.calls == []
+    path = tmp_path / f"{first.system_id}.journal"
+    lines = path.read_bytes().splitlines(keepends=True)
+    assert repository.head is not None
+    for index, record in enumerate(repository.records, start=1):
+        path.write_bytes(b"".join(lines[:index]))
+        repository.head = replace(
+            repository.head,
+            sequence=record.sequence,
+            digest=record_digest(record),
+            phase=record.phase,
+            authority_id=record.authority_id,
+            generation=record.generation,
+            operation_identity=record.operation_identity,
+        )
+        restarted = ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthorityJournal(path),
+            adapter=adapter,
+        )
+        assert await restarted.readiness(peer, successor)
+
+
+@pytest.mark.anyio
+async def test_each_commit_rechecks_current_binding_and_fences_loss(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    repository.reject_resolution = 2
+    observation = await service.execute_mutation(peer, _mutation(request))
+    assert observation.category == "target"
+    assert repository.current_resolutions == 2
+    assert adapter.calls == ["observe"]
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_sequential_commit_operations_each_receive_a_fresh_fence(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    first = _mutation(request)
+    second = first.model_copy(
+        update={
+            "operation_identity": "mutation-b",
+            "operation_digest": _DIGEST_B,
+            "attempt_id": uuid4(),
+        }
+    )
+    await service.execute_mutation(peer, first)
+    await service.execute_mutation(peer, second)
+    assert repository.current_resolutions == 4
+    assert adapter.calls == ["commit:activate", "observe"] * 2
+
+
+@pytest.mark.anyio
+async def test_restart_accepts_every_exact_phase_and_rejects_head_divergence(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    await service.execute_mutation(peer, _mutation(request))
+    records = tuple(repository.records)
+    path = tmp_path / f"{request.system_id}.journal"
+    lines = path.read_bytes().splitlines(keepends=True)
+    assert {record.phase for record in records} >= {
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        JournalPhase.ADMITTED,
+        JournalPhase.MUTATION_STARTED,
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    }
+    repository.current = False
+    assert repository.head is not None
+    for index, record in enumerate(records, start=1):
+        path.write_bytes(b"".join(lines[:index]))
+        repository.head = replace(
+            repository.head,
+            sequence=record.sequence,
+            digest=record_digest(record),
+            phase=record.phase,
+            authority_id=record.authority_id,
+            generation=record.generation,
+            operation_identity=record.operation_identity,
+        )
+        restarted = ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthorityJournal(path),
+            adapter=adapter,
+        )
+        expected_ready = record.phase not in {
+            JournalPhase.ADMITTED,
+            JournalPhase.MUTATION_STARTED,
+            JournalPhase.PROVIDER_RETURNED,
+            JournalPhase.OBSERVED,
+        }
+        assert await restarted.readiness(peer, request) is expected_ready
+    last = records[-1]
+    repository.head = replace(repository.head, sequence=last.sequence + 1)
+    assert not await service.readiness(peer, request)
+    repository.head = replace(
+        repository.head,
+        sequence=last.sequence,
+        digest=record_digest(last),
+    )
+    path.write_bytes(b"".join(lines[:-1]))
+    assert not await service.readiness(peer, request)
+    path.write_bytes(b"".join(lines) + lines[-1])
+    assert not await service.readiness(peer, request)
+    path.write_bytes(b"".join(lines) + b"corrupt")
+    assert not await service.readiness(peer, request)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("failure", "last_phase"),
+    [
+        ("commit", JournalPhase.MUTATION_STARTED),
+        ("observe", JournalPhase.PROVIDER_RETURNED),
+    ],
+)
+async def test_provider_boundary_failure_remains_unresolved_across_restart(
+    tmp_path: Path, failure: str, last_phase: JournalPhase
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    setattr(adapter, f"fail_{failure}", True)
+    with pytest.raises(RuntimeError, match="bounded"):
+        await service.execute_mutation(peer, _mutation(request))
+    assert repository.records[-1].phase is last_phase
+    successor = request.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "operation_identity": "takeover-b",
+        }
+    )
+    repository.allocating_request = successor
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await restarted.acknowledge_takeover(peer, successor)
+    assert repository.records[-1].phase is JournalPhase.WATERMARK_INSTALLED
