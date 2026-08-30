@@ -84,21 +84,24 @@ class GuestRecoveryWriter(Protocol):
         self,
         overlay: str,
         release: str,
-        source: RecoveryArchiveSource,
         capture: ModuleCapture,
+        source: RecoveryArchiveSource,
     ) -> str: ...
 ```
 
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are symmetric owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` only after it authenticates the recovery token and resolves the exact
 System/activation directory beneath the configured recovery root. The sink exclusively stages and
-fsyncs the fixed archive filename. The source accepts the relative filename only from the validated
-`ModuleArchiveCapture`, opens it relative to its already-owned directory with no-follow semantics,
-and returns a bounded read-only stream. It verifies a regular owner-only file owned by the service,
-rejects an archive larger than the configured recovery reservation before parsing, and closes its
-file and directory descriptors on every success and failure path. Neither capability accepts a
-caller path, returns a host path, or lets `GuestRecoveryWriter` resolve one. An absent capture does
-not open the source.
+fsyncs the fixed archive filename. Each source owns an already-open authenticated recovery-directory
+descriptor for exactly one restore call and rejects reuse. Before its first read it requires the
+source owner, requested release, and validated `ModuleArchiveCapture` identity to agree. It accepts
+the relative filename only from that capture, opens it relative to the owned directory with
+no-follow semantics, and retains the opened archive descriptor through the operation so a concurrent
+rename or symlink substitution cannot redirect later reads. It verifies a regular owner-only file
+owned by the service, rejects an archive larger than the configured recovery reservation before
+parsing, returns a bounded read-only stream, and closes its file and directory descriptors on every
+success and failure path. Neither capability accepts a caller path, returns a host path, or lets
+`GuestRecoveryWriter` resolve one. An absent capture does not open the source.
 
 `ModuleCapture` is either explicit absence or an archive descriptor containing the canonical
 manifest digest, entry count, uncompressed bytes, archive SHA-256, and relative archive filename.
@@ -190,6 +193,14 @@ both persistent components match source. A running prior state requires a fresh 
 an inactive prior state remains inactive. Retry from complete source performs only the conditional
 power restoration.
 
+Module restoration reads the owner-bound source into a guest-side staging directory before any
+same-filesystem publication replaces the live release. Lookup, identity, metadata, or bound failure
+before staging starts causes zero guest mutation. A source read or close failure after staging
+starts stops further mutation, never publishes or replaces the live release, and durably classifies
+the provider-owned partial staging state before returning conflict. Retry reopens and authenticates
+the recovery point and source, then resumes that owned partial or removes it before a fresh attempt;
+it never treats an unclassified or third partial as owned.
+
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
 retains the complete point identity plus explicit payload-absence facts. It fsyncs the tombstone,
@@ -270,8 +281,12 @@ tests interleave lost responses and restarts across component writes. Focused te
 existing manually dispatched tier and must not be claimed locally.
 Archive-source tests additionally cover wrong-owner construction, traversal/absolute filenames,
 symlink and non-regular archive entries, foreign owner or non-private mode, over-reservation size,
-short/error reads, descriptor cleanup on every exit, absent restoration without a read, and exact
-source/capture digest and manifest verification before guest mutation.
+single-operation reuse rejection, rename/symlink substitution after lookup, short/error reads,
+descriptor cleanup on every exit, absent restoration without a read, and exact source/release/capture
+identity plus digest and manifest verification before guest mutation. Contract tests pin the exact
+`restore(overlay, release, capture, source)` signature. Faults injected after staging begins prove a
+read or close error never publishes the live release and leaves a durably classified owned partial;
+pre-staging rejection proves zero guest mutation.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
