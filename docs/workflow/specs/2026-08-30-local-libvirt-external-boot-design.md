@@ -38,6 +38,17 @@ immutable owner coordinate, not proof of authority. No compatibility overload re
 search identifies only fault-inject and tests as current consumers, and they update atomically. If
 implementation discovers an external or separately versioned caller, it stops at scope checkpoint.
 #2140 alone validates the authority protocol and constructs the binding in production.
+`RecoveryPoint` contains `binding: ExternalBootActivationBinding` in place of relying only on its
+existing System/Run ownership. `prepare` copies the exact input binding into the point. Every
+recovery-consuming operation requires point binding, opaque token, and canonical recovery metadata
+to agree on all three UUIDs before reading provider state. Contract tests substitute a point and
+token independently across two activation IDs with the same System, Run, plan, and source, and prove
+zero observation, mutation, or deletion.
+
+Recovery identity is deterministic within one activation. A retry with the same binding, plan, and
+source returns byte-identical point metadata and reference. A distinct activation ID always selects
+a distinct point, deliberately refining ADR-0583's older System/Run/plan/source wording so a later
+activation cannot alias completed evidence.
 
 Create `local_libvirt/lifecycle/boot/recovery.py` with a narrow `GuestRecoveryWriter` protocol and
 real libguestfs implementation. It owns only `/lib/modules/<validated-release>` and uses no shell or

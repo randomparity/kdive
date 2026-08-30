@@ -34,6 +34,16 @@ ownership, never authority. There are no verified external callers and fault-inj
 current implementation, so replace-by-default applies: update the protocol, fault-inject provider,
 contract tests, and direct internal consumers atomically with no compatibility overload. #2140 alone
 translates an authenticated authority request into this binding for production composition.
+`RecoveryPoint` also carries the same closed binding. Every later operation compares its System,
+Run, and activation against the opaque token and reopened canonical metadata before observation or
+mutation; matching token and metadata alone is insufficient. This adjacent value change is required
+so `activate`, `observe`, `recover`, and `cleanup` can authenticate the selected owner without
+decoding authority data.
+
+This record refines ADR-0583's deterministic-prepare statement: identical retries within one
+activation return the same recovery point, while distinct activation UUIDs intentionally produce
+distinct points even when System, Run, plan, and source state repeat. A completed older activation
+therefore cannot alias a later activation's recovery object.
 
 Preparation creates an owner-only staging directory beside the final directory. It captures the
 exact inactive XML bytes, their ADR-0583 canonical preserved and boot-projection digests, prior
@@ -66,6 +76,9 @@ owner, verifies absence, and fsyncs the parent. Teardown quarantines evidence it
 - The internal pre-release shared port changes incompatibly. Current in-tree fault-inject and test
   consumers move in the same change; any newly discovered external consumer requires a scope
   checkpoint rather than a silent compatibility shim.
+- Shared `RecoveryPoint` gains the activation binding. Serialization and contract tests must reject
+  missing bindings and cross-activation token substitution; no legacy serialized point exists in
+  production because the capability is not advertised.
 
 ## Considered & rejected
 
