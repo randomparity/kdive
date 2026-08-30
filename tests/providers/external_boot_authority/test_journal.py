@@ -14,6 +14,7 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     JournalPhase,
     JournalRecordV1,
+    RecoveryObjectBindingV1,
     canonical_record_bytes,
     record_digest,
 )
@@ -31,6 +32,7 @@ def _record(
     previous_digest: str = GENESIS_DIGEST,
     *,
     phase: JournalPhase = JournalPhase.WATERMARK_INSTALLED,
+    **changes: object,
 ) -> JournalRecordV1:
     values: dict[str, object] = {
         "sequence": sequence,
@@ -59,7 +61,18 @@ def _record(
             "intended_target_identity": _DIGEST,
             "recovery_objects": (),
         }
+    if phase in {JournalPhase.TAKEOVER_SUPERSEDED, JournalPhase.TAKEOVER_ACKNOWLEDGED}:
+        values |= {"watermark_sequence": 1, "watermark_digest": _DIGEST}
+    if phase is JournalPhase.TAKEOVER_SUPERSEDED:
+        values["predecessor_generation"] = 1
+    values.update(changes)
     return JournalRecordV1.model_validate(values)
+
+
+def _recovery_object(reference: str) -> RecoveryObjectBindingV1:
+    return RecoveryObjectBindingV1(
+        system_id=_SYSTEM_ID, activation_id=_ACTIVATION_ID, reference=reference
+    )
 
 
 def test_append_creates_private_file_and_loads_exact_records(tmp_path: Path) -> None:
@@ -67,7 +80,12 @@ def test_append_creates_private_file_and_loads_exact_records(tmp_path: Path) -> 
     journal = FileAuthorityJournal(path)
     first = _record()
     journal.append(first)
-    second = _record(2, record_digest(first), phase=JournalPhase.TAKEOVER_ACKNOWLEDGED)
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_digest=record_digest(first),
+    )
     journal.append(second)
 
     assert path.stat().st_mode & 0o777 == 0o600
@@ -175,3 +193,73 @@ def test_existing_file_owned_by_another_identity_is_rejected(tmp_path: Path) -> 
     path.chmod(0o600)
     with pytest.raises(PermissionError, match="service identity"):
         FileAuthorityJournal(path, owner_uid=os.geteuid() + 1).load()
+
+
+@pytest.mark.parametrize("phase", [JournalPhase.OBSERVED, JournalPhase.WATERMARK_INSTALLED])
+def test_append_rejects_skipped_or_reversed_phase_without_changing_bytes(
+    tmp_path: Path, phase: JournalPhase
+) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record()
+    journal.append(first)
+    before = path.read_bytes()
+    changes: dict[str, object] = {}
+    if phase is JournalPhase.OBSERVED:
+        changes = {
+            "expected_source_identity": _DIGEST,
+            "intended_target_identity": _DIGEST,
+            "observation": {
+                "observation_id": str(uuid4()),
+                "category": "source",
+                "composite_state": _DIGEST,
+            },
+        }
+    candidate = _record(2, record_digest(first), phase=phase, **changes)
+
+    with pytest.raises(ValueError, match="phase ordering"):
+        journal.append(candidate)
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"expected_source_identity": "source-b"},
+        {"intended_target_identity": "target-b"},
+        {"recovery_objects": ()},
+        {"recovery_objects": (_recovery_object("object-b"),)},
+    ],
+)
+def test_append_rejects_mutation_evidence_drift_without_changing_bytes(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record(
+        phase=JournalPhase.ADMITTED,
+        expected_source_identity="source-a",
+        intended_target_identity="target-a",
+        recovery_objects=(_recovery_object("object-a"),),
+    )
+    journal.append(first)
+    before = path.read_bytes()
+    candidate = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.MUTATION_STARTED,
+        **(
+            {
+                "expected_source_identity": "source-a",
+                "intended_target_identity": "target-a",
+                "recovery_objects": (_recovery_object("object-a"),),
+            }
+            | changes
+        ),
+    )
+
+    with pytest.raises(ValueError, match="binding changed"):
+        journal.append(candidate)
+
+    assert path.read_bytes() == before

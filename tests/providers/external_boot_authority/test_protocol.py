@@ -201,6 +201,88 @@ def test_takeover_and_mutation_records_are_disjoint() -> None:
         _record(JournalPhase.ADMITTED)
 
 
+@pytest.mark.parametrize(
+    ("phase", "changes"),
+    [
+        (JournalPhase.WATERMARK_INSTALLED, {"watermark_sequence": 1}),
+        (JournalPhase.TAKEOVER_SUPERSEDED, {"predecessor_generation": 1}),
+        (JournalPhase.TAKEOVER_ACKNOWLEDGED, {}),
+    ],
+)
+def test_takeover_phase_linkage_is_exact(phase: JournalPhase, changes: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        _record(phase, **changes)
+
+    if phase is JournalPhase.WATERMARK_INSTALLED:
+        assert _record(phase).phase is phase
+    else:
+        canonical = {"watermark_sequence": 1, "watermark_digest": _DIGEST}
+        if phase is JournalPhase.TAKEOVER_SUPERSEDED:
+            canonical["predecessor_generation"] = 1
+        assert _record(phase, **canonical).phase is phase
+
+
+@pytest.mark.parametrize(
+    ("phase", "changes"),
+    [
+        (JournalPhase.ADMITTED, {"outcome": "never-began"}),
+        (JournalPhase.MUTATION_STARTED, {"observation": "present"}),
+        (JournalPhase.PROVIDER_RETURNED, {"outcome": "source"}),
+        (JournalPhase.OBSERVED, {}),
+        (JournalPhase.OBSERVED, {"observation": "present", "outcome": "source"}),
+        (JournalPhase.TERMINAL, {}),
+        (JournalPhase.TERMINAL, {"outcome": "source"}),
+        (
+            JournalPhase.TERMINAL,
+            {"outcome": "never-began", "observation": "present"},
+        ),
+    ],
+)
+def test_mutation_phase_evidence_is_exact(phase: JournalPhase, changes: dict[str, object]) -> None:
+    observation = AuthorityObservationV1(
+        observation_id=uuid4(), category="source", composite_state=_DIGEST
+    )
+    evidence = {key: observation if value == "present" else value for key, value in changes.items()}
+    with pytest.raises(ValidationError):
+        _record(
+            phase,
+            expected_source_identity=_DIGEST,
+            intended_target_identity=_OTHER_DIGEST,
+            recovery_objects=(),
+            **evidence,
+        )
+
+
+@pytest.mark.parametrize(
+    ("phase", "changes"),
+    [
+        (JournalPhase.ADMITTED, {}),
+        (JournalPhase.MUTATION_STARTED, {}),
+        (JournalPhase.PROVIDER_RETURNED, {}),
+        (JournalPhase.OBSERVED, {"observation": "present"}),
+        (JournalPhase.TERMINAL, {"outcome": "never-began"}),
+        (JournalPhase.TERMINAL, {"observation": "present", "outcome": "source"}),
+    ],
+)
+def test_mutation_phase_evidence_accepts_canonical_shape(
+    phase: JournalPhase, changes: dict[str, object]
+) -> None:
+    observation = AuthorityObservationV1(
+        observation_id=uuid4(), category="source", composite_state=_DIGEST
+    )
+    evidence = {key: observation if value == "present" else value for key, value in changes.items()}
+    assert (
+        _record(
+            phase,
+            expected_source_identity=_DIGEST,
+            intended_target_identity=_OTHER_DIGEST,
+            recovery_objects=(),
+            **evidence,
+        ).phase
+        is phase
+    )
+
+
 def test_record_bytes_and_digest_are_deterministic() -> None:
     record = _record(JournalPhase.WATERMARK_INSTALLED)
     encoded = canonical_record_bytes(record)
