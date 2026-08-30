@@ -114,7 +114,7 @@ async def test_lost_provider_response_recovers_without_repeating_commit(
     setattr(adapter, f"fail_{boundary}", False)
     restarted = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
         adapter=adapter,
     )
     await restarted.acknowledge_takeover(peer, successor)
@@ -238,7 +238,7 @@ async def test_recovery_ownership_rejects_drift_without_provider_or_journal_acce
     calls = tuple(adapter.calls)
     restarted = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(path),
+        journal_factory=lambda system_id: FileAuthorityJournal(path.parent, path.name),
         adapter=adapter,
     )
     with pytest.raises(AuthorityServiceError, match="journal_conflict"):
@@ -249,7 +249,7 @@ async def test_recovery_ownership_rejects_drift_without_provider_or_journal_acce
     adapter.fail_observe = False
     resumed = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(path),
+        journal_factory=lambda system_id: FileAuthorityJournal(path.parent, path.name),
         adapter=adapter,
     )
     assert (await resumed.acknowledge_takeover(peer, successor)).generation == 2
@@ -315,7 +315,7 @@ async def test_readiness_requires_exact_recovered_continuity(tmp_path: Path) -> 
     adapter.fail_commit = False
     restarted = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
         adapter=adapter,
     )
     await restarted.acknowledge_takeover(peer, successor)

@@ -218,7 +218,7 @@ async def test_mutation_reuses_one_validated_journal_scan_across_checkpoints(
     def journal_factory(_system_id: object) -> FileAuthorityJournal:
         nonlocal factory_calls
         factory_calls += 1
-        return CountingJournal(path)
+        return CountingJournal(path.parent, path.name)
 
     restarted = ExternalBootAuthorityService(
         repository=repository,
@@ -314,7 +314,7 @@ async def test_failed_local_append_never_advances_checkpoint_or_provider(tmp_pat
     service, repository, adapter, peer, request = _service(tmp_path)
     failing = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: _FailingAppendJournal(tmp_path / f"{system_id}.journal"),
+        journal_factory=lambda system_id: _FailingAppendJournal(tmp_path, f"{system_id}.journal"),
         adapter=adapter,
     )
     with pytest.raises(OSError, match="append/fsync"):
@@ -341,7 +341,7 @@ async def test_trusted_coordinate_overflow_bounds_every_metric_and_evicts_lanes(
     metrics = AuthorityServiceMetrics.empty(max_coordinates=2)
     service = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
         adapter=adapter,
         metrics=metrics,
     )
@@ -468,7 +468,7 @@ async def test_simultaneous_mutations_admit_only_one_before_any_second_append(
         await second
     assert (await first).category == "target"
     assert sum(record.phase is JournalPhase.ADMITTED for record in repository.records) == 1
-    journal = FileAuthorityJournal(tmp_path / f"{request.system_id}.journal")
+    journal = FileAuthorityJournal(tmp_path, f"{request.system_id}.journal")
     assert len(journal.load()) == len(repository.records)
     assert adapter.calls == ["commit:activate", "observe"]
 
@@ -548,7 +548,7 @@ async def test_newer_takeover_supersedes_unacknowledged_watermark(tmp_path: Path
         )
         restarted = ExternalBootAuthorityService(
             repository=repository,
-            journal_factory=lambda system_id: FileAuthorityJournal(path),
+            journal_factory=lambda system_id: FileAuthorityJournal(path.parent, path.name),
             adapter=adapter,
         )
         assert await restarted.readiness(peer, successor)
@@ -647,7 +647,7 @@ async def test_restart_accepts_every_exact_phase_and_rejects_head_divergence(
         )
         restarted = ExternalBootAuthorityService(
             repository=repository,
-            journal_factory=lambda system_id: FileAuthorityJournal(path),
+            journal_factory=lambda system_id: FileAuthorityJournal(path.parent, path.name),
             adapter=adapter,
         )
         expected_ready = record.phase not in {
@@ -701,7 +701,7 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
     repository.allocating_request = successor
     restarted = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
         adapter=adapter,
     )
     if failure == "observe":
@@ -711,7 +711,7 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
         restarted = ExternalBootAuthorityService(
             repository=repository,
             journal_factory=lambda system_id: FileAuthorityJournal(
-                tmp_path / f"{system_id}.journal"
+                tmp_path, f"{system_id}.journal"
             ),
             adapter=adapter,
         )
@@ -746,7 +746,7 @@ async def test_failed_commit_must_recover_before_later_same_generation_admission
         service = ExternalBootAuthorityService(
             repository=repository,
             journal_factory=lambda system_id: FileAuthorityJournal(
-                tmp_path / f"{system_id}.journal"
+                tmp_path, f"{system_id}.journal"
             ),
             adapter=adapter,
         )
@@ -819,7 +819,9 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
         adapter = _Adapter()
         restarted = ExternalBootAuthorityService(
             repository=repository,
-            journal_factory=lambda system_id, path=path: FileAuthorityJournal(path),
+            journal_factory=lambda system_id, path=path: FileAuthorityJournal(
+                path.parent, path.name
+            ),
             adapter=adapter,
         )
         acknowledgement = await restarted.acknowledge_takeover(peer, successor)
@@ -870,7 +872,7 @@ async def test_restart_rejects_divergent_trusted_continuation_before_recovery_ac
     fresh_adapter = _Adapter()
     restarted = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(path),
+        journal_factory=lambda system_id: FileAuthorityJournal(path.parent, path.name),
         adapter=fresh_adapter,
     )
     with pytest.raises(AuthorityServiceError, match="journal_conflict"):

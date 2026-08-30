@@ -176,11 +176,18 @@ cross-state or cross-phase attempt changes zero rows. `takeover-acknowledged` fo
 watermark and all inherited lower terminal records. A mutation may start only after that exact
 acknowledgement is recorded by 0122 and the binding is current.
 
-For every phase the service appends and fsyncs locally, then advances the database head. On first
-creation it opens the lane journal without following symlinks, creates it exclusively with mode
-`0600`, fsyncs the file, and fsyncs the parent directory before the first database compare-and-set;
-existing journals must be regular, service-owned files with exact mode `0600`. Readable or
-executable group/other bits and owner execute bits fail before parsing or appending.
+For every phase the service appends and fsyncs locally, then advances the database head. The journal
+constructor requires an explicit trusted root and a confined relative lane path. It opens the root
+once as a non-symlink directory, verifies service ownership and no group/other write, and traverses
+each relative directory component with `openat`-style retained descriptors, rejecting absolute,
+empty, `.`, and `..` components. Every directory must remain the same service-owned, non-writable
+inode; intermediate symlinks and root/ancestor replacement fail closed. Final read, exclusive
+create, append, stat, and parent fsync use only the retained validated parent descriptor, never a
+reconstructed pathname. First creation uses mode `0600`, fsyncs the file, and fsyncs that parent
+descriptor before the first database compare-and-set. Existing journals must be regular,
+service-owned files with exact mode `0600`. Readable or executable group/other bits and owner
+execute bits fail before parsing or appending. Closing or evicting a lane releases all retained
+directory descriptors. Production trusted-root selection and wiring remain #2127.
 `admitted`
 and `mutation-started` are both anchored before provider access. If the database update fails after
 local fsync, the file has a longer suffix and service enters failed-closed recovery. It never trims
