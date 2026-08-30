@@ -174,6 +174,7 @@ class JournalRecordV1(_AuthorityBinding):
     previous_digest: Digest
     phase: JournalPhase
     attempt_id: UUID
+    operation: str | None = None
     predecessor_generation: PositiveBigInt | None = None
     watermark_sequence: PositiveBigInt | None = None
     watermark_digest: Digest | None = None
@@ -194,6 +195,11 @@ class JournalRecordV1(_AuthorityBinding):
 
     _objects_are_canonical = field_validator("recovery_objects")(_canonical_recovery_objects)
 
+    @field_validator("operation")
+    @classmethod
+    def _optional_operation_is_bounded(cls, value: str | None) -> str | None:
+        return None if value is None else _bounded_text(value)
+
     @model_validator(mode="after")
     def _phase_shape_is_closed(self) -> JournalRecordV1:
         has_mutation_fields = (
@@ -204,6 +210,8 @@ class JournalRecordV1(_AuthorityBinding):
             or self.outcome is not None
         )
         if self.phase in _TAKEOVER_PHASES:
+            if self.operation is not None:
+                raise ValueError("takeover records forbid adapter operations")
             if has_mutation_fields:
                 raise ValueError("takeover records forbid mutation fields")
             if (self.phase is JournalPhase.TAKEOVER_SUPERSEDED) != (
@@ -217,6 +225,8 @@ class JournalRecordV1(_AuthorityBinding):
             ):
                 raise ValueError("takeover completion must carry the exact watermark link")
         else:
+            if self.operation is None:
+                raise ValueError("mutation records require the exact adapter operation")
             if any(
                 value is not None
                 for value in (

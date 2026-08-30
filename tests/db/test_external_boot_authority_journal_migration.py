@@ -76,6 +76,7 @@ def _record(
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     }:
         values |= {
+            "operation": "activate-commit",
             "expected_source_identity": "source-a",
             "intended_target_identity": "target-a",
             "recovery_objects": (),
@@ -500,7 +501,7 @@ def test_continuation_constraints_reject_malformed_retained_json(
             (case.system_id,),
         ).fetchone()
         assert before is not None
-        with pytest.raises(psycopg.DataError):
+        with pytest.raises(psycopg.Error):
             admin.execute(
                 "UPDATE external_boot_authority_journal_heads SET pending_takeover="
                 "jsonb_set(pending_takeover, '{authority_id}', '\"not-a-uuid\"') "
@@ -508,7 +509,7 @@ def test_continuation_constraints_reject_malformed_retained_json(
                 (case.system_id,),
             )
         suspended["attempt_id"] = "not-a-uuid"
-        with pytest.raises(psycopg.DataError):
+        with pytest.raises(psycopg.Error):
             admin.execute(
                 "UPDATE external_boot_authority_journal_heads SET suspended_operation=%s "
                 "WHERE system_id=%s",
@@ -698,6 +699,28 @@ def test_full_current_mutation_phase_sequence_and_rejections(
                 == "advanced"
             )
             previous = record
+    successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, case)
+    watermark = _record(
+        successor_case,
+        successor,
+        previous.sequence + 1,
+        record_digest(previous),
+        JournalPhase.WATERMARK_INSTALLED,
+    )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                previous.sequence,
+                record_digest(previous),
+                _payload(watermark),
+            )
+            == "advanced"
+        )
 
 
 @pytest.mark.anyio
@@ -1013,6 +1036,69 @@ def test_successor_inherits_and_completes_exact_older_operation(
             previous = completion
         completed = _head(connection, successor_case, successor)
         assert completed is not None and completed[7] is None and completed[6] is not None
+    newest_case, newest = _allocate_successor(migrated_url, authority_role_dsns, case)
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        skipped = _record(
+            newest_case,
+            newest,
+            previous.sequence + 1,
+            record_digest(previous),
+            JournalPhase.WATERMARK_INSTALLED,
+        )
+        before = _head(connection, newest_case, newest)
+        assert (
+            _advance_raw(
+                connection,
+                newest_case,
+                newest,
+                previous.sequence,
+                record_digest(previous),
+                _payload(skipped),
+            )
+            == "conflict"
+        )
+        assert _head(connection, newest_case, newest) == before
+        superseded = _record(
+            newest_case,
+            newest,
+            previous.sequence + 1,
+            record_digest(previous),
+            JournalPhase.TAKEOVER_SUPERSEDED,
+            predecessor_generation=successor.generation,
+            watermark_sequence=successor_watermark.sequence,
+            watermark_digest=record_digest(successor_watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                newest_case,
+                newest,
+                previous.sequence,
+                record_digest(previous),
+                _payload(superseded),
+            )
+            == "advanced"
+        )
+        newest_watermark = _record(
+            newest_case,
+            newest,
+            superseded.sequence + 1,
+            record_digest(superseded),
+            JournalPhase.WATERMARK_INSTALLED,
+        )
+        assert (
+            _advance_raw(
+                connection,
+                newest_case,
+                newest,
+                superseded.sequence,
+                record_digest(superseded),
+                _payload(newest_watermark),
+            )
+            == "advanced"
+        )
 
 
 def test_concurrent_successors_only_allow_newest_takeover_progress(

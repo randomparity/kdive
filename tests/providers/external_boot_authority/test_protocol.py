@@ -128,6 +128,7 @@ def test_mutation_rejects_recovery_object_from_another_binding() -> None:
                 "previous_digest": "sha256:" + "0" * 64,
                 "phase": JournalPhase.ADMITTED,
                 "attempt_id": uuid4(),
+                "operation": "recover-commit",
                 "expected_source_identity": _DIGEST,
                 "intended_target_identity": _OTHER_DIGEST,
                 "recovery_objects": (foreign,),
@@ -180,6 +181,12 @@ def _record(phase: JournalPhase, **changes: object) -> JournalRecordV1:
         "phase": phase,
         "attempt_id": uuid4(),
     }
+    if phase not in {
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_SUPERSEDED,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    }:
+        values["operation"] = "recover-commit"
     values.update(changes)
     return JournalRecordV1.model_validate(values)
 

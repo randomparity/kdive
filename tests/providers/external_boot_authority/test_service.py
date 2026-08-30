@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
@@ -10,7 +12,12 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
+from kdive.db.external_boot_authority_journal import (
+    AuthorityBinding,
+    JournalHead,
+    PendingTakeover,
+    SuspendedOperation,
+)
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
@@ -155,7 +162,56 @@ class _Repository:
             await self.phase_release.wait()
         if self.advance_status != "advanced":
             return self.advance_status
+        prior = self.records[-1] if self.records else None
         self.records.append(record)
+        pending = self.head.pending_takeover if self.head is not None else None
+        suspended = self.head.suspended_operation if self.head is not None else None
+        if record.phase in {JournalPhase.WATERMARK_INSTALLED, JournalPhase.TAKEOVER_SUPERSEDED}:
+            pending = PendingTakeover(
+                authority_id=record.authority_id,
+                generation=record.generation,
+                operation_identity=record.operation_identity,
+                attempt_id=record.attempt_id,
+                request_digest=record.operation_digest,
+                watermark_sequence=record.sequence,
+                watermark_digest=record_digest(record),
+            )
+        if (
+            record.phase is JournalPhase.WATERMARK_INSTALLED
+            and prior is not None
+            and prior.phase
+            in {
+                JournalPhase.ADMITTED,
+                JournalPhase.MUTATION_STARTED,
+                JournalPhase.PROVIDER_RETURNED,
+                JournalPhase.OBSERVED,
+            }
+        ):
+            suspended = SuspendedOperation(
+                authority_id=prior.authority_id,
+                generation=prior.generation,
+                activation_id=prior.activation_id,
+                operation_identity=prior.operation_identity,
+                attempt_id=prior.attempt_id,
+                purpose=prior.purpose,
+                operation=prior.operation or "",
+                request_digest=prior.operation_digest,
+                phase=prior.phase.value,
+                source_identity=prior.expected_source_identity or "",
+                target_identity=prior.intended_target_identity or "",
+                ownership_digest="sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        [item.model_dump(mode="json") for item in prior.recovery_objects],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            )
+        if record.phase is JournalPhase.TERMINAL:
+            suspended = None
+        if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED:
+            pending = None
         self.head = JournalHead(
             authority_instance=binding.authority_instance,
             system_id=binding.system_id,
@@ -165,8 +221,8 @@ class _Repository:
             authority_id=record.authority_id,
             generation=record.generation,
             operation_identity=record.operation_identity,
-            pending_takeover=None,
-            suspended_operation=None,
+            pending_takeover=pending,
+            suspended_operation=suspended,
         )
         return "advanced"
 
@@ -179,6 +235,7 @@ class _Adapter:
         self.release.set()
         self.fail_commit = False
         self.fail_observe = False
+        self.operations: list[str] = []
 
     async def commit(
         self, request: AuthorityMutationRequestV1, commit_point: str
@@ -192,6 +249,7 @@ class _Adapter:
 
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.calls.append("observe")
+        self.operations.append(request.operation)
         if self.fail_observe:
             raise RuntimeError("bounded observation failure")
         return self._observation("target")
@@ -257,6 +315,10 @@ async def test_rejections_precede_journal_and_provider_access(tmp_path: Path) ->
         await service.acknowledge_takeover(AuthenticatedPeer(uuid4()), request)
     assert repository.records == []
     assert adapter.calls == []
+    assert service.metrics.rejections == {
+        (request.provider_kind, request.authority_instance, "unauthenticated"): 1,
+        (request.provider_kind, request.authority_instance, "superseded"): 1,
+    }
 
 
 @pytest.mark.anyio
@@ -325,6 +387,9 @@ async def test_failed_checkpoint_never_reaches_provider_and_fails_closed(tmp_pat
     assert repository.head is None
     assert not await service.readiness(peer, request)
     assert service.metrics.checkpoints == {}
+    assert service.metrics.rejections == {
+        (request.provider_kind, request.authority_instance, "journal_conflict"): 1
+    }
 
 
 @pytest.mark.anyio
@@ -663,7 +728,8 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
     (tmp_path / "source").mkdir()
     await source.acknowledge_takeover(peer, request)
     source_repository.current = True
-    await source.execute_mutation(peer, _mutation(request))
+    mutation = _mutation(request).model_copy(update={"operation": "commit-boot"})
+    await source.execute_mutation(peer, mutation)
     source_records = tuple(source_repository.records)
     source_lines = (
         (tmp_path / "source" / f"{request.system_id}.journal")
@@ -711,6 +777,7 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
         acknowledgement = await restarted.acknowledge_takeover(peer, successor)
         assert acknowledgement.generation == 2
         assert adapter.calls == expected_calls
+        assert adapter.operations == (["commit-boot"] if expected_calls else [])
         assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
         terminal = next(
             record
@@ -718,3 +785,47 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
             if record.phase is JournalPhase.TERMINAL
         )
         assert terminal.outcome == ("never-began" if phase is JournalPhase.ADMITTED else "target")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("divergence", ["missing", "operation", "phase"])
+async def test_restart_rejects_divergent_trusted_continuation_before_recovery_access(
+    tmp_path: Path, divergence: str
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.fail_commit = True
+    mutation = _mutation(request).model_copy(update={"operation": "commit-boot"})
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, mutation)
+    successor = request.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    adapter.fail_commit = False
+    adapter.fail_observe = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.acknowledge_takeover(peer, successor)
+    assert repository.head is not None
+    suspended = repository.head.suspended_operation
+    assert suspended is not None
+    if divergence == "missing":
+        corrupted = None
+    elif divergence == "operation":
+        corrupted = replace(suspended, operation="different-commit")
+    else:
+        corrupted = replace(suspended, phase=JournalPhase.PROVIDER_RETURNED)
+    repository.head = replace(repository.head, suspended_operation=corrupted)
+    path = tmp_path / f"{request.system_id}.journal"
+    before = path.read_bytes()
+    fresh_adapter = _Adapter()
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(path),
+        adapter=fresh_adapter,
+    )
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.acknowledge_takeover(peer, successor)
+    assert fresh_adapter.calls == []
+    assert path.read_bytes() == before

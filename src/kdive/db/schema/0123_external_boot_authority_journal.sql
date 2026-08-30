@@ -67,6 +67,7 @@ CREATE TABLE public.external_boot_authority_journal_heads (
                 'operation_identity', suspended_operation->'operation_identity',
                 'attempt_id', suspended_operation->'attempt_id',
                 'purpose', suspended_operation->'purpose',
+                'operation', suspended_operation->'operation',
                 'request_digest', suspended_operation->'request_digest',
                 'phase', suspended_operation->'phase',
                 'source_identity', suspended_operation->'source_identity',
@@ -76,7 +77,7 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND suspended_operation ?& ARRAY[
                 'authority_id', 'generation', 'activation_id', 'operation_identity',
                 'attempt_id', 'purpose', 'request_digest', 'phase', 'source_identity',
-                'target_identity', 'ownership_digest'
+                'target_identity', 'ownership_digest', 'operation'
             ]
             AND suspended_operation->>'phase' IN (
                 'admitted', 'mutation-started', 'provider-returned', 'observed'
@@ -94,6 +95,7 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND (suspended_operation->>'activation_id')::uuid IS NOT NULL
             AND (suspended_operation->>'attempt_id')::uuid IS NOT NULL
             AND octet_length(suspended_operation->>'purpose') BETWEEN 1 AND 255
+            AND octet_length(suspended_operation->>'operation') BETWEEN 1 AND 255
         )
     )
 );
@@ -200,14 +202,14 @@ BEGIN
     IF p_expected_sequence < 0 OR p_expected_sequence >= 9223372036854775807
        OR p_expected_digest !~ '^sha256:[0-9a-f]{64}$'
        OR jsonb_typeof(p_record) IS DISTINCT FROM 'object'
-       OR (SELECT count(*) FROM jsonb_object_keys(p_record)) <> 25
+       OR (SELECT count(*) FROM jsonb_object_keys(p_record)) <> 26
        OR NOT p_record ?& ARRAY[
            'schema', 'authority_id', 'generation', 'system_id', 'activation_id', 'run_id',
            'plan_identity', 'purpose', 'provider_kind', 'authority_instance',
            'operation_identity', 'operation_digest', 'sequence', 'previous_digest', 'phase',
            'attempt_id', 'predecessor_generation', 'watermark_sequence', 'watermark_digest',
            'expected_source_identity', 'intended_target_identity', 'recovery_objects',
-           'observation', 'outcome', 'canonical_record'
+           'observation', 'outcome', 'operation', 'canonical_record'
        ]
        OR p_record->>'schema' <> 'external-boot-authority-v1'
        OR jsonb_typeof(p_record->'authority_id') <> 'string'
@@ -232,14 +234,20 @@ BEGIN
             OR p_record->'observation' <> 'null'::jsonb
             OR p_record->'outcome' <> 'null'::jsonb)
     THEN RETURN 'conflict'; END IF;
+    IF v_phase IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
+       AND p_record->'operation' <> 'null'::jsonb
+    THEN RETURN 'conflict'; END IF;
     IF v_phase NOT IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
        AND (jsonb_typeof(p_record->'expected_source_identity') <> 'string'
             OR jsonb_typeof(p_record->'intended_target_identity') <> 'string'
-            OR jsonb_typeof(p_record->'recovery_objects') <> 'array')
+            OR jsonb_typeof(p_record->'recovery_objects') <> 'array'
+            OR jsonb_typeof(p_record->'operation') <> 'string')
     THEN RETURN 'conflict'; END IF;
     IF octet_length(p_record->>'authority_instance') NOT BETWEEN 1 AND 255
        OR octet_length(p_record->>'operation_identity') NOT BETWEEN 1 AND 255
        OR octet_length(p_record->>'provider_kind') NOT BETWEEN 1 AND 255
+       OR (p_record->'operation' <> 'null'::jsonb
+           AND octet_length(p_record->>'operation') NOT BETWEEN 1 AND 255)
        OR p_record->>'plan_identity' !~ '^sha256:[0-9a-f]{64}$'
        OR p_record->>'operation_digest' !~ '^sha256:[0-9a-f]{64}$'
        OR p_record->>'previous_digest' !~ '^sha256:[0-9a-f]{64}$'
@@ -399,11 +407,15 @@ BEGIN
         AND v_head.suspended_operation->>'operation_identity' = p_record->>'operation_identity'
         AND v_head.suspended_operation->>'attempt_id' = p_record->>'attempt_id'
         AND v_head.suspended_operation->>'purpose' = p_record->>'purpose'
+        AND v_head.suspended_operation->>'operation' = p_record->>'operation'
         AND v_head.suspended_operation->>'request_digest' = p_record->>'operation_digest'
         AND v_head.suspended_operation->>'source_identity' = p_record->>'expected_source_identity'
         AND v_head.suspended_operation->>'target_identity' = p_record->>'intended_target_identity'
         AND v_head.suspended_operation->>'ownership_digest' = 'sha256:' || encode(
-            sha256(convert_to((p_record->'recovery_objects')::text, 'UTF8')), 'hex'
+            sha256(convert_to(
+                public.canonical_external_boot_authority_json(p_record->'recovery_objects'),
+                'UTF8'
+            )), 'hex'
         );
     v_pending_matches := v_head.pending_takeover IS NOT NULL
         AND v_head.pending_takeover->>'authority_id' = v_authority.id::text
@@ -428,14 +440,20 @@ BEGIN
     IF v_phase = 'watermark-installed' THEN
         IF v_head.phase = 'takeover-superseded'
            AND v_head.operation_identity = p_record->>'operation_identity' THEN NULL;
-        ELSIF v_head.phase IN ('admitted', 'mutation-started', 'terminal') THEN NULL;
+        ELSIF v_head.phase IN (
+            'admitted', 'mutation-started', 'provider-returned', 'observed'
+        ) THEN NULL;
+        ELSIF v_head.phase = 'terminal' AND v_head.pending_takeover IS NULL THEN NULL;
         ELSE RETURN 'conflict'; END IF;
     ELSIF v_phase = 'takeover-superseded' THEN
-        IF v_head.phase <> 'watermark-installed'
-           OR v_authority.generation <= v_head.generation
-           OR (p_record->>'predecessor_generation')::bigint <> v_head.generation
-           OR (p_record->>'watermark_sequence')::bigint <> v_head.sequence
-           OR p_record->>'watermark_digest' <> v_head.digest THEN RETURN 'conflict'; END IF;
+        IF v_head.pending_takeover IS NULL
+           OR v_authority.generation <= (v_head.pending_takeover->>'generation')::bigint
+           OR (p_record->>'predecessor_generation')::bigint
+                <> (v_head.pending_takeover->>'generation')::bigint
+           OR (p_record->>'watermark_sequence')::bigint
+                <> (v_head.pending_takeover->>'watermark_sequence')::bigint
+           OR p_record->>'watermark_digest' <> v_head.pending_takeover->>'watermark_digest'
+        THEN RETURN 'conflict'; END IF;
     ELSIF v_phase = 'takeover-acknowledged' THEN
         IF NOT v_pending_matches OR v_head.suspended_operation IS NOT NULL
            OR v_head.phase NOT IN ('watermark-installed', 'terminal')
@@ -473,19 +491,23 @@ BEGIN
                 'watermark_sequence', v_sequence, 'watermark_digest', v_digest
             ) ELSE pending_takeover END,
         suspended_operation = CASE
-            WHEN v_phase = 'watermark-installed'
-                 AND v_head.phase IN ('admitted', 'mutation-started') THEN jsonb_build_object(
+            WHEN v_phase = 'watermark-installed' AND v_head.phase IN (
+                'admitted', 'mutation-started', 'provider-returned', 'observed'
+            ) THEN jsonb_build_object(
                 'authority_id', v_head.authority_id, 'generation', v_head.generation,
                 'activation_id', v_head.head_record->>'activation_id',
                 'operation_identity', v_head.operation_identity,
                 'attempt_id', v_head.head_record->>'attempt_id',
                 'purpose', v_head.head_record->>'purpose',
+                'operation', v_head.head_record->>'operation',
                 'request_digest', v_head.head_record->>'operation_digest',
                 'phase', v_head.phase,
                 'source_identity', v_head.head_record->>'expected_source_identity',
                 'target_identity', v_head.head_record->>'intended_target_identity',
                 'ownership_digest', 'sha256:' || encode(sha256(convert_to(
-                    (v_head.head_record->'recovery_objects')::text, 'UTF8')), 'hex')
+                    public.canonical_external_boot_authority_json(
+                        v_head.head_record->'recovery_objects'
+                    ), 'UTF8')), 'hex')
             )
             WHEN v_is_suspended AND v_phase = 'terminal' THEN NULL
             WHEN v_is_suspended THEN jsonb_set(

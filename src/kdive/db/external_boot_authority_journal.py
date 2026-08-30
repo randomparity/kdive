@@ -75,6 +75,7 @@ class SuspendedOperation:
     operation_identity: str
     attempt_id: UUID
     purpose: str
+    operation: str
     request_digest: str
     phase: Literal["admitted", "mutation-started", "provider-returned", "observed"]
     source_identity: str
@@ -180,6 +181,7 @@ def _suspended(value: dict[str, Any] | None) -> SuspendedOperation | None:
         operation_identity=_bounded(value["operation_identity"]),
         attempt_id=_uuid(value["attempt_id"]),
         purpose=_bounded(value["purpose"]),
+        operation=_bounded(value["operation"]),
         request_digest=_bounded(value["request_digest"]),
         phase=value["phase"],
         source_identity=_bounded(value["source_identity"], 1024),

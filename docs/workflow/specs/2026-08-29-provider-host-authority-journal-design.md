@@ -28,7 +28,8 @@ x86_64 and ppc64le targets without adding a dependency.
   The journal record phases are `watermark-installed`, `takeover-superseded`,
   `takeover-acknowledged`, `admitted`, `mutation-started`, `provider-returned`, `observed`, and
   `terminal`. Every record repeats the authority instance, System, activation, generation,
-  operation and attempt identities, purpose, request digest, and phase-specific bounded evidence.
+  operation and attempt identities, purpose, the exact adapter operation/commit point, request
+  digest, and phase-specific bounded evidence.
   Mutation records additionally require source and target identities plus stable recovery-object
   ownership. Takeover records forbid those mutation-only fields and instead bind their predecessor
   takeover generation where applicable.
@@ -126,8 +127,9 @@ system_id)`. It stores a positive sequence, exact record digest, phase, authorit
 operation identity, and update time. Because the lane admits at most one mutation at a time, the
 same row also has two nullable, bounded continuations: `pending_takeover` retains the takeover
 authority, generation, operation, attempt, request digest, watermark sequence, and watermark digest;
-`suspended_operation` retains the lower authority, generation, activation, operation, attempt,
-purpose, request digest, last phase, and source/target/ownership digests. These are verification
+`suspended_operation` retains the lower authority, generation, activation, operation identity,
+attempt, purpose, exact adapter operation/commit point, request digest, last phase, and
+source/target/ownership digests. These are verification
 state, not another journal: they contain no provider definitions, output, or record history and are
 cleared when the corresponding operation or takeover becomes terminal.
 
