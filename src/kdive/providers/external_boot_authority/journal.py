@@ -21,6 +21,7 @@ _NEXT_OPERATION_PHASES = {
     JournalPhase.WATERMARK_INSTALLED: frozenset(
         {JournalPhase.TAKEOVER_SUPERSEDED, JournalPhase.TAKEOVER_ACKNOWLEDGED}
     ),
+    JournalPhase.TAKEOVER_SUPERSEDED: frozenset({JournalPhase.WATERMARK_INSTALLED}),
     JournalPhase.ADMITTED: frozenset({JournalPhase.MUTATION_STARTED, JournalPhase.TERMINAL}),
     JournalPhase.MUTATION_STARTED: frozenset({JournalPhase.PROVIDER_RETURNED}),
     JournalPhase.PROVIDER_RETURNED: frozenset({JournalPhase.OBSERVED}),
@@ -74,32 +75,15 @@ class FileAuthorityJournal:
             raise
         return descriptor, created
 
-    def load(self) -> tuple[JournalRecordV1, ...]:
-        """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
-        if not self._path.exists() and not self._path.is_symlink():
-            return ()
-        descriptor = self._open_read()
-        try:
-            with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                data = stream.read()
-        finally:
-            os.close(descriptor)
-        if not data:
-            return ()
-        if not data.endswith(b"\n"):
-            raise ValueError("authority journal has a partial final record")
-        records: list[JournalRecordV1] = []
+    @staticmethod
+    def _validate_records(records: tuple[JournalRecordV1, ...]) -> None:
         previous_digest = GENESIS_DIGEST
         lane: tuple[str, str] | None = None
         ownership: dict[str, tuple[str, str]] = {}
         operation_phases: dict[str, JournalPhase] = {}
         operation_bindings: dict[str, tuple[object, ...]] = {}
-        for expected_sequence, line in enumerate(data[:-1].split(b"\n"), start=1):
-            if not line or len(line) > MAX_MESSAGE_BYTES:
-                raise ValueError("authority journal record is empty or oversized")
-            record = JournalRecordV1.model_validate_json(line)
-            if canonical_record_bytes(record) != line:
-                raise ValueError("authority journal record is not canonical JSON")
+        watermarks: dict[int, JournalRecordV1] = {}
+        for expected_sequence, record in enumerate(records, start=1):
             if record.sequence != expected_sequence:
                 raise ValueError("authority journal sequence is not contiguous")
             if record.previous_digest != previous_digest:
@@ -119,12 +103,10 @@ class FileAuthorityJournal:
                 record.provider_kind,
                 record.operation_digest,
                 record.attempt_id,
+                record.expected_source_identity,
+                record.intended_target_identity,
+                record.recovery_objects,
             )
-            prior_binding = operation_bindings.setdefault(
-                record.operation_identity, operation_binding
-            )
-            if prior_binding != operation_binding:
-                raise ValueError("authority journal operation binding changed")
             prior_phase = operation_phases.get(record.operation_identity)
             allowed = (
                 _INITIAL_OPERATION_PHASES
@@ -133,28 +115,66 @@ class FileAuthorityJournal:
             )
             if record.phase not in allowed:
                 raise ValueError("authority journal phase ordering is invalid")
+            if record.phase in {
+                JournalPhase.TAKEOVER_SUPERSEDED,
+                JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            }:
+                linked_generation = (
+                    record.predecessor_generation
+                    if record.phase is JournalPhase.TAKEOVER_SUPERSEDED
+                    else record.generation
+                )
+                watermark = watermarks.get(linked_generation)
+                if watermark is None or (
+                    record.watermark_sequence != watermark.sequence
+                    or record.watermark_digest != record_digest(watermark)
+                ):
+                    raise ValueError("authority journal takeover watermark link is invalid")
+            prior_binding = operation_bindings.setdefault(
+                record.operation_identity, operation_binding
+            )
+            if prior_binding != operation_binding:
+                raise ValueError("authority journal operation binding changed")
             operation_phases[record.operation_identity] = record.phase
+            if record.phase is JournalPhase.WATERMARK_INSTALLED:
+                watermarks[record.generation] = record
             for item in record.recovery_objects:
                 current_owner = (str(item.system_id), str(item.activation_id))
                 prior_owner = ownership.setdefault(item.reference, current_owner)
                 if prior_owner != current_owner:
                     raise ValueError("authority journal recovery ownership changed")
             previous_digest = record_digest(record)
+
+    def load(self) -> tuple[JournalRecordV1, ...]:
+        """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
+        if not self._path.exists() and not self._path.is_symlink():
+            return ()
+        descriptor = self._open_read()
+        try:
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                data = stream.read()
+        finally:
+            os.close(descriptor)
+        if not data:
+            return ()
+        if not data.endswith(b"\n"):
+            raise ValueError("authority journal has a partial final record")
+        records: list[JournalRecordV1] = []
+        for line in data[:-1].split(b"\n"):
+            if not line or len(line) > MAX_MESSAGE_BYTES:
+                raise ValueError("authority journal record is empty or oversized")
+            record = JournalRecordV1.model_validate_json(line)
+            if canonical_record_bytes(record) != line:
+                raise ValueError("authority journal record is not canonical JSON")
             records.append(record)
-        return tuple(records)
+        result = tuple(records)
+        self._validate_records(result)
+        return result
 
     def append(self, record: JournalRecordV1) -> None:
         """Append one record, fsyncing file and newly created parent entry before return."""
         current = self.load()
-        expected_sequence = len(current) + 1
-        expected_previous = GENESIS_DIGEST if not current else record_digest(current[-1])
-        if record.sequence != expected_sequence or record.previous_digest != expected_previous:
-            raise ValueError("authority journal append does not continue the exact head")
-        if current and (
-            record.authority_instance != current[0].authority_instance
-            or record.system_id != current[0].system_id
-        ):
-            raise ValueError("authority journal append targets a foreign lane")
+        self._validate_records((*current, record))
         encoded = canonical_record_bytes(record) + b"\n"
         descriptor, created = self._open_append()
         try:

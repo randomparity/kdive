@@ -175,6 +175,8 @@ class JournalRecordV1(_AuthorityBinding):
     phase: JournalPhase
     attempt_id: UUID
     predecessor_generation: PositiveBigInt | None = None
+    watermark_sequence: PositiveBigInt | None = None
+    watermark_digest: Digest | None = None
     expected_source_identity: str | None = None
     intended_target_identity: str | None = None
     recovery_objects: Annotated[
@@ -208,9 +210,22 @@ class JournalRecordV1(_AuthorityBinding):
                 self.predecessor_generation is not None
             ):
                 raise ValueError("predecessor generation must match takeover supersession")
+            watermark_link = (self.watermark_sequence, self.watermark_digest)
+            expected_link_presence = self.phase is not JournalPhase.WATERMARK_INSTALLED
+            if any(value is not None for value in watermark_link) != expected_link_presence or (
+                expected_link_presence and any(value is None for value in watermark_link)
+            ):
+                raise ValueError("takeover completion must carry the exact watermark link")
         else:
-            if self.predecessor_generation is not None:
-                raise ValueError("mutation records forbid predecessor generation")
+            if any(
+                value is not None
+                for value in (
+                    self.predecessor_generation,
+                    self.watermark_sequence,
+                    self.watermark_digest,
+                )
+            ):
+                raise ValueError("mutation records forbid takeover linkage")
             if self.expected_source_identity is None or self.intended_target_identity is None:
                 raise ValueError("mutation records require source and target identities")
             if any(
@@ -218,6 +233,21 @@ class JournalRecordV1(_AuthorityBinding):
                 for item in self.recovery_objects
             ):
                 raise ValueError("recovery objects must belong to the record binding")
+            if self.phase in {
+                JournalPhase.ADMITTED,
+                JournalPhase.MUTATION_STARTED,
+                JournalPhase.PROVIDER_RETURNED,
+            } and (self.observation is not None or self.outcome is not None):
+                raise ValueError("pre-observation mutation phases forbid result evidence")
+            if self.phase is JournalPhase.OBSERVED and (
+                self.observation is None or self.outcome is not None
+            ):
+                raise ValueError("observed records require only observation evidence")
+            if self.phase is JournalPhase.TERMINAL:
+                if self.outcome is None:
+                    raise ValueError("terminal records require an outcome")
+                if (self.outcome == "never-began") != (self.observation is None):
+                    raise ValueError("terminal observation must match the outcome")
         return self
 
 
