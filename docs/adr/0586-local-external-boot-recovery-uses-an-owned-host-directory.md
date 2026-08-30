@@ -50,11 +50,14 @@ no provider write. This adjacent value change lets `activate`, `observe`, `recov
 authenticate the selected owner and immutable state without decoding authority data.
 
 Migration 0124 drops and recreates only `external_boot_activation_evidence_ownership`. Its recovery
-point arm requires the closed binding's System, Run, and activation UUIDs to equal the ledger row;
-the materialization and evidence arms remain unchanged. It performs no data rewrite and adds no
-table, role, or grant. This capability is pre-release and unadvertised, so rollback is application
-rollback plus the forward migration history; legacy `ownership` payloads remain invalid rather than
-receiving a compatibility path.
+point arm requires `binding` to be a JSON object whose key set is exactly `system_id`, `run_id`, and
+`activation_id`, then requires those three UUIDs to equal the ledger row; the materialization and
+evidence arms remain unchanged. A preflight aborts when any stored recovery point carries legacy
+`ownership` or a missing/malformed binding, because this migration performs no data rewrite. It adds
+no table, role, or grant. This capability is pre-release and unadvertised. Application rollback with
+forward migration history is safe only before any binding-shaped recovery point is written; after
+the first such write, rollback is roll-forward because the old application cannot deserialize it and
+its legacy writes fail the new CHECK. Legacy `ownership` payloads receive no compatibility path.
 
 This record refines ADR-0583's deterministic-prepare statement: identical retries within one
 activation return the same recovery point, while distinct activation UUIDs intentionally produce
@@ -129,8 +132,8 @@ Teardown likewise quarantines evidence it cannot authenticate.
   token substitution; no legacy serialized point exists in production because the capability is not
   advertised.
 - Migration 0124 is the additive database consequence of that replacement. Migration inventory,
-  immutability, exact CHECK shape, valid binding persistence, and legacy/cross-owner rejection are
-  tested explicitly.
+  immutability, exact object/key-set CHECK shape, preflight abort, valid binding persistence, and
+  legacy/malformed/cross-owner rejection are tested explicitly.
 
 ## Considered & rejected
 
