@@ -140,8 +140,8 @@ class GuestRecoveryWriter(Protocol):
         self,
         overlay: str,
         release: str,
-        source: RecoveryArchiveSource,
         capture: ModuleCapture,
+        source: RecoveryArchiveSource,
     ) -> str: ...
 
 
@@ -155,9 +155,11 @@ by `LocalLibvirtExternalBoot` after resolving and authenticating the recovery to
 configured root. The sink exposes only exclusive staged archive creation and fsync. The source
 opens only the validated capture's relative archive filename beneath the retained owner directory,
 using no-follow regular-file/service-owner/private-mode checks and a bound no larger than the owned
-recovery reservation. It exposes a read-only stream and closes file and directory descriptors on
-every exit. Neither accepts or reveals a caller-selected path; `GuestRecoveryWriter` cannot resolve
-paths or choose a source or destination. Absent restoration never opens the source.
+recovery reservation. One source owns its authenticated directory descriptor for one restore call,
+retains the opened archive descriptor against substitution, and rejects reuse. It exposes a bounded
+read-only stream and closes file and directory descriptors on every exit. Neither accepts or reveals
+a caller-selected path; `GuestRecoveryWriter` cannot resolve paths or choose a source or destination.
+Absent restoration never opens the source.
 
 1. Write golden tests for empty, regular-file, unsupported-xattr, ACL/security-xattr, and absolute
    `build` symlink manifests. Assert the empty digest is
@@ -171,9 +173,13 @@ paths or choose a source or destination. Absent restoration never opens the sour
    manifest verification, exact absent restoration, partial failure cleanup, and that symlink targets
    are copied but never followed. Cover wrong-owner source construction, absolute/traversal capture
    names, archive symlink/non-regular/foreign-owner/non-private/over-reservation rejection, bounded
-   short/error reads, absent restore without source access, and descriptor cleanup after success or
-   failure. Assert every rejected source causes zero guest mutation. Inject a manifest comparator
-   fault and observe red before restoring.
+   reads, absent restore without source access, source reuse rejection after success or failure, and
+   descriptor cleanup on every exit. Contract tests pin
+   `restore(overlay, release, capture, source)`. Validate lookup, owner, release, capture, metadata,
+   and bounds before staging and assert each rejection causes zero guest mutation. After staging
+   begins, inject short/error reads and close faults; assert no live-release rename or publication,
+   durable owned-partial classification, stopped mutation, and deterministic retry or removal of the
+   owned partial. Inject a manifest comparator fault and observe red before restoring.
 4. Run `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_recovery.py`; expect all
    tests passed. Run lint/type/diff checks and commit as
    `feat(local-libvirt): preserve external boot modules`.
