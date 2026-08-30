@@ -318,6 +318,24 @@ async def test_readiness_requires_exact_local_and_trusted_head(tmp_path: Path) -
 
 
 @pytest.mark.anyio
+async def test_unauthenticated_readiness_cannot_allocate_metric_coordinates(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _, template = _service(tmp_path)
+    for index in range(300):
+        hostile = template.model_copy(
+            update={
+                "provider_kind": f"hostile-provider-{index}",
+                "authority_instance": f"hostile-instance-{index}",
+            }
+        )
+        assert not await service.readiness(None, hostile)
+
+    assert service.metrics.recovery_failures == {("untrusted", "unresolved"): 300}
+    assert service.metrics._coordinates == set()
+
+
+@pytest.mark.anyio
 async def test_failed_checkpoint_never_reaches_provider_and_fails_closed(tmp_path: Path) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
     repository.advance_status = "conflict"
