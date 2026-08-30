@@ -80,12 +80,20 @@ identity, digest, size, and manifest matches.
 
 A narrow libguestfs seam captures, observes, installs, restores, and removes exactly the validated
 release directory on the System overlay. It accepts structured values, not caller paths or
-commands. Capture receives an owner-bound `RecoveryArchiveSink`; restore receives the matching
-owner-bound `RecoveryArchiveSource` plus the closed capture descriptor. Local external-boot code
+commands. Capture receives an owner-bound `RecoveryArchiveSink`; restore has the exact signature
+`restore(overlay, release, capture, source)`, where `capture` is the closed descriptor for that
+release and `source` is the matching owner-bound `RecoveryArchiveSource`. Local external-boot code
 constructs both only after authenticating the recovery token and resolving its directory beneath
-the configured root. The source opens only the descriptor's relative archive filename with
-no-follow, regular-file, owner, mode, and bounded-size checks. It retains no caller path, closes
-every descriptor on success or failure, and exposes no path-selection operation.
+the configured root. One source owns the already-open authenticated recovery-directory descriptor
+for one restore operation. It opens only the capture descriptor's relative archive filename via a
+descriptor-relative no-follow lookup, then retains the opened archive descriptor so a concurrent
+rename or symlink substitution cannot redirect the read. It requires source owner, release, and
+capture identity to agree before reading and applies regular-file, service-owner, private-mode,
+reservation-size, archive-entry, and uncompressed-byte bounds before guest mutation. It accepts and
+returns no host path, closes every archive and directory descriptor on success or error, and exposes
+no path-selection operation. Any lookup, identity, read, close, or bound failure is a conflict with
+zero guest mutation; durable restore staging and phase metadata make retry classify the unchanged
+source or the provider-owned partial state atomically.
 
 Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed content.
 Restoration stages beside the release directory, verifies its manifest, and uses
@@ -146,6 +154,11 @@ Teardown likewise quarantines evidence it cannot authenticate.
 - Migration 0124 is the additive database consequence of that replacement. Migration inventory,
   immutability, exact object/key-set CHECK shape, preflight abort, valid binding persistence, and
   legacy/malformed/cross-owner rejection are tested explicitly.
+- Archive-source contract and adversarial tests freeze the exact restore signature and prove
+  cross-owner/release/capture rejection, absolute or traversal-name rejection, symlink and rename
+  substitution resistance, non-regular/foreign-owner/non-private/over-limit rejection, bounded
+  short/error reads, host-path opacity, close on success and error, zero mutation on rejection, and
+  deterministic retry classification after each durable restore boundary.
 
 ## Considered & rejected
 
