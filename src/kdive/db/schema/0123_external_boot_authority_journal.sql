@@ -428,7 +428,7 @@ BEGIN
     IF v_phase = 'watermark-installed' THEN
         IF v_head.phase = 'takeover-superseded'
            AND v_head.operation_identity = p_record->>'operation_identity' THEN NULL;
-        ELSIF v_head.phase IN ('admitted', 'mutation-started') THEN NULL;
+        ELSIF v_head.phase IN ('admitted', 'mutation-started', 'terminal') THEN NULL;
         ELSE RETURN 'conflict'; END IF;
     ELSIF v_phase = 'takeover-superseded' THEN
         IF v_head.phase <> 'watermark-installed'

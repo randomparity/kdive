@@ -242,6 +242,10 @@ async def test_takeover_anchors_without_provider_access(tmp_path: Path) -> None:
     assert acknowledgement.journal_sequence == 2
     assert acknowledgement.journal_digest == record_digest(repository.records[-1])
     assert adapter.calls == []
+    labels = (request.provider_kind, request.authority_instance)
+    assert service.metrics.checkpoints[labels] == 2
+    assert service.metrics.checkpoint_latency[labels][0] == 2
+    assert service.metrics.checkpoint_latency[labels][1] >= 0
 
 
 @pytest.mark.anyio
@@ -382,6 +386,34 @@ async def test_takeover_terminalizes_admitted_operation_without_provider_access(
 
 
 @pytest.mark.anyio
+async def test_simultaneous_mutations_admit_only_one_before_any_second_append(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    repository.pause_phase = JournalPhase.ADMITTED
+    repository.phase_release.clear()
+    first = asyncio.create_task(service.execute_mutation(peer, _mutation(request)))
+    await repository.phase_entered.wait()
+    second_request = _mutation(request).model_copy(
+        update={"operation_identity": "mutation-b", "attempt_id": uuid4()}
+    )
+    second = asyncio.create_task(service.execute_mutation(peer, second_request))
+    await asyncio.sleep(0)
+    assert sum(record.phase is JournalPhase.ADMITTED for record in repository.records) == 0
+    repository.pause_phase = None
+    repository.phase_release.set()
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await second
+    assert (await first).category == "target"
+    assert sum(record.phase is JournalPhase.ADMITTED for record in repository.records) == 1
+    journal = FileAuthorityJournal(tmp_path / f"{request.system_id}.journal")
+    assert len(journal.load()) == len(repository.records)
+    assert adapter.calls == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
 async def test_takeover_waits_for_started_operation_positive_observation(tmp_path: Path) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
     await service.acknowledge_takeover(peer, request)
@@ -463,16 +495,39 @@ async def test_newer_takeover_supersedes_unacknowledged_watermark(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_completed_mutation_can_transition_to_later_takeover(tmp_path: Path) -> None:
+    service, repository, _, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    await service.execute_mutation(peer, _mutation(request))
+    successor = request.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "operation_identity": "takeover-b",
+        }
+    )
+    repository.allocating_request = successor
+    acknowledgement = await service.acknowledge_takeover(peer, successor)
+    assert acknowledgement.generation == 2
+    assert [record.phase for record in repository.records[-3:]] == [
+        JournalPhase.TERMINAL,
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    ]
+
+
+@pytest.mark.anyio
 async def test_each_commit_rechecks_current_binding_and_fences_loss(tmp_path: Path) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
     await service.acknowledge_takeover(peer, request)
     repository.current = True
     repository.reject_resolution = 2
-    observation = await service.execute_mutation(peer, _mutation(request))
-    assert observation.category == "target"
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(request))
     assert repository.current_resolutions == 2
-    assert adapter.calls == ["observe"]
-    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert adapter.calls == []
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
 
 
 @pytest.mark.anyio
@@ -570,7 +625,7 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
     await service.acknowledge_takeover(peer, request)
     repository.current = True
     setattr(adapter, f"fail_{failure}", True)
-    with pytest.raises(RuntimeError, match="bounded"):
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await service.execute_mutation(peer, _mutation(request))
     assert repository.records[-1].phase is last_phase
     successor = request.model_copy(
@@ -586,6 +641,80 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
         journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
         adapter=adapter,
     )
-    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
-        await restarted.acknowledge_takeover(peer, successor)
-    assert repository.records[-1].phase is JournalPhase.WATERMARK_INSTALLED
+    if failure == "observe":
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await restarted.acknowledge_takeover(peer, successor)
+        adapter.fail_observe = False
+        restarted = ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path / f"{system_id}.journal"
+            ),
+            adapter=adapter,
+        )
+    acknowledgement = await restarted.acknowledge_takeover(peer, successor)
+    assert acknowledgement.generation == 2
+    assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+
+
+@pytest.mark.anyio
+async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: Path) -> None:
+    source, source_repository, _, peer, request = _service(tmp_path / "source")
+    (tmp_path / "source").mkdir()
+    await source.acknowledge_takeover(peer, request)
+    source_repository.current = True
+    await source.execute_mutation(peer, _mutation(request))
+    source_records = tuple(source_repository.records)
+    source_lines = (
+        (tmp_path / "source" / f"{request.system_id}.journal")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    successor = request.model_copy(
+        update={
+            "authority_id": uuid4(),
+            "generation": 2,
+            "operation_identity": "takeover-b",
+        }
+    )
+    for phase, expected_calls in (
+        (JournalPhase.ADMITTED, []),
+        (JournalPhase.MUTATION_STARTED, ["observe"]),
+        (JournalPhase.PROVIDER_RETURNED, ["observe"]),
+        (JournalPhase.OBSERVED, []),
+    ):
+        index = next(i for i, record in enumerate(source_records) if record.phase is phase)
+        phase_dir = tmp_path / phase
+        phase_dir.mkdir()
+        path = phase_dir / f"{request.system_id}.journal"
+        path.write_bytes(b"".join(source_lines[: index + 1]))
+        repository = _Repository(peer, request)
+        repository.allocating_request = successor
+        repository.records = list(source_records[: index + 1])
+        record = source_records[index]
+        assert source_repository.head is not None
+        repository.head = replace(
+            source_repository.head,
+            sequence=record.sequence,
+            digest=record_digest(record),
+            phase=record.phase,
+            authority_id=record.authority_id,
+            generation=record.generation,
+            operation_identity=record.operation_identity,
+        )
+        adapter = _Adapter()
+        restarted = ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=lambda system_id, path=path: FileAuthorityJournal(path),
+            adapter=adapter,
+        )
+        acknowledgement = await restarted.acknowledge_takeover(peer, successor)
+        assert acknowledgement.generation == 2
+        assert adapter.calls == expected_calls
+        assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+        terminal = next(
+            record
+            for record in reversed(repository.records)
+            if record.phase is JournalPhase.TERMINAL
+        )
+        assert terminal.outcome == ("never-began" if phase is JournalPhase.ADMITTED else "target")
