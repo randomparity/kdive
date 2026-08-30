@@ -164,17 +164,22 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
    substitution, and quarantine. Test the mkdir-before-intent empty-partial rule separately.
 3. Before implementation, add the minimal crash tests for loss immediately before/after intent
    fsync, stop, module publish, XML define, source restoration, tombstone publish, and tombstone
-   delete. Assert fresh-instance retry outcomes and before/after snapshots. Run them now and require
-   failures attributable to the absent state machine, not fixture errors.
+   delete. Include initially-running source → inactive module/XML restoration → durable
+   `source-restored` → boot/readiness → cleanup, and assert cleanup never calls guestfs or live
+   composite observation. Assert fresh-instance retry outcomes and before/after snapshots. Run them
+   now and require failures attributable to the absent state machine, not fixture errors.
 4. Implement materialization by reusing streaming bundle extraction and staged writes. Verify every
    digest/obligation; publish only complete deterministic System/Run-owned artifacts.
 5. Implement prepare ordering: read initial power/XML, write and fsync `pre-stop-intent`, stop and
    verify inactive, capture modules, render target, publish complete recovery directory. Retry uses
    intent rather than re-deriving power/XML and restores source on failure when evidence permits.
-6. Implement private inactive `_observe_composite`; activate modules then XML with durable phases;
-   recover modules then exact XML then prior power/readiness. At every entry reopen metadata and
-   compare the entire point. Public observe uses durable target-defined evidence plus existing
-   running-kernel readiness only and never opens a live overlay.
+6. Implement private inactive `_observe_composite`; activate modules then XML with durable phases.
+   Recover modules then exact XML, verify their complete source composite while inactive, and fsync
+   a `source-restored` phase before restoring prior power/readiness. At every entry reopen metadata
+   and compare the entire point. Public observe uses durable target-defined evidence plus existing
+   running-kernel readiness only and never opens a live overlay. Cleanup after `recovered`
+   authenticates complete point equality and `source-restored`; it performs no fresh guestfs/live
+   composite observation even when the restored source is running.
 7. Implement cleanup as payload deletion plus authenticated accounted tombstone. Implement U1a
    finalization: present tombstone requires exact proof equality; absent success requires the exact
    current-binding, same-operation `mutation-started` proof supplied by #2140. Reject every stale,
