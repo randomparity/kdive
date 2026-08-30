@@ -68,13 +68,26 @@ class GuestRecoveryWriter(Protocol):
 
 `ModuleCapture` is either explicit absence or an archive descriptor containing the canonical
 manifest digest, entry count, uncompressed bytes, archive SHA-256, and relative archive filename.
-Its `recovery-module-tree-v1` manifest is exactly ADR-0583's installed entry metadata and path
-grammar: sorted relative NFC entry path, kind, mode, uid, gid, size and content SHA-256 for regular
-files, every xattr including POSIX ACL and `security.*` values, and `xattrs_supported`. Symlink lstat
+Its `recovery-module-tree-v1` manifest uses ADR-0583's exact canonical JSON bytes and
+`kdive-recovery-module-tree-v1` NUL-prefixed hash domain: entries sort by UTF-8 path bytes; object
+keys, UTF-8/control escaping, four-character lowercase octal modes, integer fields, lowercase
+content digests, and no-trailing-newline encoding are identical to `module-installed-tree-v1`.
+Xattr names sort bytewise and map to unpadded standard base64 values. Entries carry relative NFC
+path, kind, mode, uid, gid, size and content SHA-256 for regular files, every xattr including POSIX
+ACL and `security.*` values, and `xattrs_supported`. Symlink lstat
 targets are recorded verbatim as UTF-8 NFC and may be absolute; capture, hashing, and restore never
 follow them. Hard links, special files, undecodable names/targets, noncanonical entry paths,
 duplicates, more than 200,000 entries, or more than 8 GiB of regular content reject before
 publication. Observation uses the same walk and manifest algorithm.
+
+The envelope is exactly `{"entries":[...],"schema":"recovery-module-tree-v1"}`. An absent release
+uses `AbsentComponentState` and has no manifest; an existing empty directory uses an empty entries
+array whose domain-separated digest is
+`sha256:7048c9e065ecf77a964188f42aaebb79a3e8238ecc47736ae47239b8ceec30a5`.
+Golden fixtures freeze complete bytes and digests for a regular file, `xattrs_supported=false`, an
+unpadded-base64 ACL/security xattr set, and an absolute `build` symlink. Unsupported xattrs record
+`xattrs_supported=false` and `{}`; an error after support was established is unreadable conflict,
+not unsupported. Timestamps are excluded; uid, gid, and lstat permission bits are preserved exactly.
 
 `LocalRecoveryMetadataV1` is closed canonical JSON with schema, System and activation UUIDs, Run,
 plan and materialization identities, release, exact source inactive XML SHA-256, canonical preserved
@@ -93,21 +106,26 @@ the exact running-kernel observation facts derived from the validated bundle. Re
 matching complete files; a partial or mismatched final artifact is removed only when its deterministic
 System/Run ownership is provable, otherwise it is conflict.
 
-`prepare` reads and records the domain's initial active state, then uses the existing bounded
-force-off operation and verifies inactivity before opening its overlay read-write. It reads inactive
-XML, safe-parses it, verifies KDIVE System ownership, and computes ADR-0583 preserved-definition and
-boot-projection identities. It renders the target by changing only `/domain/os/kernel`, optional
-`initrd`, and `cmdline`. It then captures the exact source release tree through
+`prepare` reads the domain's initial active state and inactive XML, safe-parses and verifies KDIVE
+System ownership, computes ADR-0583 definition identities, and durably publishes a `pre-stop-intent`
+inside the owned partial directory before any power mutation. The intent binds the complete point
+inputs, prior power state, exact XML bytes/digests, and source boot projection; its file, directory,
+and parent are fsynced. Only then does prepare use the existing bounded force-off operation and
+verify inactivity before opening the overlay read-write. It renders the target by changing only
+`/domain/os/kernel`, optional `initrd`, and `cmdline`. It then captures the exact source release tree through
 `GuestRecoveryWriter.capture`, verifies the source state by a fresh observation, and builds the
 target module tree without publishing it. If preparation fails after stopping but before publishing
 the recovery point, it restores the captured definition/module state when available and restores
 the recorded power state; otherwise it retains the owned partial for retry and reports failure.
 
 The recovery directory is staged as `<root>/.<system>.<activation>.partial` with mode 0700 beneath a
-pre-existing owner-only recovery root. Regular files are 0600 and opened no-follow/exclusive. File,
-directory, rename, and parent fsync order follows ADR-0586. A retry removes only its authenticated
-partial directory. It returns `RecoveryPoint` only after reopening the final metadata and verifying
-every digest and owner.
+pre-existing owner-only recovery root. Regular files are 0600 and opened no-follow/exclusive. After
+mkdir and parent fsync, `pre-stop-intent` is the first entry and is durably written before stopping.
+A crash between mkdir and intent may leave only an empty directory; retry removes it only when lstat
+proves the exact deterministic name, service uid, mode 0700, directory type, and zero entries.
+Anything else is quarantined. Once intent exists, retry authenticates it and resumes without
+recapturing prior power or XML. File, directory, rename, and parent fsync order follows ADR-0586. It
+returns `RecoveryPoint` only after reopening final metadata and verifying every digest and owner.
 
 ## Activate, observe, recover, and cleanup
 
