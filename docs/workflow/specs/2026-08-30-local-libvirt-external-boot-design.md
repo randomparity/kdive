@@ -123,9 +123,11 @@ independently. It classifies source or target only when both component identitie
 recorded composite state; it may classify a provider-owned partial phase for same-operation
 resumption. Missing domain, malformed/forbidden XML, unreadable overlay, unowned metadata, or an
 unclassified mixture is conflict, never absence. Public `ExternalBootPorts.observe` retains its
-existing `RunningKernelObservation` return contract: after authenticating the complete point and
-requiring composite target state, it uses the existing bounded readiness/running-kernel seam and
-returns architecture, release, and GNU build ID. It never exposes internal composite classification.
+existing `RunningKernelObservation` return contract. It authenticates the complete point, requires
+durable `target-defined` evidence produced by inactive activation, and then uses only the existing
+bounded readiness/running-kernel seam to return architecture, release, and GNU build ID. It never
+opens the live overlay or exposes internal composite classification. Fresh composite observation
+occurs only while the domain is verified inactive in prepare, activate, and recover.
 
 `recover` requires the authenticated recovery point and a source, target, or owned-partial state.
 It restores the captured module tree (or verifies/removes it for recorded absence), fsyncs durable
@@ -135,11 +137,16 @@ both persistent components match source. A running prior state requires a fresh 
 an inactive prior state remains inactive. Retry from complete source performs only the conditional
 power restoration.
 
-`cleanup` requires complete source state. It deletes materialized kernel/initrd files and the exact
-recovery directory idempotently, verifies absence, and fsyncs each parent. It never follows symlinks
-or deletes an object whose metadata owner does not exactly match. Missing authenticated metadata is
-quarantined rather than guessed. Destroyed-System cleanup is not a second six-port entry point;
-teardown-owned invocation and authentication remain outside #2108.
+`cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
+verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
+retains the complete point identity plus explicit payload-absence facts. It fsyncs the tombstone,
+directory, and parent before success. A lost-response retry authenticates the tombstone and returns
+success without provider mutation; missing metadata without the exact tombstone is quarantined. The
+tombstone is excluded from reserved payload bytes and may be swept only after the owning lifecycle
+has durably committed cleanup complete, through separately owned reconciliation. Cleanup never
+follows symlinks or deletes an object whose metadata owner does not exactly match. Destroyed-System
+cleanup is not a second six-port entry point; teardown-owned invocation and authentication remain
+outside #2108.
 
 ## Error and observability contract
 

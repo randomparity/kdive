@@ -64,14 +64,21 @@ same-filesystem renames with durable phase metadata so retry can classify source
 provider-owned partial state. Any unowned, unreadable, over-limit, or third state is a conflict and
 causes no further mutation.
 
-Cleanup removes only a directory whose canonical metadata proves the exact System and activation
-owner, verifies absence, and fsyncs the parent. Teardown quarantines evidence it cannot authenticate.
+Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
+activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
+retains the complete point identity and explicit payload-absence facts, and fsyncs the directory and
+parent. A lost-response retry authenticates that tombstone and succeeds without mutation. The small
+tombstone is not reserved recovery capacity; an owner-authenticated sweep may remove it only after
+durable core cleanup completion. Missing metadata without a matching tombstone remains quarantined.
+Teardown likewise quarantines evidence it cannot authenticate.
 
 ## Consequences
 
 - Local recovery remains host-local and needs no object-store credential or network availability.
 - Recovery capacity is bounded per activation but can remain charged while conflict evidence is
   quarantined; the owning lifecycle remains responsible for admission and release accounting.
+- One bounded cleanup tombstone remains after payload deletion so retries distinguish completed
+  cleanup from unowned absence; its post-core sweep remains ownership checked.
 - The configured recovery root becomes durable provider state and must share the worker's lifecycle,
   permissions, backup expectations, and provisioning parity on x86_64 and ppc64le hosts.
 - The design adds a fixed libguestfs recovery seam but no generic guest filesystem editor.
