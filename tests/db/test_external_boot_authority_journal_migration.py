@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from typing import Any
+from uuid import UUID, uuid4
+
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.db.external_boot_authority_journal import (
+    advance_journal_head,
+    read_journal_head,
+    resolve_allocating_authority_binding,
+)
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     JournalPhase,
@@ -28,6 +39,126 @@ _FUNCTIONS = {
     "read_external_boot_authority_journal_head(text,uuid,bigint,text)",
     "advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,text,jsonb)",
 }
+
+_DIGEST = "sha256:" + "d" * 64
+
+
+def _record(
+    case: Any,
+    authority: Any,
+    sequence: int,
+    previous_digest: str,
+    phase: JournalPhase,
+    **changes: object,
+) -> JournalRecordV1:
+    values: dict[str, object] = {
+        "authority_id": authority.authority_id,
+        "generation": authority.generation,
+        "system_id": case.system_id,
+        "activation_id": case.activation_id,
+        "run_id": case.run_id,
+        "plan_identity": "sha256:" + "a" * 64,
+        "purpose": case.purpose,
+        "provider_kind": case.provider_kind,
+        "authority_instance": case.authority_instance,
+        "operation_identity": case.operation_identity,
+        "operation_digest": authority.operation_digest,
+        "sequence": sequence,
+        "previous_digest": previous_digest,
+        "phase": phase,
+        "attempt_id": case.job_id,
+    }
+    if phase not in {
+        JournalPhase.WATERMARK_INSTALLED,
+        JournalPhase.TAKEOVER_SUPERSEDED,
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+    }:
+        values |= {
+            "expected_source_identity": "source-a",
+            "intended_target_identity": "target-a",
+            "recovery_objects": (),
+        }
+    values.update(changes)
+    return JournalRecordV1.model_validate(values)
+
+
+def _payload(record: JournalRecordV1) -> dict[str, object]:
+    return record.model_dump(mode="json", by_alias=True) | {
+        "canonical_record": canonical_record_bytes(record).decode()
+    }
+
+
+def _advance_raw(
+    conn: psycopg.Connection,
+    case: Any,
+    authority: Any,
+    expected_sequence: int,
+    expected_digest: str,
+    payload: dict[str, object],
+) -> str:
+    row = conn.execute(
+        "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
+        (
+            case.worker_id,
+            authority.authority_id,
+            authority.generation,
+            expected_sequence,
+            expected_digest,
+            Jsonb(payload),
+        ),
+    ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _head(conn: psycopg.Connection, case: Any, authority: Any) -> tuple[object, ...] | None:
+    return conn.execute(
+        "SELECT sequence,digest,phase,authority_id,generation,operation_identity,"
+        "pending_takeover,suspended_operation FROM read_external_boot_authority_journal_head("
+        "%s,%s,%s,%s)",
+        (
+            case.worker_id,
+            authority.authority_id,
+            authority.generation,
+            case.authority_instance,
+        ),
+    ).fetchone()
+
+
+def _seed_allocated(migrated_url: str, role_dsns: _RoleDsns, suffix: str) -> tuple[Any, Any]:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, worker_suffix=suffix)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    return case, authority
+
+
+def _promote(
+    migrated_url: str, case: Any, authority: Any, acknowledgement: JournalRecordV1
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE external_boot_authorities SET state='current', acknowledged_at=now() "
+            "WHERE id=%s",
+            (authority.authority_id,),
+        )
+        conn.execute(
+            "INSERT INTO external_boot_authority_acknowledgements "
+            "(authority_id,system_id,generation,authority_instance,operation_identity,"
+            "operation_digest,journal_sequence,journal_digest,positive_quiescence_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                authority.authority_id,
+                case.system_id,
+                authority.generation,
+                case.authority_instance,
+                case.operation_identity,
+                authority.operation_digest,
+                acknowledgement.sequence,
+                record_digest(acknowledgement),
+                _DIGEST,
+            ),
+        )
 
 
 def test_migration_0123_is_the_unique_inventory_tail() -> None:
@@ -205,3 +336,210 @@ def test_allocating_binding_can_create_and_read_exact_genesis_head(
                 case.authority_instance,
             ),
         ).fetchone() == (1, record_digest(record))
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["authority", "generation", "system", "activation", "run", "peer"],
+)
+def test_cross_binding_genesis_changes_no_head(
+    migrated_url: str, authority_role_dsns: _RoleDsns, mismatch: str
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, mismatch[0])
+    record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+    changed_case = case
+    changed_authority = authority
+    if mismatch in {"system", "activation", "run"}:
+        record = record.model_copy(update={f"{mismatch}_id": uuid4()})
+    elif mismatch == "authority":
+        changed_authority = replace(authority, authority_id=uuid4())
+    elif mismatch == "generation":
+        changed_authority = replace(authority, generation=authority.generation + 1)
+    elif mismatch == "peer":
+        changed_case = replace(case, worker_id="docker:foreign-peer")
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as provider_authority:
+        assert (
+            _advance_raw(
+                provider_authority,
+                changed_case,
+                changed_authority,
+                0,
+                GENESIS_DIGEST,
+                _payload(record),
+            )
+            == "superseded"
+        )
+        assert _head(provider_authority, case, authority) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["noncanonical", "extra", "null_uuid", "overflow", "uppercase_digest", "oversized"],
+)
+def test_malformed_genesis_is_conflict_without_a_write(
+    migrated_url: str, authority_role_dsns: _RoleDsns, mutation: str
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, mutation[0])
+    record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+    payload = _payload(record)
+    if mutation == "noncanonical":
+        payload["canonical_record"] = " " + str(payload["canonical_record"])
+    elif mutation == "extra":
+        payload["extra"] = "field"
+    elif mutation == "null_uuid":
+        payload["activation_id"] = None
+    elif mutation == "overflow":
+        payload["sequence"] = 9_223_372_036_854_775_808
+    elif mutation == "uppercase_digest":
+        payload["operation_digest"] = "sha256:" + "A" * 64
+    else:
+        payload["authority_instance"] = "x" * 256
+    if mutation != "noncanonical":
+        canonical = dict(payload)
+        canonical.pop("canonical_record", None)
+        import json
+
+        payload["canonical_record"] = json.dumps(
+            canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as provider_authority:
+        assert (
+            _advance_raw(provider_authority, case, authority, 0, GENESIS_DIGEST, payload)
+            == "conflict"
+        )
+        assert _head(provider_authority, case, authority) is None
+
+
+def test_concurrent_identical_genesis_is_idempotent(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "r")
+    record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+
+    def advance() -> str:
+        with psycopg.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as connection:
+            return _advance_raw(connection, case, authority, 0, GENESIS_DIGEST, _payload(record))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: advance(), range(2)))
+    assert results == ["advanced", "advanced"]
+
+
+def test_full_current_mutation_phase_sequence_and_rejections(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "m")
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        watermark = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            _advance_raw(connection, case, authority, 0, GENESIS_DIGEST, _payload(watermark))
+            == "advanced"
+        )
+        acknowledgement = _record(
+            case,
+            authority,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                case,
+                authority,
+                1,
+                record_digest(watermark),
+                _payload(acknowledgement),
+            )
+            == "advanced"
+        )
+    _promote(migrated_url, case, authority, acknowledgement)
+    phases = [
+        JournalPhase.ADMITTED,
+        JournalPhase.MUTATION_STARTED,
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    previous = acknowledgement
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        for sequence, phase in enumerate(phases, start=3):
+            changes: dict[str, object] = {}
+            if phase in {JournalPhase.OBSERVED, JournalPhase.TERMINAL}:
+                changes["observation"] = {
+                    "observation_id": str(uuid4()),
+                    "category": "source",
+                    "composite_state": _DIGEST,
+                }
+            if phase is JournalPhase.TERMINAL:
+                changes["outcome"] = "source"
+            record = _record(case, authority, sequence, record_digest(previous), phase, **changes)
+            before = _head(connection, case, authority)
+            skipped = record.model_copy(update={"sequence": sequence + 1})
+            assert (
+                _advance_raw(
+                    connection,
+                    case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    _payload(skipped),
+                )
+                == "conflict"
+            )
+            assert _head(connection, case, authority) == before
+            assert (
+                _advance_raw(
+                    connection,
+                    case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    _payload(record),
+                )
+                == "advanced"
+            )
+            previous = record
+
+
+@pytest.mark.anyio
+async def test_repository_round_trips_typed_binding_and_head(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "t")
+    async with await psycopg.AsyncConnection.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        binding = await resolve_allocating_authority_binding(
+            connection,
+            peer_incarnation_id=case.worker_id,
+            authority_id=authority.authority_id,
+            generation=authority.generation,
+        )
+        assert binding is not None and isinstance(binding.authority_id, UUID)
+        record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            await advance_journal_head(
+                connection,
+                binding=binding,
+                expected_sequence=0,
+                expected_digest=GENESIS_DIGEST,
+                record=record,
+            )
+            == "advanced"
+        )
+        head = await read_journal_head(connection, binding=binding)
+        assert head is not None
+        assert head.sequence == 1 and head.phase is JournalPhase.WATERMARK_INSTALLED
