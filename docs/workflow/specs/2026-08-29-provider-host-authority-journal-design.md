@@ -193,7 +193,11 @@ declares a record absent.
 The journal limit is exact on-disk bytes, including newlines. Its constructor-configurable
 maximum defaults to 64 MiB per authority journal. Startup streams and validates every retained
 record with bounded per-record input; the cached trusted tail then makes appends independent of
-retained-history length. A prospective append beyond the maximum fails before file bytes,
+retained-history length. The cache binds the opened file's device, inode, size, modification and
+change timestamps plus the exact final-record bytes and offset. Append reopens once, verifies that
+identity and bounded tail on the same descriptor used for `O_APPEND`, and verifies the pathname
+still names that descriptor before and after fsync; replacement or same-size rewrite fails closed.
+A prospective append beyond the maximum fails before file bytes,
 database CAS, or provider progress and leaves readiness false. Recovery is audited restoration or
 retention of exact bytes, never truncation or compaction. Production hosting configuration and
 advertisement remain deferred to #2127.

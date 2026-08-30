@@ -125,6 +125,38 @@ def test_journal_byte_limit_accepts_exact_size_and_rejects_growth(tmp_path: Path
     assert DEFAULT_MAX_JOURNAL_BYTES == 64 * 1024 * 1024
 
 
+@pytest.mark.parametrize("change", ["rewrite", "replace"])
+def test_same_size_external_change_rejects_append_without_writing(
+    tmp_path: Path, change: str
+) -> None:
+    path = tmp_path / "journal.ndjson"
+    journal = FileAuthorityJournal(path)
+    first = _record()
+    journal.append(first)
+    original = path.read_bytes()
+    if change == "rewrite":
+        changed = original.replace(b'"purpose":"recover"', b'"purpose":"release"')
+        assert len(changed) == len(original)
+        path.write_bytes(changed)
+    else:
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(original)
+        replacement.chmod(0o600)
+        replacement.replace(path)
+    before = path.read_bytes()
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_digest=record_digest(first),
+    )
+
+    with pytest.raises(ValueError, match="changed since validation"):
+        journal.append(second)
+
+    assert path.read_bytes() == before
+
+
 def test_append_validates_only_candidate_after_streamed_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -141,10 +173,13 @@ def test_append_validates_only_candidate_after_streamed_load(
         records.append(record)
         previous = record_digest(record)
     path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    loaded_size = path.stat().st_size
     journal = FileAuthorityJournal(path)
     assert journal.load() == tuple(records)
     calls = 0
+    reads: list[tuple[int, int]] = []
     original = journal._validate_record
+    original_pread = os.pread
 
     def counting_validate(state: Any, record: JournalRecordV1) -> None:
         nonlocal calls
@@ -152,6 +187,12 @@ def test_append_validates_only_candidate_after_streamed_load(
         original(state, record)
 
     monkeypatch.setattr(journal, "_validate_record", counting_validate)
+
+    def bounded_pread(descriptor: int, length: int, offset: int) -> bytes:
+        reads.append((length, offset))
+        return original_pread(descriptor, length, offset)
+
+    monkeypatch.setattr(os, "pread", bounded_pread)
     candidate = _record(
         101,
         previous,
@@ -161,6 +202,8 @@ def test_append_validates_only_candidate_after_streamed_load(
     journal.append(candidate)
 
     assert calls == 1
+    tail_length = len(canonical_record_bytes(records[-1])) + 1
+    assert reads == [(tail_length, loaded_size - tail_length)]
 
 
 def test_append_fsyncs_parent_on_first_creation(
