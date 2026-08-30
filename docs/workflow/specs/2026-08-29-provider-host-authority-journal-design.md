@@ -244,9 +244,13 @@ so rejected high-cardinality input and completed work cannot grow lane or metric
 Trusted metric coordinates use a construction-time registry capped at 256 by default. Operators
 may pre-register configured coordinates at library construction; production wiring remains #2127.
 After the cap, all new coordinates aggregate into one fixed `overflow` coordinate/series without
-raw provider or tenant values. Rejections, recovery failures, checkpoints, latency, and unresolved
-gauges remain bounded to the configured maximum plus that overflow series; overflow counts and
-latency remain aggregate, and unresolved drains as overflow operations resolve.
+raw provider or tenant values. Admission and bounding use only the distinct
+`(provider_kind, authority_instance)` prefix: every closed rejection category remains exact for an
+admitted or pre-registered coordinate without consuming another coordinate slot. Overflow
+rejections collapse their category too, so they remain one series. Rejections, recovery failures,
+checkpoints, latency, and unresolved gauges expose no more than the configured coordinate prefixes
+plus overflow; overflow counts and latency remain aggregate, and unresolved drains as overflow
+operations resolve.
 it is never converted to source or target by elapsed time.
 
 Logs and exceptions contain authority, System, generation, sequence, phase, operation, and bounded

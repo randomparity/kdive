@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 from uuid import UUID
@@ -133,20 +133,15 @@ class AuthorityServiceMetrics:
         self._coordinates.add(labels)
         return labels
 
-    def _key(self, store: Iterable[tuple[str, ...]], key: tuple[str, ...]) -> tuple[str, ...]:
+    def _key(self, key: tuple[str, ...]) -> tuple[str, ...]:
         overflow = (*self._OVERFLOW, *("overflow" for _ in key[2:]))
-        entries = tuple(store)
         if key[:2] == self._OVERFLOW:
             return overflow
-        if key in entries or key[:2] == self._UNTRUSTED:
-            return key
-        if sum(existing[:2] != self._OVERFLOW for existing in entries) < self.max_coordinates:
-            return key
-        return overflow
+        return key
 
     def reject_labels(self, labels: tuple[str, str], category: str) -> tuple[str, str]:
         bounded = self.labels(labels)
-        key = cast(tuple[str, str, str], self._key(self.rejections, (*bounded, category)))
+        key = cast(tuple[str, str, str], self._key((*bounded, category)))
         self.rejections[key] = self.rejections.get(key, 0) + 1
         return key[:2]
 
@@ -158,14 +153,14 @@ class AuthorityServiceMetrics:
         self.reject_labels((request.provider_kind, request.authority_instance), category)
 
     def recovery_failed(self, request: AuthorityTakeoverRequestV1) -> tuple[str, str]:
-        key = cast(tuple[str, str], self._key(self.recovery_failures, self._labels(request)))
+        key = cast(tuple[str, str], self._key(self._labels(request)))
         self.recovery_failures[key] = self.recovery_failures.get(key, 0) + 1
         return key
 
     def record_checkpoint(self, request: JournalRecordV1, elapsed: float) -> None:
-        key = cast(tuple[str, str], self._key(self.checkpoints, self._labels(request)))
+        key = cast(tuple[str, str], self._key(self._labels(request)))
         self.checkpoints[key] = self.checkpoints.get(key, 0) + 1
-        key = cast(tuple[str, str], self._key(self.checkpoint_latency, self._labels(request)))
+        key = cast(tuple[str, str], self._key(self._labels(request)))
         count, total = self.checkpoint_latency.get(key, (0, 0.0))
         self.checkpoint_latency[key] = count + 1, total + elapsed
 
