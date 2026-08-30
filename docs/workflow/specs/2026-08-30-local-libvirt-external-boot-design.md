@@ -1,0 +1,143 @@
+# Local-libvirt external-boot design
+
+## Scope and governing decisions
+
+Issue #2108 adapts local-libvirt to ADR-0583's `ExternalBootPorts`. ADR-0586 records the
+user-selected provider-host recovery directory. The implementation covers local provider primitives
+and tests only. `AuthorityMutationAdapter`, provider-host service composition, configured authority
+coordinates, and capability advertisement remain #2140; remote primitives, jobs, reconciliation,
+hosting, schemas, and migrations remain excluded.
+
+The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
+dependency. It reuses libvirt, defused XML parsing, `xml.etree.ElementTree.canonicalize`, libguestfs,
+the bounded kernel-bundle reader, staged writes, and existing readiness seam.
+
+## Components and values
+
+Create `local_libvirt/lifecycle/external_boot.py` containing `LocalLibvirtExternalBoot`, the six
+synchronous `ExternalBootPorts` methods, ADR-0583 libvirt-definition identity helpers, recovery
+metadata models, and filesystem publication. Keep legacy `LocalLibvirtInstall` unchanged; shared
+helpers may move only when both callers need the identical behavior.
+
+Create `local_libvirt/lifecycle/boot/recovery.py` with a narrow `GuestRecoveryWriter` protocol and
+real libguestfs implementation. It owns only `/lib/modules/<validated-release>` and uses no shell or
+guest executable. Its operations are:
+
+```python
+class GuestRecoveryWriter(Protocol):
+    def capture(self, overlay: str, release: str, destination: Path) -> ModuleCapture: ...
+    def observe(self, overlay: str, release: str) -> ComponentState: ...
+    def install(self, overlay: str, release: str, source: Path) -> str: ...
+    def restore(self, overlay: str, release: str, capture: ModuleCapture) -> str: ...
+```
+
+`ModuleCapture` is either explicit absence or an archive descriptor containing the canonical
+manifest digest, entry count, uncompressed bytes, archive SHA-256, and relative archive filename.
+The manifest hashes sorted entries containing relative NFC path, kind, mode, size, content SHA-256
+for regular files, and link target for links. Absolute paths, traversal, devices, FIFOs, sockets,
+escaping links, duplicates, non-NFC names, more than 200,000 entries, or more than 8 GiB of regular
+content reject before publication. Observation uses the same walk and manifest algorithm.
+
+`LocalRecoveryMetadataV1` is closed canonical JSON with schema, System and activation UUIDs, Run,
+plan and materialization identities, release, exact source inactive XML SHA-256, canonical preserved
+definition digest, source and target boot-projection digests, source and target module states, prior
+power state, capture descriptor, and durable recovery phase. It contains no configured root or
+absolute path. The opaque reference has `local-recovery-v1/<system UUID>/<activation UUID>` and is
+accepted only when both UUIDs equal `RecoveryPoint.ownership` and the activation supplied to the
+local provider construction context.
+
+## Materialize and prepare
+
+`materialize` validates provider kind `local-libvirt`, ownership, architecture, bundle and initrd
+digests already carried by `ExternalBootPlan`. It stages artifacts under the existing
+System/Run directory using streamed kernel extraction and temp-then-rename initrd fetch, verifies
+the extracted vmlinuz digest and module obligation, and returns opaque relative artifact refs plus
+the exact running-kernel observation facts derived from the validated bundle. Retry accepts only
+matching complete files; a partial or mismatched final artifact is removed only when its deterministic
+System/Run ownership is provable, otherwise it is conflict.
+
+`prepare` reads and records the domain's initial active state, then uses the existing bounded
+force-off operation and verifies inactivity before opening its overlay read-write. It reads inactive
+XML, safe-parses it, verifies KDIVE System ownership, and computes ADR-0583 preserved-definition and
+boot-projection identities. It renders the target by changing only `/domain/os/kernel`, optional
+`initrd`, and `cmdline`. It then captures the exact source release tree through
+`GuestRecoveryWriter.capture`, verifies the source state by a fresh observation, and builds the
+target module tree without publishing it. If preparation fails after stopping but before publishing
+the recovery point, it restores the captured definition/module state when available and restores
+the recorded power state; otherwise it retains the owned partial for retry and reports failure.
+
+The recovery directory is staged as `<root>/.<system>.<activation>.partial` with mode 0700 beneath a
+pre-existing owner-only recovery root. Regular files are 0600 and opened no-follow/exclusive. File,
+directory, rename, and parent fsync order follows ADR-0586. A retry removes only its authenticated
+partial directory. It returns `RecoveryPoint` only after reopening the final metadata and verifying
+every digest and owner.
+
+## Activate, observe, recover, and cleanup
+
+`activate` reopens and authenticates the recovery metadata, requires a fresh complete source-state
+observation, installs the target module tree with same-filesystem staged rename, records and fsyncs
+the module-installed phase, rechecks the complete composite state, defines the target inactive XML,
+and fsyncs target-defined evidence. It does not start the domain; the existing lifecycle owner keeps
+boot and readiness responsibility. Retry classifies source, target, or its own durable partial
+phase. A source/target mixture is resumable only when metadata proves the completed component write;
+every other mixture is conflict.
+
+`observe` reads inactive XML and the release tree independently. It returns source or target only
+when both component identities match the same recorded composite state. A provider-owned partial
+phase is reported internally for same-operation resumption. Missing domain, malformed/forbidden XML,
+unreadable overlay, unowned metadata, or an unclassified mixture is conflict, never absence.
+
+`recover` requires the authenticated recovery point and a source, target, or owned-partial state.
+It restores the captured module tree (or verifies/removes it for recorded absence), fsyncs durable
+module-restored evidence, defines the exact captured inactive XML bytes, and verifies the complete
+source identity. It restores recorded power through existing control/readiness seams only after
+both persistent components match source. A running prior state requires a fresh readiness success;
+an inactive prior state remains inactive. Retry from complete source performs only the conditional
+power restoration.
+
+`cleanup` requires complete source state, or the owning lifecycle's separately authenticated
+destroyed-System cleanup context. It deletes materialized kernel/initrd files and the exact recovery
+directory idempotently, verifies absence, and fsyncs each parent. It never follows symlinks or
+deletes an object whose metadata owner does not exactly match. Missing authenticated metadata is
+quarantined rather than guessed.
+
+## Error and observability contract
+
+Malformed plans, refs, XML, archives, or ownership mismatches fail before mutation. Libvirt,
+libguestfs, filesystem, and readiness unavailability use existing bounded `CategorizedError`
+categories; stable third-state or owner mismatches are conflicts. Diagnostics contain operation,
+bounded category, System/activation identifiers, and digests only. They exclude XML, cmdline,
+archive names, host paths, guest content, credentials, and raw tool output.
+
+## Threat model
+
+Added boundaries are validated plan/recovery values into local filesystem resolution; libvirt
+inactive XML into canonical identity parsing; a stopped System overlay into libguestfs; and recovery
+bytes read after process restart. Authenticated but stale workers may replay valid-looking refs;
+tenants influence build artifacts and command-line values; a local operator controls configuration;
+libvirtd and the provider host are trusted. Privileged host interference is outside the fence.
+
+Opaque owner tokens are parsed as closed canonical components and resolved beneath a configured
+root without accepting caller path bytes. Owner, plan, materialization, release, and digest checks
+precede every write. Defused parsing rejects DTD/entity input; XML construction changes only three
+owned fields. Archive capture and extraction enforce no-follow topology, NFC, entry and byte bounds,
+and content manifests. Recovery files use owner-only modes, exclusive/no-follow creation, atomic
+publication, and fsync. Failures reveal bounded identifiers and categories only. Authority freshness
+is deliberately not reimplemented here: #2140 wraps these primitives in the ADR-0584 service before
+advertisement. Until then no production composition exposes this port.
+
+Out of scope are compromise of the trusted host/libvirtd/libguestfs appliance, privileged manual
+disk edits, authority transport/authentication, remote providers, lifecycle database truth, and
+capacity admission. Those are existing operator trust or owned issues, not claims of this design.
+
+## Verification
+
+Unit tests cover canonical XML vectors, definition preservation, opaque-ref ownership, archive
+bounds/topology, absent/present manifests, optional initrd, atomic publication faults, every
+source/target/partial/mixed observation, retries at each fsync/rename/define boundary, exact XML and
+module restoration, prior-power readiness, cleanup/quarantine, and cross-System/Run/activation
+denial with before/after snapshots. A controlled fault in owner comparison and manifest comparison
+must make the new tests fail. Composition tests prove the capability is not advertised. Adversarial
+tests interleave lost responses and restarts across component writes. Focused tests, `just lint`,
+`just type`, `prek run`, and pre-push `just ci` remain required; live VM proof is deferred to the
+existing manually dispatched tier and must not be claimed locally.
