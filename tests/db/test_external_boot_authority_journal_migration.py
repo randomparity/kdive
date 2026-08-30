@@ -604,6 +604,21 @@ def test_full_current_mutation_phase_sequence_and_rejections(
                 == "conflict"
             )
             assert _head(connection, case, authority) == before
+            invalid_attempt = _payload(record)
+            invalid_attempt["attempt_id"] = "not-a-uuid"
+            _canonicalize(invalid_attempt)
+            assert (
+                _advance_raw(
+                    connection,
+                    case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    invalid_attempt,
+                )
+                == "conflict"
+            )
+            assert _head(connection, case, authority) == before
             if phase is not JournalPhase.ADMITTED:
                 replacements = (
                     {"attempt_id": uuid4()},
