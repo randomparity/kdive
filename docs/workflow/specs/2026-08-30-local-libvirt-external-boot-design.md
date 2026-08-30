@@ -51,11 +51,16 @@ substitute each field independently, including a point and token across two acti
 same System, Run, plan, and source, and prove zero observation, mutation, or deletion.
 
 Migration 0124 replaces only the existing `external_boot_activation_evidence_ownership` CHECK. The
-new recovery-point arm reads `binding.system_id`, `binding.run_id`, and `binding.activation_id` and
-requires exact equality with the activation row; all other arms are preserved. It rewrites no data,
-creates no role or grant, and does not accept the removed `ownership` shape. Because the capability
-has never been advertised, rollback retains immutable forward migration history and rolls back the
-application rather than restoring a legacy payload contract.
+new recovery-point arm requires `jsonb_typeof(binding) = 'object'`, requires its key set to equal
+exactly `system_id`, `run_id`, and `activation_id`, and requires those three UUIDs to equal the
+activation row; all other arms are preserved. Before dropping the old CHECK, the same migration
+transaction scans every stored recovery point and aborts on legacy `ownership`, missing binding,
+scalar/array binding, extra/missing keys, malformed UUIDs, or owner mismatch. An abort preserves the
+old constraint because the migration runner is transactional. Migration 0124 rewrites no data and
+creates no role or grant. Application rollback with immutable forward migration history is safe only
+before the first binding-shaped recovery point is written. After that write, recovery is roll-forward:
+the old application cannot deserialize the new point and its legacy write fails the replacement
+CHECK. The removed payload contract is never restored.
 
 Recovery identity is deterministic within one activation. A retry with the same binding, plan, and
 source returns byte-identical point metadata and reference. A distinct activation ID always selects
@@ -239,5 +244,9 @@ tests interleave lost responses and restarts across component writes. Focused te
 `just type`, `prek run`, and pre-push `just ci` remain required; live VM proof is deferred to the
 existing manually dispatched tier and must not be claimed locally.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
-replacement CHECK, accept canonical binding rows, and reject missing, legacy, cross-System,
-cross-Run, and cross-activation recovery points without changing role grants.
+replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
+malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
+changing role grants. Upgrade fixtures inject each incompatible pre-existing row and prove migration
+abort leaves the prior CHECK installed with no partial DDL. Compatibility assertions cover both
+sides of the first-binding-write boundary: pre-write application rollback and post-write
+roll-forward-only recovery.
