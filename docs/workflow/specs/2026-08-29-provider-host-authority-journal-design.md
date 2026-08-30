@@ -25,11 +25,13 @@ x86_64 and ppc64le targets without adding a dependency.
   digests, never provider definitions, paths, commands, credentials, or provider output.
 - `journal.py` canonicalizes each record, hashes the previous digest into the next record, appends
   one newline-delimited record, flushes and fsyncs the file, and exposes exact-prefix recovery.
-  The journal record phases are `watermark-installed`, `takeover-acknowledged`, `admitted`,
-  `mutation-started`, `provider-returned`, `observed`, and `terminal`. Each record repeats the
-  authority instance, System, activation, generation,
-  operation and attempt identities, purpose, request digest, source and target identities,
-  stable recovery-object ownership, and the phase-specific bounded observation.
+  The journal record phases are `watermark-installed`, `takeover-superseded`,
+  `takeover-acknowledged`, `admitted`, `mutation-started`, `provider-returned`, `observed`, and
+  `terminal`. Every record repeats the authority instance, System, activation, generation,
+  operation and attempt identities, purpose, request digest, and phase-specific bounded evidence.
+  Mutation records additionally require source and target identities plus stable recovery-object
+  ownership. Takeover records forbid those mutation-only fields and instead bind their predecessor
+  takeover generation where applicable.
 - `service.py` owns one `asyncio.Lock` mutation lane per System. Under that lane it restores and
   verifies the exact journal head, installs a newer generation watermark, resolves every older
   admitted operation, appends and anchors each phase, rechecks the generation immediately before
@@ -74,13 +76,28 @@ of: provider mutation never began, returned and observed, lost response resolved
 source or target identity, or conflict. Timeout, cancellation, disconnect, task termination, or an
 unobserved provider return is unresolved and therefore withholds acknowledgement.
 
-After every lower-generation operation is terminal, takeover appends and anchors a
-`watermark-installed` record for `G`, followed by `takeover-acknowledged`. These records use the
-takeover request's immutable operation identity and digest and perform no provider access. The
-acknowledgement returned to migration 0122 carries the exact sequence and digest of the anchored
-`takeover-acknowledged` record. A competing takeover can proceed only after the earlier takeover's
-two-record sequence is complete, and only the newest exact allocating generation may append either
-phase.
+Takeover first appends and anchors `watermark-installed` for `G`, immediately preventing any new
+lower-generation admission or provider commit. It then positively resolves every operation already
+admitted below `G`. Those operations may append only `provider-returned`, `observed`, and `terminal`
+records for their pre-watermark operation identities; they may not append `admitted` or
+`mutation-started` or reach another provider commit. After every such operation is terminal,
+takeover appends and anchors `takeover-acknowledged`. These takeover records use the request's
+immutable operation identity and digest and perform no provider access.
+
+The acknowledgement returned to migration 0122 carries three distinct values: the exact sequence
+and digest of the anchored `takeover-acknowledged` record, plus `positive_quiescence_digest`. The
+quiescence digest is SHA-256 over canonical JSON containing the authority instance, System,
+generation, watermark sequence and digest, and the journal-ordered list of every lower operation's
+terminal sequence, digest, and closed outcome category. An empty lower-operation list is explicit.
+Migration 0122 persists this value separately from the acknowledgement journal digest.
+
+Allocation can supersede `G` while it is quiescing. If the exact newer allocating generation wins
+the System lock before `G` anchors acknowledgement, `G` may not acknowledge. The newer takeover
+must append and anchor `takeover-superseded`, binding `G`'s watermark record and the newer
+generation, before installing its own watermark. This canonical transition closes the incomplete
+takeover without claiming its lower operations quiescent; the newer takeover inherits and resolves
+all still-nonterminal lower operations. Thus concurrent allocation cannot strand the lane, and a
+superseded takeover can never produce an acknowledgement.
 
 Client cancellation never cancels an admitted provider call. The lane-owned task retains the
 adapter call and its recovery-object ownership until it reaches a positive observation. On process
@@ -109,13 +126,15 @@ mismatched binding, phase regression, operation switch before terminal, duplicat
 different facts, or unexpected prior head changes zero rows and returns `superseded` or `conflict`
 without moving the checkpoint.
 
-The binding-state rule is phase-specific: `watermark-installed` and `takeover-acknowledged` accept
-only the exact newest `allocating` binding, while every mutation phase accepts only the exact
-`current` binding carrying the recorded takeover acknowledgement. An allocating binding cannot
-append mutation phases, and a current binding cannot append takeover phases; every cross-state or
-cross-phase attempt changes zero rows. `takeover-acknowledged` must immediately follow its matching
-`watermark-installed` record after all older operations are terminal. A mutation operation may
-start only after that exact acknowledgement is recorded by 0122 and the binding is current.
+The binding-state rule is phase-specific. `watermark-installed`, `takeover-superseded`, and
+`takeover-acknowledged` accept only the exact newest `allocating` binding. New mutation admission
+and commit phases accept only the exact `current` binding carrying the recorded takeover
+acknowledgement. After a watermark, a superseded lower binding may append only completion records
+for an operation whose `admitted` and `mutation-started` records are already anchored in that lane;
+the function verifies that immutable operation identity and permits no provider access. Every other
+cross-state or cross-phase attempt changes zero rows. `takeover-acknowledged` follows its matching
+watermark and all inherited lower terminal records. A mutation may start only after that exact
+acknowledgement is recorded by 0122 and the binding is current.
 
 For every phase the service appends and fsyncs locally, then advances the database head. On first
 creation it opens the lane journal without following symlinks, creates it exclusively with mode

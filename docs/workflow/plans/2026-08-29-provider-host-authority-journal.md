@@ -20,8 +20,10 @@ remote adapters share the same bounded port and contract tests.
 - Requests and diagnostics contain identities and bounded observations, never provider definitions,
   paths, commands, credentials, secrets, or raw provider output.
 - Postgres remains lifecycle truth. The journal records provider admission and observation only.
-- `watermark-installed` and `takeover-acknowledged` are anchored only for the newest exact
-  allocating binding; mutation phases require its promoted current binding.
+- `watermark-installed`, recoverable `takeover-superseded`, and `takeover-acknowledged` are
+  anchored only for the newest exact allocating binding. Already-started lower operations may
+  append bounded completion evidence after the watermark; new mutation phases require the promoted
+  current binding.
 - `admitted` and `mutation-started` are locally fsynced and database-anchored before provider
   access. Every provider commit gets a fresh binding/generation check.
 - Takeover acknowledgement waits for positive resolution of every older admitted call. Timeout,
@@ -53,7 +55,10 @@ bytes`, `record_digest(record) -> str`, and `FileAuthorityJournal.append(record)
    `uv run python -m pytest tests/providers/external_boot_authority/test_protocol.py -q`; expect
    collection to fail because the package does not exist.
 2. Implement closed Pydantic values, byte validators, canonical recovery ordering, and the
-   serialized-size guard. Rerun the command; expect all protocol tests to pass.
+   serialized-size guard. Make journal records a discriminated union: takeover phases forbid
+   source/target/recovery fields, while mutation phases require them. Give
+   `AuthorityAcknowledgementV1` separate journal sequence, journal digest, and
+   positive-quiescence-digest fields. Rerun the command; expect all protocol tests to pass.
 3. Write journal tests for genesis, previous-digest chaining, takeover and mutation phase ordering,
    exclusive mode-0600 creation without symlink following, parent-directory fsync before the first
    checkpoint,
@@ -94,10 +99,13 @@ repository protocol; it does not issue SQL directly.
    signed-64-bit overflow fails without writes. Include foreign System/activation/Run/attempt,
    provider/instance/purpose/operation/digest/peer cases.
 3. Add a complete binding-state/phase matrix: only the newest exact allocating authority may anchor
-   `watermark-installed` then `takeover-acknowledged`; only the matching promoted current authority
-   may anchor mutation phases. Cross-state, cross-phase, stale, and concurrent takeover attempts
-   change zero rows. Assert the acknowledgement exposes the exact anchored sequence and digest used
-   by migration 0122.
+   takeover records; only the matching promoted current authority may admit or start mutations.
+   After a watermark, a superseded lower authority may append only returned/observed/terminal
+   records for its already-anchored operation. Cross-state, cross-phase, stale, and unrelated
+   attempts change zero rows. Race allocations between watermark and acknowledgement and prove the
+   winner anchors `takeover-superseded`, inherits unresolved operations, and makes progress. Assert
+   the acknowledgement exposes its anchored sequence/digest and a separately constructed canonical
+   positive-quiescence digest for migration 0122.
 4. Implement migration 0123 with the one-row-per-lane head, constraints, security-definer resolve
    and compare-and-set functions, pinned `search_path`, explicit revokes, and exact execute grants.
    Acquire the System advisory lock before the head row and re-resolve the 0122 binding under lock.
@@ -130,9 +138,11 @@ repository.
    stale/cross-binding request, malformed ownership, and failed readiness all produce no journal or
    provider access. Run the service file; expect import failures.
 2. Prove takeover accepts only the newest exact `allocating` binding, performs no provider mutation,
-   anchors `watermark-installed` and then `takeover-acknowledged`, and returns the latter record's
-   exact sequence/digest. Prove mutation is denied until core promotes the
-   binding to `current` with the exact acknowledgement sequence and digest.
+   anchors `watermark-installed` before quiescing older calls, and returns the final
+   `takeover-acknowledged` sequence/digest plus the canonical positive-quiescence digest. Prove an
+   intervening newer allocation records `takeover-superseded`, inherits unresolved work, and cannot
+   strand the lane. Prove mutation is denied until core promotes the binding to `current` with the
+   exact acknowledgement sequence and digest.
 3. Add concurrency tests that pause an old operation before and after every commit point, admit a
    successor, and prove acknowledgement remains pending until the old call is positively observed.
    Cover cancellation and client disconnect while the lane task continues.
