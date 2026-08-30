@@ -228,6 +228,11 @@ Malformed or unauthenticated input is rejected before journal or provider access
 generation mismatch is `superseded`. Journal/database disagreement, invalid phase continuity, or
 stable-owner disagreement is `journal_conflict`. An unreadable or mixed provider state is
 `provider_conflict`. Provider unavailability leaves the operation unresolved and takeover blocked;
+
+The service authenticates and resolves the exact trusted binding before allocating a per-System
+lane. Pre-binding rejection telemetry uses fixed `untrusted`/`unresolved` dimensions; later labels
+come only from the trusted binding. Idle terminal lanes are evicted after the last concurrent user,
+so rejected high-cardinality input and completed work cannot grow lane or metric dictionaries.
 it is never converted to source or target by elapsed time.
 
 Logs and exceptions contain authority, System, generation, sequence, phase, operation, and bounded

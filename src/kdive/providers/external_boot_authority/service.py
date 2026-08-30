@@ -121,6 +121,7 @@ class AuthorityServiceMetrics:
 @dataclass(slots=True)
 class _Lane:
     lock: asyncio.Lock
+    users: int = 0
     failed: bool = False
     watermark_generation: int = 0
     active: _ActiveOperation | None = None
@@ -153,19 +154,35 @@ class ExternalBootAuthorityService:
         self._logger = logging.getLogger(__name__)
 
     def _lane(self, system_id: UUID) -> _Lane:
-        return self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
+        lane = self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
+        lane.users += 1
+        return lane
+
+    def _release_lane(self, system_id: UUID, lane: _Lane) -> None:
+        lane.users -= 1
+        if lane.users == 0 and lane.active is None and self._lanes.get(system_id) is lane:
+            self._lanes.pop(system_id)
+
+    @staticmethod
+    def _trusted_labels(binding: AuthorityBinding | None) -> tuple[str, str]:
+        if binding is None:
+            return "untrusted", "unresolved"
+        return binding.provider_kind, binding.authority_instance
 
     def _reject(
         self,
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
         category: Literal["unauthenticated", "superseded", "journal_conflict"],
+        *,
+        labels: tuple[str, str] = ("untrusted", "unresolved"),
     ) -> AuthorityServiceError:
-        self.metrics.reject(request, category)
+        key = (*labels, category)
+        self.metrics.rejections[key] = self.metrics.rejections.get(key, 0) + 1
         self._logger.warning(
             "authority request rejected",
             extra={
-                "provider_kind": request.provider_kind,
-                "authority_instance": request.authority_instance,
+                "provider_kind": labels[0],
+                "authority_instance": labels[1],
                 "category": category,
             },
         )
@@ -257,7 +274,9 @@ class ExternalBootAuthorityService:
         )
         if status != "advanced":
             raise self._reject(
-                record, "superseded" if status == "superseded" else "journal_conflict"
+                record,
+                "superseded" if status == "superseded" else "journal_conflict",
+                labels=self._trusted_labels(binding),
             )
         self.metrics.record_checkpoint(record, time.perf_counter() - started)
         return (*records, record)
@@ -445,13 +464,30 @@ class ExternalBootAuthorityService:
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
     ) -> AuthorityAcknowledgementV1:
         authenticated = self._require_peer(peer, request)
-        lane = self._lane(request.system_id)
+        binding = await self._repository.resolve_allocating(authenticated, request)
+        if binding is None or not self._binding_matches(binding, request):
+            raise self._reject(request, "superseded", labels=self._trusted_labels(binding))
+        lane = self._lane(binding.system_id)
+        try:
+            return await self._acknowledge_takeover_bound(authenticated, binding, lane, request)
+        finally:
+            self._release_lane(binding.system_id, lane)
+
+    async def _acknowledge_takeover_bound(
+        self,
+        authenticated: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        lane: _Lane,
+        request: AuthorityTakeoverRequestV1,
+    ) -> AuthorityAcknowledgementV1:
         async with lane.lock:
             if lane.failed:
-                raise self._reject(request, "journal_conflict")
-            binding = await self._repository.resolve_allocating(authenticated, request)
-            if binding is None or not self._binding_matches(binding, request):
-                raise self._reject(request, "superseded")
+                raise self._reject(
+                    request, "journal_conflict", labels=self._trusted_labels(binding)
+                )
+            confirmed = await self._repository.resolve_allocating(authenticated, request)
+            if confirmed is None or confirmed != binding:
+                raise self._reject(request, "superseded", labels=self._trusted_labels(binding))
             journal = self._journal_factory(request.system_id)
             try:
                 records = await self._recover(binding, journal)
@@ -613,7 +649,23 @@ class ExternalBootAuthorityService:
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1:
         authenticated = self._require_peer(peer, request)
-        lane = self._lane(request.system_id)
+        journal = self._journal_factory(request.system_id)
+        records = journal.load()
+        acknowledgements = [
+            record
+            for record in records
+            if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+            and record.generation == request.generation
+        ]
+        if not acknowledgements:
+            raise self._reject(request, "superseded")
+        acknowledgement = acknowledgements[-1]
+        trusted = await self._repository.resolve_current(
+            authenticated, request, acknowledgement.sequence, record_digest(acknowledgement)
+        )
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject(request, "superseded", labels=self._trusted_labels(trusted))
+        lane = self._lane(trusted.system_id)
 
         async def run() -> AuthorityObservationV1:
             active = _ActiveOperation(request.generation, JournalPhase.ADMITTED, asyncio.Event())
@@ -634,14 +686,7 @@ class ExternalBootAuthorityService:
                     if not acknowledgements:
                         raise AuthorityServiceError("superseded")
                     acknowledgement = acknowledgements[-1]
-                    binding = await self._repository.resolve_current(
-                        authenticated,
-                        request,
-                        acknowledgement.sequence,
-                        record_digest(acknowledgement),
-                    )
-                    if binding is None or not self._binding_matches(binding, request):
-                        raise AuthorityServiceError("superseded")
+                    binding = trusted
                     records = await self._recover(binding, journal)
                     records = await self._anchor(
                         binding,
@@ -730,6 +775,7 @@ class ExternalBootAuthorityService:
                 active.done.set()
                 if lane.active is active:
                     lane.active = None
+                self._release_lane(trusted.system_id, lane)
 
         task = asyncio.create_task(run())
         try:
