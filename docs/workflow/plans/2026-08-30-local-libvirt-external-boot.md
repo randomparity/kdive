@@ -13,7 +13,8 @@ pytest, Ruff, ty, and prek.
 ## Global constraints
 
 - Targets are x86_64 and ppc64le; do not infer target behavior from the x86_64 development host.
-- Add no dependency and no schema/migration. Keep `LocalLibvirtInstall` behavior unchanged.
+- Add no dependency. Migration 0124 may only replace the activation-ledger recovery-point ownership
+  CHECK; keep `LocalLibvirtInstall` behavior unchanged.
 - Recovery bounds are 200,000 entries and 8,589,934,592 uncompressed regular-file bytes.
 - Never follow archive, recovery-root, or guest-tree symlinks. Preserve recovery symlink targets
   verbatim, including absolute targets. Reject hard links, special files, non-NFC/undecodable names,
@@ -45,6 +46,8 @@ pytest, Ruff, ty, and prek.
   `tests/providers/local_libvirt/test_external_boot.py`.
 - Modify `tests/providers/local_libvirt/test_composition.py`: prove no advertisement/composition.
 - Create `tests/adversarial/test_local_external_boot_recovery.py` for crash/retry matrices.
+- Create `src/kdive/db/schema/0124_external_boot_activation_binding.sql` and update exact migration
+  inventory tests; do not edit migration 0121.
 
 ## Task 1: Close activation ownership across the shared contract
 
@@ -59,6 +62,7 @@ class ExternalBootActivationBinding(_ClosedValue):
     run_id: CanonicalUuid
     activation_id: CanonicalUuid
 
+
 class RecoveryPoint(_ClosedValue):
     schema_: Literal["external-boot-recovery-v1"] = Field(
         "external-boot-recovery-v1", alias="schema"
@@ -69,6 +73,7 @@ class RecoveryPoint(_ClosedValue):
     recovery_ref: OpaqueProviderRef
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
+
 
 def prepare(
     self,
@@ -87,6 +92,12 @@ def prepare(
    `recovery_point.binding`; preserve their existing System/Run equality checks and add activation
    round-trip assertions. Repository-search `prepare(`, `.ownership`, and `RecoveryPoint(` and update
    every direct in-tree caller; discovery of an external/versioned caller stops at scope checkpoint.
+   Add migration 0124 to drop and recreate only `external_boot_activation_evidence_ownership`,
+   preserving every non-recovery arm and requiring binding System, Run, and activation equality.
+   Perform no data rewrite and add no role/grant changes. Test exact CHECK shape, canonical
+   persistence, missing/extra/legacy ownership rejection, each owner mismatch, migration inventory,
+   and migration immutability. Pre-release rollback is application rollback with forward migration
+   history; do not restore the removed wire shape.
 3. Run `just test-verbose tests/providers/ports/test_external_boot.py`,
    `just test-verbose tests/domain/test_external_boot_activation.py`, and
    `just test-verbose tests/db/test_external_boot_activation_repository.py`; expect all passed.
@@ -109,6 +120,7 @@ class GuestRecoveryWriter(Protocol):
     def observe(self, overlay: str, release: str) -> ComponentState: ...
     def install(self, overlay: str, release: str, source: Path) -> str: ...
     def restore(self, overlay: str, release: str, capture: ModuleCapture) -> str: ...
+
 
 class RealGuestRecoveryWriter:
     # implements GuestRecoveryWriter through one mounted, inactive qcow2 overlay
@@ -148,13 +160,24 @@ install/XML/readiness helpers only when required.
 
 ```python
 class LocalLibvirtExternalBoot(ExternalBootPorts):
-    def materialize(self, plan: ExternalBootPlan, authority: OpaqueProviderRef) -> ExternalBootMaterialization: ...
-    def prepare(self, materialization: ExternalBootMaterialization, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef) -> RecoveryPoint: ...
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization: ...
+    def prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> RecoveryPoint: ...
     def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None: ...
-    def observe(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> RunningKernelObservation: ...
+    def observe(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> RunningKernelObservation: ...
     def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None: ...
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None: ...
-    def finalize_cleanup_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof, authority: OpaqueProviderRef) -> None: ...
+    def finalize_cleanup_tombstone(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof, authority: OpaqueProviderRef
+    ) -> None: ...
 ```
 
 1. Add XML golden-vector tests from ADR-0583, preserved-subtree/device/QEMU argument retention,

@@ -22,6 +22,10 @@ completion only for the exact current-binding finalize operation durably journal
 authority-reference translation, authority-service composition, finalization invocation, and
 capability advertisement remain #2140.
 
+Implementation found that migration 0121's immutable activation-ledger CHECK addresses the removed
+`RecoveryPoint.ownership` path. On 2026-08-30 the operator authorized the next available additive
+migration, 0124, to replace that CHECK without rewriting stored data.
+
 ## Decision
 
 Local-libvirt stores each recovery point beneath its configured provider-owned recovery root in a
@@ -44,6 +48,13 @@ state — with reopened canonical metadata before observation or mutation. Reope
 metadata, not caller-presented fields, supplies mutation truth. Any field mismatch is conflict with
 no provider write. This adjacent value change lets `activate`, `observe`, `recover`, and `cleanup`
 authenticate the selected owner and immutable state without decoding authority data.
+
+Migration 0124 drops and recreates only `external_boot_activation_evidence_ownership`. Its recovery
+point arm requires the closed binding's System, Run, and activation UUIDs to equal the ledger row;
+the materialization and evidence arms remain unchanged. It performs no data rewrite and adds no
+table, role, or grant. This capability is pre-release and unadvertised, so rollback is application
+rollback plus the forward migration history; legacy `ownership` payloads remain invalid rather than
+receiving a compatibility path.
 
 This record refines ADR-0583's deterministic-prepare statement: identical retries within one
 activation return the same recovery point, while distinct activation UUIDs intentionally produce
@@ -117,6 +128,9 @@ Teardown likewise quarantines evidence it cannot authenticate.
   Serialization and contract tests reject the removed field, missing bindings, and cross-activation
   token substitution; no legacy serialized point exists in production because the capability is not
   advertised.
+- Migration 0124 is the additive database consequence of that replacement. Migration inventory,
+  immutability, exact CHECK shape, valid binding persistence, and legacy/cross-owner rejection are
+  tested explicitly.
 
 ## Considered & rejected
 

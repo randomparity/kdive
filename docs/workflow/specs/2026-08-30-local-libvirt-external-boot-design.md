@@ -8,8 +8,9 @@ provider-neutral activation binding into preparation. The implementation covers 
 and signature adjustment, local provider primitives, fault-inject consistency, and tests only.
 `AuthorityMutationAdapter`, authority-reference translation, provider-host service composition,
 post-core tombstone-finalization invocation, configured authority coordinates, and capability
-advertisement remain #2140; remote primitives,
-jobs, reconciliation, hosting, schemas, and migrations remain excluded.
+advertisement remain #2140; remote primitives, jobs, reconciliation, and hosting remain excluded.
+The sole schema change is additive migration 0124, authorized by the operator on 2026-08-30 after
+implementation exposed migration 0121's immutable CHECK dependency.
 
 The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
 dependency. It reuses libvirt, defused XML parsing, `xml.etree.ElementTree.canonicalize`, libguestfs,
@@ -48,6 +49,13 @@ recovery metadata before reading provider state. Reopened metadata supplies ever
 used for comparison and mutation; caller-presented point fields never override it. Contract tests
 substitute each field independently, including a point and token across two activation IDs with the
 same System, Run, plan, and source, and prove zero observation, mutation, or deletion.
+
+Migration 0124 replaces only the existing `external_boot_activation_evidence_ownership` CHECK. The
+new recovery-point arm reads `binding.system_id`, `binding.run_id`, and `binding.activation_id` and
+requires exact equality with the activation row; all other arms are preserved. It rewrites no data,
+creates no role or grant, and does not accept the removed `ownership` shape. Because the capability
+has never been advertised, rollback retains immutable forward migration history and rolls back the
+application rather than restoring a legacy payload contract.
 
 Recovery identity is deterministic within one activation. A retry with the same binding, plan, and
 source returns byte-identical point metadata and reference. A distinct activation ID always selects
@@ -230,3 +238,6 @@ must make the new tests fail. Composition tests prove the capability is not adve
 tests interleave lost responses and restarts across component writes. Focused tests, `just lint`,
 `just type`, `prek run`, and pre-push `just ci` remain required; live VM proof is deferred to the
 existing manually dispatched tier and must not be claimed locally.
+Migration tests additionally freeze inventory order and migration immutability, inspect the exact
+replacement CHECK, accept canonical binding rows, and reject missing, legacy, cross-System,
+cross-Run, and cross-activation recovery points without changing role grants.
