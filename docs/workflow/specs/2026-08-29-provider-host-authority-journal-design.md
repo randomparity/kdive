@@ -25,8 +25,9 @@ x86_64 and ppc64le targets without adding a dependency.
   digests, never provider definitions, paths, commands, credentials, or provider output.
 - `journal.py` canonicalizes each record, hashes the previous digest into the next record, appends
   one newline-delimited record, flushes and fsyncs the file, and exposes exact-prefix recovery.
-  The journal record phases are `admitted`, `mutation-started`, `provider-returned`, `observed`,
-  and `terminal`. Each record repeats the authority instance, System, activation, generation,
+  The journal record phases are `watermark-installed`, `takeover-acknowledged`, `admitted`,
+  `mutation-started`, `provider-returned`, `observed`, and `terminal`. Each record repeats the
+  authority instance, System, activation, generation,
   operation and attempt identities, purpose, request digest, source and target identities,
   stable recovery-object ownership, and the phase-specific bounded observation.
 - `service.py` owns one `asyncio.Lock` mutation lane per System. Under that lane it restores and
@@ -73,6 +74,14 @@ of: provider mutation never began, returned and observed, lost response resolved
 source or target identity, or conflict. Timeout, cancellation, disconnect, task termination, or an
 unobserved provider return is unresolved and therefore withholds acknowledgement.
 
+After every lower-generation operation is terminal, takeover appends and anchors a
+`watermark-installed` record for `G`, followed by `takeover-acknowledged`. These records use the
+takeover request's immutable operation identity and digest and perform no provider access. The
+acknowledgement returned to migration 0122 carries the exact sequence and digest of the anchored
+`takeover-acknowledged` record. A competing takeover can proceed only after the earlier takeover's
+two-record sequence is complete, and only the newest exact allocating generation may append either
+phase.
+
 Client cancellation never cancels an admitted provider call. The lane-owned task retains the
 adapter call and its recovery-object ownership until it reaches a positive observation. On process
 restart the journal supplies the admitted work; service readiness remains false until recovery
@@ -100,7 +109,19 @@ mismatched binding, phase regression, operation switch before terminal, duplicat
 different facts, or unexpected prior head changes zero rows and returns `superseded` or `conflict`
 without moving the checkpoint.
 
-For every phase the service appends and fsyncs locally, then advances the database head. `admitted`
+The binding-state rule is phase-specific: `watermark-installed` and `takeover-acknowledged` accept
+only the exact newest `allocating` binding, while every mutation phase accepts only the exact
+`current` binding carrying the recorded takeover acknowledgement. An allocating binding cannot
+append mutation phases, and a current binding cannot append takeover phases; every cross-state or
+cross-phase attempt changes zero rows. `takeover-acknowledged` must immediately follow its matching
+`watermark-installed` record after all older operations are terminal. A mutation operation may
+start only after that exact acknowledgement is recorded by 0122 and the binding is current.
+
+For every phase the service appends and fsyncs locally, then advances the database head. On first
+creation it opens the lane journal without following symlinks, creates it exclusively with mode
+`0600`, fsyncs the file, and fsyncs the parent directory before the first database compare-and-set;
+existing journals must be regular, privately owned files with no writable group/other bits.
+`admitted`
 and `mutation-started` are both anchored before provider access. If the database update fails after
 local fsync, the file has a longer suffix and service enters failed-closed recovery. It never trims
 or adopts that suffix automatically. If local append fails, the database head cannot advance.
@@ -179,8 +200,9 @@ directly. A privileged host or database administrator is outside the fence.
   wrong-provider, and wrong-instance requests.
 - Per-System serialization, pre-commit binding checks, and positive observation prevent a newer
   generation from acknowledging while an older call may still commit.
-- Fsync-before-CAS, exact monotonic checkpoints, and full-chain recovery expose truncation, extra
-  suffixes, corruption, reorder, substitution, and partial database failure.
+- File and parent-directory fsync before the first CAS, file fsync before every later CAS, exact
+  monotonic checkpoints, and full-chain recovery expose truncation, extra suffixes, corruption,
+  reorder, substitution, and partial database failure.
 - Stable ownership validation prevents takeover from claiming another activation's recovery object.
 - The provider-authority database role has execute-only access to the narrow functions and no
   lifecycle writes. Bounded structured diagnostics prevent secret and provider-output disclosure.
@@ -198,7 +220,7 @@ their current owners.
 ## Verification
 
 Unit tests prove closed bounded takeover and mutation values, allocating-to-acknowledged-to-current
-ordering, canonical journal hashing, every phase transition,
+ordering, canonical journal hashing, every takeover and mutation phase transition,
 stable ownership, cancellation retention, and identical local/remote adapter behavior. Migration
 tests prove role grants, exact binding resolution, monotonic compare-and-set, concurrency, zero-row
 mismatch behavior, and immutable heads. Adversarial service tests pause each older operation before
@@ -206,6 +228,10 @@ and after each commit, lose responses, restart from every journal phase, and pro
 until positive observation. Recovery tests reject shorter, longer, divergent, reordered, corrupt,
 duplicate, foreign, and valid-prefix-truncated journals, including a trusted `mutation-started`
 head whose provider call remains unresolved.
+Crash tests cover first-file exclusive creation, parent-directory fsync, and the initial checkpoint;
+migration tests cover every allocating/current versus takeover/mutation phase combination and
+concurrent takeover attempts. Restart tests stop after each takeover record and require the exact
+anchored `takeover-acknowledged` sequence and digest before core promotion.
 
 The focused gates are `just test-verbose tests/providers/external_boot_authority`,
 `just test-verbose tests/providers/local_libvirt/test_external_boot_authority.py`,
