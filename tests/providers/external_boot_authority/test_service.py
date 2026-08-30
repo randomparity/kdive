@@ -22,6 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     AuthorityServiceError,
+    AuthorityServiceMetrics,
     ExternalBootAuthorityService,
 )
 
@@ -88,6 +89,7 @@ class _Repository:
         self.current = False
         self.head: JournalHead | None = None
         self.records: list[JournalRecordV1] = []
+        self.advance_status: Literal["advanced", "superseded", "conflict"] = "advanced"
 
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
@@ -135,6 +137,8 @@ class _Repository:
         expected_digest: str,
         record: JournalRecordV1,
     ) -> Literal["advanced", "superseded", "conflict"]:
+        if self.advance_status != "advanced":
+            return self.advance_status
         self.records.append(record)
         self.head = JournalHead(
             authority_instance=binding.authority_instance,
@@ -264,3 +268,38 @@ async def test_caller_cancellation_does_not_cancel_started_lane(tmp_path: Path) 
             break
         await asyncio.sleep(0)
     assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_readiness_requires_exact_local_and_trusted_head(tmp_path: Path) -> None:
+    service, repository, _, peer, request = _service(tmp_path)
+    assert await service.readiness(peer, request)
+    await service.acknowledge_takeover(peer, request)
+    assert await service.readiness(peer, request)
+    path = tmp_path / f"{request.system_id}.journal"
+    path.write_bytes(path.read_bytes() + b"corrupt")
+    assert not await service.readiness(peer, request)
+    assert service.metrics.recovery_failures == {
+        (request.provider_kind, request.authority_instance): 1
+    }
+
+
+@pytest.mark.anyio
+async def test_failed_checkpoint_never_reaches_provider_and_fails_closed(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    repository.advance_status = "conflict"
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await service.acknowledge_takeover(peer, request)
+    assert adapter.calls == []
+    assert repository.head is None
+    assert not await service.readiness(peer, request)
+    assert service.metrics.checkpoints == {}
+
+
+def test_metric_labels_are_bounded_non_tenant_dimensions() -> None:
+    metrics = AuthorityServiceMetrics.empty()
+    request = _takeover()
+    metrics.reject(request, "superseded")
+    assert set(metrics.rejections) == {
+        (request.provider_kind, request.authority_instance, "superseded")
+    }
