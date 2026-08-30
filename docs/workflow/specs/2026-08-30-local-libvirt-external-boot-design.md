@@ -7,7 +7,8 @@ user-selected provider-host recovery directory and the later A1 decision to carr
 provider-neutral activation binding into preparation. The implementation covers the shared value
 and signature adjustment, local provider primitives, fault-inject consistency, and tests only.
 `AuthorityMutationAdapter`, authority-reference translation, provider-host service composition,
-configured authority coordinates, and capability advertisement remain #2140; remote primitives,
+post-core tombstone-finalization invocation, configured authority coordinates, and capability
+advertisement remain #2140; remote primitives,
 jobs, reconciliation, hosting, schemas, and migrations remain excluded.
 
 The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
@@ -143,7 +144,16 @@ retains the complete point identity plus explicit payload-absence facts. It fsyn
 directory, and parent before success. A lost-response retry authenticates the tombstone and returns
 success without provider mutation; missing metadata without the exact tombstone is quarantined. The
 tombstone is excluded from reserved payload bytes and may be swept only after the owning lifecycle
-has durably committed cleanup complete, through separately owned reconciliation. Cleanup never
+tombstone remains reservation-owned recovery evidence. #2108 defines an idempotent narrow
+`finalize_cleanup_tombstone(point: RecoveryPoint, authority: OpaqueProviderRef) -> None` primitive.
+It re-authenticates the complete point and cleaned tombstone, consumes a caller precondition that
+durable core `cleanup_complete` is already true, removes only that exact directory, verifies
+absence, and fsyncs the parent. A lost response retries successfully through the same authenticated
+point/authority and deterministic absence record; unrelated absence remains conflict. #2140 alone
+invokes finalization after the durable core commit and releases capacity only after finalization
+success. Advertisement remains blocked until crash-before-commit, crash-after-commit-before-delete,
+and lost-delete-response tests pass. No generic reconciliation sweep or retention timer exists.
+Cleanup never
 follows symlinks or deletes an object whose metadata owner does not exactly match. Destroyed-System
 cleanup is not a second six-port entry point; teardown-owned invocation and authentication remain
 outside #2108.
@@ -176,6 +186,10 @@ advertisement. Until then no production composition exposes this port.
 Out of scope are compromise of the trusted host/libvirtd/libguestfs appliance, privileged manual
 disk edits, authority transport/authentication, remote providers, lifecycle database truth, and
 capacity admission. Those are existing operator trust or owned issues, not claims of this design.
+
+The #2140 integration acceptance must include the exact post-`cleanup_complete` finalization and
+capacity-release ordering above. Spellcraft records that dependency here; changing #2140's public
+issue body is not necessary to define or implement #2108 and is left to campaign tracking.
 
 ## Verification
 
