@@ -295,14 +295,14 @@ def test_acknowledgement_cannot_cross_link_another_same_generation_operation(
     first = _record(operation_identity="takeover-a")
     journal.append(first)
     before = path.read_bytes()
-    other = _record(operation_identity="takeover-b", attempt_id=uuid4())
     crossed = _record(
         2,
         record_digest(first),
         phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
-        operation_identity="takeover-a",
-        watermark_sequence=other.sequence,
-        watermark_digest=record_digest(other),
+        operation_identity="takeover-b",
+        attempt_id=uuid4(),
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
     )
 
     with pytest.raises(ValueError, match="watermark link"):
@@ -311,4 +311,54 @@ def test_acknowledgement_cannot_cross_link_another_same_generation_operation(
 
     path.write_bytes(before + canonical_record_bytes(crossed) + b"\n")
     with pytest.raises(ValueError, match="watermark link"):
+        journal.load()
+
+
+def test_predecessor_watermark_can_be_superseded_only_once(tmp_path: Path) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record(generation=1, operation_identity="takeover-a")
+    journal.append(first)
+    first_successor = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_SUPERSEDED,
+        authority_id=uuid4(),
+        generation=2,
+        operation_identity="takeover-b",
+        attempt_id=uuid4(),
+        predecessor_generation=1,
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
+    )
+    journal.append(first_successor)
+    second_watermark = _record(
+        3,
+        record_digest(first_successor),
+        generation=2,
+        authority_id=first_successor.authority_id,
+        operation_identity="takeover-b",
+        attempt_id=first_successor.attempt_id,
+    )
+    journal.append(second_watermark)
+    before = path.read_bytes()
+    crossed = _record(
+        4,
+        record_digest(second_watermark),
+        phase=JournalPhase.TAKEOVER_SUPERSEDED,
+        authority_id=uuid4(),
+        generation=3,
+        operation_identity="takeover-c",
+        attempt_id=uuid4(),
+        predecessor_generation=1,
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
+    )
+
+    with pytest.raises(ValueError, match="already superseded"):
+        journal.append(crossed)
+    assert path.read_bytes() == before
+
+    path.write_bytes(before + canonical_record_bytes(crossed) + b"\n")
+    with pytest.raises(ValueError, match="already superseded"):
         journal.load()
