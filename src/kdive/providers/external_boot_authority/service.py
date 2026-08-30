@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -75,6 +76,38 @@ class AuthorityServiceError(RuntimeError):
 
 
 @dataclass(slots=True)
+class AuthorityServiceMetrics:
+    """Bounded in-process observations; composition may export these values."""
+
+    rejections: dict[tuple[str, str, str], int]
+    recovery_failures: dict[tuple[str, str], int]
+    unresolved: dict[tuple[str, str], int]
+    checkpoints: dict[tuple[str, str], int]
+
+    @classmethod
+    def empty(cls) -> AuthorityServiceMetrics:
+        return cls({}, {}, {}, {})
+
+    @staticmethod
+    def _labels(
+        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
+    ) -> tuple[str, str]:
+        return request.provider_kind, request.authority_instance
+
+    def reject(self, request: AuthorityTakeoverRequestV1, category: str) -> None:
+        key = (*self._labels(request), category)
+        self.rejections[key] = self.rejections.get(key, 0) + 1
+
+    def recovery_failed(self, request: AuthorityTakeoverRequestV1) -> None:
+        key = self._labels(request)
+        self.recovery_failures[key] = self.recovery_failures.get(key, 0) + 1
+
+    def record_checkpoint(self, request: JournalRecordV1) -> None:
+        key = self._labels(request)
+        self.checkpoints[key] = self.checkpoints.get(key, 0) + 1
+
+
+@dataclass(slots=True)
 class _Lane:
     lock: asyncio.Lock
     failed: bool = False
@@ -89,11 +122,14 @@ class ExternalBootAuthorityService:
         repository: AuthorityRepository,
         journal_factory: Callable[[UUID], FileAuthorityJournal],
         adapter: AuthorityMutationAdapter,
+        metrics: AuthorityServiceMetrics | None = None,
     ) -> None:
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
+        self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
+        self._logger = logging.getLogger(__name__)
 
     def _lane(self, system_id: UUID) -> _Lane:
         return self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
@@ -164,7 +200,31 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError(
                 "superseded" if status == "superseded" else "journal_conflict"
             )
+        self.metrics.record_checkpoint(record)
         return (*records, record)
+
+    async def readiness(
+        self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
+    ) -> bool:
+        """Return true only when local bytes exactly equal the scoped trusted head."""
+        try:
+            authenticated = self._require_peer(peer)
+            binding = await self._repository.resolve_allocating(authenticated, request)
+            if binding is None or not self._binding_matches(binding, request):
+                return False
+            await self._recover(binding, self._journal_factory(request.system_id))
+        except AuthorityServiceError, OSError, ValueError:
+            self.metrics.recovery_failed(request)
+            self._logger.warning(
+                "authority recovery rejected",
+                extra={
+                    "provider_kind": request.provider_kind,
+                    "authority_instance": request.authority_instance,
+                    "category": "journal_conflict",
+                },
+            )
+            return False
+        return True
 
     @staticmethod
     def _record(
