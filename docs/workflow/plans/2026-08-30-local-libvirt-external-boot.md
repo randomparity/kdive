@@ -47,7 +47,9 @@ pytest, Ruff, ty, and prek.
 - Modify `tests/providers/local_libvirt/test_composition.py`: prove no advertisement/composition.
 - Create `tests/adversarial/test_local_external_boot_recovery.py` for crash/retry matrices.
 - Create `src/kdive/db/schema/0124_external_boot_activation_binding.sql` and update exact migration
-  inventory tests; do not edit migration 0121.
+  inventory tests in `tests/db/test_migrate.py`; do not edit migration 0121.
+- Create `tests/db/test_external_boot_activation_binding_migration.py`: exact replacement-CHECK,
+  compatibility-preflight, atomic-abort, grants, and persistence proofs for migration 0124.
 
 ## Task 1: Close activation ownership across the shared contract
 
@@ -92,12 +94,25 @@ def prepare(
    `recovery_point.binding`; preserve their existing System/Run equality checks and add activation
    round-trip assertions. Repository-search `prepare(`, `.ownership`, and `RecoveryPoint(` and update
    every direct in-tree caller; discovery of an external/versioned caller stops at scope checkpoint.
-   Add migration 0124 to drop and recreate only `external_boot_activation_evidence_ownership`,
-   preserving every non-recovery arm and requiring binding System, Run, and activation equality.
-   Perform no data rewrite and add no role/grant changes. Test exact CHECK shape, canonical
-   persistence, missing/extra/legacy ownership rejection, each owner mismatch, migration inventory,
-   and migration immutability. Pre-release rollback is application rollback with forward migration
-   history; do not restore the removed wire shape.
+   Add migration 0124 with a same-transaction compatibility preflight before any
+   `DROP CONSTRAINT`. The preflight aborts on an existing recovery point with legacy ownership,
+   missing binding, a scalar or array binding, missing or extra binding keys, a malformed UUID, or
+   binding ownership unequal to the ledger row. Only after it passes, drop and recreate
+   `external_boot_activation_evidence_ownership`, preserving every non-recovery arm. Require
+   `jsonb_typeof(binding) = 'object'`, the exact keyset `{system_id, run_id, activation_id}`,
+   canonical UUID casts, and equality of all three values to the ledger System, Run, and activation.
+   Perform no data rewrite and add no table, role, or grant changes.
+
+   In `tests/db/test_external_boot_activation_binding_migration.py`, prove the exact CHECK shape,
+   canonical persistence, each malformed/legacy/cross-owner row rejection after migration, and a
+   pre-migration fixture for every incompatibility above. Each preflight fixture must prove the
+   migration transaction aborts before the drop and leaves the old CHECK installed with no partial
+   DDL. Prove the role/grant inventory is unchanged. In `tests/db/test_migrate.py`, add 0124 to the
+   exact ordered inventory and immutable historical-prefix assertions without changing 0121.
+   Run `just test-verbose tests/db/test_external_boot_activation_binding_migration.py` and
+   `just test-verbose tests/db/test_migrate.py`; expect all passed. Application rollback is allowed
+   only before the first binding-shaped row is written. After that boundary, recover by roll-forward;
+   never restore the removed wire shape.
 3. Run `just test-verbose tests/providers/ports/test_external_boot.py`,
    `just test-verbose tests/domain/test_external_boot_activation.py`, and
    `just test-verbose tests/db/test_external_boot_activation_repository.py`; expect all passed.
