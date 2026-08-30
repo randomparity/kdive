@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
+from kdive.providers.external_boot_authority import protocol
 from kdive.providers.external_boot_authority.protocol import (
+    MAX_MESSAGE_BYTES,
     MAX_SIGNED_BIGINT,
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
@@ -17,6 +20,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     RecoveryObjectBindingV1,
     canonical_record_bytes,
+    decode_authority_request,
     record_digest,
 )
 
@@ -303,3 +307,43 @@ def test_record_bytes_and_digest_are_deterministic() -> None:
 def test_serialized_request_is_capped_at_one_mib() -> None:
     with pytest.raises(ValidationError):
         _mutation(operation="x" * 1_048_576)
+
+
+@pytest.mark.parametrize("value", [_takeover(), _mutation()])
+def test_raw_request_decoder_accepts_exact_canonical_bounded_bytes(
+    value: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
+) -> None:
+    payload = json.dumps(
+        value.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert decode_authority_request(payload) == value
+
+
+def test_raw_request_decoder_rejects_oversize_before_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser_called = False
+
+    def forbidden_parser(_payload: bytes) -> object:
+        nonlocal parser_called
+        parser_called = True
+        raise AssertionError("oversized input reached the parser")
+
+    monkeypatch.setattr(protocol, "_parse_authority_request_bytes", forbidden_parser)
+
+    with pytest.raises(ValueError, match="exceeds configured byte maximum"):
+        decode_authority_request(b"x" * (MAX_MESSAGE_BYTES + 1))
+
+    assert parser_called is False
+
+
+@pytest.mark.parametrize("payload", [b"not-json", b'{"schema":"secret"}', b" {}"])
+def test_raw_request_decoder_rejects_malformed_without_echo(payload: bytes) -> None:
+    with pytest.raises(ValueError) as caught:
+        decode_authority_request(payload)
+
+    assert str(caught.value) == "invalid external-boot authority request"
+    assert payload.decode(errors="ignore") not in str(caught.value)

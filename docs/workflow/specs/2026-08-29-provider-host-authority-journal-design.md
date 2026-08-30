@@ -58,7 +58,10 @@ recovery-object bindings. Takeover resolves an `allocating` 0122 binding and per
 mutation. After core records the acknowledgement and promotes the binding, mutation resolves the
 same binding in `current` state before provider access. Every identifier is nonblank and at most 255 UTF-8
 bytes; provider identities are opaque nonblank strings of at most 1,024 UTF-8 bytes; digests use
-`sha256:` plus 64 lowercase hexadecimal digits. Serialized input is closed and capped at 1 MiB.
+`sha256:` plus 64 lowercase hexadecimal digits. Model validation bounds the canonical
+representation after structure exists. The public provider-neutral decoder accepts bytes only,
+rejects more than 1 MiB before JSON or Pydantic parsing, and then requires the exact canonical
+closed takeover or mutation shape. #2127 hosting must use this decoder at the raw request boundary.
 
 The service asks migration 0122 to resolve the opaque reference for the authenticated active worker
 incarnation and requires every immutable field to match before journal admission. Takeover accepts
@@ -297,8 +300,9 @@ directly. A privileged host or database administrator is outside the fence.
 
 ### Controls
 
-- Closed Pydantic models, byte/cardinality caps, canonical serialization, digest validation, and a
-  1 MiB message cap reject malicious input before allocation or provider access.
+- The bytes-only decoder enforces the 1 MiB raw request cap before parsing. Closed Pydantic models,
+  field/cardinality caps, canonical serialization, and digest validation then reject malformed or
+  noncanonical requests before allocation or provider access.
 - Peer identity plus migration 0122's exact active-incarnation and immutable-binding lookup defeats
   possession, replay, cross-System, cross-Run, cross-activation, cross-attempt, wrong-purpose,
   wrong-provider, and wrong-instance requests.
@@ -316,7 +320,9 @@ directly. A privileged host or database administrator is outside the fence.
 Deployment enforcement that workers and reconcilers lack mutation-capable sockets, SSH accounts,
 filesystem permissions, and service credentials belongs to #2127. The authenticated transport's
 listener and credential provisioning also belong to deployment assembly; this issue defines the
-service's required authenticated-peer input and fails closed without it. Privileged host/database
+service's required authenticated-peer input and raw decoder and fails closed without either.
+#2127 must call the decoder rather than relying on the model's after-validator to bound transport
+bytes. Privileged host/database
 administrators are trusted operators. Denial of service by withholding a provider response is
 accepted in favor of false takeover. Scheduling, reconciliation, and lifecycle policy remain in
 their current owners.

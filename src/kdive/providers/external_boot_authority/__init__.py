@@ -10,6 +10,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     RecoveryObjectBindingV1,
     canonical_record_bytes,
+    decode_authority_request,
     record_digest,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "JournalRecordV1",
     "RecoveryObjectBindingV1",
     "canonical_record_bytes",
+    "decode_authority_request",
     "record_digest",
 ]

@@ -8,7 +8,15 @@ from enum import StrEnum
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 MAX_MESSAGE_BYTES = 1_048_576
@@ -120,6 +128,29 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
         return _bounded_text(value, maximum=1024)
 
     _objects_are_canonical = field_validator("recovery_objects")(_canonical_recovery_objects)
+
+
+type AuthorityRequestV1 = AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1
+_AUTHORITY_REQUEST_ADAPTER = TypeAdapter(AuthorityRequestV1)
+
+
+def _parse_authority_request_bytes(payload: bytes) -> AuthorityRequestV1:
+    return _AUTHORITY_REQUEST_ADAPTER.validate_json(payload)
+
+
+def decode_authority_request(payload: bytes) -> AuthorityRequestV1:
+    """Decode one canonical bounded provider-neutral authority request."""
+    if type(payload) is not bytes:
+        raise TypeError("external-boot authority request must be bytes")
+    if len(payload) > MAX_MESSAGE_BYTES:
+        raise ValueError("external-boot authority request exceeds configured byte maximum")
+    try:
+        request = _parse_authority_request_bytes(payload)
+        if _canonical_bytes(request) != payload:
+            raise ValueError
+    except ValidationError, ValueError:
+        raise ValueError("invalid external-boot authority request") from None
+    return request
 
 
 class AuthorityAcknowledgementV1(_ClosedValue):
