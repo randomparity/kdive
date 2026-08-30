@@ -83,6 +83,7 @@ class FileAuthorityJournal:
         operation_phases: dict[str, JournalPhase] = {}
         operation_bindings: dict[str, tuple[object, ...]] = {}
         watermarks: dict[int, JournalRecordV1] = {}
+        consumed_watermarks: set[tuple[int, str]] = set()
         for expected_sequence, record in enumerate(records, start=1):
             if record.sequence != expected_sequence:
                 raise ValueError("authority journal sequence is not contiguous")
@@ -107,14 +108,6 @@ class FileAuthorityJournal:
                 record.intended_target_identity,
                 record.recovery_objects,
             )
-            prior_phase = operation_phases.get(record.operation_identity)
-            allowed = (
-                _INITIAL_OPERATION_PHASES
-                if prior_phase is None
-                else _NEXT_OPERATION_PHASES.get(prior_phase, frozenset())
-            )
-            if record.phase not in allowed:
-                raise ValueError("authority journal phase ordering is invalid")
             if record.phase in {
                 JournalPhase.TAKEOVER_SUPERSEDED,
                 JournalPhase.TAKEOVER_ACKNOWLEDGED,
@@ -124,6 +117,8 @@ class FileAuthorityJournal:
                     if record.phase is JournalPhase.TAKEOVER_SUPERSEDED
                     else record.generation
                 )
+                if linked_generation is None:
+                    raise ValueError("authority journal takeover watermark link is invalid")
                 watermark = watermarks.get(linked_generation)
                 if watermark is None or (
                     record.watermark_sequence != watermark.sequence
@@ -134,12 +129,28 @@ class FileAuthorityJournal:
                     )
                 ):
                     raise ValueError("authority journal takeover watermark link is invalid")
+                watermark_identity = (linked_generation, watermark.operation_identity)
+                if (
+                    record.phase is JournalPhase.TAKEOVER_SUPERSEDED
+                    and watermark_identity in consumed_watermarks
+                ):
+                    raise ValueError("authority journal watermark is already superseded")
+            prior_phase = operation_phases.get(record.operation_identity)
+            allowed = (
+                _INITIAL_OPERATION_PHASES
+                if prior_phase is None
+                else _NEXT_OPERATION_PHASES.get(prior_phase, frozenset())
+            )
+            if record.phase not in allowed:
+                raise ValueError("authority journal phase ordering is invalid")
             prior_binding = operation_bindings.setdefault(
                 record.operation_identity, operation_binding
             )
             if prior_binding != operation_binding:
                 raise ValueError("authority journal operation binding changed")
             operation_phases[record.operation_identity] = record.phase
+            if record.phase is JournalPhase.TAKEOVER_SUPERSEDED:
+                consumed_watermarks.add(watermark_identity)
             if record.phase is JournalPhase.WATERMARK_INSTALLED:
                 if record.generation in watermarks:
                     raise ValueError("authority journal generation has multiple watermarks")
