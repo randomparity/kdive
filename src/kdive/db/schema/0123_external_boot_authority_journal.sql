@@ -63,11 +63,16 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND suspended_operation = jsonb_build_object(
                 'authority_id', suspended_operation->'authority_id',
                 'generation', suspended_operation->'generation',
+                'system_id', suspended_operation->'system_id',
                 'activation_id', suspended_operation->'activation_id',
+                'run_id', suspended_operation->'run_id',
+                'plan_identity', suspended_operation->'plan_identity',
                 'operation_identity', suspended_operation->'operation_identity',
                 'attempt_id', suspended_operation->'attempt_id',
                 'purpose', suspended_operation->'purpose',
                 'operation', suspended_operation->'operation',
+                'provider_kind', suspended_operation->'provider_kind',
+                'authority_instance', suspended_operation->'authority_instance',
                 'request_digest', suspended_operation->'request_digest',
                 'phase', suspended_operation->'phase',
                 'source_identity', suspended_operation->'source_identity',
@@ -75,9 +80,11 @@ CREATE TABLE public.external_boot_authority_journal_heads (
                 'ownership_digest', suspended_operation->'ownership_digest'
             )
             AND suspended_operation ?& ARRAY[
-                'authority_id', 'generation', 'activation_id', 'operation_identity',
+                'authority_id', 'generation', 'system_id', 'activation_id', 'run_id',
+                'plan_identity', 'operation_identity',
                 'attempt_id', 'purpose', 'request_digest', 'phase', 'source_identity',
-                'target_identity', 'ownership_digest', 'operation'
+                'target_identity', 'ownership_digest', 'operation', 'provider_kind',
+                'authority_instance'
             ]
             AND suspended_operation->>'phase' IN (
                 'admitted', 'mutation-started', 'provider-returned', 'observed'
@@ -90,12 +97,19 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND octet_length(suspended_operation->>'target_identity') BETWEEN 1 AND 1024
             AND jsonb_typeof(suspended_operation->'authority_id') = 'string'
             AND jsonb_typeof(suspended_operation->'activation_id') = 'string'
+            AND jsonb_typeof(suspended_operation->'system_id') = 'string'
+            AND jsonb_typeof(suspended_operation->'run_id') = 'string'
             AND jsonb_typeof(suspended_operation->'attempt_id') = 'string'
             AND (suspended_operation->>'authority_id')::uuid IS NOT NULL
             AND (suspended_operation->>'activation_id')::uuid IS NOT NULL
+            AND (suspended_operation->>'system_id')::uuid IS NOT NULL
+            AND (suspended_operation->>'run_id')::uuid IS NOT NULL
             AND (suspended_operation->>'attempt_id')::uuid IS NOT NULL
             AND octet_length(suspended_operation->>'purpose') BETWEEN 1 AND 255
             AND octet_length(suspended_operation->>'operation') BETWEEN 1 AND 255
+            AND octet_length(suspended_operation->>'plan_identity') BETWEEN 1 AND 255
+            AND octet_length(suspended_operation->>'provider_kind') BETWEEN 1 AND 255
+            AND octet_length(suspended_operation->>'authority_instance') BETWEEN 1 AND 255
         )
     )
 );
@@ -195,6 +209,8 @@ DECLARE
     v_digest text;
     v_is_suspended boolean := false;
     v_pending_matches boolean := false;
+    v_successor_pending boolean := false;
+    v_inherited_completion boolean := false;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_provider_authority', 'member') THEN
         RAISE EXCEPTION 'provider authority is required' USING ERRCODE = '42501';
@@ -344,6 +360,38 @@ BEGIN
     IF (p_record->>'sequence')::bigint IS DISTINCT FROM v_sequence
        OR p_record->>'previous_digest' IS DISTINCT FROM p_expected_digest
     THEN RETURN 'conflict'; END IF;
+    SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
+    WHERE authority_instance = v_authority.authority_instance
+      AND system_id = v_authority.system_id FOR UPDATE;
+    v_successor_pending := FOUND AND v_head.pending_takeover IS NOT NULL
+        AND v_head.pending_takeover->>'authority_id' = v_authority.id::text
+        AND (v_head.pending_takeover->>'generation')::bigint = v_authority.generation
+        AND v_head.pending_takeover->>'operation_identity' = v_authority.operation_identity
+        AND v_head.pending_takeover->>'request_digest' = v_authority.operation_digest;
+    v_is_suspended := FOUND AND v_head.suspended_operation IS NOT NULL
+        AND v_head.suspended_operation->>'authority_id' = p_record->>'authority_id'
+        AND v_head.suspended_operation->>'generation' = p_record->>'generation'
+        AND v_head.suspended_operation->>'system_id' = p_record->>'system_id'
+        AND v_head.suspended_operation->>'activation_id' = p_record->>'activation_id'
+        AND v_head.suspended_operation->>'run_id' = p_record->>'run_id'
+        AND v_head.suspended_operation->>'plan_identity' = p_record->>'plan_identity'
+        AND v_head.suspended_operation->>'operation_identity' = p_record->>'operation_identity'
+        AND v_head.suspended_operation->>'attempt_id' = p_record->>'attempt_id'
+        AND v_head.suspended_operation->>'purpose' = p_record->>'purpose'
+        AND v_head.suspended_operation->>'operation' = p_record->>'operation'
+        AND v_head.suspended_operation->>'provider_kind' = p_record->>'provider_kind'
+        AND v_head.suspended_operation->>'authority_instance' = p_record->>'authority_instance'
+        AND v_head.suspended_operation->>'request_digest' = p_record->>'operation_digest'
+        AND v_head.suspended_operation->>'source_identity' = p_record->>'expected_source_identity'
+        AND v_head.suspended_operation->>'target_identity' = p_record->>'intended_target_identity'
+        AND v_head.suspended_operation->>'ownership_digest' = 'sha256:' || encode(
+            sha256(convert_to(
+                public.canonical_external_boot_authority_json(p_record->'recovery_objects'),
+                'UTF8'
+            )), 'hex'
+        );
+    v_inherited_completion := v_successor_pending AND v_is_suspended
+        AND v_phase IN ('provider-returned', 'observed', 'terminal');
     IF (p_record->>'authority_id')::uuid IS DISTINCT FROM v_authority.id
        OR (p_record->>'generation')::bigint IS DISTINCT FROM v_authority.generation
        OR (p_record->>'system_id')::uuid IS DISTINCT FROM v_authority.system_id
@@ -354,12 +402,10 @@ BEGIN
        OR p_record->>'provider_kind' IS DISTINCT FROM v_authority.provider_kind
        OR p_record->>'authority_instance' IS DISTINCT FROM v_authority.authority_instance
        OR p_record->>'operation_identity' IS DISTINCT FROM v_authority.operation_identity
-       OR p_record->>'operation_digest' IS DISTINCT FROM v_authority.operation_digest THEN
-        RETURN 'superseded';
+       OR p_record->>'operation_digest' IS DISTINCT FROM v_authority.operation_digest
+    THEN
+        IF NOT v_inherited_completion THEN RETURN 'superseded'; END IF;
     END IF;
-    SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
-    WHERE authority_instance = v_authority.authority_instance
-      AND system_id = v_authority.system_id FOR UPDATE;
     IF FOUND AND (p_record->>'sequence')::bigint = v_head.sequence THEN
         IF v_digest = v_head.digest AND p_record - 'canonical_record' = v_head.head_record
         THEN RETURN 'advanced'; ELSE RETURN 'conflict'; END IF;
@@ -395,28 +441,12 @@ BEGIN
        AND (p_record->>'attempt_id' IS DISTINCT FROM v_head.head_record->>'attempt_id'
             OR p_record->>'expected_source_identity'
                 IS DISTINCT FROM v_head.head_record->>'expected_source_identity'
+            OR p_record->>'operation' IS DISTINCT FROM v_head.head_record->>'operation'
             OR p_record->>'intended_target_identity'
                 IS DISTINCT FROM v_head.head_record->>'intended_target_identity'
             OR p_record->'recovery_objects'
                 IS DISTINCT FROM v_head.head_record->'recovery_objects')
     THEN RETURN 'conflict'; END IF;
-    v_is_suspended := v_head.suspended_operation IS NOT NULL
-        AND v_head.suspended_operation->>'authority_id' = v_authority.id::text
-        AND (v_head.suspended_operation->>'generation')::bigint = v_authority.generation
-        AND v_head.suspended_operation->>'activation_id' = v_authority.activation_id::text
-        AND v_head.suspended_operation->>'operation_identity' = p_record->>'operation_identity'
-        AND v_head.suspended_operation->>'attempt_id' = p_record->>'attempt_id'
-        AND v_head.suspended_operation->>'purpose' = p_record->>'purpose'
-        AND v_head.suspended_operation->>'operation' = p_record->>'operation'
-        AND v_head.suspended_operation->>'request_digest' = p_record->>'operation_digest'
-        AND v_head.suspended_operation->>'source_identity' = p_record->>'expected_source_identity'
-        AND v_head.suspended_operation->>'target_identity' = p_record->>'intended_target_identity'
-        AND v_head.suspended_operation->>'ownership_digest' = 'sha256:' || encode(
-            sha256(convert_to(
-                public.canonical_external_boot_authority_json(p_record->'recovery_objects'),
-                'UTF8'
-            )), 'hex'
-        );
     v_pending_matches := v_head.pending_takeover IS NOT NULL
         AND v_head.pending_takeover->>'authority_id' = v_authority.id::text
         AND (v_head.pending_takeover->>'generation')::bigint = v_authority.generation
@@ -434,7 +464,7 @@ BEGIN
             SELECT 1 FROM public.external_boot_authority_acknowledgements AS ack
             WHERE ack.authority_id = v_authority.id
         ) THEN RETURN 'superseded'; END IF;
-    ELSIF v_authority.state <> 'current' AND NOT v_is_suspended THEN
+    ELSIF v_authority.state <> 'current' AND NOT v_inherited_completion THEN
         RETURN 'superseded';
     END IF;
     IF v_phase = 'watermark-installed' THEN
@@ -461,7 +491,7 @@ BEGIN
                 <> (v_head.pending_takeover->>'watermark_sequence')::bigint
            OR p_record->>'watermark_digest' <> v_head.pending_takeover->>'watermark_digest'
         THEN RETURN 'conflict'; END IF;
-    ELSIF v_is_suspended THEN
+    ELSIF v_inherited_completion THEN
         IF (v_head.suspended_operation->>'phase' = 'admitted'
             AND NOT (v_phase = 'terminal' AND p_record->>'outcome' = 'never-began'))
            OR (v_head.suspended_operation->>'phase' = 'mutation-started'
@@ -495,11 +525,16 @@ BEGIN
                 'admitted', 'mutation-started', 'provider-returned', 'observed'
             ) THEN jsonb_build_object(
                 'authority_id', v_head.authority_id, 'generation', v_head.generation,
+                'system_id', v_head.system_id,
                 'activation_id', v_head.head_record->>'activation_id',
+                'run_id', v_head.head_record->>'run_id',
+                'plan_identity', v_head.head_record->>'plan_identity',
                 'operation_identity', v_head.operation_identity,
                 'attempt_id', v_head.head_record->>'attempt_id',
                 'purpose', v_head.head_record->>'purpose',
                 'operation', v_head.head_record->>'operation',
+                'provider_kind', v_head.head_record->>'provider_kind',
+                'authority_instance', v_head.authority_instance,
                 'request_digest', v_head.head_record->>'operation_digest',
                 'phase', v_head.phase,
                 'source_identity', v_head.head_record->>'expected_source_identity',

@@ -228,6 +228,7 @@ def test_append_rejects_skipped_or_reversed_phase_without_changing_bytes(
     "changes",
     [
         {"expected_source_identity": "source-b"},
+        {"operation": "different-commit"},
         {"intended_target_identity": "target-b"},
         {"recovery_objects": ()},
         {"recovery_objects": (_recovery_object("object-b"),)},

@@ -71,11 +71,16 @@ class PendingTakeover:
 class SuspendedOperation:
     authority_id: UUID
     generation: int
+    system_id: UUID
     activation_id: UUID
+    run_id: UUID
+    plan_identity: str
     operation_identity: str
     attempt_id: UUID
     purpose: str
     operation: str
+    provider_kind: str
+    authority_instance: str
     request_digest: str
     phase: Literal["admitted", "mutation-started", "provider-returned", "observed"]
     source_identity: str
@@ -177,11 +182,16 @@ def _suspended(value: dict[str, Any] | None) -> SuspendedOperation | None:
     return SuspendedOperation(
         authority_id=_uuid(value["authority_id"]),
         generation=_positive(value["generation"]),
+        system_id=_uuid(value["system_id"]),
         activation_id=_uuid(value["activation_id"]),
+        run_id=_uuid(value["run_id"]),
+        plan_identity=_bounded(value["plan_identity"]),
         operation_identity=_bounded(value["operation_identity"]),
         attempt_id=_uuid(value["attempt_id"]),
         purpose=_bounded(value["purpose"]),
         operation=_bounded(value["operation"]),
+        provider_kind=_bounded(value["provider_kind"]),
+        authority_instance=_bounded(value["authority_instance"]),
         request_digest=_bounded(value["request_digest"]),
         phase=value["phase"],
         source_identity=_bounded(value["source_identity"], 1024),

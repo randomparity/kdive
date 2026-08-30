@@ -93,9 +93,9 @@ repository protocol; it does not issue SQL directly.
 
 `JournalHead` includes bounded nullable `PendingTakeover` and `SuspendedOperation` values. The
 former retains takeover authority/generation/operation/attempt/request digest and watermark head;
-the latter retains the one serialized lower operation's authority/generation/activation,
-operation identity/attempt/purpose/exact adapter operation or commit point/request digest, prior
-phase, and source/target/ownership digests.
+the latter retains the one serialized lower operation's authority/generation/System/activation/
+Run/plan/provider/authority instance, operation identity/attempt/purpose/exact adapter operation or
+commit point/request digest, prior phase, and source/target/ownership digests.
 
 1. Write migration tests for the table constraints, genesis insertion, exact 0122 binding lookup,
    binding-scoped trusted-head read, authority-role execute grants, denied worker/reconciler/core
@@ -109,9 +109,10 @@ phase, and source/target/ownership digests.
    provider/instance/purpose/operation/digest/peer cases.
 3. Add a complete binding-state/phase matrix: only the newest exact allocating authority may anchor
    takeover records; only the matching promoted current authority may admit or start mutations.
-   After a watermark, a superseded lower authority may append only returned/observed/terminal
-   records for its already-started operation, or terminal `never-began` directly from its anchored
-   admitted record. Cross-state, cross-phase, stale, and unrelated
+   After a watermark, only the authenticated pending successor may append inherited
+   returned/observed/terminal records for an already-started lower operation, or terminal
+   `never-began` directly from its anchored admitted record, without impersonating the lower
+   binding. Cross-state, cross-phase, stale, and unrelated
    attempts change zero rows. Race allocations between watermark and acknowledgement and prove the
    winner anchors `takeover-superseded`, inherits unresolved operations, and makes progress. Assert
    the acknowledgement exposes its anchored sequence/digest and a separately constructed canonical

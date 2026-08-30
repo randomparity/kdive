@@ -172,9 +172,12 @@ def _promote(
         )
 
 
-def _allocate_successor(migrated_url: str, role_dsns: _RoleDsns, case: Any) -> tuple[Any, Any]:
+def _allocate_successor(
+    migrated_url: str, role_dsns: _RoleDsns, case: Any, *, new_peer: bool = False
+) -> tuple[Any, Any]:
     successor_job = uuid4()
     successor_identity = f"successor-{uuid4()}"
+    worker_id = f"docker:successor-{uuid4()}" if new_peer else case.worker_id
     with psycopg.connect(migrated_url) as conn:
         marker_row = conn.execute(
             "SELECT payload->'external_boot_authority_v1' FROM jobs WHERE id=%s",
@@ -183,6 +186,12 @@ def _allocate_successor(migrated_url: str, role_dsns: _RoleDsns, case: Any) -> t
         assert marker_row is not None
         marker = dict(marker_row[0])
         marker["operation_identity"] = successor_identity
+        if new_peer:
+            conn.execute(
+                "INSERT INTO worker_incarnations (incarnation,authority_kind,authority_binding,"
+                "credential_hash,fence_protocol) VALUES (%s,'docker','{}'::jsonb,%s,4)",
+                (worker_id, b"e" * 32),
+            )
         conn.execute(
             "INSERT INTO jobs (id,kind,payload,state,attempt,max_attempts,worker_id,"
             "lease_expires_at,heartbeat_at,authorizing,dedup_key) VALUES "
@@ -190,12 +199,18 @@ def _allocate_successor(migrated_url: str, role_dsns: _RoleDsns, case: Any) -> t
             (
                 successor_job,
                 Jsonb({"external_boot_authority_v1": marker}),
-                case.worker_id,
+                worker_id,
                 Jsonb({"principal": "p", "project": "proj"}),
                 str(successor_job),
             ),
         )
-    successor_case = replace(case, job_id=successor_job, operation_identity=successor_identity)
+    successor_case = replace(
+        case,
+        job_id=successor_job,
+        operation_identity=successor_identity,
+        worker_id=worker_id,
+        credential=b"e" * 32 if new_peer else case.credential,
+    )
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         successor = _allocate(worker, successor_case)
     return successor_case, successor
@@ -623,6 +638,7 @@ def test_full_current_mutation_phase_sequence_and_rejections(
             if phase is not JournalPhase.ADMITTED:
                 replacements = (
                     {"attempt_id": uuid4()},
+                    {"operation": "different-commit"},
                     {"expected_source_identity": "source-b"},
                     {"intended_target_identity": "target-b"},
                     {
@@ -944,7 +960,9 @@ def test_successor_inherits_and_completes_exact_older_operation(
                 == "advanced"
             )
             previous = started
-    successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, case)
+    successor_case, successor = _allocate_successor(
+        migrated_url, authority_role_dsns, case, new_peer=True
+    )
     sequence += 1
     successor_watermark = _record(
         successor_case,
@@ -1007,16 +1025,25 @@ def test_successor_inherits_and_completes_exact_older_operation(
                 reference="recovery-b",
             )
             mismatches = [
-                (case, completion.model_copy(update={"attempt_id": uuid4()})),
-                (case, completion.model_copy(update={"operation_digest": _DIGEST})),
-                (case, completion.model_copy(update={"recovery_objects": (wrong_owner,)})),
-                (replace(case, worker_id="docker:foreign-peer"), completion),
+                (successor_case, successor, completion.model_copy(update={"attempt_id": uuid4()})),
+                (
+                    successor_case,
+                    successor,
+                    completion.model_copy(update={"operation_digest": _DIGEST}),
+                ),
+                (
+                    successor_case,
+                    successor,
+                    completion.model_copy(update={"recovery_objects": (wrong_owner,)}),
+                ),
+                (case, authority, completion),
+                (replace(successor_case, worker_id="docker:foreign-peer"), successor, completion),
             ]
-            for mismatch_case, mismatch_record in mismatches:
+            for mismatch_case, mismatch_authority, mismatch_record in mismatches:
                 assert _advance_raw(
                     connection,
                     mismatch_case,
-                    authority,
+                    mismatch_authority,
                     sequence - 1,
                     record_digest(previous),
                     _payload(mismatch_record),
@@ -1025,8 +1052,8 @@ def test_successor_inherits_and_completes_exact_older_operation(
             assert (
                 _advance_raw(
                     connection,
-                    case,
-                    authority,
+                    successor_case,
+                    successor,
                     sequence - 1,
                     record_digest(previous),
                     _payload(completion),

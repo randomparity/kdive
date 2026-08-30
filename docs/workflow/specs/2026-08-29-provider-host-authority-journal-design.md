@@ -127,9 +127,9 @@ system_id)`. It stores a positive sequence, exact record digest, phase, authorit
 operation identity, and update time. Because the lane admits at most one mutation at a time, the
 same row also has two nullable, bounded continuations: `pending_takeover` retains the takeover
 authority, generation, operation, attempt, request digest, watermark sequence, and watermark digest;
-`suspended_operation` retains the lower authority, generation, activation, operation identity,
-attempt, purpose, exact adapter operation/commit point, request digest, last phase, and
-source/target/ownership digests. These are verification
+`suspended_operation` retains the lower authority, generation, System, activation, Run, plan,
+provider, authority instance, operation identity, attempt, purpose, exact adapter operation/commit
+point, request digest, last phase, and source/target/ownership digests. These are verification
 state, not another journal: they contain no provider definitions, output, or record history and are
 cleared when the corresponding operation or takeover becomes terminal.
 
@@ -162,11 +162,13 @@ sufficient because the lane has at most one admitted mutation and one takeover i
 The binding-state rule is phase-specific. `watermark-installed`, `takeover-superseded`, and
 `takeover-acknowledged` accept only the exact newest `allocating` binding. New mutation admission
 and commit phases accept only the exact `current` binding carrying the recorded takeover
-acknowledgement. After a watermark, a superseded lower binding may append only completion records
+acknowledgement. After a watermark, only the authenticated pending successor binding may append
+completion records
 for an operation whose `admitted` record is already anchored in that lane. Without
 `mutation-started`, only terminal `never-began` is legal; with it, only
 returned/observed/terminal completion is legal. The function verifies that immutable operation
-identity and permits no provider access. Every other
+identity against `suspended_operation`; it never impersonates the lower binding. Provider access
+follows this trusted-head authorization. Every other
 cross-state or cross-phase attempt changes zero rows. `takeover-acknowledged` follows its matching
 watermark and all inherited lower terminal records. A mutation may start only after that exact
 acknowledgement is recorded by 0122 and the binding is current.

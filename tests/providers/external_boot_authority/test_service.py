@@ -190,11 +190,16 @@ class _Repository:
             suspended = SuspendedOperation(
                 authority_id=prior.authority_id,
                 generation=prior.generation,
+                system_id=prior.system_id,
                 activation_id=prior.activation_id,
+                run_id=prior.run_id,
+                plan_identity=prior.plan_identity,
                 operation_identity=prior.operation_identity,
                 attempt_id=prior.attempt_id,
                 purpose=prior.purpose,
                 operation=prior.operation or "",
+                provider_kind=prior.provider_kind,
+                authority_instance=prior.authority_instance,
                 request_digest=prior.operation_digest,
                 phase=prior.phase.value,
                 source_identity=prior.expected_source_identity or "",
@@ -593,6 +598,9 @@ async def test_each_commit_rechecks_current_binding_and_fences_loss(tmp_path: Pa
     assert repository.current_resolutions == 2
     assert adapter.calls == []
     assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+    assert service.metrics.rejections == {
+        (request.provider_kind, request.authority_instance, "superseded"): 1
+    }
 
 
 @pytest.mark.anyio
