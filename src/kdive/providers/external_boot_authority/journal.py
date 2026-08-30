@@ -101,6 +101,7 @@ class FileAuthorityJournal:
                 record.run_id,
                 record.plan_identity,
                 record.purpose,
+                record.operation,
                 record.provider_kind,
                 record.operation_digest,
                 record.attempt_id,

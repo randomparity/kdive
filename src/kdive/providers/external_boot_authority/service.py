@@ -71,8 +71,11 @@ class AuthorityServiceError(RuntimeError):
     def __init__(
         self,
         category: Literal["unauthenticated", "superseded", "journal_conflict", "provider_conflict"],
+        *,
+        telemetry_recorded: bool = False,
     ):
         self.category = category
+        self.telemetry_recorded = telemetry_recorded
         super().__init__(category)
 
 
@@ -166,7 +169,25 @@ class ExternalBootAuthorityService:
                 "category": category,
             },
         )
-        return AuthorityServiceError(category)
+        return AuthorityServiceError(category, telemetry_recorded=True)
+
+    def _ensure_rejection(
+        self,
+        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
+        error: AuthorityServiceError,
+    ) -> None:
+        if error.telemetry_recorded:
+            return
+        self.metrics.reject(request, error.category)
+        self._logger.warning(
+            "authority request rejected",
+            extra={
+                "provider_kind": request.provider_kind,
+                "authority_instance": request.authority_instance,
+                "category": error.category,
+            },
+        )
+        error.telemetry_recorded = True
 
     def _require_peer(
         self,
@@ -251,7 +272,7 @@ class ExternalBootAuthorityService:
                 "category": "provider_conflict",
             },
         )
-        return AuthorityServiceError("provider_conflict")
+        return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
 
     async def readiness(
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
@@ -329,27 +350,9 @@ class ExternalBootAuthorityService:
             recovery_objects=record.recovery_objects,
         )
 
-    @staticmethod
-    def _binding_from_record(peer: AuthenticatedPeer, record: JournalRecordV1) -> AuthorityBinding:
-        return AuthorityBinding(
-            peer_incarnation_id=str(peer.incarnation_id),
-            authority_id=record.authority_id,
-            generation=record.generation,
-            system_id=record.system_id,
-            activation_id=record.activation_id,
-            run_id=record.run_id,
-            plan_identity=record.plan_identity,
-            purpose=record.purpose,
-            provider_kind=record.provider_kind,
-            authority_instance=record.authority_instance,
-            operation_identity=record.operation_identity,
-            operation_digest=record.operation_digest,
-            state="current",
-        )
-
     async def _recover_suspended(
         self,
-        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
         journal: FileAuthorityJournal,
         records: tuple[JournalRecordV1, ...],
         prior: JournalRecordV1,
@@ -370,11 +373,16 @@ class ExternalBootAuthorityService:
         if not isinstance(suspended, SuspendedOperation) or (
             suspended.authority_id != prior.authority_id
             or suspended.generation != prior.generation
+            or suspended.system_id != prior.system_id
             or suspended.activation_id != prior.activation_id
+            or suspended.run_id != prior.run_id
+            or suspended.plan_identity != prior.plan_identity
             or suspended.operation_identity != prior.operation_identity
             or suspended.attempt_id != prior.attempt_id
             or suspended.purpose != prior.purpose
             or suspended.operation != prior.operation
+            or suspended.provider_kind != prior.provider_kind
+            or suspended.authority_instance != prior.authority_instance
             or suspended.request_digest != prior.operation_digest
             or suspended.phase != prior.phase.value
             or suspended.source_identity != prior.expected_source_identity
@@ -383,7 +391,6 @@ class ExternalBootAuthorityService:
         ):
             raise AuthorityServiceError("journal_conflict")
         request = self._mutation_from_record(prior)
-        binding = self._binding_from_record(peer, prior)
         if prior.phase is JournalPhase.ADMITTED:
             terminal = self._record(request, records, JournalPhase.TERMINAL, outcome="never-began")
             return await self._anchor(binding, journal, records, terminal)
@@ -441,7 +448,7 @@ class ExternalBootAuthorityService:
         lane = self._lane(request.system_id)
         async with lane.lock:
             if lane.failed:
-                raise AuthorityServiceError("journal_conflict")
+                raise self._reject(request, "journal_conflict")
             binding = await self._repository.resolve_allocating(authenticated, request)
             if binding is None or not self._binding_matches(binding, request):
                 raise self._reject(request, "superseded")
@@ -519,7 +526,7 @@ class ExternalBootAuthorityService:
                     if trusted_after_watermark is None:
                         raise AuthorityServiceError("journal_conflict")
                     records = await self._recover_suspended(
-                        authenticated,
+                        binding,
                         journal,
                         records,
                         unresolved,
@@ -530,6 +537,7 @@ class ExternalBootAuthorityService:
                         active.stop_before_start = True
                     self.metrics.unresolved[(request.provider_kind, request.authority_instance)] = 1
             except AuthorityServiceError as error:
+                self._ensure_rejection(request, error)
                 lane.failed = error.category == "journal_conflict"
                 raise
             except BaseException:
@@ -564,6 +572,7 @@ class ExternalBootAuthorityService:
                 )
                 records = await self._anchor(binding, journal, records, acknowledgement)
             except AuthorityServiceError as error:
+                self._ensure_rejection(request, error)
                 lane.failed = error.category == "journal_conflict"
                 raise
             except BaseException:
@@ -723,4 +732,8 @@ class ExternalBootAuthorityService:
                     lane.active = None
 
         task = asyncio.create_task(run())
-        return await asyncio.shield(task)
+        try:
+            return await asyncio.shield(task)
+        except AuthorityServiceError as error:
+            self._ensure_rejection(request, error)
+            raise
