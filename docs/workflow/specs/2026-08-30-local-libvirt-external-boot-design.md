@@ -143,16 +143,21 @@ verifies absence, and atomically replaces metadata with a 0600 canonical `cleane
 retains the complete point identity plus explicit payload-absence facts. It fsyncs the tombstone,
 directory, and parent before success. A lost-response retry authenticates the tombstone and returns
 success without provider mutation; missing metadata without the exact tombstone is quarantined. The
-tombstone is excluded from reserved payload bytes and may be swept only after the owning lifecycle
-tombstone remains reservation-owned recovery evidence. #2108 defines an idempotent narrow
-`finalize_cleanup_tombstone(point: RecoveryPoint, authority: OpaqueProviderRef) -> None` primitive.
-It re-authenticates the complete point and cleaned tombstone, consumes a caller precondition that
-durable core `cleanup_complete` is already true, removes only that exact directory, verifies
-absence, and fsyncs the parent. A lost response retries successfully through the same authenticated
-point/authority and deterministic absence record; unrelated absence remains conflict. #2140 alone
-invokes finalization after the durable core commit and releases capacity only after finalization
-success. Advertisement remains blocked until crash-before-commit, crash-after-commit-before-delete,
-and lost-delete-response tests pass. No generic reconciliation sweep or retention timer exists.
+The tombstone remains reservation-owned recovery evidence. Add closed
+`FinalizeCleanupProof(point_digest, binding, operation_id, attempt_id, journal_sequence,
+journal_digest, phase="mutation-started")` and the narrow local primitive
+`finalize_cleanup_tombstone(point: RecoveryPoint, proof: FinalizeCleanupProof,
+authority: OpaqueProviderRef) -> None`. #2140 authenticates the exact current binding and journal
+head before constructing the proof; local-libvirt validates only closed equality and never parses
+authority. A present tombstone is deleted only after complete point/proof/tombstone equality, then
+absence and parent fsync are verified. An absent tombstone succeeds only when #2140 re-presents the
+same exact still-current proof whose `mutation-started` record predates the attempted delete.
+Generic, stale, superseded, cross-binding, cross-operation, or unjournaled absence is conflict.
+#2140 calls finalization while cleanup remains incomplete and the reservation charged. Only after
+success or exact U1a confirmation does #2118/core release the reservation and durably commit
+`cleanup_complete`. Advertisement remains blocked until crash-before-delete,
+crash-after-delete-before-terminal-journal, stale-proof, and lost-response tests pass. No receipt,
+generic reconciliation sweep, separate budget, or retention timer exists.
 Cleanup never
 follows symlinks or deletes an object whose metadata owner does not exactly match. Destroyed-System
 cleanup is not a second six-port entry point; teardown-owned invocation and authentication remain
@@ -187,8 +192,9 @@ Out of scope are compromise of the trusted host/libvirtd/libguestfs appliance, p
 disk edits, authority transport/authentication, remote providers, lifecycle database truth, and
 capacity admission. Those are existing operator trust or owned issues, not claims of this design.
 
-The #2140 integration acceptance must include the exact post-`cleanup_complete` finalization and
-capacity-release ordering above. Spellcraft records that dependency here; changing #2140's public
+The #2140 integration acceptance must include exact current-binding proof construction and
+finalization before #2118/core capacity release and `cleanup_complete`. Spellcraft records that
+dependency here; changing #2140's public
 issue body is not necessary to define or implement #2108 and is left to campaign tracking.
 
 ## Verification

@@ -16,8 +16,9 @@ shared `ExternalBootPorts` contract.
 The operator selected a deterministic provider-host recovery directory on 2026-08-30. After review
 showed that the shared port exposed no activation identity, the operator selected a narrow
 provider-neutral activation binding on the same date. After cleanup review exposed the need for
-post-commit retry evidence, the operator selected an accounted tombstone plus authority-mediated
-finalization owned by #2140. This record settles those storage and ownership choices;
+post-commit retry evidence, the operator selected reordered finalization and then U1a: absence is
+completion only for the exact current-binding finalize operation durably journaled as
+`mutation-started`. This record settles those storage and ownership choices;
 authority-reference translation, authority-service composition, finalization invocation, and
 capability advertisement remain #2140.
 
@@ -69,16 +70,23 @@ causes no further mutation.
 Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
 activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
 retains the complete point identity and explicit payload-absence facts, and fsyncs the directory and
-parent. A lost-response retry authenticates that tombstone and succeeds without mutation. The small
-tombstone remains recovery evidence and keeps its reservation charged. #2108 defines an idempotent
-local `finalize_cleanup_tombstone(point, authority)` primitive. It authenticates the complete point,
-tombstone, and opaque authority coordinate; requires the caller's separately established durable
-core `cleanup_complete` precondition; deletes only the exact tombstone directory, verifies absence,
-and fsyncs the parent. A lost finalization response retries from deterministic absence only through
-the same authenticated point/authority binding. #2140 invokes this primitive after durable core
-cleanup completion and only then releases reserved capacity. Production advertisement is blocked
-until that ordering is wired and tested. There is no generic sweeper, retention timeout, or separate
-tombstone budget. Missing metadata without a matching tombstone remains quarantined.
+parent. The tombstone remains recovery evidence and keeps its reservation charged. #2108 defines an
+idempotent local `finalize_cleanup_tombstone(point, proof, authority)` primitive. Closed
+`FinalizeCleanupProof` contains the complete point digest, current activation binding, exact
+finalize operation and attempt identities, authority-journal sequence and digest, and literal
+`phase="mutation-started"`. #2140 alone authenticates the current binding and journal head and
+constructs this proof; local-libvirt compares its closed fields but never decodes authority.
+
+With a present tombstone, finalization requires exact proof/point/tombstone equality, deletes only
+that directory, verifies absence, and fsyncs the parent. With an absent tombstone, it succeeds only
+when #2140 re-presents the same proof for the exact still-current finalize operation whose
+`mutation-started` record is durable. Generic absence and a stale, superseded, cross-binding,
+cross-operation, or unjournaled proof are conflict. This narrowly resolves a crash or lost response
+between deletion and journal terminalization without treating absence generally as success. After
+successful or confirmed finalization, #2118/core releases the reservation and commits
+`cleanup_complete`; neither may occur earlier. Production advertisement is blocked until that
+ordering is wired and tested. There is no post-cleanup receipt, generic sweeper, retention timeout,
+or separate tombstone budget.
 Teardown likewise quarantines evidence it cannot authenticate.
 
 ## Consequences
@@ -88,9 +96,10 @@ Teardown likewise quarantines evidence it cannot authenticate.
   quarantined; the owning lifecycle remains responsible for admission and release accounting.
 - One bounded cleanup tombstone remains reservation-owned after payload deletion so retries
   distinguish completed cleanup from unowned absence. Capacity release follows authenticated
-  post-core finalization, never tombstone creation.
-- #2140 gains the integration obligation to call finalization after durable core cleanup completion
-  and to withhold advertisement until crash-ordering and lost-response tests pass.
+  finalization, never tombstone creation; core cleanup completion follows capacity release.
+- #2140 gains the integration obligation to construct the current journal proof and call
+  finalization before #2118/core releases capacity and commits cleanup completion. Advertisement is
+  withheld until crash-ordering, stale-proof, and lost-response tests pass.
 - The configured recovery root becomes durable provider state and must share the worker's lifecycle,
   permissions, backup expectations, and provisioning parity on x86_64 and ppc64le hosts.
 - The design adds a fixed libguestfs recovery seam but no generic guest filesystem editor.
