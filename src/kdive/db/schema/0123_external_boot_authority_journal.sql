@@ -31,6 +31,15 @@ CREATE TABLE public.external_boot_authority_journal_heads (
         pending_takeover IS NULL OR (
             jsonb_typeof(pending_takeover) = 'object'
             AND octet_length(pending_takeover::text) <= 8192
+            AND pending_takeover = jsonb_build_object(
+                'authority_id', pending_takeover->'authority_id',
+                'generation', pending_takeover->'generation',
+                'operation_identity', pending_takeover->'operation_identity',
+                'attempt_id', pending_takeover->'attempt_id',
+                'request_digest', pending_takeover->'request_digest',
+                'watermark_sequence', pending_takeover->'watermark_sequence',
+                'watermark_digest', pending_takeover->'watermark_digest'
+            )
             AND pending_takeover ?& ARRAY[
                 'authority_id', 'generation', 'operation_identity', 'attempt_id',
                 'request_digest', 'watermark_sequence', 'watermark_digest'
@@ -41,12 +50,27 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND pending_takeover->>'request_digest' ~ '^sha256:[0-9a-f]{64}$'
             AND pending_takeover->>'watermark_digest' ~ '^sha256:[0-9a-f]{64}$'
             AND octet_length(pending_takeover->>'operation_identity') BETWEEN 1 AND 255
+            AND jsonb_typeof(pending_takeover->'authority_id') = 'string'
+            AND jsonb_typeof(pending_takeover->'attempt_id') = 'string'
         )
     ),
     CONSTRAINT external_boot_journal_suspended_bounded CHECK (
         suspended_operation IS NULL OR (
             jsonb_typeof(suspended_operation) = 'object'
             AND octet_length(suspended_operation::text) <= 16384
+            AND suspended_operation = jsonb_build_object(
+                'authority_id', suspended_operation->'authority_id',
+                'generation', suspended_operation->'generation',
+                'activation_id', suspended_operation->'activation_id',
+                'operation_identity', suspended_operation->'operation_identity',
+                'attempt_id', suspended_operation->'attempt_id',
+                'purpose', suspended_operation->'purpose',
+                'request_digest', suspended_operation->'request_digest',
+                'phase', suspended_operation->'phase',
+                'source_identity', suspended_operation->'source_identity',
+                'target_identity', suspended_operation->'target_identity',
+                'ownership_digest', suspended_operation->'ownership_digest'
+            )
             AND suspended_operation ?& ARRAY[
                 'authority_id', 'generation', 'activation_id', 'operation_identity',
                 'attempt_id', 'purpose', 'request_digest', 'phase', 'source_identity',
@@ -61,6 +85,9 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND octet_length(suspended_operation->>'operation_identity') BETWEEN 1 AND 255
             AND octet_length(suspended_operation->>'source_identity') BETWEEN 1 AND 1024
             AND octet_length(suspended_operation->>'target_identity') BETWEEN 1 AND 1024
+            AND jsonb_typeof(suspended_operation->'authority_id') = 'string'
+            AND jsonb_typeof(suspended_operation->'activation_id') = 'string'
+            AND jsonb_typeof(suspended_operation->'attempt_id') = 'string'
         )
     )
 );
@@ -177,6 +204,11 @@ BEGIN
            'observation', 'outcome', 'canonical_record'
        ]
        OR p_record->>'schema' <> 'external-boot-authority-v1'
+       OR jsonb_typeof(p_record->'authority_id') <> 'string'
+       OR jsonb_typeof(p_record->'system_id') <> 'string'
+       OR jsonb_typeof(p_record->'activation_id') <> 'string'
+       OR jsonb_typeof(p_record->'run_id') <> 'string'
+       OR jsonb_typeof(p_record->'attempt_id') <> 'string'
        OR v_phase NOT IN (
            'watermark-installed', 'takeover-superseded', 'takeover-acknowledged',
            'admitted', 'mutation-started', 'provider-returned', 'observed', 'terminal'
@@ -201,6 +233,9 @@ BEGIN
     IF octet_length(p_record->>'authority_instance') NOT BETWEEN 1 AND 255
        OR octet_length(p_record->>'operation_identity') NOT BETWEEN 1 AND 255
        OR octet_length(p_record->>'provider_kind') NOT BETWEEN 1 AND 255
+       OR p_record->>'plan_identity' !~ '^sha256:[0-9a-f]{64}$'
+       OR p_record->>'operation_digest' !~ '^sha256:[0-9a-f]{64}$'
+       OR p_record->>'previous_digest' !~ '^sha256:[0-9a-f]{64}$'
        OR (p_record->>'generation')::numeric NOT BETWEEN 1 AND 9223372036854775807
        OR (p_record->>'sequence')::numeric NOT BETWEEN 1 AND 9223372036854775807
        OR jsonb_array_length(p_record->'recovery_objects') > 1024
@@ -259,19 +294,20 @@ BEGIN
     WHERE a.id = p_authority_id AND a.generation = p_generation
       AND w.incarnation = p_peer_incarnation AND w.state = 'active' AND w.fence_protocol = 4;
     IF NOT FOUND THEN RETURN 'superseded'; END IF;
-    IF (p_record->>'sequence')::bigint <> v_sequence
-       OR p_record->>'previous_digest' <> p_expected_digest
-       OR (p_record->>'authority_id')::uuid <> v_authority.id
-       OR (p_record->>'generation')::bigint <> v_authority.generation
-       OR (p_record->>'system_id')::uuid <> v_authority.system_id
-       OR (p_record->>'activation_id')::uuid <> v_authority.activation_id
-       OR (p_record->>'run_id')::uuid <> v_authority.run_id
-       OR p_record->>'plan_identity' <> v_authority.plan_identity
-       OR p_record->>'purpose' <> v_authority.purpose
-       OR p_record->>'provider_kind' <> v_authority.provider_kind
-       OR p_record->>'authority_instance' <> v_authority.authority_instance
-       OR p_record->>'operation_identity' <> v_authority.operation_identity
-       OR p_record->>'operation_digest' <> v_authority.operation_digest THEN
+    IF (p_record->>'sequence')::bigint IS DISTINCT FROM v_sequence
+       OR p_record->>'previous_digest' IS DISTINCT FROM p_expected_digest
+    THEN RETURN 'conflict'; END IF;
+    IF (p_record->>'authority_id')::uuid IS DISTINCT FROM v_authority.id
+       OR (p_record->>'generation')::bigint IS DISTINCT FROM v_authority.generation
+       OR (p_record->>'system_id')::uuid IS DISTINCT FROM v_authority.system_id
+       OR (p_record->>'activation_id')::uuid IS DISTINCT FROM v_authority.activation_id
+       OR (p_record->>'run_id')::uuid IS DISTINCT FROM v_authority.run_id
+       OR p_record->>'plan_identity' IS DISTINCT FROM v_authority.plan_identity
+       OR p_record->>'purpose' IS DISTINCT FROM v_authority.purpose
+       OR p_record->>'provider_kind' IS DISTINCT FROM v_authority.provider_kind
+       OR p_record->>'authority_instance' IS DISTINCT FROM v_authority.authority_instance
+       OR p_record->>'operation_identity' IS DISTINCT FROM v_authority.operation_identity
+       OR p_record->>'operation_digest' IS DISTINCT FROM v_authority.operation_digest THEN
         RETURN 'superseded';
     END IF;
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
