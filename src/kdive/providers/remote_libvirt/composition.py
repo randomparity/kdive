@@ -71,6 +71,10 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
     RemoteLibvirtVmcoreIntrospect,
 )
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    ConnectionFactory,
+    RemoteLibvirtAuthorityMutationAdapter,
+)
 from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
     RemoteLibvirtCaptureQuiescence,
 )
@@ -112,6 +116,13 @@ _POOL = "remote-libvirt"
 # Reuses seeded `local`; a remote seed row would be DDL beyond migration 0020.
 _COST_CLASS = "local"
 RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
+
+
+def build_external_boot_authority_adapter(
+    config: RemoteLibvirtConfig, *, connection: ConnectionFactory
+) -> RemoteLibvirtAuthorityMutationAdapter:
+    """Construct the bounded adapter from one already resource-bound config."""
+    return RemoteLibvirtAuthorityMutationAdapter(config, connection=connection)
 
 
 def capture_operation_configuration(resource_id: UUID, resource_name: str) -> bytes:
