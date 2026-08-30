@@ -29,8 +29,12 @@ pytest, Ruff, ty, and prek.
 
 - Modify `src/kdive/providers/ports/external_boot.py`: activation binding, recovery-point schema, and
   prepare signature.
+- Modify `src/kdive/domain/external_boot_activation.py` and
+  `src/kdive/db/external_boot_activations.py`: consume `RecoveryPoint.binding` consistently.
 - Modify `src/kdive/providers/fault_inject/lifecycle/external_boot.py`: pre-release contract parity.
 - Modify `tests/providers/ports/test_external_boot.py`: canonical values and consumer conformance.
+- Modify `tests/domain/test_external_boot_activation.py` and
+  `tests/db/test_external_boot_activation_repository.py`: binding validation and persistence.
 - Create `src/kdive/providers/local_libvirt/lifecycle/boot/recovery.py`: bounded manifest and narrow
   guestfs capture/observe/install/restore seam.
 - Create `src/kdive/providers/local_libvirt/lifecycle/external_boot.py`: local six-port orchestration,
@@ -44,7 +48,8 @@ pytest, Ruff, ty, and prek.
 
 ## Task 1: Close activation ownership across the shared contract
 
-**Files:** modify the shared port, fault-inject implementation, and shared contract tests named above.
+**Files:** modify the shared port, fault-inject implementation, domain activation model, activation
+repository, and their shared/domain/database tests named above.
 
 **Interfaces:** add exactly:
 
@@ -77,10 +82,14 @@ def prepare(
    rejection at prepare, activation changes produce unequal points, legacy `ownership` is rejected,
    and fault-inject implements the revised protocol. Run the exact test under a controlled fault
    that skips the System comparison; expect the mismatch test to fail, then restore.
-2. Implement the values/signature and update fault-inject to copy the exact binding. Repository-search
-   `prepare(` and update every direct in-tree caller; discovery of an external/versioned caller stops
-   at scope checkpoint rather than adding overload compatibility.
-3. Run `just test-verbose tests/providers/ports/test_external_boot.py`; expect all tests passed.
+2. Implement the values/signature and update fault-inject to copy the exact binding. Replace
+   `recovery_point.ownership` reads in the domain invariant and repository serializer with
+   `recovery_point.binding`; preserve their existing System/Run equality checks and add activation
+   round-trip assertions. Repository-search `prepare(`, `.ownership`, and `RecoveryPoint(` and update
+   every direct in-tree caller; discovery of an external/versioned caller stops at scope checkpoint.
+3. Run `just test-verbose tests/providers/ports/test_external_boot.py`,
+   `just test-verbose tests/domain/test_external_boot_activation.py`, and
+   `just test-verbose tests/db/test_external_boot_activation_repository.py`; expect all passed.
    Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 1 paths as
    `refactor(providers): bind external boot to activation`.
 
@@ -96,7 +105,7 @@ ownership; no production composition changes.
 
 ```python
 class GuestRecoveryWriter(Protocol):
-    def capture(self, overlay: str, release: str, destination: Path) -> ModuleCapture: ...
+    def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture: ...
     def observe(self, overlay: str, release: str) -> ComponentState: ...
     def install(self, overlay: str, release: str, source: Path) -> str: ...
     def restore(self, overlay: str, release: str, capture: ModuleCapture) -> str: ...
@@ -105,6 +114,11 @@ class RealGuestRecoveryWriter:
     # implements GuestRecoveryWriter through one mounted, inactive qcow2 overlay
     ...
 ```
+
+`RecoveryArchiveSink` is an injected owner-bound sink constructed by `LocalLibvirtExternalBoot`
+after resolving and authenticating the recovery token beneath its configured root. It exposes only
+exclusive staged archive creation and fsync, never a caller-selected path. `GuestRecoveryWriter`
+cannot resolve paths or choose another destination.
 
 1. Write golden tests for empty, regular-file, unsupported-xattr, ACL/security-xattr, and absolute
    `build` symlink manifests. Assert the empty digest is
@@ -148,20 +162,24 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
 2. Add recovery-root tests for exact relative token parsing, owner-only modes, no-follow exclusive
    writes, file/directory/parent fsync ordering, atomic rename, complete-point reopening, cross-field
    substitution, and quarantine. Test the mkdir-before-intent empty-partial rule separately.
-3. Implement materialization by reusing streaming bundle extraction and staged writes. Verify every
+3. Before implementation, add the minimal crash tests for loss immediately before/after intent
+   fsync, stop, module publish, XML define, source restoration, tombstone publish, and tombstone
+   delete. Assert fresh-instance retry outcomes and before/after snapshots. Run them now and require
+   failures attributable to the absent state machine, not fixture errors.
+4. Implement materialization by reusing streaming bundle extraction and staged writes. Verify every
    digest/obligation; publish only complete deterministic System/Run-owned artifacts.
-4. Implement prepare ordering: read initial power/XML, write and fsync `pre-stop-intent`, stop and
+5. Implement prepare ordering: read initial power/XML, write and fsync `pre-stop-intent`, stop and
    verify inactive, capture modules, render target, publish complete recovery directory. Retry uses
    intent rather than re-deriving power/XML and restores source on failure when evidence permits.
-5. Implement private inactive `_observe_composite`; activate modules then XML with durable phases;
+6. Implement private inactive `_observe_composite`; activate modules then XML with durable phases;
    recover modules then exact XML then prior power/readiness. At every entry reopen metadata and
    compare the entire point. Public observe uses durable target-defined evidence plus existing
    running-kernel readiness only and never opens a live overlay.
-6. Implement cleanup as payload deletion plus authenticated accounted tombstone. Implement U1a
+7. Implement cleanup as payload deletion plus authenticated accounted tombstone. Implement U1a
    finalization: present tombstone requires exact proof equality; absent success requires the exact
    current-binding, same-operation `mutation-started` proof supplied by #2140. Reject every stale,
    cross-binding, cross-operation, or unjournaled proof. Do not release capacity or set core state.
-7. Run `just test-verbose tests/providers/local_libvirt/test_external_boot.py`; expect all passed.
+8. Run `just test-verbose tests/providers/local_libvirt/test_external_boot.py`; expect all passed.
    Run the legacy install file to prove behavior preservation. Run lint/type/diff and commit as
    `feat(local-libvirt): implement external boot ports`.
 
@@ -174,15 +192,16 @@ unreadable, or cross-owner state makes zero writes; exact recovery and cleanup a
 
 **Interfaces:** consume Task 3 public methods and injected IO. Do not add runtime composition.
 
-1. Parameterize lost process/response points before and after intent fsync, stop, capture publication,
+1. Expand Task 3's biting fault tests across every lost process/response point before and after intent fsync, stop, capture publication,
    module rename, XML define, restoration writes, tombstone publication, tombstone deletion, and
    parent fsync. Restart a fresh instance from disk and assert exact continuation or conflict.
 2. Race/replay two bindings across same System/Run with different activation IDs; substitute every
    RecoveryPoint field and U1a proof field; assert before/after filesystem/XML snapshots are equal.
 3. Model U1a windows: unresolved exact mutation-started after delete succeeds; stale/current-binding
    mismatch fails; terminal replay is recorded as a #2140 contract test requirement and never calls
-   local finalization. Prove cleanup remains incomplete/reservation charged in the handoff until
-   finalization succeeds; do not implement #2118 orchestration.
+   local finalization. A fake handoff records that local finalization must precede reservation release
+   and cleanup completion; it does not claim to prove excluded DB/core orchestration. End-to-end
+   ordering remains required acceptance for #2140/#2118.
 4. Assert production `ProviderRuntime` and composition still do not expose external boot. This is a
    required negative proof, not deferred implementation.
 5. Run focused local external-boot, shared-port, legacy-install, composition, and adversarial paths;
@@ -191,7 +210,8 @@ unreadable, or cross-owner state makes zero writes; exact recovery and cleanup a
    `test(local-libvirt): prove external boot recovery`.
 
 **Acceptance:** crash/retry and cross-owner matrices pass; legacy install remains green; no production
-advertisement or authority adapter exists. #2140/#2118 obligations are explicit testable handoffs.
+advertisement or authority adapter exists. Local tests prove the bounded handoff contract only;
+#2140/#2118 own the end-to-end capacity-release/cleanup-completion proof.
 
 ## Final verification and handoff
 
