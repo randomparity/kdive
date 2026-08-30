@@ -35,6 +35,9 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.external_boot_authority import (
+    LocalLibvirtAuthorityMutationAdapter,
+)
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
     LocalLibvirtCaptureQuiescence,
 )
@@ -68,6 +71,11 @@ from kdive.store.objectstore import ObjectStore
 
 _POOL = "local-libvirt"
 _COST_CLASS = "local"
+
+
+def build_external_boot_authority_adapter() -> LocalLibvirtAuthorityMutationAdapter:
+    """Construct the bounded adapter from the operator-configured local URI."""
+    return LocalLibvirtAuthorityMutationAdapter(config.require(LIBVIRT_URI))
 
 
 def capture_operation_configuration(resource_id: UUID) -> bytes:
