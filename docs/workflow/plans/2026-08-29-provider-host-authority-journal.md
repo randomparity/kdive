@@ -89,6 +89,11 @@ None`, and `advance_journal_head(conn, *, binding, expected_sequence,
 expected_digest, record) -> Literal["advanced", "superseded", "conflict"]`. Task 3 consumes this
 repository protocol; it does not issue SQL directly.
 
+`JournalHead` includes bounded nullable `PendingTakeover` and `SuspendedOperation` values. The
+former retains takeover authority/generation/operation/attempt/request digest and watermark head;
+the latter retains the one serialized lower operation's authority/generation/activation,
+operation/attempt/purpose/request digest, prior phase, and source/target/ownership digests.
+
 1. Write migration tests for the table constraints, genesis insertion, exact 0122 binding lookup,
    authority-role grants, denied worker/reconciler/core table writes, and no lifecycle permissions.
    Run `just test-verbose tests/db/test_external_boot_authority_journal_migration.py`; expect a
@@ -107,15 +112,22 @@ repository protocol; it does not issue SQL directly.
    winner anchors `takeover-superseded`, inherits unresolved operations, and makes progress. Assert
    the acknowledgement exposes its anchored sequence/digest and a separately constructed canonical
    positive-quiescence digest for migration 0122.
-4. Implement migration 0123 with the one-row-per-lane head, constraints, security-definer resolve
+4. Add continuation-state tests. Watermark CAS atomically snapshots the exact nonterminal head into
+   one `SuspendedOperation` and installs `PendingTakeover`; completion must match every retained
+   immutable field and phase; terminal completion clears the suspended state and returns only to
+   that takeover; exact newer supersession replaces only the pending takeover. Fabricated lower
+   operations, wrong admitted/started phase, wrong attempt/request/ownership digest, unrelated
+   takeover, partial-null groups, and over-bound values change zero rows.
+5. Implement migration 0123 with the one-row-per-lane head, bounded continuation columns,
+   constraints, security-definer resolve
    and compare-and-set functions, pinned `search_path`, explicit revokes, and exact execute grants.
    Acquire the System advisory lock before the head row and re-resolve the 0122 binding under lock.
-5. Implement the typed psycopg repository wrapper and prove it maps all three SQL outcomes without
+6. Implement the typed psycopg repository wrapper and prove it maps all three SQL outcomes without
    swallowing database failures. Rerun the migration file; expect all tests to pass.
-6. Update the existing migration-count/name assertions, regenerate nothing by hand, then run
+7. Update the existing migration-count/name assertions, regenerate nothing by hand, then run
    `just test-verbose tests/db/test_migrate.py tests/db/test_external_boot_authority_migration.py
    tests/db/test_external_boot_authority_journal_migration.py`; expect all tests to pass.
-7. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 2 paths
+8. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 2 paths
    as `feat(db): anchor authority journal heads`.
 
 **Acceptance:** Only the authority role can resolve and advance heads; every mismatch is zero-write;

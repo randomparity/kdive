@@ -123,21 +123,39 @@ unattempted and records the last observed partial state for successor classifica
 
 Migration 0123 adds one `external_boot_authority_journal_heads` row per `(authority_instance,
 system_id)`. It stores a positive sequence, exact record digest, phase, authority UUID, generation,
-operation identity, and update time. A security-definer compare-and-set function authenticates the
-provider-authority role, locks the System and head row, resolves the exact 0122 binding, and accepts
+operation identity, and update time. Because the lane admits at most one mutation at a time, the
+same row also has two nullable, bounded continuations: `pending_takeover` retains the takeover
+authority, generation, operation, attempt, request digest, watermark sequence, and watermark digest;
+`suspended_operation` retains the lower authority, generation, activation, operation, attempt,
+purpose, request digest, last phase, and source/target/ownership digests. These are verification
+state, not another journal: they contain no provider definitions, output, or record history and are
+cleared when the corresponding operation or takeover becomes terminal.
+
+A security-definer compare-and-set function authenticates the provider-authority role, locks the
+System and head row, resolves the exact 0122 binding, and accepts
 only `(expected_sequence, expected_digest) -> (expected_sequence + 1, new_digest)`. The initial
 expected head is sequence zero and the fixed genesis digest. Sequence overflow, a non-current or
 mismatched binding, invalid phase transition, duplicate replay with different facts, or unexpected
 prior head changes zero rows and returns `superseded` or `conflict` without moving the checkpoint.
 
 Operation identity normally cannot switch before terminal. The only exceptions are checked against
-the retained lane chain: a watermark may switch to an exact previously anchored lower operation's
-completion-only records; that lower operation's terminal record may switch back to the same
-takeover; and watermark `G` may switch to `takeover-superseded` for the exact newer allocating
-generation. Each exception revalidates immutable System, activation, authority instance,
-operation, attempt, request digest, and generation relationships. No exception admits work or
-permits provider access; every other nonterminal operation switch conflicts without moving the
-head.
+the row's retained continuations. Anchoring a watermark atomically copies the exact current head's
+nonterminal operation into `suspended_operation` and installs `pending_takeover`. A watermark may
+switch only to completion records matching every suspended field; terminal completion clears the
+suspended continuation and may switch only to the retained pending takeover. Watermark `G` may
+switch to `takeover-superseded` only for the exact newer allocating generation, which atomically
+replaces `pending_takeover` while retaining the suspended operation. Each exception revalidates the
+immutable System, activation, authority instance, operation, attempt, request digest, generation,
+phase, and ownership digests. No exception admits work or permits provider access; every other
+nonterminal operation switch conflicts without moving the head.
+
+The continuation columns are updated in the same transaction as the exact head CAS. Constraints
+require the complete field group or all null, cap every text/digest field, and prohibit a suspended
+terminal phase. Fabricated operation identities, wrong prior phases, attempts, digests, ownership,
+or unrelated takeover continuations therefore change zero rows without trusting caller-supplied
+journal history. A bounded chain proof is deliberately not accepted: SQL cannot authenticate local
+journal bytes beyond the one exact head it already trusts, while the two fixed continuations are
+sufficient because the lane has at most one admitted mutation and one takeover in progress.
 
 The binding-state rule is phase-specific. `watermark-installed`, `takeover-superseded`, and
 `takeover-acknowledged` accept only the exact newest `allocating` binding. New mutation admission
