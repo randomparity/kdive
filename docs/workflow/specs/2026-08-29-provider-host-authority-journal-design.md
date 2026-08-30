@@ -6,7 +6,7 @@ Issue #2126 implements the provider-host slice of accepted
 [ADR-0584](../../adr/0584-provider-host-authority-fences-external-boot-mutations.md).
 It adds the provider-neutral `external-boot-authority-v1` value contract, a narrow authority
 service, a crash-recoverable append-only journal, migration 0123's independently anchored journal
-head, and bounded local-libvirt and remote-libvirt commit adapters. Migration 0122 remains the
+head, and the shared bounded `AuthorityMutationAdapter` contract. Migration 0122 remains the
 owner of authority allocation, acknowledgement, and core-result fencing. PostgreSQL remains
 lifecycle truth; the journal records provider mutation admission and observation only.
 
@@ -200,19 +200,19 @@ Adapters receive only validated ownership records. A successor can resume or del
 after an observation proves the same owner; otherwise it reports conflict. Teardown may destroy the
 owned System under its distinct authority, but an unproven recovery object remains quarantined.
 
-## Provider adapters
+## Provider adapter contract
 
 `AuthorityMutationAdapter` exposes provider-neutral `observe(request)` and
 `commit(request, commit_point)` operations with closed result values. The service, not the adapter,
 owns generation checks, serialization, journal phases, retries, and takeover. An adapter maps only
-the named external-boot commit points to existing local or remote libvirt primitives and returns a
-bounded identity observation.
+the named external-boot commit points to provider primitives and returns a bounded identity
+observation.
 
-Local and remote adapters share the same contract suite. Local composition binds the adapter to
-the configured local libvirt URI; remote composition binds it to the already selected resource's
-`RemoteLibvirtConfig`. Neither adapter accepts an arbitrary URI, path, shell command, libvirt XML,
-or credential from the protocol request. Existing `ProviderRuntime.external_boot` and all
-non-external install, boot, control, capture, and reaping paths remain unchanged.
+Concrete local-libvirt and remote-libvirt adapters and their composition are owned by #2140 after
+the provider primitives in #2108, #2110, and #2120 land. This issue proves the shared adapter
+contract with a controllable test adapter. Production assembly must not advertise v1 before #2140
+and the authenticated hosting boundary are installed. Existing `ProviderRuntime.external_boot` and
+all non-external install, boot, control, capture, and reaping paths remain unchanged.
 
 ## Failure behavior and observability
 
@@ -240,8 +240,8 @@ labels.
   reordered, corrupted, or replaced by bytes from another lane.
 - **Added: authority service to Postgres.** A compromised authority process has its narrowly granted
   database role. Database availability can fail between local fsync and checkpoint.
-- **Widened: local and remote libvirt mutation seams.** Existing provider code gains an
-  authority-mediated external-boot entry; arbitrary worker access is not granted by this issue.
+- **Added: shared provider adapter contract.** Concrete local and remote mutation seams remain
+  unchanged here and are owned by #2140.
 
 The design trusts Postgres, the authority host's kernel and supervisor, the configured
 provider-authority identity, and platform operators. Tenant agents never call this protocol
@@ -277,7 +277,7 @@ their current owners.
 
 Unit tests prove closed bounded takeover and mutation values, allocating-to-acknowledged-to-current
 ordering, canonical journal hashing, every takeover and mutation phase transition,
-stable ownership, cancellation retention, and identical local/remote adapter behavior. Migration
+stable ownership, cancellation retention, and adapter-contract behavior. Migration
 tests prove role grants, exact binding resolution, monotonic compare-and-set, concurrency, zero-row
 mismatch behavior, and immutable heads. Adversarial service tests pause each older operation before
 and after each commit, lose responses, restart from every journal phase, and prove takeover waits
@@ -290,8 +290,6 @@ concurrent takeover attempts. Restart tests stop after each takeover record and 
 anchored `takeover-acknowledged` sequence and digest before core promotion.
 
 The focused gates are `just test-verbose tests/providers/external_boot_authority`,
-`just test-verbose tests/providers/local_libvirt/test_external_boot_authority.py`,
-`just test-verbose tests/providers/remote_libvirt/test_external_boot_authority.py`, and
 `just test-verbose tests/db/test_external_boot_authority_journal_migration.py`. The branch gates
 are `just lint`, `just type`, and `just ci`.
 
