@@ -183,6 +183,74 @@ def test_metric_labels_are_bounded_non_tenant_dimensions() -> None:
 
 
 @pytest.mark.anyio
+async def test_trusted_coordinate_overflow_bounds_every_metric_and_evicts_lanes(
+    tmp_path: Path,
+) -> None:
+    _unused, repository, adapter, peer, template = _service(tmp_path)
+    metrics = AuthorityServiceMetrics.empty(max_coordinates=2)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        adapter=adapter,
+        metrics=metrics,
+    )
+    labels: list[tuple[str, str]] = []
+    for index in range(5):
+        request = template.model_copy(
+            update={
+                "authority_id": uuid4(),
+                "system_id": uuid4(),
+                "activation_id": uuid4(),
+                "run_id": uuid4(),
+                "operation_identity": f"takeover-{index}",
+                "provider_kind": f"trusted-provider-{index}",
+                "authority_instance": f"trusted-instance-{index}",
+            }
+        )
+        repository.request = request
+        repository.allocating_request = request
+        repository.current = False
+        repository.head = None
+        repository.records = []
+        await service.acknowledge_takeover(peer, request)
+        metrics.reject(request, "superseded")
+        metrics.recovery_failed(request)
+        coordinate = (request.provider_kind, request.authority_instance)
+        labels.append(coordinate)
+        metrics.set_unresolved(coordinate, True)
+
+    assert service._lanes == {}
+    assert all(
+        len(store) <= 3
+        for store in (
+            metrics.rejections,
+            metrics.recovery_failures,
+            metrics.unresolved,
+            metrics.checkpoints,
+            metrics.checkpoint_latency,
+        )
+    )
+    assert ("overflow", "overflow") in metrics.checkpoints
+    assert ("overflow", "overflow", "overflow") in metrics.rejections
+    for coordinate in labels:
+        metrics.set_unresolved(coordinate, False)
+    assert metrics.unresolved == {}
+    assert AuthorityServiceMetrics.empty().max_coordinates == 256
+
+
+def test_registered_metric_coordinate_keeps_exact_labels() -> None:
+    registered = ("configured-provider", "configured-instance")
+    metrics = AuthorityServiceMetrics.empty(
+        max_coordinates=1, registered_coordinates=frozenset({registered})
+    )
+    assert metrics.labels(registered) == registered
+    assert metrics.labels(("another-provider", "another-instance")) == (
+        "overflow",
+        "overflow",
+    )
+
+
+@pytest.mark.anyio
 async def test_takeover_terminalizes_admitted_operation_without_provider_access(
     tmp_path: Path,
 ) -> None:
