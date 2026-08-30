@@ -241,6 +241,12 @@ The service authenticates and resolves the exact trusted binding before allocati
 lane. Pre-binding rejection telemetry uses fixed `untrusted`/`unresolved` dimensions; later labels
 come only from the trusted binding. Idle terminal lanes are evicted after the last concurrent user,
 so rejected high-cardinality input and completed work cannot grow lane or metric dictionaries.
+Mutation admission resolves and fully matches the authenticated current binding before constructing
+or loading any journal from the caller's System identifier. Only then does it open the trusted
+binding's journal and require its exact anchored acknowledgement; the existing binding recheck
+still fences immediately before provider commit. Inactive, stale, cross-System, or high-cardinality
+hostile requests therefore cannot turn absent, malformed, oversized, or path failures into an
+oracle or allocate journal, lane, filesystem, or provider work.
 Trusted metric coordinates use a construction-time registry capped at 256 by default. Operators
 may pre-register configured coordinates at library construction; production wiring remains #2127.
 After the cap, all new coordinates aggregate into one fixed `overflow` coordinate/series without

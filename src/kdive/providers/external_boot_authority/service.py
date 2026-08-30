@@ -54,6 +54,10 @@ class AuthorityRepository(Protocol):
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
 
+    async def resolve_current_candidate(
+        self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+    ) -> AuthorityBinding | None: ...
+
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None: ...
 
     async def advance(
@@ -714,7 +718,10 @@ class ExternalBootAuthorityService:
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1:
         authenticated = self._require_peer(peer, request)
-        journal = self._journal_factory(request.system_id)
+        trusted = await self._repository.resolve_current_candidate(authenticated, request)
+        if trusted is None or not self._binding_matches(trusted, request):
+            raise self._reject(request, "superseded", labels=self._trusted_labels(trusted))
+        journal = self._journal_factory(trusted.system_id)
         records = journal.load()
         acknowledgements = [
             record
@@ -725,10 +732,10 @@ class ExternalBootAuthorityService:
         if not acknowledgements:
             raise self._reject(request, "superseded")
         acknowledgement = acknowledgements[-1]
-        trusted = await self._repository.resolve_current(
+        confirmed = await self._repository.resolve_current(
             authenticated, request, acknowledgement.sequence, record_digest(acknowledgement)
         )
-        if trusted is None or not self._binding_matches(trusted, request):
+        if confirmed is None or confirmed != trusted:
             raise self._reject(request, "superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 

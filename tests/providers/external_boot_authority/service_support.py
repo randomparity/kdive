@@ -99,7 +99,27 @@ class _Repository:
         self.phase_release = asyncio.Event()
         self.phase_release.set()
         self.current_resolutions = 0
+        self.current_candidate_resolutions = 0
         self.reject_resolution: int | None = None
+
+    async def resolve_current_candidate(
+        self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+    ) -> AuthorityBinding | None:
+        self.current_candidate_resolutions += 1
+        if (
+            peer != self.peer
+            or not self.current
+            or request.authority_id != self.request.authority_id
+            or request.generation != self.request.generation
+            or request.system_id != self.request.system_id
+            or request.activation_id != self.request.activation_id
+            or request.run_id != self.request.run_id
+            or request.purpose != self.request.purpose
+            or request.provider_kind != self.request.provider_kind
+            or request.authority_instance != self.request.authority_instance
+        ):
+            return None
+        return _binding(peer, request, "current")
 
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
