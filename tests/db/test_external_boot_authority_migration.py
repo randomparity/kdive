@@ -787,7 +787,7 @@ def test_result_cross_binding_mismatch_changes_no_durable_surface(
         assert _durable_surface_snapshot(conn, case) == before
 
 
-def test_migration_creates_four_authority_tables_and_exact_role_grants(
+def test_migration_creates_authority_tables_and_exact_role_grants(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     with psycopg.connect(migrated_url) as conn:
@@ -803,6 +803,7 @@ def test_migration_creates_four_authority_tables_and_exact_role_grants(
             "external_boot_authorities",
             "external_boot_authority_acknowledgements",
             "external_boot_authority_audit",
+            "external_boot_authority_journal_heads",
         }
         allowed = {
             _ALLOCATE_SIGNATURE: {"kdive_worker"},

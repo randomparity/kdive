@@ -39,4 +39,5 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0120", "0120_system_root_provenance.sql"),
         ("0121", "0121_external_boot_activations.sql"),
         ("0122", "0122_external_boot_authority.sql"),
+        ("0123", "0123_external_boot_authority_journal.sql"),
     ]
