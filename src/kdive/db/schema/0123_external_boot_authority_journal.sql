@@ -417,7 +417,7 @@ BEGIN
         head_record = p_record - 'canonical_record',
         pending_takeover = CASE
             WHEN v_phase = 'takeover-acknowledged' THEN NULL
-            WHEN v_phase = 'watermark-installed' THEN jsonb_build_object(
+            WHEN v_phase IN ('takeover-superseded', 'watermark-installed') THEN jsonb_build_object(
                 'authority_id', v_authority.id, 'generation', v_authority.generation,
                 'operation_identity', p_record->>'operation_identity',
                 'attempt_id', p_record->>'attempt_id', 'request_digest', p_record->>'operation_digest',

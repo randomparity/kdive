@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -21,6 +21,7 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     JournalPhase,
     JournalRecordV1,
+    RecoveryObjectBindingV1,
     canonical_record_bytes,
     record_digest,
 )
@@ -159,6 +160,35 @@ def _promote(
                 _DIGEST,
             ),
         )
+
+
+def _allocate_successor(migrated_url: str, role_dsns: _RoleDsns, case: Any) -> tuple[Any, Any]:
+    successor_job = uuid4()
+    successor_identity = f"successor-{uuid4()}"
+    with psycopg.connect(migrated_url) as conn:
+        marker_row = conn.execute(
+            "SELECT payload->'external_boot_authority_v1' FROM jobs WHERE id=%s",
+            (case.job_id,),
+        ).fetchone()
+        assert marker_row is not None
+        marker = dict(marker_row[0])
+        marker["operation_identity"] = successor_identity
+        conn.execute(
+            "INSERT INTO jobs (id,kind,payload,state,attempt,max_attempts,worker_id,"
+            "lease_expires_at,heartbeat_at,authorizing,dedup_key) VALUES "
+            "(%s,'boot',%s,'running',1,3,%s,now()+interval '5 minutes',now(),%s,%s)",
+            (
+                successor_job,
+                Jsonb({"external_boot_authority_v1": marker}),
+                case.worker_id,
+                Jsonb({"principal": "p", "project": "proj"}),
+                str(successor_job),
+            ),
+        )
+    successor_case = replace(case, job_id=successor_job, operation_identity=successor_identity)
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+        successor = _allocate(worker, successor_case)
+    return successor_case, successor
 
 
 def test_migration_0123_is_the_unique_inventory_tail() -> None:
@@ -543,3 +573,356 @@ async def test_repository_round_trips_typed_binding_and_head(
         head = await read_journal_head(connection, binding=binding)
         assert head is not None
         assert head.sequence == 1 and head.phase is JournalPhase.WATERMARK_INSTALLED
+
+
+def test_successor_takeover_has_exact_supersede_watermark_ack_order(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    first_case, first = _seed_allocated(migrated_url, authority_role_dsns, "g")
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        first_watermark = _record(
+            first_case, first, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED
+        )
+        assert (
+            _advance_raw(
+                connection, first_case, first, 0, GENESIS_DIGEST, _payload(first_watermark)
+            )
+            == "advanced"
+        )
+    successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, first_case)
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        skipped = _record(
+            successor_case,
+            successor,
+            2,
+            record_digest(first_watermark),
+            JournalPhase.WATERMARK_INSTALLED,
+        )
+        before = _head(connection, successor_case, successor)
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                1,
+                record_digest(first_watermark),
+                _payload(skipped),
+            )
+            == "conflict"
+        )
+        assert _head(connection, successor_case, successor) == before
+        superseded = _record(
+            successor_case,
+            successor,
+            2,
+            record_digest(first_watermark),
+            JournalPhase.TAKEOVER_SUPERSEDED,
+            predecessor_generation=first.generation,
+            watermark_sequence=1,
+            watermark_digest=record_digest(first_watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                1,
+                record_digest(first_watermark),
+                _payload(superseded),
+            )
+            == "advanced"
+        )
+        pending = _head(connection, successor_case, successor)
+        assert pending is not None
+        pending_takeover = pending[6]
+        assert isinstance(pending_takeover, dict)
+        pending_takeover = cast(dict[str, object], pending_takeover)
+        assert pending_takeover["authority_id"] == str(successor.authority_id)
+        successor_watermark = _record(
+            successor_case,
+            successor,
+            3,
+            record_digest(superseded),
+            JournalPhase.WATERMARK_INSTALLED,
+        )
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                2,
+                record_digest(superseded),
+                _payload(successor_watermark),
+            )
+            == "advanced"
+        )
+        acknowledgement = _record(
+            successor_case,
+            successor,
+            4,
+            record_digest(successor_watermark),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=3,
+            watermark_digest=record_digest(successor_watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                3,
+                record_digest(successor_watermark),
+                _payload(acknowledgement),
+            )
+            == "advanced"
+        )
+        final = _head(connection, successor_case, successor)
+        assert final is not None and final[6] is None and final[7] is None
+
+
+@pytest.mark.parametrize("anchored_phase", [JournalPhase.ADMITTED, JournalPhase.MUTATION_STARTED])
+def test_successor_inherits_and_completes_exact_older_operation(
+    migrated_url: str, authority_role_dsns: _RoleDsns, anchored_phase: JournalPhase
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, anchored_phase.value[0])
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        watermark = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            _advance_raw(connection, case, authority, 0, GENESIS_DIGEST, _payload(watermark))
+            == "advanced"
+        )
+        acknowledgement = _record(
+            case,
+            authority,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        assert (
+            _advance_raw(
+                connection, case, authority, 1, record_digest(watermark), _payload(acknowledgement)
+            )
+            == "advanced"
+        )
+    _promote(migrated_url, case, authority, acknowledgement)
+    previous = acknowledgement
+    sequence = 3
+    owned = RecoveryObjectBindingV1(
+        system_id=case.system_id,
+        activation_id=case.activation_id,
+        reference="recovery-a",
+    )
+    admitted = _record(
+        case,
+        authority,
+        sequence,
+        record_digest(previous),
+        JournalPhase.ADMITTED,
+        recovery_objects=(owned,),
+    )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                case,
+                authority,
+                sequence - 1,
+                record_digest(previous),
+                _payload(admitted),
+            )
+            == "advanced"
+        )
+        previous = admitted
+        if anchored_phase is JournalPhase.MUTATION_STARTED:
+            sequence += 1
+            started = _record(
+                case,
+                authority,
+                sequence,
+                record_digest(previous),
+                JournalPhase.MUTATION_STARTED,
+                recovery_objects=(owned,),
+            )
+            assert (
+                _advance_raw(
+                    connection,
+                    case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    _payload(started),
+                )
+                == "advanced"
+            )
+            previous = started
+    successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, case)
+    sequence += 1
+    successor_watermark = _record(
+        successor_case,
+        successor,
+        sequence,
+        record_digest(previous),
+        JournalPhase.WATERMARK_INSTALLED,
+    )
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        assert (
+            _advance_raw(
+                connection,
+                successor_case,
+                successor,
+                sequence - 1,
+                record_digest(previous),
+                _payload(successor_watermark),
+            )
+            == "advanced"
+        )
+        retained = _head(connection, successor_case, successor)
+        assert retained is not None
+        suspended = retained[7]
+        assert isinstance(suspended, dict)
+        assert cast(dict[str, object], suspended)["phase"] == anchored_phase.value
+        completion_phases = (
+            [JournalPhase.TERMINAL]
+            if anchored_phase is JournalPhase.ADMITTED
+            else [JournalPhase.PROVIDER_RETURNED, JournalPhase.OBSERVED, JournalPhase.TERMINAL]
+        )
+        previous = successor_watermark
+        for phase in completion_phases:
+            sequence += 1
+            changes: dict[str, object] = {}
+            if phase is JournalPhase.TERMINAL and anchored_phase is JournalPhase.ADMITTED:
+                changes["outcome"] = "never-began"
+            elif phase in {JournalPhase.OBSERVED, JournalPhase.TERMINAL}:
+                changes["observation"] = {
+                    "observation_id": str(uuid4()),
+                    "category": "source",
+                    "composite_state": _DIGEST,
+                }
+                if phase is JournalPhase.TERMINAL:
+                    changes["outcome"] = "source"
+            completion = _record(
+                case,
+                authority,
+                sequence,
+                record_digest(previous),
+                phase,
+                recovery_objects=(owned,),
+                **changes,
+            )
+            before = _head(connection, successor_case, successor)
+            wrong_owner = RecoveryObjectBindingV1(
+                system_id=case.system_id,
+                activation_id=case.activation_id,
+                reference="recovery-b",
+            )
+            mismatches = [
+                (case, completion.model_copy(update={"attempt_id": uuid4()})),
+                (case, completion.model_copy(update={"operation_digest": _DIGEST})),
+                (case, completion.model_copy(update={"recovery_objects": (wrong_owner,)})),
+                (replace(case, worker_id="docker:foreign-peer"), completion),
+            ]
+            for mismatch_case, mismatch_record in mismatches:
+                assert _advance_raw(
+                    connection,
+                    mismatch_case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    _payload(mismatch_record),
+                ) in {"superseded", "conflict"}
+                assert _head(connection, successor_case, successor) == before
+            assert (
+                _advance_raw(
+                    connection,
+                    case,
+                    authority,
+                    sequence - 1,
+                    record_digest(previous),
+                    _payload(completion),
+                )
+                == "advanced"
+            )
+            previous = completion
+        completed = _head(connection, successor_case, successor)
+        assert completed is not None and completed[7] is None and completed[6] is not None
+
+
+def test_concurrent_successors_only_allow_newest_takeover_progress(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    first_case, first = _seed_allocated(migrated_url, authority_role_dsns, "c")
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        watermark = _record(first_case, first, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+        assert (
+            _advance_raw(connection, first_case, first, 0, GENESIS_DIGEST, _payload(watermark))
+            == "advanced"
+        )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(_allocate_successor, migrated_url, authority_role_dsns, first_case)
+            for _ in range(2)
+        ]
+        successors = [future.result() for future in futures]
+    older_case, older = min(successors, key=lambda item: item[1].generation)
+    newest_case, newest = max(successors, key=lambda item: item[1].generation)
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        older_record = _record(
+            older_case,
+            older,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_SUPERSEDED,
+            predecessor_generation=first.generation,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        before = _head(connection, newest_case, newest)
+        assert (
+            _advance_raw(
+                connection,
+                older_case,
+                older,
+                1,
+                record_digest(watermark),
+                _payload(older_record),
+            )
+            == "superseded"
+        )
+        assert _head(connection, newest_case, newest) == before
+        winner = _record(
+            newest_case,
+            newest,
+            2,
+            record_digest(watermark),
+            JournalPhase.TAKEOVER_SUPERSEDED,
+            predecessor_generation=first.generation,
+            watermark_sequence=1,
+            watermark_digest=record_digest(watermark),
+        )
+        assert (
+            _advance_raw(
+                connection,
+                newest_case,
+                newest,
+                1,
+                record_digest(watermark),
+                _payload(winner),
+            )
+            == "advanced"
+        )
