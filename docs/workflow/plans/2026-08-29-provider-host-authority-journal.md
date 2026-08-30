@@ -39,7 +39,8 @@ remote adapters share the same bounded port and contract tests.
 `journal.py`; create `tests/providers/external_boot_authority/test_protocol.py` and
 `test_journal.py`.
 
-**Interfaces:** Define `AuthorityRequestV1`, `AuthorityAcknowledgementV1`, `AuthorityObservationV1`,
+**Interfaces:** Define `AuthorityTakeoverRequestV1`, `AuthorityMutationRequestV1`,
+`AuthorityAcknowledgementV1`, `AuthorityObservationV1`,
 `RecoveryObjectBindingV1`, `JournalRecordV1`, `JournalPhase`, `canonical_record_bytes(record) ->
 bytes`, `record_digest(record) -> str`, and `FileAuthorityJournal.append(record) -> None` /
 `load() -> tuple[JournalRecordV1, ...]`. Later tasks consume only these public values.
@@ -71,8 +72,10 @@ digest chains; loading never normalizes or silently drops journal bytes.
 expectations that enumerate every schema file.
 
 **Interfaces:** Define `AuthorityBinding` and `JournalHead` repository values,
-`resolve_authority_binding(conn, *, peer_incarnation_id, authority_id, generation) ->
-AuthorityBinding | None`, and `advance_journal_head(conn, *, binding, expected_sequence,
+`resolve_allocating_authority_binding(conn, *, peer_incarnation_id, authority_id, generation) ->
+AuthorityBinding | None`, `resolve_current_authority_binding(conn, *, peer_incarnation_id,
+authority_id, generation, acknowledgement_sequence, acknowledgement_digest) -> AuthorityBinding |
+None`, and `advance_journal_head(conn, *, binding, expected_sequence,
 expected_digest, record) -> Literal["advanced", "superseded", "conflict"]`. Task 3 consumes this
 repository protocol; it does not issue SQL directly.
 
@@ -107,26 +110,32 @@ result proven necessary by these tests.
 
 **Interfaces:** Define `AuthenticatedPeer(incarnation_id: UUID)`, `AuthorityMutationAdapter` with
 `observe(request) -> Awaitable[AuthorityObservationV1]` and `commit(request, commit_point) ->
-Awaitable[AuthorityObservationV1]`, and `ExternalBootAuthorityService.execute(peer, request) ->
-AuthorityAcknowledgementV1`. It consumes Task 1's codec/journal and Task 2's repository.
+Awaitable[AuthorityObservationV1]`. `ExternalBootAuthorityService.acknowledge_takeover(peer,
+request) -> AuthorityAcknowledgementV1` installs the watermark and quiesces older calls without
+provider mutation. `execute_mutation(peer, request) -> AuthorityObservationV1` requires the exact
+current 0122 binding and recorded acknowledgement. It consumes Task 1's codec/journal and Task 2's
+repository.
 
 1. Write a fake repository, journal, and controllable adapter. Test unauthenticated/inactive peer,
    stale/cross-binding request, malformed ownership, and failed readiness all produce no journal or
    provider access. Run the service file; expect import failures.
-2. Add concurrency tests that pause an old operation before and after every commit point, admit a
+2. Prove takeover accepts only the newest exact `allocating` binding, performs no provider mutation,
+   and returns anchored acknowledgement evidence. Prove mutation is denied until core promotes the
+   binding to `current` with the exact acknowledgement sequence and digest.
+3. Add concurrency tests that pause an old operation before and after every commit point, admit a
    successor, and prove acknowledgement remains pending until the old call is positively observed.
    Cover cancellation and client disconnect while the lane task continues.
-3. Add exact phase-order tests proving `admitted` and `mutation-started` are fsynced and anchored
+4. Add exact phase-order tests proving `admitted` and `mutation-started` are fsynced and anchored
    before the first adapter call, and later observations are anchored before acknowledgement or a
    later commit. Inject local-append, fsync, database-CAS, provider-return, and observation failures.
-4. Add restart matrices for every journal phase and reject empty-with-head, valid-prefix truncation,
+5. Add restart matrices for every journal phase and reject empty-with-head, valid-prefix truncation,
    extra suffix, corruption, reorder, duplicate sequence, foreign lane, divergent phase/operation,
    and changed stable ownership. Include a trusted `mutation-started` head with unresolved provider
    work and prove takeover remains withheld.
-5. Implement lane state, startup recovery, phase append+anchor, pre-commit binding rechecks,
+6. Implement lane state, startup recovery, phase append+anchor, pre-commit binding rechecks,
    cancellation shielding, positive observation classification, and bounded structured errors.
    Do not add lease/deadline promotion or automatic journal repair.
-6. Rerun `just test-verbose tests/providers/external_boot_authority`; expect all tests to pass.
+7. Rerun `just test-verbose tests/providers/external_boot_authority`; expect all tests to pass.
    Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 3 paths
    as `feat(providers): serialize authority mutations`.
 
@@ -145,7 +154,7 @@ returned acknowledgement is backed by the exact fsynced and anchored terminal ev
 **Interfaces:** Each module implements Task 3's `AuthorityMutationAdapter`. Local construction takes
 the configured libvirt URI; remote construction takes the already resource-bound
 `RemoteLibvirtConfig` and existing connection factory. Neither accepts transport coordinates from
-`AuthorityRequestV1`.
+`AuthorityMutationRequestV1`.
 
 1. Write one shared behavioral test matrix and invoke it for local and remote adapters. It covers
    exact source, target, mixed/unreadable/conflict observations; every external-boot commit point;

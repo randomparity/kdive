@@ -46,24 +46,28 @@ must not advertise the service without such a peer-authentication boundary.
 
 ## Protocol and authentication
 
-An `AuthorityRequestV1` contains the opaque authority UUID, positive generation, System,
-activation, Run, plan digest, purpose, provider kind, authority instance, admitted operation,
-operation identity, operation digest, expected source identity, intended target identity, and at
-most 1,024 stable recovery-object bindings. Every identifier is nonblank and at most 255 UTF-8
+An `AuthorityTakeoverRequestV1` contains the opaque authority UUID, positive generation, System,
+activation, Run, plan digest, purpose, provider kind, authority instance, operation identity, and
+operation digest. An `AuthorityMutationRequestV1` repeats that immutable binding and adds the
+admitted operation, expected source identity, intended target identity, and at most 1,024 stable
+recovery-object bindings. Takeover resolves an `allocating` 0122 binding and performs no provider
+mutation. After core records the acknowledgement and promotes the binding, mutation resolves the
+same binding in `current` state before provider access. Every identifier is nonblank and at most 255 UTF-8
 bytes; provider identities are opaque nonblank strings of at most 1,024 UTF-8 bytes; digests use
 `sha256:` plus 64 lowercase hexadecimal digits. Serialized input is closed and capped at 1 MiB.
 
 The service asks migration 0122 to resolve the opaque reference for the authenticated active worker
-incarnation and requires every immutable field to match before journal admission. Possession of the
-reference is insufficient. The provider adapter receives the validated typed request, never the
+incarnation and requires every immutable field to match before journal admission. Takeover accepts
+only the exact newest `allocating` binding; mutation accepts only the exact `current` binding with
+its recorded acknowledgement. Possession of the reference is insufficient. The provider adapter receives the validated typed request, never the
 peer credential. Failures return a bounded category and identity references; no raw provider
 definition, output, path, command, or secret crosses the shared response boundary.
 
 ## Serialized mutation and takeover
 
 The per-System lane makes admission, watermark changes, provider commit points, and observations a
-single ordered history. A request at generation `G` is admitted only when `G` equals the binding
-resolved from Postgres and is not below the installed lane watermark. Before acknowledging `G`, the
+single ordered history. A takeover request at generation `G` is admitted only when `G` equals the
+newest allocating binding resolved from Postgres and is not below the installed lane watermark. Before acknowledging `G`, the
 service persists and anchors its watermark and classifies every lower-generation operation as one
 of: provider mutation never began, returned and observed, lost response resolved to the exact
 source or target identity, or conflict. Timeout, cancellation, disconnect, task termination, or an
@@ -77,8 +81,10 @@ survival if an operating-system process can die while its provider call continue
 the hosting supervisor must preserve the execution owner as ADR-0584 requires before the provider
 advertises v1.
 
-Immediately before each adapter commit, the service re-resolves the authority binding and requires
-the same generation and immutable fields. A stale generation stops without provider access. A
+Core records that acknowledgement through migration 0122 and promotes `G` to `current`; only then
+may a separate mutation request enter the lane. Immediately before each adapter commit, the service
+re-resolves the authority binding and requires `current`, the same generation and immutable fields,
+and the acknowledgement's exact journal sequence and digest. A stale generation stops without provider access. A
 multi-commit operation rechecks separately for every commit; loss of authority leaves later commits
 unattempted and records the last observed partial state for successor classification.
 
@@ -191,7 +197,8 @@ their current owners.
 
 ## Verification
 
-Unit tests prove closed bounded protocol values, canonical journal hashing, every phase transition,
+Unit tests prove closed bounded takeover and mutation values, allocating-to-acknowledged-to-current
+ordering, canonical journal hashing, every phase transition,
 stable ownership, cancellation retention, and identical local/remote adapter behavior. Migration
 tests prove role grants, exact binding resolution, monotonic compare-and-set, concurrency, zero-row
 mismatch behavior, and immutable heads. Adversarial service tests pause each older operation before
