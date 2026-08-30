@@ -82,7 +82,7 @@ def _recovery_object(reference: str) -> RecoveryObjectBindingV1:
 
 def test_append_creates_private_file_and_loads_exact_records(tmp_path: Path) -> None:
     path = tmp_path / "journal.ndjson"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record()
     journal.append(first)
     second = _record(
@@ -105,7 +105,7 @@ def test_journal_byte_limit_accepts_exact_size_and_rejects_growth(tmp_path: Path
     path = tmp_path / "journal.ndjson"
     first = _record()
     encoded = canonical_record_bytes(first) + b"\n"
-    journal = FileAuthorityJournal(path, max_bytes=len(encoded))
+    journal = FileAuthorityJournal(path.parent, path.name, max_bytes=len(encoded))
 
     journal.append(first)
     before = path.read_bytes()
@@ -119,9 +119,9 @@ def test_journal_byte_limit_accepts_exact_size_and_rejects_growth(tmp_path: Path
         journal.append(second)
 
     assert path.read_bytes() == before
-    assert FileAuthorityJournal(path, max_bytes=len(encoded)).load() == (first,)
+    assert FileAuthorityJournal(path.parent, path.name, max_bytes=len(encoded)).load() == (first,)
     with pytest.raises(ValueError, match="configured byte maximum"):
-        FileAuthorityJournal(path, max_bytes=len(encoded) - 1).load()
+        FileAuthorityJournal(path.parent, path.name, max_bytes=len(encoded) - 1).load()
     assert DEFAULT_MAX_JOURNAL_BYTES == 64 * 1024 * 1024
 
 
@@ -130,7 +130,7 @@ def test_same_size_external_change_rejects_append_without_writing(
     tmp_path: Path, change: str
 ) -> None:
     path = tmp_path / "journal.ndjson"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record()
     journal.append(first)
     original = path.read_bytes()
@@ -175,7 +175,7 @@ def test_append_validates_only_candidate_after_streamed_load(
     path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
     path.chmod(0o600)
     loaded_size = path.stat().st_size
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     assert journal.load() == tuple(records)
     calls = 0
     reads: list[tuple[int, int]] = []
@@ -225,7 +225,7 @@ def test_append_reuses_history_and_validation_storage_at_any_scale(
         previous = record_digest(record)
     path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
     path.chmod(0o600)
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     journal.load()
     assert journal._cache is not None
     storage_ids = (
@@ -261,7 +261,7 @@ def test_failed_append_does_not_publish_validation_delta(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     path = tmp_path / "journal.ndjson"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record()
     journal.append(first)
     assert journal._cache is not None
@@ -296,7 +296,7 @@ def test_append_fsyncs_parent_on_first_creation(
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", recording_fsync)
-    FileAuthorityJournal(tmp_path / "journal.ndjson").append(_record())
+    FileAuthorityJournal(tmp_path, "journal.ndjson").append(_record())
 
     assert any(stat.S_ISDIR(mode) for mode in calls)
 
@@ -307,7 +307,97 @@ def test_existing_symlink_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "journal"
     path.symlink_to(target)
     with pytest.raises(OSError):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
+
+
+@pytest.mark.parametrize(
+    "lane_path", ["", "/absolute", "../escape", "nested/../escape", "./journal", "a//journal"]
+)
+def test_journal_rejects_unconfined_lane_paths(tmp_path: Path, lane_path: str) -> None:
+    with pytest.raises(ValueError, match="relative lane path"):
+        FileAuthorityJournal(tmp_path, lane_path)
+
+
+def test_journal_rejects_symlinked_intermediate_without_outside_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir(mode=0o700)
+    outside.mkdir(mode=0o700)
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        FileAuthorityJournal(root, "linked/journal")
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("replaced", ["root", "parent"])
+def test_journal_rejects_ancestor_replacement_before_append(tmp_path: Path, replaced: str) -> None:
+    root = tmp_path / "root"
+    parent = root / "nested"
+    parent.mkdir(parents=True, mode=0o700)
+    journal = FileAuthorityJournal(root, "nested/journal")
+    displaced = tmp_path / f"displaced-{replaced}"
+    if replaced == "root":
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        (root / "nested").mkdir(mode=0o700)
+    else:
+        parent.rename(displaced)
+        parent.mkdir(mode=0o700)
+
+    with pytest.raises(ValueError, match="trusted directory chain changed"):
+        journal.append(_record())
+
+    assert not (root / "nested" / "journal").exists()
+    displaced_journal = (
+        displaced / "nested" / "journal" if replaced == "root" else displaced / "journal"
+    )
+    assert not displaced_journal.exists()
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o707])
+def test_journal_rejects_writable_trusted_directory(tmp_path: Path, mode: int) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=mode)
+    root.chmod(mode)
+    with pytest.raises(PermissionError, match="trusted directory"):
+        FileAuthorityJournal(root, "journal")
+
+
+def test_journal_rejects_foreign_trusted_directory(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    with pytest.raises(PermissionError, match="foreign ownership"):
+        FileAuthorityJournal(root, "journal", owner_uid=os.geteuid() + 1)
+
+
+def test_nested_journal_creation_is_confined_and_durable(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    parent = root / "nested"
+    parent.mkdir(parents=True, mode=0o700)
+    journal = FileAuthorityJournal(root, "nested/journal")
+    record = _record()
+
+    journal.append(record)
+
+    assert (parent / "journal").stat().st_mode & 0o777 == 0o600
+    assert journal.load() == (record,)
+    journal.close()
+
+
+def test_close_releases_every_retained_directory_descriptor(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "nested").mkdir(parents=True, mode=0o700)
+    journal = FileAuthorityJournal(root, "nested/journal")
+    descriptors = journal._directory_fds
+
+    journal.close()
+    journal.close()
+
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 @pytest.mark.parametrize("mode", [0o620, 0o602, 0o640, 0o644, 0o700, 0o400])
@@ -316,7 +406,7 @@ def test_existing_non_private_file_mode_is_rejected(tmp_path: Path, mode: int) -
     path.write_text("")
     path.chmod(mode)
     with pytest.raises(PermissionError, match="mode 0600"):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 @pytest.mark.parametrize("mode", [0o640, 0o644, 0o700])
@@ -324,7 +414,7 @@ def test_invalid_existing_mode_rejects_append_without_changing_bytes(
     tmp_path: Path, mode: int
 ) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record()
     journal.append(first)
     before = path.read_bytes()
@@ -338,7 +428,7 @@ def test_invalid_existing_mode_rejects_append_without_changing_bytes(
     )
 
     with pytest.raises(PermissionError, match="mode 0600"):
-        FileAuthorityJournal(path).append(second)
+        FileAuthorityJournal(path.parent, path.name).append(second)
 
     assert path.read_bytes() == before
 
@@ -347,7 +437,7 @@ def test_non_regular_path_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "journal"
     path.mkdir()
     with pytest.raises(OSError):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 def test_partial_final_record_is_rejected(tmp_path: Path) -> None:
@@ -355,7 +445,7 @@ def test_partial_final_record_is_rejected(tmp_path: Path) -> None:
     path.write_bytes(canonical_record_bytes(_record()))
     path.chmod(0o600)
     with pytest.raises(ValueError, match="partial"):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 def test_duplicate_or_broken_chain_is_rejected(tmp_path: Path) -> None:
@@ -367,7 +457,7 @@ def test_duplicate_or_broken_chain_is_rejected(tmp_path: Path) -> None:
     )
     path.chmod(0o600)
     with pytest.raises(ValueError, match="sequence"):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 def test_foreign_lane_is_rejected(tmp_path: Path) -> None:
@@ -377,7 +467,7 @@ def test_foreign_lane_is_rejected(tmp_path: Path) -> None:
     path.write_bytes(canonical_record_bytes(first) + b"\n" + canonical_record_bytes(second) + b"\n")
     path.chmod(0o600)
     with pytest.raises(ValueError, match="lane"):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 def test_invalid_phase_ordering_is_rejected(tmp_path: Path) -> None:
@@ -387,7 +477,7 @@ def test_invalid_phase_ordering_is_rejected(tmp_path: Path) -> None:
     path.write_bytes(canonical_record_bytes(first) + b"\n" + canonical_record_bytes(second) + b"\n")
     path.chmod(0o600)
     with pytest.raises(ValueError, match="phase ordering"):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 def test_corrupt_previous_digest_is_rejected(tmp_path: Path) -> None:
@@ -397,15 +487,22 @@ def test_corrupt_previous_digest_is_rejected(tmp_path: Path) -> None:
     path.write_bytes(canonical_record_bytes(first) + b"\n" + canonical_record_bytes(second) + b"\n")
     path.chmod(0o600)
     with pytest.raises(ValueError, match="digest chain"):
-        FileAuthorityJournal(path).load()
+        FileAuthorityJournal(path.parent, path.name).load()
 
 
 def test_existing_file_owned_by_another_identity_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "journal"
     path.write_text("")
     path.chmod(0o600)
-    with pytest.raises(PermissionError, match="service identity"):
-        FileAuthorityJournal(path, owner_uid=os.geteuid() + 1).load()
+    journal = FileAuthorityJournal(path.parent, path.name)
+    descriptor = os.open(path, os.O_RDONLY)
+    journal._owner_uid = os.geteuid() + 1
+    try:
+        with pytest.raises(PermissionError, match="service identity"):
+            journal._validate_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+        journal.close()
 
 
 @pytest.mark.parametrize("phase", [JournalPhase.OBSERVED, JournalPhase.WATERMARK_INSTALLED])
@@ -413,7 +510,7 @@ def test_append_rejects_skipped_or_reversed_phase_without_changing_bytes(
     tmp_path: Path, phase: JournalPhase
 ) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record()
     journal.append(first)
     before = path.read_bytes()
@@ -450,7 +547,7 @@ def test_append_rejects_mutation_evidence_drift_without_changing_bytes(
     tmp_path: Path, changes: dict[str, object]
 ) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record(
         phase=JournalPhase.ADMITTED,
         expected_source_identity="source-a",
@@ -481,7 +578,7 @@ def test_append_rejects_mutation_evidence_drift_without_changing_bytes(
 
 def test_duplicate_generation_watermark_is_rejected_on_load_and_append(tmp_path: Path) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record(operation_identity="takeover-a")
     journal.append(first)
     before = path.read_bytes()
@@ -505,7 +602,7 @@ def test_acknowledgement_cannot_cross_link_another_same_generation_operation(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record(operation_identity="takeover-a")
     journal.append(first)
     before = path.read_bytes()
@@ -530,7 +627,7 @@ def test_acknowledgement_cannot_cross_link_another_same_generation_operation(
 
 def test_predecessor_watermark_can_be_superseded_only_once(tmp_path: Path) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record(generation=1, operation_identity="takeover-a")
     journal.append(first)
     first_successor = _record(
@@ -580,7 +677,7 @@ def test_predecessor_watermark_can_be_superseded_only_once(tmp_path: Path) -> No
 
 def test_superseded_watermark_cannot_later_be_acknowledged(tmp_path: Path) -> None:
     path = tmp_path / "journal"
-    journal = FileAuthorityJournal(path)
+    journal = FileAuthorityJournal(path.parent, path.name)
     first = _record(generation=1, operation_identity="takeover-a")
     journal.append(first)
     superseded = _record(

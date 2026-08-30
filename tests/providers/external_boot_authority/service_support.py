@@ -311,7 +311,7 @@ def _service(
     adapter = _Adapter()
     service = ExternalBootAuthorityService(
         repository=repository,
-        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path / f"{system_id}.journal"),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
         adapter=adapter,
     )
     return service, repository, adapter, peer, request

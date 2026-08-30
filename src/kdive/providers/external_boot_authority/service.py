@@ -226,6 +226,8 @@ class ExternalBootAuthorityService:
         lane.users -= 1
         if lane.users == 0 and lane.active is None and self._lanes.get(system_id) is lane:
             self._lanes.pop(system_id)
+            if lane.journal is not None:
+                lane.journal.close()
 
     def _lane_journal(
         self, system_id: UUID, lane: _Lane
@@ -378,12 +380,14 @@ class ExternalBootAuthorityService:
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
     ) -> bool:
         """Return true only when local bytes exactly equal the scoped trusted head."""
+        journal: FileAuthorityJournal | None = None
         try:
             authenticated = self._require_peer(peer, request)
             binding = await self._repository.resolve_allocating(authenticated, request)
             if binding is None or not self._binding_matches(binding, request):
                 return False
-            records = await self._recover(binding, self._journal_factory(request.system_id))
+            journal = self._journal_factory(request.system_id)
+            records = await self._recover(binding, journal)
         except AuthorityServiceError, OSError, ValueError:
             labels = self.metrics.recovery_failed(request)
             self._logger.warning(
@@ -395,6 +399,9 @@ class ExternalBootAuthorityService:
                 },
             )
             return False
+        finally:
+            if journal is not None:
+                journal.close()
         phases_by_operation = {record.operation_identity: record.phase for record in records}
         return not any(
             phase

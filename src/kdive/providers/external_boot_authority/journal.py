@@ -81,17 +81,60 @@ class FileAuthorityJournal:
 
     def __init__(
         self,
-        path: Path,
+        trusted_root: Path,
+        lane_path: str | Path,
         *,
         owner_uid: int | None = None,
         max_bytes: int = DEFAULT_MAX_JOURNAL_BYTES,
     ) -> None:
+        self._directory_fds: tuple[int, ...] = ()
         if max_bytes < 1:
             raise ValueError("authority journal maximum must be positive")
-        self._path = path
+        raw_path = os.fspath(lane_path)
+        parts = raw_path.split("/")
+        if raw_path.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("authority journal requires a confined relative lane path")
+        self._trusted_root = trusted_root
+        self._parts = tuple(parts)
+        self._name = parts[-1]
         self._owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self._max_bytes = max_bytes
         self._cache: _JournalCache | None = None
+        descriptors: list[int] = []
+        try:
+            root_fd = os.open(trusted_root, os.O_RDONLY | os.O_DIRECTORY | _OPEN_BASE)
+            descriptors.append(root_fd)
+            self._validate_directory_descriptor(root_fd)
+            current = root_fd
+            for component in parts[:-1]:
+                current = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | _OPEN_BASE,
+                    dir_fd=current,
+                )
+                descriptors.append(current)
+                self._validate_directory_descriptor(current)
+        except BaseException:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            raise
+        self._directory_fds = tuple(descriptors)
+
+    def close(self) -> None:
+        """Release retained trusted-directory descriptors."""
+        descriptors, self._directory_fds = self._directory_fds, ()
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+    def __del__(self) -> None:
+        if hasattr(self, "_directory_fds"):
+            self.close()
+
+    @property
+    def _parent_fd(self) -> int:
+        if not self._directory_fds:
+            raise ValueError("authority journal is closed")
+        return self._directory_fds[-1]
 
     @staticmethod
     def _identity(status: os.stat_result) -> _FileIdentity:
@@ -112,8 +155,54 @@ class FileAuthorityJournal:
         if stat.S_IMODE(status.st_mode) != 0o600:
             raise PermissionError("authority journal must have exact mode 0600")
 
+    def _validate_directory_descriptor(self, descriptor: int) -> None:
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode):
+            raise OSError("authority journal trusted directory must be a directory")
+        if status.st_uid != self._owner_uid:
+            raise PermissionError("authority journal trusted directory has foreign ownership")
+        if stat.S_IMODE(status.st_mode) & 0o022:
+            raise PermissionError("authority journal trusted directory must not be writable")
+
+    def _validate_directory_chain(self) -> None:
+        if not self._directory_fds:
+            raise ValueError("authority journal is closed")
+        try:
+            root_status = os.stat(self._trusted_root, follow_symlinks=False)
+        except OSError:
+            raise ValueError("authority journal trusted directory chain changed") from None
+        retained_root = os.fstat(self._directory_fds[0])
+        if (root_status.st_dev, root_status.st_ino) != (
+            retained_root.st_dev,
+            retained_root.st_ino,
+        ):
+            raise ValueError("authority journal trusted directory chain changed")
+        for index, component in enumerate(self._parts[:-1]):
+            try:
+                linked = os.stat(
+                    component, dir_fd=self._directory_fds[index], follow_symlinks=False
+                )
+            except OSError:
+                raise ValueError("authority journal trusted directory chain changed") from None
+            retained = os.fstat(self._directory_fds[index + 1])
+            if not stat.S_ISDIR(linked.st_mode) or (linked.st_dev, linked.st_ino) != (
+                retained.st_dev,
+                retained.st_ino,
+            ):
+                raise ValueError("authority journal trusted directory chain changed")
+        for descriptor in self._directory_fds:
+            self._validate_directory_descriptor(descriptor)
+
+    def _entry_status(self) -> os.stat_result | None:
+        self._validate_directory_chain()
+        try:
+            return os.stat(self._name, dir_fd=self._parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+
     def _open_read(self) -> int:
-        descriptor = os.open(self._path, os.O_RDONLY | _OPEN_BASE)
+        self._validate_directory_chain()
+        descriptor = os.open(self._name, os.O_RDONLY | _OPEN_BASE, dir_fd=self._parent_fd)
         try:
             self._validate_descriptor(descriptor)
         except BaseException:
@@ -122,16 +211,20 @@ class FileAuthorityJournal:
         return descriptor
 
     def _open_append(self) -> tuple[int, bool]:
+        self._validate_directory_chain()
         created = False
         try:
             descriptor = os.open(
-                self._path,
+                self._name,
                 os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | _OPEN_BASE,
                 0o600,
+                dir_fd=self._parent_fd,
             )
             created = True
         except FileExistsError:
-            descriptor = os.open(self._path, os.O_RDWR | os.O_APPEND | _OPEN_BASE)
+            descriptor = os.open(
+                self._name, os.O_RDWR | os.O_APPEND | _OPEN_BASE, dir_fd=self._parent_fd
+            )
         try:
             self._validate_descriptor(descriptor)
         except BaseException:
@@ -260,7 +353,7 @@ class FileAuthorityJournal:
 
     def load(self) -> tuple[JournalRecordV1, ...]:
         """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
-        if not self._path.exists() and not self._path.is_symlink():
+        if self._entry_status() is None:
             self._cache = _JournalCache([], _ValidationState(), None, 0, b"")
             return ()
         descriptor = self._open_read()
@@ -320,7 +413,8 @@ class FileAuthorityJournal:
                 != self._cache.tail_bytes
             ):
                 raise ValueError("authority journal tail changed since validation")
-            path_status = os.stat(self._path, follow_symlinks=False)
+            self._validate_directory_chain()
+            path_status = os.stat(self._name, dir_fd=self._parent_fd, follow_symlinks=False)
             after_check = os.fstat(descriptor)
             if (
                 self._identity(after_check) != self._identity(before)
@@ -333,7 +427,8 @@ class FileAuthorityJournal:
                 written += os.write(descriptor, encoded[written:])
             os.fsync(descriptor)
             final_status = os.fstat(descriptor)
-            final_path_status = os.stat(self._path, follow_symlinks=False)
+            self._validate_directory_chain()
+            final_path_status = os.stat(self._name, dir_fd=self._parent_fd, follow_symlinks=False)
             if (
                 final_path_status.st_dev != final_status.st_dev
                 or final_path_status.st_ino != final_status.st_ino
@@ -342,11 +437,7 @@ class FileAuthorityJournal:
         finally:
             os.close(descriptor)
         if created:
-            parent = os.open(self._path.parent, os.O_RDONLY | os.O_DIRECTORY | _OPEN_BASE)
-            try:
-                os.fsync(parent)
-            finally:
-                os.close(parent)
+            os.fsync(self._parent_fd)
         final_identity = self._identity(final_status)
         self._apply_delta(state, delta)
         self._cache.records.append(record)
