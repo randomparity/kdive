@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any, cast
@@ -87,6 +88,14 @@ def _payload(record: JournalRecordV1) -> dict[str, object]:
     return record.model_dump(mode="json", by_alias=True) | {
         "canonical_record": canonical_record_bytes(record).decode()
     }
+
+
+def _canonicalize(payload: dict[str, object]) -> None:
+    canonical = dict(payload)
+    canonical.pop("canonical_record", None)
+    payload["canonical_record"] = json.dumps(
+        canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
 
 
 def _advance_raw(
@@ -429,8 +438,6 @@ def test_malformed_genesis_is_conflict_without_a_write(
     if mutation != "noncanonical":
         canonical = dict(payload)
         canonical.pop("canonical_record", None)
-        import json
-
         payload["canonical_record"] = json.dumps(
             canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
@@ -459,6 +466,60 @@ def test_concurrent_identical_genesis_is_idempotent(
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: advance(), range(2)))
     assert results == ["advanced", "advanced"]
+
+
+def test_continuation_constraints_reject_malformed_retained_json(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "c")
+    record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+    with psycopg.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as provider_authority:
+        assert (
+            _advance_raw(provider_authority, case, authority, 0, GENESIS_DIGEST, _payload(record))
+            == "advanced"
+        )
+    suspended = {
+        "authority_id": str(authority.authority_id),
+        "generation": authority.generation,
+        "activation_id": str(case.activation_id),
+        "operation_identity": case.operation_identity,
+        "attempt_id": str(case.job_id),
+        "purpose": case.purpose,
+        "request_digest": authority.operation_digest,
+        "phase": "admitted",
+        "source_identity": "source-a",
+        "target_identity": "target-a",
+        "ownership_digest": _DIGEST,
+    }
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        before = admin.execute(
+            "SELECT pending_takeover,suspended_operation FROM "
+            "external_boot_authority_journal_heads WHERE system_id=%s",
+            (case.system_id,),
+        ).fetchone()
+        assert before is not None
+        with pytest.raises(psycopg.DataError):
+            admin.execute(
+                "UPDATE external_boot_authority_journal_heads SET pending_takeover="
+                "jsonb_set(pending_takeover, '{authority_id}', '\"not-a-uuid\"') "
+                "WHERE system_id=%s",
+                (case.system_id,),
+            )
+        suspended["attempt_id"] = "not-a-uuid"
+        with pytest.raises(psycopg.DataError):
+            admin.execute(
+                "UPDATE external_boot_authority_journal_heads SET suspended_operation=%s "
+                "WHERE system_id=%s",
+                (Jsonb(suspended), case.system_id),
+            )
+        after = admin.execute(
+            "SELECT pending_takeover,suspended_operation FROM "
+            "external_boot_authority_journal_heads WHERE system_id=%s",
+            (case.system_id,),
+        ).fetchone()
+        assert after == before
 
 
 def test_full_current_mutation_phase_sequence_and_rejections(
@@ -502,6 +563,11 @@ def test_full_current_mutation_phase_sequence_and_rejections(
         JournalPhase.TERMINAL,
     ]
     previous = acknowledgement
+    owned = RecoveryObjectBindingV1(
+        system_id=case.system_id,
+        activation_id=case.activation_id,
+        reference="current-object-a",
+    )
     with psycopg.connect(
         authority_role_dsns("kdive_provider_authority"), autocommit=True
     ) as connection:
@@ -515,7 +581,15 @@ def test_full_current_mutation_phase_sequence_and_rejections(
                 }
             if phase is JournalPhase.TERMINAL:
                 changes["outcome"] = "source"
-            record = _record(case, authority, sequence, record_digest(previous), phase, **changes)
+            record = _record(
+                case,
+                authority,
+                sequence,
+                record_digest(previous),
+                phase,
+                recovery_objects=(owned,),
+                **changes,
+            )
             before = _head(connection, case, authority)
             skipped = record.model_copy(update={"sequence": sequence + 1})
             assert (
@@ -530,6 +604,73 @@ def test_full_current_mutation_phase_sequence_and_rejections(
                 == "conflict"
             )
             assert _head(connection, case, authority) == before
+            if phase is not JournalPhase.ADMITTED:
+                replacements = (
+                    {"attempt_id": uuid4()},
+                    {"expected_source_identity": "source-b"},
+                    {"intended_target_identity": "target-b"},
+                    {
+                        "recovery_objects": (
+                            RecoveryObjectBindingV1(
+                                system_id=case.system_id,
+                                activation_id=case.activation_id,
+                                reference="current-object-b",
+                            ),
+                        )
+                    },
+                )
+                for replacement in replacements:
+                    drifted = record.model_copy(update=replacement)
+                    assert (
+                        _advance_raw(
+                            connection,
+                            case,
+                            authority,
+                            sequence - 1,
+                            record_digest(previous),
+                            _payload(drifted),
+                        )
+                        == "conflict"
+                    )
+                    assert _head(connection, case, authority) == before
+                malformed_payloads: list[dict[str, object]] = []
+                for field, value in (
+                    ("expected_source_identity", ""),
+                    ("intended_target_identity", "x" * 1025),
+                ):
+                    malformed = _payload(record)
+                    malformed[field] = value
+                    _canonicalize(malformed)
+                    malformed_payloads.append(malformed)
+                foreign_object = _payload(record)
+                recovery = cast(list[dict[str, object]], foreign_object["recovery_objects"])
+                recovery[0]["system_id"] = str(uuid4())
+                _canonicalize(foreign_object)
+                malformed_payloads.append(foreign_object)
+                if phase in {JournalPhase.OBSERVED, JournalPhase.TERMINAL}:
+                    bad_observation = _payload(record)
+                    observation = cast(dict[str, object], bad_observation["observation"])
+                    observation["category"] = "foreign"
+                    _canonicalize(bad_observation)
+                    malformed_payloads.append(bad_observation)
+                if phase is JournalPhase.TERMINAL:
+                    bad_outcome = _payload(record)
+                    bad_outcome["observation"] = None
+                    _canonicalize(bad_outcome)
+                    malformed_payloads.append(bad_outcome)
+                for malformed in malformed_payloads:
+                    assert (
+                        _advance_raw(
+                            connection,
+                            case,
+                            authority,
+                            sequence - 1,
+                            record_digest(previous),
+                            malformed,
+                        )
+                        == "conflict"
+                    )
+                    assert _head(connection, case, authority) == before
             assert (
                 _advance_raw(
                     connection,
