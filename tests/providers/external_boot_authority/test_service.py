@@ -801,6 +801,7 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
         phase_dir.mkdir()
         path = phase_dir / f"{request.system_id}.journal"
         path.write_bytes(b"".join(source_lines[: index + 1]))
+        path.chmod(0o600)
         repository = _Repository(peer, request)
         repository.allocating_request = successor
         repository.records = list(source_records[: index + 1])

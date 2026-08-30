@@ -173,6 +173,7 @@ def test_append_validates_only_candidate_after_streamed_load(
         records.append(record)
         previous = record_digest(record)
     path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    path.chmod(0o600)
     loaded_size = path.stat().st_size
     journal = FileAuthorityJournal(path)
     assert journal.load() == tuple(records)
@@ -223,6 +224,7 @@ def test_append_reuses_history_and_validation_storage_at_any_scale(
         records.append(record)
         previous = record_digest(record)
     path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    path.chmod(0o600)
     journal = FileAuthorityJournal(path)
     journal.load()
     assert journal._cache is not None
