@@ -61,8 +61,9 @@ bytes`, `record_digest(record) -> str`, and `FileAuthorityJournal.append(record)
    positive-quiescence-digest fields. Rerun the command; expect all protocol tests to pass.
 3. Write journal tests for genesis, previous-digest chaining, takeover and mutation phase ordering,
    exclusive mode-0600 creation without symlink following, parent-directory fsync before the first
-   checkpoint,
-   canonical newline-delimited encoding, partial final records, duplicate/reordered sequences,
+   checkpoint, and rejection of an existing path that is not a regular service-owned file or has
+   group/other write bits. Cover canonical newline-delimited encoding, partial final records,
+   duplicate/reordered sequences,
    foreign lane identity, ownership mutation, and corrupt digests. Run the journal test file;
    expect failures for missing codec and journal.
 4. Implement the canonical JSON codec and journal using descriptor-based exclusive/no-follow open,
@@ -85,7 +86,8 @@ expectations that enumerate every schema file.
 `resolve_allocating_authority_binding(conn, *, peer_incarnation_id, authority_id, generation) ->
 AuthorityBinding | None`, `resolve_current_authority_binding(conn, *, peer_incarnation_id,
 authority_id, generation, acknowledgement_sequence, acknowledgement_digest) -> AuthorityBinding |
-None`, and `advance_journal_head(conn, *, binding, expected_sequence,
+None`, `read_journal_head(conn, *, binding) -> JournalHead | None`, and
+`advance_journal_head(conn, *, binding, expected_sequence,
 expected_digest, record) -> Literal["advanced", "superseded", "conflict"]`. Task 3 consumes this
 repository protocol; it does not issue SQL directly.
 
@@ -95,7 +97,8 @@ the latter retains the one serialized lower operation's authority/generation/act
 operation/attempt/purpose/request digest, prior phase, and source/target/ownership digests.
 
 1. Write migration tests for the table constraints, genesis insertion, exact 0122 binding lookup,
-   authority-role grants, denied worker/reconciler/core table writes, and no lifecycle permissions.
+   binding-scoped trusted-head read, authority-role execute grants, denied worker/reconciler/core
+   reads and writes, and no lifecycle permissions.
    Run `just test-verbose tests/db/test_external_boot_authority_journal_migration.py`; expect a
    missing-migration failure.
 2. Add concurrent compare-and-set tests: one successor advances, stale expected heads change zero
@@ -117,13 +120,17 @@ operation/attempt/purpose/request digest, prior phase, and source/target/ownersh
    immutable field and phase; terminal completion clears the suspended state and returns only to
    that takeover; exact newer supersession replaces only the pending takeover. Fabricated lower
    operations, wrong admitted/started phase, wrong attempt/request/ownership digest, unrelated
-   takeover, partial-null groups, and over-bound values change zero rows.
+   takeover, partial-null groups, and over-bound values change zero rows. Exact
+   `takeover-acknowledged` atomically clears its matching `PendingTakeover`. Prove the only successor
+   order is `G watermark-installed` → `H takeover-superseded` → `H watermark-installed`; skipped,
+   reversed, duplicated, or foreign transitions change zero rows.
 5. Implement migration 0123 with the one-row-per-lane head, bounded continuation columns,
    constraints, security-definer resolve
    and compare-and-set functions, pinned `search_path`, explicit revokes, and exact execute grants.
    Acquire the System advisory lock before the head row and re-resolve the 0122 binding under lock.
-6. Implement the typed psycopg repository wrapper and prove it maps all three SQL outcomes without
-   swallowing database failures. Rerun the migration file; expect all tests to pass.
+6. Implement the typed psycopg repository wrapper and prove binding-scoped head reads plus all three
+   SQL outcomes without swallowing database failures. Rerun the migration file; expect all tests to
+   pass.
 7. Update the existing migration-count/name assertions, regenerate nothing by hand, then run
    `just test-verbose tests/db/test_migrate.py tests/db/test_external_boot_authority_migration.py
    tests/db/test_external_boot_authority_journal_migration.py`; expect all tests to pass.
@@ -149,13 +156,15 @@ repository.
 
 1. Write a fake repository, journal, and controllable adapter. Test unauthenticated/inactive peer,
    stale/cross-binding request, malformed ownership, and failed readiness all produce no journal or
-   provider access. Run the service file; expect import failures.
+   provider access. The fake's binding-scoped `read_journal_head` drives startup equality and
+   mismatch cases. Run the service file; expect import failures.
 2. Prove takeover accepts only the newest exact `allocating` binding, performs no provider mutation,
    anchors `watermark-installed` before quiescing older calls, and returns the final
    `takeover-acknowledged` sequence/digest plus the canonical positive-quiescence digest. Prove an
-   intervening newer allocation records `takeover-superseded`, inherits unresolved work, and cannot
-   strand the lane. Prove mutation is denied until core promotes the binding to `current` with the
-   exact acknowledgement sequence and digest.
+   intervening newer allocation follows exactly `G watermark-installed` →
+   `H takeover-superseded` → `H watermark-installed`, inherits unresolved work, and cannot strand
+   the lane; reject reversed or skipped phases. Prove mutation is denied until core promotes the
+   binding to `current` with the exact acknowledgement sequence and digest.
 3. Add concurrency tests that pause an old operation before and after every commit point, admit a
    successor, and prove acknowledgement remains pending until the old call is positively observed.
    Cover the admitted-before-start race with a provider-access-free terminal `never-began`, plus
@@ -174,7 +183,9 @@ repository.
    head must never survive a missing directory entry.
 6. Implement lane state, startup recovery, phase append+anchor, pre-commit binding rechecks,
    cancellation shielding, positive observation classification, and bounded structured errors.
-   Do not add lease/deadline promotion or automatic journal repair.
+   Add bounded structured logs and metrics for rejection category, recovery failure, unresolved
+   older calls, and checkpoint latency. Labels are provider kind and authority instance only, never
+   tenant-controlled values. Do not add lease/deadline promotion or automatic journal repair.
 7. Rerun `just test-verbose tests/providers/external_boot_authority`; expect all tests to pass.
    Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 3 paths
    as `feat(providers): serialize authority mutations`.
@@ -231,7 +242,9 @@ implemented above; define no production API.
    ownership. Run the file with a controlled fault in the generation or head comparison and confirm
    at least one test fails; revert the fault.
 2. Run all focused provider and migration commands from the spec; expect all tests to pass. Run
-   `just lint` and `just type`; expect exit 0.
+   `just lint` and `just type`; expect exit 0. Assert recovery failures, unresolved-call gauges,
+   rejection counters, and checkpoint latency are bounded and carry no tenant-controlled labels or
+   provider output.
 3. Run `just ci` bare; expect exit 0. Record environment-gated live tiers as not run unless their
    prerequisites are present; do not treat a skip as a live proof.
 4. Re-read `git diff main...HEAD`, verify wrapper docs are unaffected, run `git diff --check`, and
