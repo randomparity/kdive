@@ -26,12 +26,12 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
     record_digest,
 )
-from tests.db.test_external_boot_authority_migration import (
+from tests.db.external_boot_authority_support import (
     _allocate,
     _RoleDsns,
     _seed_case,
 )
-from tests.db.test_external_boot_authority_migration import (
+from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
 
