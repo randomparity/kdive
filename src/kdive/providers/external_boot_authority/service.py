@@ -30,7 +30,7 @@ from kdive.providers.external_boot_authority.protocol import (
 class AuthenticatedPeer:
     """Identity established by the hosting authentication boundary."""
 
-    incarnation_id: UUID
+    incarnation_id: UUID | str
 
 
 class AuthorityMutationAdapter(Protocol):
@@ -287,7 +287,7 @@ class ExternalBootAuthorityService:
         peer: AuthenticatedPeer | None,
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
     ) -> AuthenticatedPeer:
-        if peer is None or not isinstance(peer.incarnation_id, UUID):
+        if peer is None or not isinstance(peer.incarnation_id, UUID | str):
             raise self._reject("unauthenticated")
         return peer
 
@@ -327,12 +327,19 @@ class ExternalBootAuthorityService:
         if not records:
             raise AuthorityServiceError("journal_conflict")
         last = records[-1]
+        inherited_terminal = (
+            last.phase is JournalPhase.TERMINAL
+            and last.generation < binding.generation
+            and head.pending_takeover is not None
+            and head.pending_takeover.authority_id == binding.authority_id
+            and head.pending_takeover.generation == binding.generation
+        )
         if (
             last.sequence != head.sequence
             or record_digest(last) != head.digest
             or last.phase is not head.phase
-            or last.authority_id != head.authority_id
-            or last.generation != head.generation
+            or (not inherited_terminal and last.authority_id != head.authority_id)
+            or (not inherited_terminal and last.generation != head.generation)
             or last.operation_identity != head.operation_identity
         ):
             raise AuthorityServiceError("journal_conflict")

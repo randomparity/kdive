@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -17,15 +18,23 @@ from kdive.db.external_boot_authority_journal import (
     advance_journal_head,
     read_journal_head,
     resolve_allocating_authority_binding,
+    resolve_current_authority_binding,
     resolve_current_authority_candidate,
 )
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthorityMutationRequestV1,
+    AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     RecoveryObjectBindingV1,
     canonical_record_bytes,
     record_digest,
+)
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    ExternalBootAuthorityService,
 )
 from tests.db.external_boot_authority_support import (
     _allocate,
@@ -35,6 +44,7 @@ from tests.db.external_boot_authority_support import (
 from tests.db.external_boot_authority_support import (
     authority_role_dsns as authority_role_dsns,  # noqa: F401
 )
+from tests.providers.external_boot_authority.service_support import _Adapter
 
 _FUNCTIONS = {
     "resolve_allocating_external_boot_authority(text,uuid,bigint)",
@@ -144,6 +154,94 @@ def _seed_allocated(migrated_url: str, role_dsns: _RoleDsns, suffix: str) -> tup
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         authority = _allocate(worker, case)
     return case, authority
+
+
+class _RealRepository:
+    def __init__(self, connection: psycopg.AsyncConnection[Any]) -> None:
+        self.connection = connection
+
+    async def resolve_allocating(
+        self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
+    ):
+        return await resolve_allocating_authority_binding(
+            self.connection,
+            peer_incarnation_id=str(peer.incarnation_id),
+            authority_id=request.authority_id,
+            generation=request.generation,
+        )
+
+    async def resolve_current_candidate(
+        self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+    ):
+        return await resolve_current_authority_candidate(
+            self.connection,
+            peer_incarnation_id=str(peer.incarnation_id),
+            authority_id=request.authority_id,
+            generation=request.generation,
+        )
+
+    async def resolve_current(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ):
+        return await resolve_current_authority_binding(
+            self.connection,
+            peer_incarnation_id=str(peer.incarnation_id),
+            authority_id=request.authority_id,
+            generation=request.generation,
+            acknowledgement_sequence=acknowledgement_sequence,
+            acknowledgement_digest=acknowledgement_digest,
+        )
+
+    async def read_head(self, binding: Any):
+        return await read_journal_head(self.connection, binding=binding)
+
+    async def advance(
+        self,
+        binding: Any,
+        expected_sequence: int,
+        expected_digest: str,
+        record: JournalRecordV1,
+    ):
+        return await advance_journal_head(
+            self.connection,
+            binding=binding,
+            expected_sequence=expected_sequence,
+            expected_digest=expected_digest,
+            record=record,
+        )
+
+
+def _takeover_request(case: Any, authority: Any) -> AuthorityTakeoverRequestV1:
+    return AuthorityTakeoverRequestV1(
+        authority_id=authority.authority_id,
+        generation=authority.generation,
+        system_id=case.system_id,
+        activation_id=case.activation_id,
+        run_id=case.run_id,
+        plan_identity="sha256:" + "a" * 64,
+        purpose=case.purpose,
+        operation=case.operation,
+        provider_kind=case.provider_kind,
+        authority_instance=case.authority_instance,
+        operation_identity=case.operation_identity,
+        operation_digest=authority.operation_digest,
+    )
+
+
+def _mutation_request(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1:
+    return AuthorityMutationRequestV1.model_validate(
+        request.model_dump(mode="json", by_alias=True)
+        | {
+            "attempt_id": str(uuid4()),
+            "expected_source_identity": "source-a",
+            "intended_target_identity": "target-a",
+            "recovery_objects": [],
+        }
+    )
 
 
 def _promote(
@@ -798,6 +896,79 @@ async def test_repository_round_trips_typed_binding_and_head(
             generation=authority.generation,
         )
         assert current is not None and current.state == "current"
+
+
+@pytest.mark.anyio
+async def test_service_promotes_and_mutates_through_real_repository(
+    tmp_path: Any, migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "s")
+    request = _takeover_request(case, authority)
+    peer = AuthenticatedPeer(case.worker_id)
+    adapter = _Adapter()
+    async with await psycopg.AsyncConnection.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        service = ExternalBootAuthorityService(
+            repository=_RealRepository(connection),
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path, f"{system_id}.journal"
+            ),
+            adapter=adapter,
+        )
+        await service.acknowledge_takeover(peer, request)
+        journal = FileAuthorityJournal(tmp_path, f"{request.system_id}.journal")
+        acknowledgement = journal.load()[-1]
+        journal.close()
+        _promote(migrated_url, case, authority, acknowledgement)
+
+        observation = await service.execute_mutation(peer, _mutation_request(request))
+
+        assert observation.category == "target"
+        assert adapter.calls == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
+async def test_service_successor_authenticates_inflight_completion_through_real_cas(
+    tmp_path: Any, migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "i")
+    request = _takeover_request(case, authority)
+    peer = AuthenticatedPeer(case.worker_id)
+    adapter = _Adapter()
+    async with await psycopg.AsyncConnection.connect(
+        authority_role_dsns("kdive_provider_authority"), autocommit=True
+    ) as connection:
+        service = ExternalBootAuthorityService(
+            repository=_RealRepository(connection),
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path, f"{system_id}.journal"
+            ),
+            adapter=adapter,
+        )
+        await service.acknowledge_takeover(peer, request)
+        journal = FileAuthorityJournal(tmp_path, f"{request.system_id}.journal")
+        acknowledgement = journal.load()[-1]
+        journal.close()
+        _promote(migrated_url, case, authority, acknowledgement)
+        adapter.release.clear()
+        mutation_task = asyncio.create_task(
+            service.execute_mutation(peer, _mutation_request(request))
+        )
+        await adapter.entered.wait()
+        successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, case)
+        successor_request = _takeover_request(successor_case, successor)
+        takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor_request))
+        active = service._lanes[request.system_id].active
+        assert active is not None
+        while active.completion_binding is None:
+            await asyncio.sleep(0)
+        assert not takeover_task.done()
+
+        adapter.release.set()
+
+        assert (await mutation_task).category == "target"
+        assert (await takeover_task).generation == successor.generation
 
 
 def test_successor_takeover_has_exact_supersede_watermark_ack_order(
