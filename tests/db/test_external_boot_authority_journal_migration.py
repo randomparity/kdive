@@ -10,6 +10,7 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     JournalPhase,
     JournalRecordV1,
+    canonical_record_bytes,
     record_digest,
 )
 from tests.db.test_external_boot_authority_migration import (
@@ -149,7 +150,7 @@ def test_allocating_binding_can_create_and_read_exact_genesis_head(
             }
         )
         payload = record.model_dump(mode="json", by_alias=True) | {
-            "record_digest": record_digest(record)
+            "canonical_record": canonical_record_bytes(record).decode("utf-8")
         }
         assert provider_authority.execute(
             "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
