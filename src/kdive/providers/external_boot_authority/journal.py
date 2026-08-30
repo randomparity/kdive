@@ -47,6 +47,24 @@ class _ValidationState:
     count: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _FileIdentity:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(slots=True)
+class _JournalCache:
+    records: tuple[JournalRecordV1, ...]
+    state: _ValidationState
+    identity: _FileIdentity | None
+    tail_offset: int
+    tail_bytes: bytes
+
+
 class FileAuthorityJournal:
     """One private newline-delimited journal whose writes are fsynced before return."""
 
@@ -62,7 +80,17 @@ class FileAuthorityJournal:
         self._path = path
         self._owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self._max_bytes = max_bytes
-        self._cache: tuple[tuple[JournalRecordV1, ...], _ValidationState, int] | None = None
+        self._cache: _JournalCache | None = None
+
+    @staticmethod
+    def _identity(status: os.stat_result) -> _FileIdentity:
+        return _FileIdentity(
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
 
     def _validate_descriptor(self, descriptor: int) -> None:
         status = os.fstat(descriptor)
@@ -92,7 +120,7 @@ class FileAuthorityJournal:
             )
             created = True
         except FileExistsError:
-            descriptor = os.open(self._path, os.O_WRONLY | os.O_APPEND | _OPEN_BASE)
+            descriptor = os.open(self._path, os.O_RDWR | os.O_APPEND | _OPEN_BASE)
         try:
             self._validate_descriptor(descriptor)
         except BaseException:
@@ -189,12 +217,13 @@ class FileAuthorityJournal:
     def load(self) -> tuple[JournalRecordV1, ...]:
         """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
         if not self._path.exists() and not self._path.is_symlink():
-            self._cache = ((), _ValidationState(), 0)
+            self._cache = _JournalCache((), _ValidationState(), None, 0, b"")
             return ()
         descriptor = self._open_read()
         try:
             with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                size = os.fstat(descriptor).st_size
+                status = os.fstat(descriptor)
+                size = status.st_size
                 if size > self._max_bytes:
                     raise ValueError("authority journal exceeds configured byte maximum")
                 records: list[JournalRecordV1] = []
@@ -217,26 +246,54 @@ class FileAuthorityJournal:
         finally:
             os.close(descriptor)
         result = tuple(records)
-        self._cache = (result, state, size)
+        tail_bytes = canonical_record_bytes(result[-1]) + b"\n" if result else b""
+        self._cache = _JournalCache(
+            result, state, self._identity(status), size - len(tail_bytes), tail_bytes
+        )
         return result
 
     def append(self, record: JournalRecordV1) -> None:
         """Append one record, fsyncing file and newly created parent entry before return."""
-        current = self.load() if self._cache is None else self._cache[0]
+        current = self.load() if self._cache is None else self._cache.records
         assert self._cache is not None
-        state = deepcopy(self._cache[1])
+        state = deepcopy(self._cache.state)
         encoded = canonical_record_bytes(record) + b"\n"
-        if self._cache[2] + len(encoded) > self._max_bytes:
+        cached_size = self._cache.identity.size if self._cache.identity is not None else 0
+        if cached_size + len(encoded) > self._max_bytes:
             raise ValueError("authority journal append exceeds configured byte maximum")
         self._validate_record(state, record)
         descriptor, created = self._open_append()
         try:
-            if os.fstat(descriptor).st_size != self._cache[2]:
+            before = os.fstat(descriptor)
+            if self._cache.identity is None:
+                if not created or before.st_size != 0:
+                    raise ValueError("authority journal changed since validation")
+            elif self._identity(before) != self._cache.identity:
+                raise ValueError("authority journal changed since validation")
+            if self._cache.tail_bytes and (
+                os.pread(descriptor, len(self._cache.tail_bytes), self._cache.tail_offset)
+                != self._cache.tail_bytes
+            ):
+                raise ValueError("authority journal tail changed since validation")
+            path_status = os.stat(self._path, follow_symlinks=False)
+            after_check = os.fstat(descriptor)
+            if (
+                self._identity(after_check) != self._identity(before)
+                or path_status.st_dev != after_check.st_dev
+                or path_status.st_ino != after_check.st_ino
+            ):
                 raise ValueError("authority journal changed since validation")
             written = 0
             while written < len(encoded):
                 written += os.write(descriptor, encoded[written:])
             os.fsync(descriptor)
+            final_status = os.fstat(descriptor)
+            final_path_status = os.stat(self._path, follow_symlinks=False)
+            if (
+                final_path_status.st_dev != final_status.st_dev
+                or final_path_status.st_ino != final_status.st_ino
+            ):
+                raise ValueError("authority journal changed during append")
         finally:
             os.close(descriptor)
         if created:
@@ -245,4 +302,7 @@ class FileAuthorityJournal:
                 os.fsync(parent)
             finally:
                 os.close(parent)
-        self._cache = ((*current, record), state, self._cache[2] + len(encoded))
+        final_identity = self._identity(final_status)
+        self._cache = _JournalCache(
+            (*current, record), state, final_identity, final_identity.size - len(encoded), encoded
+        )
