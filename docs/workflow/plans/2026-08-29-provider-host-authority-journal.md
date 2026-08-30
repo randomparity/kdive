@@ -1,12 +1,12 @@
 # Provider-host external-boot authority and journal implementation plan
 
 **Goal:** Implement issue #2126's provider-host authority, exact journal recovery, database head
-checkpoint, and equivalent local/remote libvirt adapters.
+checkpoint, and shared bounded mutation-adapter contract.
 
 **Architecture:** A provider-neutral authority service validates migration 0122 bindings, serializes
 one lane per System, journals and anchors every mutation phase, and delegates only typed commit
-points to a provider adapter. Migration 0123 owns an independent monotonic journal head; local and
-remote adapters share the same bounded port and contract tests.
+points to a provider adapter. Migration 0123 owns an independent monotonic journal head; concrete
+local and remote adapters and composition are owned by #2140.
 
 **Tech stack:** Python 3.14, Pydantic, asyncio, psycopg 3, PostgreSQL, pytest, Hypothesis, libvirt.
 
@@ -196,66 +196,43 @@ repository.
 through cancellation and restart; no provider commit occurs without a current exact binding; every
 returned acknowledgement is backed by the exact fsynced and anchored terminal evidence.
 
-## Task 4: Add bounded local and remote libvirt adapters
+## Moved task: Integrate local and remote libvirt adapters
 
-**Files:** Create `src/kdive/providers/local_libvirt/external_boot_authority.py` and
-`src/kdive/providers/remote_libvirt/external_boot_authority.py`; update the corresponding
-`composition.py` files only to construct the bounded adapter; create matching
-`tests/providers/local_libvirt/test_external_boot_authority.py` and
-`tests/providers/remote_libvirt/test_external_boot_authority.py`.
+Concrete local-libvirt and remote-libvirt `AuthorityMutationAdapter` implementations, composition,
+configured-coordinate proofs, bounded provider-error mapping, and advertisement gating moved to
+#2140. They depend on the real external-boot primitives owned by #2108, #2110, and #2120 and are not
+an executable task in this plan.
 
-**Interfaces:** Each module implements Task 3's `AuthorityMutationAdapter`. Local construction takes
-the configured libvirt URI; remote construction takes the already resource-bound
-`RemoteLibvirtConfig` and existing connection factory. Neither accepts transport coordinates from
-`AuthorityMutationRequestV1`.
-
-1. Write one shared behavioral test matrix and invoke it for local and remote adapters. It covers
-   exact source, target, mixed/unreadable/conflict observations; every external-boot commit point;
-   stable recovery ownership; bounded exception mapping; and rejection of unsupported commit
-   points. Run both files; expect missing adapter failures.
-2. Add provider-specific tests proving local uses only its configured URI and remote uses only the
-   already selected resource config. Pass hostile URI/path/command-like identity strings and prove
-   they remain opaque comparison values and never reach connection or command construction.
-3. Implement the smallest adapters over existing libvirt lifecycle primitives. Return only typed
-   identities and categories; redact provider exceptions through existing redaction boundaries.
-4. Wire construction into local and remote composition without changing existing
-   `ProviderRuntime.external_boot` behavior or advertising v1 before an authenticated service host
-   is configured. Rerun both adapter files and relevant composition tests; expect all to pass.
-5. Run `just test-verbose tests/providers/external_boot_authority
-   tests/providers/local_libvirt/test_external_boot_authority.py
-   tests/providers/remote_libvirt/test_external_boot_authority.py`; expect all tests to pass.
-6. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 4 paths
-   as `feat(providers): adapt authority mutations to libvirt`.
-
-**Acceptance:** Local and remote providers obey one contract and expose no caller-selected provider
-coordinates; legacy and non-external provider behavior is unchanged.
-
-## Task 5: Prove the complete authority boundary
+## Task 4: Prove the complete core authority boundary
 
 **Files:** Create `tests/adversarial/test_external_boot_authority_journal.py`; update the design
 spec only if implementation revealed a factual correction, never to weaken a failed proof.
 
-**Interfaces:** Consume the public protocol, service, repository, and both adapters exactly as
-implemented above; define no production API.
+**Interfaces:** Consume the public protocol, service, repository, and Task 3's controllable shared
+adapter contract exactly as implemented above; define no production API or composition binding.
 
 1. Write adversarial races covering two generations, stale retries with successful idempotency
    keys, later Run versus earlier completed Run, lost response at every commit point, restart with
    an unresolved call, conflict/source/target classification, release/teardown, and stable recovery
    ownership. Run the file with a controlled fault in the generation or head comparison and confirm
    at least one test fails; revert the fault.
-2. Run all focused provider and migration commands from the spec; expect all tests to pass. Run
+2. Prove `readiness` remains false for journal/head disagreement and unresolved recovery and becomes
+   true only for exact recovered continuity. Prove no production assembly advertises v1 in this
+   issue; authenticated hosting belongs to #2127 and concrete provider composition belongs to
+   #2140.
+3. Run all focused provider and migration commands from the spec; expect all tests to pass. Run
    `just lint` and `just type`; expect exit 0. Assert recovery failures, unresolved-call gauges,
    rejection counters, and checkpoint latency are bounded and carry no tenant-controlled labels or
    provider output.
-3. Run `just ci` bare; expect exit 0. Record environment-gated live tiers as not run unless their
+4. Run `just ci` bare; expect exit 0. Record environment-gated live tiers as not run unless their
    prerequisites are present; do not treat a skip as a live proof.
-4. Re-read `git diff main...HEAD`, verify wrapper docs are unaffected, run `git diff --check`, and
+5. Re-read `git diff main...HEAD`, verify wrapper docs are unaffected, run `git diff --check`, and
    commit the explicit adversarial test path and any factual spec correction as
    `test(providers): prove authority takeover fencing`.
 
-**Acceptance:** The branch proves all issue completion criteria, all threat-model controls, and the
-same bounded semantics for local and remote adapters. No excluded subsystem or deployment promise
-is introduced.
+**Acceptance:** The branch proves all narrowed #2126 completion criteria and threat-model controls
+through the shared adapter contract. No concrete provider integration, assembly advertisement,
+excluded subsystem, or deployment promise is introduced.
 
 ## Rollback and cleanup
 
