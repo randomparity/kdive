@@ -91,9 +91,10 @@ rename or symlink substitution cannot redirect the read. It requires source owne
 capture identity to agree before reading and applies regular-file, service-owner, private-mode,
 reservation-size, archive-entry, and uncompressed-byte bounds before guest mutation. It accepts and
 returns no host path, closes every archive and directory descriptor on success or error, and exposes
-no path-selection operation. Any lookup, identity, read, close, or bound failure is a conflict with
-zero guest mutation; durable restore staging and phase metadata make retry classify the unchanged
-source or the provider-owned partial state atomically.
+no path-selection operation. Lookup, identity, metadata, or bound rejection completed before restore
+starts is a conflict with zero guest mutation. A read or close failure after guest staging starts
+must not publish or replace the live release; it durably classifies the provider-owned partial
+staging state and stops further mutation so retry can resume or remove that owned partial.
 
 Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed content.
 Restoration stages beside the release directory, verifies its manifest, and uses
@@ -157,8 +158,9 @@ Teardown likewise quarantines evidence it cannot authenticate.
 - Archive-source contract and adversarial tests freeze the exact restore signature and prove
   cross-owner/release/capture rejection, absolute or traversal-name rejection, symlink and rename
   substitution resistance, non-regular/foreign-owner/non-private/over-limit rejection, bounded
-  short/error reads, host-path opacity, close on success and error, zero mutation on rejection, and
-  deterministic retry classification after each durable restore boundary.
+  short/error reads, host-path opacity, and close on success and error. Tests distinguish
+  pre-staging rejection with zero guest mutation from post-staging read/close failure, which must
+  leave the live release unpublished and the owned partial state durably retry-classifiable.
 
 ## Considered & rejected
 
