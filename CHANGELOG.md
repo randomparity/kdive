@@ -166,6 +166,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Account and reap boot artifacts
 - Fence external boot authority results
 - Route external boot authority results
+- Define authority journal protocol
+- Anchor authority journal heads
+- Serialize authority mutations
+- Verify authority lane readiness
+- Recover authority lane handoffs
+- Adapt authority mutations to libvirt
+- Bound raw authority request decoding
 
 ### Changed
 
@@ -324,6 +331,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify run context reader
 - Share investigation terminal states
 - Group reconciler cleanup lanes
+- Append authority journal in constant work
+- Reuse authority journal lane cache
+- Simplify authority core
 
 ### Documentation
 
@@ -986,6 +996,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep journal work in provider issue
 - Make journal evidence opaque
 - State current authority cardinality
+- Design provider-host authority journal
+- Separate authority takeover from mutation
+- Harden authority takeover journal design
+- Correct authority takeover ordering
+- Close authority watermark races
+- Persist authority continuation evidence
+- Complete authority implementation plan
+- Narrow provider authority core scope
 
 ### Fixed
 
@@ -1593,6 +1611,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align authority result adapter
 - Represent fail authority operation
 - Align authority evidence contracts
+- Validate authority journal candidates
+- Bind acknowledgements to watermarks
+- Consume superseded watermarks
+- Terminalize superseded watermarks
+- Validate authority journal transitions
+- Advance suspended authority operations
+- Bind authority journal evidence
+- Validate journal attempt identifiers
+- Recover suspended authority work
+- Bind trusted takeover continuations
+- Authorize successor recovery
+- Stream bounded authority journals
+- Bound authority admission state
+- Detect authority journal replacement
+- Cap authority metric coordinates
+- Key metric capacity by coordinate
+- Resolve mutation binding before journal
+- Recover unresolved mutation before admission
+- Require private authority journal mode
+- Confine authority journals to trusted root
+- Bind stored authority operation
+- Align authority mutation journal binding
+- Redact authority recovery logs
 
 ### Security
 
