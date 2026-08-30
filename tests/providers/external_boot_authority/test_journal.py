@@ -308,13 +308,37 @@ def test_existing_symlink_is_rejected(tmp_path: Path) -> None:
         FileAuthorityJournal(path).load()
 
 
-@pytest.mark.parametrize("mode", [0o620, 0o602])
-def test_existing_group_or_other_writable_file_is_rejected(tmp_path: Path, mode: int) -> None:
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o640, 0o644, 0o700, 0o400])
+def test_existing_non_private_file_mode_is_rejected(tmp_path: Path, mode: int) -> None:
     path = tmp_path / "journal"
     path.write_text("")
     path.chmod(mode)
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError, match="mode 0600"):
         FileAuthorityJournal(path).load()
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o644, 0o700])
+def test_invalid_existing_mode_rejects_append_without_changing_bytes(
+    tmp_path: Path, mode: int
+) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record()
+    journal.append(first)
+    before = path.read_bytes()
+    path.chmod(mode)
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
+    )
+
+    with pytest.raises(PermissionError, match="mode 0600"):
+        FileAuthorityJournal(path).append(second)
+
+    assert path.read_bytes() == before
 
 
 def test_non_regular_path_is_rejected(tmp_path: Path) -> None:

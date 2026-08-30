@@ -179,7 +179,8 @@ acknowledgement is recorded by 0122 and the binding is current.
 For every phase the service appends and fsyncs locally, then advances the database head. On first
 creation it opens the lane journal without following symlinks, creates it exclusively with mode
 `0600`, fsyncs the file, and fsyncs the parent directory before the first database compare-and-set;
-existing journals must be regular, privately owned files with no writable group/other bits.
+existing journals must be regular, service-owned files with exact mode `0600`. Readable or
+executable group/other bits and owner execute bits fail before parsing or appending.
 `admitted`
 and `mutation-started` are both anchored before provider access. If the database update fails after
 local fsync, the file has a longer suffix and service enters failed-closed recovery. It never trims
