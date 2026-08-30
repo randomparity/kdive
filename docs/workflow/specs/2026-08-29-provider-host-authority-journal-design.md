@@ -84,6 +84,11 @@ records for their pre-watermark operation identities; they may not append `admit
 takeover appends and anchors `takeover-acknowledged`. These takeover records use the request's
 immutable operation identity and digest and perform no provider access.
 
+An operation paused after anchored `admitted` but before `mutation-started` may append one terminal
+`never-began` record directly from that admitted record. It performs no provider access and carries
+no provider observation. An operation with anchored `mutation-started` must instead append the
+bounded returned/observed/terminal sequence needed to classify its provider outcome.
+
 The acknowledgement returned to migration 0122 carries three distinct values: the exact sequence
 and digest of the anchored `takeover-acknowledged` record, plus `positive_quiescence_digest`. The
 quiescence digest is SHA-256 over canonical JSON containing the authority instance, System,
@@ -122,16 +127,26 @@ operation identity, and update time. A security-definer compare-and-set function
 provider-authority role, locks the System and head row, resolves the exact 0122 binding, and accepts
 only `(expected_sequence, expected_digest) -> (expected_sequence + 1, new_digest)`. The initial
 expected head is sequence zero and the fixed genesis digest. Sequence overflow, a non-current or
-mismatched binding, phase regression, operation switch before terminal, duplicate replay with
-different facts, or unexpected prior head changes zero rows and returns `superseded` or `conflict`
-without moving the checkpoint.
+mismatched binding, invalid phase transition, duplicate replay with different facts, or unexpected
+prior head changes zero rows and returns `superseded` or `conflict` without moving the checkpoint.
+
+Operation identity normally cannot switch before terminal. The only exceptions are checked against
+the retained lane chain: a watermark may switch to an exact previously anchored lower operation's
+completion-only records; that lower operation's terminal record may switch back to the same
+takeover; and watermark `G` may switch to `takeover-superseded` for the exact newer allocating
+generation. Each exception revalidates immutable System, activation, authority instance,
+operation, attempt, request digest, and generation relationships. No exception admits work or
+permits provider access; every other nonterminal operation switch conflicts without moving the
+head.
 
 The binding-state rule is phase-specific. `watermark-installed`, `takeover-superseded`, and
 `takeover-acknowledged` accept only the exact newest `allocating` binding. New mutation admission
 and commit phases accept only the exact `current` binding carrying the recorded takeover
 acknowledgement. After a watermark, a superseded lower binding may append only completion records
-for an operation whose `admitted` and `mutation-started` records are already anchored in that lane;
-the function verifies that immutable operation identity and permits no provider access. Every other
+for an operation whose `admitted` record is already anchored in that lane. Without
+`mutation-started`, only terminal `never-began` is legal; with it, only
+returned/observed/terminal completion is legal. The function verifies that immutable operation
+identity and permits no provider access. Every other
 cross-state or cross-phase attempt changes zero rows. `takeover-acknowledged` follows its matching
 watermark and all inherited lower terminal records. A mutation may start only after that exact
 acknowledgement is recorded by 0122 and the binding is current.

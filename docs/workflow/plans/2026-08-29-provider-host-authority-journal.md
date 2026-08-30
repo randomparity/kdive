@@ -101,7 +101,8 @@ repository protocol; it does not issue SQL directly.
 3. Add a complete binding-state/phase matrix: only the newest exact allocating authority may anchor
    takeover records; only the matching promoted current authority may admit or start mutations.
    After a watermark, a superseded lower authority may append only returned/observed/terminal
-   records for its already-anchored operation. Cross-state, cross-phase, stale, and unrelated
+   records for its already-started operation, or terminal `never-began` directly from its anchored
+   admitted record. Cross-state, cross-phase, stale, and unrelated
    attempts change zero rows. Race allocations between watermark and acknowledgement and prove the
    winner anchors `takeover-superseded`, inherits unresolved operations, and makes progress. Assert
    the acknowledgement exposes its anchored sequence/digest and a separately constructed canonical
@@ -145,10 +146,14 @@ repository.
    exact acknowledgement sequence and digest.
 3. Add concurrency tests that pause an old operation before and after every commit point, admit a
    successor, and prove acknowledgement remains pending until the old call is positively observed.
-   Cover cancellation and client disconnect while the lane task continues.
+   Cover the admitted-before-start race with a provider-access-free terminal `never-began`, plus
+   cancellation and client disconnect while a started lane task continues.
 4. Add exact phase-order tests proving `admitted` and `mutation-started` are fsynced and anchored
    before the first adapter call, and later observations are anchored before acknowledgement or a
-   later commit. Inject local-append, fsync, database-CAS, provider-return, and observation failures.
+   later commit. Prove the only nonterminal operation switches are watermark to exact inherited
+   completion, inherited terminal back to its takeover, and watermark to the exact newer allocating
+   takeover's supersession record. Inject local-append, fsync, database-CAS, provider-return, and
+   observation failures.
 5. Add restart matrices for every journal phase, including both takeover records, and reject
    empty-with-head, valid-prefix truncation, extra suffix, corruption, reorder, duplicate sequence,
    foreign lane, divergent phase/operation, and changed stable ownership. Include a trusted
