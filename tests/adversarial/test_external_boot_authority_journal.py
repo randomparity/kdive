@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     RecoveryObjectBindingV1,
@@ -167,11 +171,21 @@ async def test_release_and_teardown_are_independently_fenced(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("drift", ["system", "activation", "reference", "order", "digest"])
+@pytest.mark.parametrize("drift", ["system", "activation", "reference", "digest"])
 async def test_recovery_ownership_rejects_drift_without_provider_or_journal_access(
-    tmp_path: Path, drift: str
+    tmp_path: Path, drift: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
+    request = request.model_copy(
+        update={
+            "run_id": uuid4(),
+            "plan_identity": "sha256:" + "e" * 64,
+            "operation_identity": "tenant-operation-identity-do-not-log",
+        }
+    )
+    repository.request = request
+    repository.allocating_request = request
+    adapter.provider_output = "provider-output-do-not-log"
     await service.acknowledge_takeover(peer, request)
     repository.current = True
     objects = tuple(
@@ -182,12 +196,14 @@ async def test_recovery_ownership_rejects_drift_without_provider_or_journal_acce
                     activation_id=request.activation_id,
                     reference=reference,
                 )
-                for reference in ("object-a", "object-b")
+                for reference in ("object-a", "tenant-reference-do-not-log")
             ),
             key=lambda item: item.model_dump_json(),
         )
     )
-    mutation = _mutation(request).model_copy(update={"recovery_objects": objects})
+    mutation = _mutation(request).model_copy(
+        update={"operation": "tenant-operation-do-not-log", "recovery_objects": objects}
+    )
     adapter.fail_commit = True
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await service.execute_mutation(peer, mutation)
@@ -201,12 +217,21 @@ async def test_recovery_ownership_rejects_drift_without_provider_or_journal_acce
     assert service.metrics.unresolved == {labels: 1}
     assert repository.head is not None and repository.head.suspended_operation is not None
     exact = repository.head.suspended_operation
-    field = "system_id" if drift == "system" else "activation_id"
-    changes = (
-        {field: uuid4()}
-        if drift in {"system", "activation"}
-        else {"ownership_digest": "sha256:" + ("c" if drift == "reference" else "d") * 64}
-    )
+    if drift in {"system", "activation"}:
+        changes = {f"{drift}_id": uuid4()}
+    elif drift == "reference":
+        changed_objects = (
+            *objects[:-1],
+            objects[-1].model_copy(update={"reference": "changed-ref"}),
+        )
+        canonical = json.dumps(
+            [item.model_dump(mode="json") for item in changed_objects],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        changes = {"ownership_digest": "sha256:" + hashlib.sha256(canonical).hexdigest()}
+    else:
+        changes = {"ownership_digest": "sha256:" + "d" * 64}
     repository.head = replace(repository.head, suspended_operation=replace(exact, **changes))
     path = tmp_path / f"{request.system_id}.journal"
     before = path.read_bytes()
@@ -228,6 +253,44 @@ async def test_recovery_ownership_rejects_drift_without_provider_or_journal_acce
         adapter=adapter,
     )
     assert (await resumed.acknowledge_takeover(peer, successor)).generation == 2
+    forbidden = {
+        str(request.run_id),
+        request.plan_identity,
+        mutation.operation,
+        objects[-1].reference,
+        adapter.provider_output,
+    }
+    metric_surface = repr(
+        (
+            service.metrics.recovery_failures,
+            service.metrics.unresolved,
+            service.metrics.rejections,
+            service.metrics.checkpoint_latency,
+        )
+    )
+    log_surface = " ".join(f"{record.getMessage()} {record.__dict__}" for record in caplog.records)
+    assert all(value not in metric_surface for value in forbidden)
+    assert all(value not in log_surface for value in forbidden)
+
+
+def test_reversed_recovery_tuple_is_rejected_before_side_effects(tmp_path: Path) -> None:
+    service, repository, adapter, _, request = _service(tmp_path)
+    objects = tuple(
+        RecoveryObjectBindingV1(
+            system_id=request.system_id,
+            activation_id=request.activation_id,
+            reference=reference,
+        )
+        for reference in ("object-a", "object-b")
+    )
+    values = _mutation(request).model_dump(mode="json", by_alias=True)
+    values["recovery_objects"] = [item.model_dump(mode="json") for item in reversed(objects)]
+    with pytest.raises(ValidationError, match="sorted"):
+        AuthorityMutationRequestV1.model_validate(values)
+    assert repository.records == []
+    assert repository.head is None
+    assert adapter.calls == []
+    assert not (tmp_path / f"{request.system_id}.journal").exists()
 
 
 @pytest.mark.anyio
