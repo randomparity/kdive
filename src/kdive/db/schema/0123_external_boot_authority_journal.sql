@@ -175,6 +175,23 @@ CREATE FUNCTION public.resolve_current_external_boot_authority(
       AND ack.journal_sequence = p_ack_sequence AND ack.journal_digest = p_ack_digest
 $$;
 
+CREATE FUNCTION public.resolve_current_external_boot_authority_candidate(
+    p_peer_incarnation text, p_authority_id uuid, p_generation bigint
+) RETURNS TABLE (
+    peer_incarnation_id text, authority_id uuid, generation bigint, system_id uuid,
+    activation_id uuid, run_id uuid, plan_identity text, purpose text, provider_kind text,
+    authority_instance text, operation_identity text, operation_digest text, state text
+) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
+    SELECT a.worker_incarnation, a.id, a.generation, a.system_id, a.activation_id, a.run_id,
+           a.plan_identity, a.purpose, a.provider_kind, a.authority_instance,
+           a.operation_identity, a.operation_digest, a.state
+    FROM public.external_boot_authorities AS a
+    JOIN public.worker_incarnations AS w ON w.incarnation = a.worker_incarnation
+    WHERE pg_has_role(session_user, 'kdive_provider_authority', 'member')
+      AND w.incarnation = p_peer_incarnation AND w.state = 'active' AND w.fence_protocol = 4
+      AND a.id = p_authority_id AND a.generation = p_generation AND a.state = 'current'
+$$;
+
 CREATE FUNCTION public.read_external_boot_authority_journal_head(
     p_peer_incarnation text, p_authority_id uuid, p_generation bigint,
     p_authority_instance text
@@ -563,6 +580,7 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 REVOKE ALL ON FUNCTION
     public.canonical_external_boot_authority_json(jsonb),
     public.resolve_allocating_external_boot_authority(text, uuid, bigint),
+    public.resolve_current_external_boot_authority_candidate(text, uuid, bigint),
     public.resolve_current_external_boot_authority(text, uuid, bigint, bigint, text),
     public.read_external_boot_authority_journal_head(text, uuid, bigint, text),
     public.advance_external_boot_authority_journal_head(text, uuid, bigint, bigint, text, jsonb)
@@ -570,6 +588,7 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
     kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION
     public.resolve_allocating_external_boot_authority(text, uuid, bigint),
+    public.resolve_current_external_boot_authority_candidate(text, uuid, bigint),
     public.resolve_current_external_boot_authority(text, uuid, bigint, bigint, text),
     public.read_external_boot_authority_journal_head(text, uuid, bigint, text),
     public.advance_external_boot_authority_journal_head(text, uuid, bigint, bigint, text, jsonb)

@@ -17,6 +17,7 @@ from kdive.db.external_boot_authority_journal import (
     advance_journal_head,
     read_journal_head,
     resolve_allocating_authority_binding,
+    resolve_current_authority_candidate,
 )
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
@@ -37,6 +38,7 @@ from tests.db.external_boot_authority_support import (
 
 _FUNCTIONS = {
     "resolve_allocating_external_boot_authority(text,uuid,bigint)",
+    "resolve_current_external_boot_authority_candidate(text,uuid,bigint)",
     "resolve_current_external_boot_authority(text,uuid,bigint,bigint,text)",
     "read_external_boot_authority_journal_head(text,uuid,bigint,text)",
     "advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,text,jsonb)",
@@ -768,6 +770,33 @@ async def test_repository_round_trips_typed_binding_and_head(
         head = await read_journal_head(connection, binding=binding)
         assert head is not None
         assert head.sequence == 1 and head.phase is JournalPhase.WATERMARK_INSTALLED
+        acknowledgement = _record(
+            case,
+            authority,
+            2,
+            record_digest(record),
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+            watermark_sequence=record.sequence,
+            watermark_digest=record_digest(record),
+        )
+        assert (
+            await advance_journal_head(
+                connection,
+                binding=binding,
+                expected_sequence=1,
+                expected_digest=record_digest(record),
+                record=acknowledgement,
+            )
+            == "advanced"
+        )
+        _promote(migrated_url, case, authority, acknowledgement)
+        current = await resolve_current_authority_candidate(
+            connection,
+            peer_incarnation_id=case.worker_id,
+            authority_id=authority.authority_id,
+            generation=authority.generation,
+        )
+        assert current is not None and current.state == "current"
 
 
 def test_successor_takeover_has_exact_supersede_watermark_ack_order(

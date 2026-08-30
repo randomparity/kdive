@@ -88,6 +88,78 @@ async def test_untrusted_cardinality_cannot_allocate_lanes_or_metric_series(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("case", ["inactive-peer", "stale-binding", "cross-system"])
+async def test_mutation_rejects_before_caller_journal_construction(
+    tmp_path: Path, case: str
+) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    repository.current = case == "cross-system"
+    request = _mutation(takeover)
+    selected_peer: AuthenticatedPeer | None = peer
+    if case == "inactive-peer":
+        selected_peer = None
+    elif case == "cross-system":
+        request = request.model_copy(update={"system_id": uuid4()})
+    journal_calls = 0
+
+    def forbidden_journal(_system_id: object) -> FileAuthorityJournal:
+        nonlocal journal_calls
+        journal_calls += 1
+        raise AssertionError("caller-derived journal path was accessed")
+
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=forbidden_journal,
+        adapter=adapter,
+    )
+    category = "unauthenticated" if case == "inactive-peer" else "superseded"
+    with pytest.raises(AuthorityServiceError, match=category):
+        await service.execute_mutation(selected_peer, request)
+
+    assert journal_calls == 0
+    assert adapter.calls == []
+    assert service._lanes == {}
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_hostile_mutation_cardinality_stops_before_journal_and_lane(
+    tmp_path: Path,
+) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    repository.current = True
+    journal_calls = 0
+
+    def forbidden_journal(_system_id: object) -> FileAuthorityJournal:
+        nonlocal journal_calls
+        journal_calls += 1
+        raise AssertionError("hostile journal path was accessed")
+
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=forbidden_journal,
+        adapter=adapter,
+    )
+    template = _mutation(takeover)
+    for index in range(100):
+        hostile = template.model_copy(
+            update={
+                "system_id": uuid4(),
+                "provider_kind": f"hostile-provider-{index}",
+                "authority_instance": f"hostile-instance-{index}",
+            }
+        )
+        with pytest.raises(AuthorityServiceError, match="superseded"):
+            await service.execute_mutation(peer, hostile)
+
+    assert journal_calls == 0
+    assert adapter.calls == []
+    assert service._lanes == {}
+    assert service.metrics.rejections == {("untrusted", "unresolved", "superseded"): 100}
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
 async def test_mutation_requires_promotion_and_anchors_before_provider(tmp_path: Path) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
     await service.acknowledge_takeover(peer, request)

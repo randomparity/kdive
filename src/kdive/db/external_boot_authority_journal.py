@@ -162,6 +162,22 @@ async def resolve_current_authority_binding(
         return _binding(await cursor.fetchone())
 
 
+async def resolve_current_authority_candidate(
+    conn: AsyncConnection,
+    *,
+    peer_incarnation_id: str,
+    authority_id: UUID,
+    generation: int,
+) -> AuthorityBinding | None:
+    """Resolve an authenticated current binding before consulting provider-host storage."""
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(
+            "SELECT * FROM resolve_current_external_boot_authority_candidate(%s, %s, %s)",
+            (peer_incarnation_id, authority_id, generation),
+        )
+        return _binding(await cursor.fetchone())
+
+
 def _pending(value: dict[str, Any] | None) -> PendingTakeover | None:
     if value is None:
         return None
