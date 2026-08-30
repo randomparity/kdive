@@ -388,8 +388,8 @@ async def test_trusted_coordinate_overflow_bounds_every_metric_and_evicts_lanes(
         repository.records = []
         await service.acknowledge_takeover(peer, request)
         metrics.reject(request, "superseded")
-        metrics.recovery_failed(request)
         coordinate = (request.provider_kind, request.authority_instance)
+        metrics.recovery_failed_labels(coordinate)
         labels.append(coordinate)
         metrics.set_unresolved(coordinate, True)
 

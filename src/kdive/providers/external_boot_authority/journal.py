@@ -23,6 +23,7 @@ _NEXT_OPERATION_PHASES = {
         {JournalPhase.TAKEOVER_SUPERSEDED, JournalPhase.TAKEOVER_ACKNOWLEDGED}
     ),
     JournalPhase.TAKEOVER_SUPERSEDED: frozenset({JournalPhase.WATERMARK_INSTALLED}),
+    JournalPhase.TAKEOVER_ACKNOWLEDGED: frozenset({JournalPhase.ADMITTED}),
     JournalPhase.ADMITTED: frozenset({JournalPhase.MUTATION_STARTED, JournalPhase.TERMINAL}),
     JournalPhase.MUTATION_STARTED: frozenset({JournalPhase.PROVIDER_RETURNED}),
     JournalPhase.PROVIDER_RETURNED: frozenset({JournalPhase.OBSERVED}),
@@ -256,10 +257,21 @@ class FileAuthorityJournal:
             record.operation,
             record.provider_kind,
             record.operation_digest,
-            record.attempt_id,
-            record.expected_source_identity,
-            record.intended_target_identity,
-            record.recovery_objects,
+            *(
+                ()
+                if record.phase
+                in {
+                    JournalPhase.WATERMARK_INSTALLED,
+                    JournalPhase.TAKEOVER_SUPERSEDED,
+                    JournalPhase.TAKEOVER_ACKNOWLEDGED,
+                }
+                else (
+                    record.attempt_id,
+                    record.expected_source_identity,
+                    record.intended_target_identity,
+                    record.recovery_objects,
+                )
+            ),
         )
         if record.phase in {
             JournalPhase.TAKEOVER_SUPERSEDED,
@@ -295,7 +307,10 @@ class FileAuthorityJournal:
             raise ValueError("authority journal phase ordering is invalid")
         prior_binding = state.operation_bindings.get(record.operation_identity)
         if prior_binding != operation_binding:
-            if prior_binding is not None:
+            if prior_binding is not None and not (
+                prior_phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                and record.phase is JournalPhase.ADMITTED
+            ):
                 raise ValueError("authority journal operation binding changed")
             new_binding: tuple[object, ...] | None = operation_binding
         else:

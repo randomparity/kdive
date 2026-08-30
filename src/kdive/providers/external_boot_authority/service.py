@@ -156,8 +156,8 @@ class AuthorityServiceMetrics:
     ) -> None:
         self.reject_labels((request.provider_kind, request.authority_instance), category)
 
-    def recovery_failed(self, request: AuthorityTakeoverRequestV1) -> tuple[str, str]:
-        key = cast(tuple[str, str], self._key(self._labels(request)))
+    def recovery_failed_labels(self, labels: tuple[str, str]) -> tuple[str, str]:
+        key = cast(tuple[str, str], self._key(self.labels(labels)))
         self.recovery_failures[key] = self.recovery_failures.get(key, 0) + 1
         return key
 
@@ -197,6 +197,7 @@ class _ActiveOperation:
     phase: JournalPhase
     done: asyncio.Event
     stop_before_start: bool = False
+    completion_binding: AuthorityBinding | None = None
 
 
 class ExternalBootAuthorityService:
@@ -380,15 +381,17 @@ class ExternalBootAuthorityService:
     ) -> bool:
         """Return true only when local bytes exactly equal the scoped trusted head."""
         journal: FileAuthorityJournal | None = None
+        trusted_labels = self._trusted_labels(None)
         try:
             authenticated = self._require_peer(peer, request)
             binding = await self._repository.resolve_allocating(authenticated, request)
             if binding is None or not self._binding_matches(binding, request):
                 return False
+            trusted_labels = self._trusted_labels(binding)
             journal = self._journal_factory(request.system_id)
             records = await self._recover(binding, journal)
         except AuthorityServiceError, OSError, ValueError:
-            labels = self.metrics.recovery_failed(request)
+            labels = self.metrics.recovery_failed_labels(trusted_labels)
             self._logger.warning(
                 "authority recovery rejected",
                 extra={
@@ -665,6 +668,7 @@ class ExternalBootAuthorityService:
                         trusted_after_watermark.suspended_operation,
                     )
                 if active is not None and active.generation < request.generation:
+                    active.completion_binding = binding
                     if active.phase is JournalPhase.ADMITTED:
                         active.stop_before_start = True
                     self.metrics.set_unresolved(
@@ -867,8 +871,9 @@ class ExternalBootAuthorityService:
                 except Exception:
                     raise self._provider_error(request) from None
                 async with lane.lock:
+                    completion_binding = active.completion_binding or binding
                     records = await self._anchor(
-                        binding,
+                        completion_binding,
                         journal,
                         records,
                         self._record(request, records, JournalPhase.PROVIDER_RETURNED),
@@ -878,8 +883,9 @@ class ExternalBootAuthorityService:
                 except Exception:
                     raise self._provider_error(request) from None
                 async with lane.lock:
+                    completion_binding = active.completion_binding or binding
                     records = await self._anchor(
-                        binding,
+                        completion_binding,
                         journal,
                         records,
                         self._record(
@@ -892,7 +898,7 @@ class ExternalBootAuthorityService:
                         else "conflict"
                     )
                     await self._anchor(
-                        binding,
+                        completion_binding,
                         journal,
                         records,
                         self._record(
