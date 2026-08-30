@@ -51,9 +51,10 @@ must not advertise the service without such a peer-authentication boundary.
 ## Protocol and authentication
 
 An `AuthorityTakeoverRequestV1` contains the opaque authority UUID, positive generation, System,
-activation, Run, plan digest, purpose, provider kind, authority instance, operation identity, and
-operation digest. An `AuthorityMutationRequestV1` repeats that immutable binding and adds the
-admitted operation, expected source identity, intended target identity, and at most 1,024 stable
+activation, Run, plan digest, purpose, the closed provider-neutral operation, provider kind,
+authority instance, operation identity, and operation digest. An `AuthorityMutationRequestV1`
+repeats that immutable binding and adds the expected source identity, intended target identity,
+and at most 1,024 stable
 recovery-object bindings. Takeover resolves an `allocating` 0122 binding and performs no provider
 mutation. After core records the acknowledgement and promotes the binding, mutation resolves the
 same binding in `current` state before provider access. Every identifier is nonblank and at most 255 UTF-8
@@ -62,6 +63,10 @@ bytes; provider identities are opaque nonblank strings of at most 1,024 UTF-8 by
 representation after structure exists. The public provider-neutral decoder accepts bytes only,
 rejects more than 1 MiB before JSON or Pydantic parsing, and then requires the exact canonical
 closed takeover or mutation shape. #2127 hosting must use this decoder at the raw request boundary.
+The allowed purpose/operation pairs are exactly those enforced by migration 0122. Migration 0123
+resolves that stored operation with the rest of the binding and compares it at preadmission, every
+journal CAS, inherited recovery, acknowledgement resolution, and the final provider fence; a
+caller-repeated digest cannot substitute for the stored operation.
 
 The service asks migration 0122 to resolve the opaque reference for the authenticated active worker
 incarnation and requires every immutable field to match before journal admission. Takeover accepts

@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityOperation,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
@@ -49,6 +50,7 @@ class AuthorityBinding:
     run_id: UUID
     plan_identity: str
     purpose: str
+    operation: AuthorityOperation
     provider_kind: str
     authority_instance: str
     operation_identity: str
@@ -114,6 +116,7 @@ def _binding(row: dict[str, Any] | None) -> AuthorityBinding | None:
         run_id=_uuid(row["run_id"]),
         plan_identity=_bounded(row["plan_identity"]),
         purpose=_bounded(row["purpose"]),
+        operation=AuthorityOperation(_bounded(row["operation"])),
         provider_kind=_bounded(row["provider_kind"]),
         authority_instance=_bounded(row["authority_instance"]),
         operation_identity=_bounded(row["operation_identity"]),

@@ -147,7 +147,11 @@ async def test_release_and_teardown_are_independently_fenced(tmp_path: Path) -> 
         lane.mkdir()
         service, repository, adapter, peer, base = _service(lane)
         request = base.model_copy(
-            update={"purpose": purpose, "operation_identity": f"takeover-{purpose}"}
+            update={
+                "purpose": purpose,
+                "operation": purpose,
+                "operation_identity": f"takeover-{purpose}",
+            }
         )
         repository.request = request
         repository.allocating_request = request
@@ -201,9 +205,7 @@ async def test_recovery_ownership_rejects_drift_without_provider_or_journal_acce
             key=lambda item: item.model_dump_json(),
         )
     )
-    mutation = _mutation(request).model_copy(
-        update={"operation": "tenant-operation-do-not-log", "recovery_objects": objects}
-    )
+    mutation = _mutation(request).model_copy(update={"recovery_objects": objects})
     adapter.fail_commit = True
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await service.execute_mutation(peer, mutation)

@@ -304,6 +304,7 @@ class ExternalBootAuthorityService:
             and binding.run_id == request.run_id
             and binding.plan_identity == request.plan_identity
             and binding.purpose == request.purpose
+            and binding.operation == request.operation
             and binding.provider_kind == request.provider_kind
             and binding.authority_instance == request.authority_instance
             and binding.operation_identity == request.operation_identity

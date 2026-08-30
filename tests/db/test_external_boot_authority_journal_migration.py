@@ -63,6 +63,7 @@ def _record(
         "run_id": case.run_id,
         "plan_identity": "sha256:" + "a" * 64,
         "purpose": case.purpose,
+        "operation": case.operation,
         "provider_kind": case.provider_kind,
         "authority_instance": case.authority_instance,
         "operation_identity": case.operation_identity,
@@ -78,7 +79,6 @@ def _record(
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     }:
         values |= {
-            "operation": "activate-commit",
             "expected_source_identity": "source-a",
             "intended_target_identity": "target-a",
             "recovery_objects": (),
@@ -327,6 +327,7 @@ def test_allocating_binding_can_create_and_read_exact_genesis_head(
                 "run_id": case.run_id,
                 "plan_identity": "sha256:" + "a" * 64,
                 "purpose": case.purpose,
+                "operation": case.operation,
                 "provider_kind": case.provider_kind,
                 "authority_instance": case.authority_instance,
                 "operation_identity": case.operation_identity,
@@ -640,7 +641,7 @@ def test_full_current_mutation_phase_sequence_and_rejections(
             if phase is not JournalPhase.ADMITTED:
                 replacements = (
                     {"attempt_id": uuid4()},
-                    {"operation": "different-commit"},
+                    {"operation": "fail"},
                     {"expected_source_identity": "source-b"},
                     {"intended_target_identity": "target-b"},
                     {

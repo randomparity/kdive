@@ -49,6 +49,7 @@ def _record(
         "run_id": _RUN_ID,
         "plan_identity": _DIGEST,
         "purpose": "recover",
+        "operation": "recover",
         "provider_kind": "remote-libvirt",
         "authority_instance": "authority-a",
         "operation_identity": "operation-a",
@@ -61,7 +62,6 @@ def _record(
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     }:
         values |= {
-            "operation": "recover-commit",
             "expected_source_identity": _DIGEST,
             "intended_target_identity": _DIGEST,
             "recovery_objects": (),
@@ -537,7 +537,7 @@ def test_append_rejects_skipped_or_reversed_phase_without_changing_bytes(
     "changes",
     [
         {"expected_source_identity": "source-b"},
-        {"operation": "different-commit"},
+        {"operation": "fail"},
         {"intended_target_identity": "target-b"},
         {"recovery_objects": ()},
         {"recovery_objects": (_recovery_object("object-b"),)},

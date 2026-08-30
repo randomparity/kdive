@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -19,6 +20,7 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityOperation,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -42,6 +44,7 @@ def _takeover() -> AuthorityTakeoverRequestV1:
         run_id=uuid4(),
         plan_identity=_DIGEST_A,
         purpose="activate",
+        operation="activate",
         provider_kind="local-libvirt",
         authority_instance="host-a",
         operation_identity="takeover-a",
@@ -52,7 +55,6 @@ def _takeover() -> AuthorityTakeoverRequestV1:
 def _mutation(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1:
     values = request.model_dump(mode="json", by_alias=True)
     values |= {
-        "operation": "activate",
         "operation_identity": "mutation-a",
         "operation_digest": _DIGEST_A,
         "attempt_id": str(uuid4()),
@@ -77,6 +79,7 @@ def _binding(
         run_id=request.run_id,
         plan_identity=request.plan_identity,
         purpose=request.purpose,
+        operation=request.operation,
         provider_kind=request.provider_kind,
         authority_instance=request.authority_instance,
         operation_identity=request.operation_identity,
@@ -101,6 +104,7 @@ class _Repository:
         self.current_resolutions = 0
         self.current_candidate_resolutions = 0
         self.reject_resolution: int | None = None
+        self.operation_override: AuthorityOperation | None = None
 
     async def resolve_current_candidate(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
@@ -119,7 +123,12 @@ class _Repository:
             or request.authority_instance != self.request.authority_instance
         ):
             return None
-        return _binding(peer, request, "current")
+        binding = _binding(peer, request, "current")
+        return (
+            replace(binding, operation=self.operation_override)
+            if self.operation_override
+            else binding
+        )
 
     async def resolve_allocating(
         self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
