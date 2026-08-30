@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import LiteralString, cast
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
@@ -106,14 +107,69 @@ def _constraint(conn: psycopg.Connection) -> str:
     return row[0]
 
 
+def _install_old_check_not_valid(conn: psycopg.Connection, definition: str) -> None:
+    conn.execute(
+        sql.SQL(
+            "ALTER TABLE external_boot_activations "
+            "ADD CONSTRAINT external_boot_activation_evidence_ownership {} NOT VALID"
+        ).format(sql.SQL(cast(LiteralString, definition)))
+    )
+
+
+def _schema_snapshot(conn: psycopg.Connection) -> list[tuple[object, ...]]:
+    return conn.execute(
+        "SELECT 'relation', n.nspname, c.relname, c.relkind::text, '' FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+        "UNION ALL SELECT 'constraint', n.nspname, c.relname, con.conname, "
+        "pg_get_constraintdef(con.oid, true) || ':' || con.convalidated::text "
+        "FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+        "UNION ALL SELECT 'function', n.nspname, p.proname, "
+        "pg_get_function_identity_arguments(p.oid), pg_get_functiondef(p.oid) "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'public' ORDER BY 1, 2, 3, 4, 5"
+    ).fetchall()
+
+
+def _role_snapshot(conn: psycopg.Connection) -> list[tuple[object, ...]]:
+    return conn.execute(
+        "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin "
+        "FROM pg_roles ORDER BY rolname"
+    ).fetchall()
+
+
+def _grant_snapshot(conn: psycopg.Connection) -> list[tuple[object, ...]]:
+    return conn.execute(
+        "SELECT grantee, table_schema, table_name, privilege_type, is_grantable "
+        "FROM information_schema.role_table_grants ORDER BY 1, 2, 3, 4, 5"
+    ).fetchall()
+
+
 def test_migration_replaces_only_recovery_ownership_and_preserves_grants(
     pg_conn: psycopg.Connection,
 ) -> None:
     _apply_through(pg_conn, "0123")
-    before = pg_conn.execute(
-        "SELECT grantee, privilege_type FROM information_schema.role_table_grants "
-        "WHERE table_name = 'external_boot_activations' ORDER BY 1, 2"
+    system_id, run_id, activation_id = _seed(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO external_boot_activations "
+        "(id, system_id, run_id, plan_identity, operation_owner_id, authority_generation, "
+        "state, materialization) VALUES (%s, %s, %s, %s, %s, 1, 'preparing', %s)",
+        (
+            activation_id,
+            system_id,
+            run_id,
+            _PLAN,
+            uuid4(),
+            Jsonb(_materialization(system_id, run_id)),
+        ),
+    )
+    rows_before = pg_conn.execute(
+        "SELECT id, materialization::text, recovery_point::text "
+        "FROM external_boot_activations ORDER BY id"
     ).fetchall()
+    roles_before = _role_snapshot(pg_conn)
+    grants_before = _grant_snapshot(pg_conn)
+    objects_before = _schema_snapshot(pg_conn)
     migration = next(item for item in migrate.discover_migrations() if item.version == "0124")
     pg_conn.execute(migration.sql.encode())
     definition = _constraint(pg_conn)
@@ -122,12 +178,19 @@ def test_migration_replaces_only_recovery_ownership_and_preserves_grants(
     assert "binding,run_id" in definition
     assert "binding,activation_id" in definition
     assert "ownership,system_id" in definition  # materialization arm remains
+    assert "jsonb_typeof(recovery_point #> '{binding,system_id}'" in definition
+    assert _role_snapshot(pg_conn) == roles_before
+    assert _grant_snapshot(pg_conn) == grants_before
+    after_objects = _schema_snapshot(pg_conn)
+    assert [
+        row for row in after_objects if row[3] != "external_boot_activation_evidence_ownership"
+    ] == [row for row in objects_before if row[3] != "external_boot_activation_evidence_ownership"]
     assert (
         pg_conn.execute(
-            "SELECT grantee, privilege_type FROM information_schema.role_table_grants "
-            "WHERE table_name = 'external_boot_activations' ORDER BY 1, 2"
+            "SELECT id, materialization::text, recovery_point::text "
+            "FROM external_boot_activations ORDER BY id"
         ).fetchall()
-        == before
+        == rows_before
     )
 
 
@@ -184,16 +247,64 @@ def test_replacement_check_rejects_malformed_or_extra_binding(
         _insert(pg_conn, system_id, run_id, activation_id, point)
 
 
-def test_legacy_preflight_aborts_without_dropping_old_check(
-    pg_conn: psycopg.Connection,
+@pytest.mark.parametrize(
+    "case",
+    [
+        "legacy",
+        "missing-binding",
+        "scalar-binding",
+        "array-binding",
+        "missing-key",
+        "extra-key",
+        "malformed-uuid",
+        "cross-system",
+        "cross-run",
+        "cross-activation",
+    ],
+)
+def test_incompatible_preflight_aborts_without_partial_ddl(
+    pg_conn: psycopg.Connection, case: str
 ) -> None:
     _apply_through(pg_conn, "0123")
     system_id, run_id, activation_id = _seed(pg_conn)
-    legacy = _point(system_id, run_id, activation_id)
-    legacy["ownership"] = legacy.pop("binding")
-    _insert(pg_conn, system_id, run_id, activation_id, legacy)
-    pg_conn.commit()
+    point = _point(system_id, run_id, activation_id)
+    binding = cast(dict[str, object], point["binding"])
+    if case == "legacy":
+        point["ownership"] = point.pop("binding")
+    elif case == "missing-binding":
+        point.pop("binding")
+    elif case == "scalar-binding":
+        point["binding"] = "binding"
+    elif case == "array-binding":
+        point["binding"] = []
+    elif case == "missing-key":
+        binding.pop("activation_id")
+    elif case == "extra-key":
+        binding["extra"] = "value"
+    elif case == "malformed-uuid":
+        binding["activation_id"] = "not-a-uuid"
+    elif case == "cross-system":
+        binding["system_id"] = str(uuid4())
+    elif case == "cross-run":
+        binding["run_id"] = str(uuid4())
+    else:
+        binding["activation_id"] = str(uuid4())
     before = _constraint(pg_conn)
+    if case == "legacy":
+        _insert(pg_conn, system_id, run_id, activation_id, point)
+    else:
+        pg_conn.execute(
+            "ALTER TABLE external_boot_activations "
+            "DROP CONSTRAINT external_boot_activation_evidence_ownership"
+        )
+        _insert(pg_conn, system_id, run_id, activation_id, point)
+        _install_old_check_not_valid(pg_conn, before)
+    pg_conn.commit()
+    installed_check = _constraint(pg_conn)
+    ddl_before = _schema_snapshot(pg_conn)
+    rows_before = pg_conn.execute(
+        "SELECT id, recovery_point::text FROM external_boot_activations ORDER BY id"
+    ).fetchall()
     migration = next(item for item in migrate.discover_migrations() if item.version == "0124")
 
     with (
@@ -202,6 +313,38 @@ def test_legacy_preflight_aborts_without_dropping_old_check(
     ):
         pg_conn.execute(migration.sql.encode())
 
-    assert _constraint(pg_conn) == before
+    assert _constraint(pg_conn) == installed_check
+    assert _schema_snapshot(pg_conn) == ddl_before
+    assert (
+        pg_conn.execute(
+            "SELECT id, recovery_point::text FROM external_boot_activations ORDER BY id"
+        ).fetchall()
+        == rows_before
+    )
     assert "ownership,system_id" in before
     assert "binding,system_id" not in before
+
+
+def test_modified_non_recovery_arm_aborts_before_drop(pg_conn: psycopg.Connection) -> None:
+    _apply_through(pg_conn, "0123")
+    pg_conn.execute(
+        "ALTER TABLE external_boot_activations "
+        "DROP CONSTRAINT external_boot_activation_evidence_ownership"
+    )
+    pg_conn.execute(
+        "ALTER TABLE external_boot_activations "
+        "ADD CONSTRAINT external_boot_activation_evidence_ownership CHECK (true)"
+    )
+    pg_conn.commit()
+    before = _constraint(pg_conn)
+    ddl_before = _schema_snapshot(pg_conn)
+    migration = next(item for item in migrate.discover_migrations() if item.version == "0124")
+
+    with (
+        pytest.raises(psycopg.errors.RaiseException, match="exact migration 0121"),
+        pg_conn.transaction(),
+    ):
+        pg_conn.execute(migration.sql.encode())
+
+    assert _constraint(pg_conn) == before
+    assert _schema_snapshot(pg_conn) == ddl_before

@@ -1,8 +1,37 @@
 -- Bind persisted external-boot recovery points to their activation (ADR-0586, #2108).
 
+CREATE TEMPORARY TABLE external_boot_0124_expected
+    (LIKE public.external_boot_activations) ON COMMIT DROP;
+
+ALTER TABLE external_boot_0124_expected
+    ADD CONSTRAINT external_boot_0124_expected_ownership CHECK (
+        (materialization IS NULL OR (
+            materialization #>> '{ownership,system_id}' IS NOT DISTINCT FROM system_id::text
+            AND materialization #>> '{ownership,run_id}' IS NOT DISTINCT FROM run_id::text
+            AND materialization ->> 'plan_identity' IS NOT DISTINCT FROM plan_identity))
+        AND (recovery_point IS NULL OR (
+            recovery_point #>> '{ownership,system_id}' IS NOT DISTINCT FROM system_id::text
+            AND recovery_point #>> '{ownership,run_id}' IS NOT DISTINCT FROM run_id::text
+            AND recovery_point ->> 'plan_identity' IS NOT DISTINCT FROM plan_identity))
+        AND (pre_recovery_evidence IS NULL OR (
+            pre_recovery_evidence ->> 'activation_id' IS NOT DISTINCT FROM id::text
+            AND pre_recovery_evidence ->> 'system_id' IS NOT DISTINCT FROM system_id::text
+            AND pre_recovery_evidence ->> 'run_id' IS NOT DISTINCT FROM run_id::text
+            AND pre_recovery_evidence ->> 'plan_identity' IS NOT DISTINCT FROM plan_identity))
+        AND (terminal_evidence IS NULL OR (
+            terminal_evidence ->> 'activation_id' IS NOT DISTINCT FROM id::text
+            AND terminal_evidence ->> 'system_id' IS NOT DISTINCT FROM system_id::text))
+        AND (teardown_evidence IS NULL OR teardown_evidence ->> 'system_id'
+            IS NOT DISTINCT FROM system_id::text)
+        AND (cleanup_evidence IS NULL OR (
+            cleanup_evidence ->> 'activation_id' IS NOT DISTINCT FROM id::text
+            AND cleanup_evidence ->> 'system_id' IS NOT DISTINCT FROM system_id::text))
+    );
+
 DO $$
 DECLARE
     ownership_check text;
+    expected_check text;
 BEGIN
     SELECT pg_get_constraintdef(oid, true) INTO ownership_check
     FROM pg_constraint
@@ -10,10 +39,13 @@ BEGIN
       AND conname = 'external_boot_activation_evidence_ownership'
       AND contype = 'c';
 
-    IF ownership_check IS NULL
-       OR ownership_check NOT LIKE '%recovery_point #>> ''{ownership,system_id}''%'
-       OR ownership_check NOT LIKE '%recovery_point #>> ''{ownership,run_id}''%'
-       OR ownership_check LIKE '%recovery_point #>> ''{binding,%' THEN
+    SELECT pg_get_constraintdef(oid, true) INTO expected_check
+    FROM pg_constraint
+    WHERE conrelid = 'external_boot_0124_expected'::regclass
+      AND conname = 'external_boot_0124_expected_ownership'
+      AND contype = 'c';
+
+    IF regexp_replace(ownership_check, ' NOT VALID$', '') IS DISTINCT FROM expected_check THEN
         RAISE EXCEPTION '0124 requires the exact migration 0121 ownership CHECK';
     END IF;
 
@@ -46,6 +78,8 @@ BEGIN
     END IF;
 END
 $$;
+
+DROP TABLE external_boot_0124_expected;
 
 ALTER TABLE public.external_boot_activations
     DROP CONSTRAINT external_boot_activation_evidence_ownership;
