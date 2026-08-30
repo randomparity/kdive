@@ -398,14 +398,10 @@ class ExternalBootAuthorityService:
             journal = self._journal_factory(request.system_id)
             records = await self._recover(binding, journal)
         except AuthorityServiceError, OSError, ValueError:
-            labels = self.metrics.recovery_failed_labels(trusted_labels)
+            self.metrics.recovery_failed_labels(trusted_labels)
             self._logger.warning(
                 "authority recovery rejected",
-                extra={
-                    "provider_kind": labels[0],
-                    "authority_instance": labels[1],
-                    "category": "journal_conflict",
-                },
+                extra={"category": "journal_conflict"},
             )
             return False
         finally:

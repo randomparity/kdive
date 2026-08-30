@@ -304,7 +304,9 @@ async def test_caller_cancellation_does_not_cancel_started_lane(tmp_path: Path) 
 
 
 @pytest.mark.anyio
-async def test_readiness_requires_exact_local_and_trusted_head(tmp_path: Path) -> None:
+async def test_readiness_requires_exact_local_and_trusted_head(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     service, repository, _, peer, request = _service(tmp_path)
     assert await service.readiness(peer, request)
     await service.acknowledge_takeover(peer, request)
@@ -315,6 +317,11 @@ async def test_readiness_requires_exact_local_and_trusted_head(tmp_path: Path) -
     assert service.metrics.recovery_failures == {
         (request.provider_kind, request.authority_instance): 1
     }
+    rejection = next(
+        record for record in caplog.records if record.message == "authority recovery rejected"
+    )
+    assert "provider_kind" not in rejection.__dict__
+    assert "authority_instance" not in rejection.__dict__
 
 
 @pytest.mark.anyio
