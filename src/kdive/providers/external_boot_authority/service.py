@@ -246,7 +246,6 @@ class ExternalBootAuthorityService:
 
     def _reject(
         self,
-        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
         category: Literal["unauthenticated", "superseded", "journal_conflict"],
         *,
         labels: tuple[str, str] = ("untrusted", "unresolved"),
@@ -288,7 +287,7 @@ class ExternalBootAuthorityService:
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
     ) -> AuthenticatedPeer:
         if peer is None or not isinstance(peer.incarnation_id, UUID):
-            raise self._reject(request, "unauthenticated")
+            raise self._reject("unauthenticated")
         return peer
 
     @staticmethod
@@ -355,7 +354,6 @@ class ExternalBootAuthorityService:
         )
         if status != "advanced":
             raise self._reject(
-                record,
                 "superseded" if status == "superseded" else "journal_conflict",
                 labels=self._trusted_labels(binding),
             )
@@ -451,7 +449,7 @@ class ExternalBootAuthorityService:
             authority_instance=record.authority_instance,
             operation_identity=record.operation_identity,
             operation_digest=record.operation_digest,
-            operation=record.operation or "",
+            operation=record.operation,
             attempt_id=record.attempt_id,
             expected_source_identity=record.expected_source_identity or "",
             intended_target_identity=record.intended_target_identity or "",
@@ -564,7 +562,7 @@ class ExternalBootAuthorityService:
         authenticated = self._require_peer(peer, request)
         binding = await self._repository.resolve_allocating(authenticated, request)
         if binding is None or not self._binding_matches(binding, request):
-            raise self._reject(request, "superseded", labels=self._trusted_labels(binding))
+            raise self._reject("superseded", labels=self._trusted_labels(binding))
         lane = self._lane(binding.system_id)
         try:
             return await self._acknowledge_takeover_bound(authenticated, binding, lane, request)
@@ -580,12 +578,10 @@ class ExternalBootAuthorityService:
     ) -> AuthorityAcknowledgementV1:
         async with lane.lock:
             if lane.failed:
-                raise self._reject(
-                    request, "journal_conflict", labels=self._trusted_labels(binding)
-                )
+                raise self._reject("journal_conflict", labels=self._trusted_labels(binding))
             confirmed = await self._repository.resolve_allocating(authenticated, request)
             if confirmed is None or confirmed != binding:
-                raise self._reject(request, "superseded", labels=self._trusted_labels(binding))
+                raise self._reject("superseded", labels=self._trusted_labels(binding))
             try:
                 journal, records = self._lane_journal(request.system_id, lane)
                 records = await self._recover(binding, journal, records)
@@ -753,7 +749,7 @@ class ExternalBootAuthorityService:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         if trusted is None or not self._binding_matches(trusted, request):
-            raise self._reject(request, "superseded", labels=self._trusted_labels(trusted))
+            raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
         async def run() -> AuthorityObservationV1:
@@ -864,8 +860,7 @@ class ExternalBootAuthorityService:
                     acknowledgement.sequence,
                     record_digest(acknowledgement),
                 )
-                committed = rechecked is not None and self._binding_matches(rechecked, request)
-                if not committed:
+                if rechecked is None or not self._binding_matches(rechecked, request):
                     raise AuthorityServiceError("superseded")
                 try:
                     await self._adapter.commit(request, request.operation)
