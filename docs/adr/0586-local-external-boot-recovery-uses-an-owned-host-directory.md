@@ -26,6 +26,11 @@ Implementation found that migration 0121's immutable activation-ledger CHECK add
 `RecoveryPoint.ownership` path. On 2026-08-30 the operator authorized the next available additive
 migration, 0124, to replace that CHECK without rewriting stored data.
 
+Task 2 exposed that a relative archive filename cannot by itself authorize restoration: the guest
+writer neither owns the recovery root nor receives a path from the closed capture descriptor. On
+2026-08-30 the operator selected a symmetric owner-bound archive source rather than giving the
+guest writer path-resolution authority.
+
 ## Decision
 
 Local-libvirt stores each recovery point beneath its configured provider-owned recovery root in a
@@ -75,8 +80,15 @@ identity, digest, size, and manifest matches.
 
 A narrow libguestfs seam captures, observes, installs, restores, and removes exactly the validated
 release directory on the System overlay. It accepts structured values, not caller paths or
-commands. Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed
-content. Restoration stages beside the release directory, verifies its manifest, and uses
+commands. Capture receives an owner-bound `RecoveryArchiveSink`; restore receives the matching
+owner-bound `RecoveryArchiveSource` plus the closed capture descriptor. Local external-boot code
+constructs both only after authenticating the recovery token and resolving its directory beneath
+the configured root. The source opens only the descriptor's relative archive filename with
+no-follow, regular-file, owner, mode, and bounded-size checks. It retains no caller path, closes
+every descriptor on success or failure, and exposes no path-selection operation.
+
+Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed content.
+Restoration stages beside the release directory, verifies its manifest, and uses
 same-filesystem renames with durable phase metadata so retry can classify source, target, and the
 provider-owned partial state. Any unowned, unreadable, over-limit, or third state is a conflict and
 causes no further mutation.
@@ -149,6 +161,11 @@ Teardown likewise quarantines evidence it cannot authenticate.
 - **Put a host path in `OpaqueProviderRef`.** verified: ADR-0583 requires provider paths to remain
   behind the provider seam, and `OpaqueProviderRef` rejects absolute and traversal-bearing values in
   `src/kdive/providers/ports/external_boot.py`.
+- **Let `GuestRecoveryWriter` resolve the capture's relative filename.** judgment: this gives the
+  guest filesystem primitive recovery-root authority it does not own and leaves the restore
+  signature without an authenticated base directory.
+- **Store an absolute archive path in `ModuleArchiveCapture`.** judgment: this exposes a provider
+  host path through the shared recovery value and makes caller-replayed path bytes authoritative.
 - **Decode the authority reference inside local-libvirt to obtain the activation.** judgment: this
   would collapse #2140's authentication/translation boundary into a provider primitive and make an
   opaque capability double as ownership data.

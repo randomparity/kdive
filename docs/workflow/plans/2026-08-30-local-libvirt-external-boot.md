@@ -6,6 +6,8 @@ Implement issue #2108's local-libvirt `ExternalBootPorts` primitives over the ac
 ADR-0586 contracts. A closed activation binding and recovery point carry ownership; local recovery
 uses an atomically published provider-host directory plus a narrow libguestfs seam. Authority proof
 translation, orchestration, capacity release, and advertisement remain #2140/#2118.
+The operator's 2026-08-30 Task 2 decision requires a symmetric owner-bound archive source; the
+guest writer receives that capability and the closed capture descriptor, never a host path.
 
 Tech stack: Python 3.14, Pydantic closed values, libvirt-python, libguestfs, stdlib tar/XML/hash/fsync,
 pytest, Ruff, ty, and prek.
@@ -134,7 +136,13 @@ class GuestRecoveryWriter(Protocol):
     def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture: ...
     def observe(self, overlay: str, release: str) -> ComponentState: ...
     def install(self, overlay: str, release: str, source: Path) -> str: ...
-    def restore(self, overlay: str, release: str, capture: ModuleCapture) -> str: ...
+    def restore(
+        self,
+        overlay: str,
+        release: str,
+        source: RecoveryArchiveSource,
+        capture: ModuleCapture,
+    ) -> str: ...
 
 
 class RealGuestRecoveryWriter:
@@ -142,10 +150,14 @@ class RealGuestRecoveryWriter:
     ...
 ```
 
-`RecoveryArchiveSink` is an injected owner-bound sink constructed by `LocalLibvirtExternalBoot`
-after resolving and authenticating the recovery token beneath its configured root. It exposes only
-exclusive staged archive creation and fsync, never a caller-selected path. `GuestRecoveryWriter`
-cannot resolve paths or choose another destination.
+`RecoveryArchiveSink` and `RecoveryArchiveSource` are injected owner-bound capabilities constructed
+by `LocalLibvirtExternalBoot` after resolving and authenticating the recovery token beneath its
+configured root. The sink exposes only exclusive staged archive creation and fsync. The source
+opens only the validated capture's relative archive filename beneath the retained owner directory,
+using no-follow regular-file/service-owner/private-mode checks and a bound no larger than the owned
+recovery reservation. It exposes a read-only stream and closes file and directory descriptors on
+every exit. Neither accepts or reveals a caller-selected path; `GuestRecoveryWriter` cannot resolve
+paths or choose a source or destination. Absent restoration never opens the source.
 
 1. Write golden tests for empty, regular-file, unsupported-xattr, ACL/security-xattr, and absolute
    `build` symlink manifests. Assert the empty digest is
@@ -157,7 +169,11 @@ cannot resolve paths or choose another destination.
    explicit absence. Use directory-relative guestfs operations; accept no caller destination path.
 3. Add capture/install/restore tests proving same-filesystem staged rename, parent sync, source/target
    manifest verification, exact absent restoration, partial failure cleanup, and that symlink targets
-   are copied but never followed. Inject a manifest comparator fault and observe red before restoring.
+   are copied but never followed. Cover wrong-owner source construction, absolute/traversal capture
+   names, archive symlink/non-regular/foreign-owner/non-private/over-reservation rejection, bounded
+   short/error reads, absent restore without source access, and descriptor cleanup after success or
+   failure. Assert every rejected source causes zero guest mutation. Inject a manifest comparator
+   fault and observe red before restoring.
 4. Run `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_recovery.py`; expect all
    tests passed. Run lint/type/diff checks and commit as
    `feat(local-libvirt): preserve external boot modules`.

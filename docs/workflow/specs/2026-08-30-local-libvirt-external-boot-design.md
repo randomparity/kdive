@@ -11,6 +11,8 @@ post-core tombstone-finalization invocation, configured authority coordinates, a
 advertisement remain #2140; remote primitives, jobs, reconciliation, and hosting remain excluded.
 The sole schema change is additive migration 0124, authorized by the operator on 2026-08-30 after
 implementation exposed migration 0121's immutable CHECK dependency.
+For Task 2, the operator selected an owner-bound `RecoveryArchiveSource` on 2026-08-30 so restart
+restoration never accepts or derives a provider-host path inside the guest writer.
 
 The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
 dependency. It reuses libvirt, defused XML parsing, `xml.etree.ElementTree.canonicalize`, libguestfs,
@@ -75,11 +77,28 @@ guest executable. Its operations are:
 
 ```python
 class GuestRecoveryWriter(Protocol):
-    def capture(self, overlay: str, release: str, destination: Path) -> ModuleCapture: ...
+    def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture: ...
     def observe(self, overlay: str, release: str) -> ComponentState: ...
     def install(self, overlay: str, release: str, source: Path) -> str: ...
-    def restore(self, overlay: str, release: str, capture: ModuleCapture) -> str: ...
+    def restore(
+        self,
+        overlay: str,
+        release: str,
+        source: RecoveryArchiveSource,
+        capture: ModuleCapture,
+    ) -> str: ...
 ```
+
+`RecoveryArchiveSink` and `RecoveryArchiveSource` are symmetric owner-bound capabilities constructed
+by `LocalLibvirtExternalBoot` only after it authenticates the recovery token and resolves the exact
+System/activation directory beneath the configured recovery root. The sink exclusively stages and
+fsyncs the fixed archive filename. The source accepts the relative filename only from the validated
+`ModuleArchiveCapture`, opens it relative to its already-owned directory with no-follow semantics,
+and returns a bounded read-only stream. It verifies a regular owner-only file owned by the service,
+rejects an archive larger than the configured recovery reservation before parsing, and closes its
+file and directory descriptors on every success and failure path. Neither capability accepts a
+caller path, returns a host path, or lets `GuestRecoveryWriter` resolve one. An absent capture does
+not open the source.
 
 `ModuleCapture` is either explicit absence or an archive descriptor containing the canonical
 manifest digest, entry count, uncompressed bytes, archive SHA-256, and relative archive filename.
@@ -210,14 +229,18 @@ archive names, host paths, guest content, credentials, and raw tool output.
 
 ## Threat model
 
-Added boundaries are validated plan/recovery values into local filesystem resolution; libvirt
+Added boundaries are validated plan/recovery values into local filesystem resolution; an
+authenticated owner-bound archive source into restart restoration; libvirt
 inactive XML into canonical identity parsing; a stopped System overlay into libguestfs; and recovery
 bytes read after process restart. Authenticated but stale workers may replay valid-looking refs;
 tenants influence build artifacts and command-line values; a local operator controls configuration;
 libvirtd and the provider host are trusted. Privileged host interference is outside the fence.
 
 Opaque owner tokens are parsed as closed canonical components and resolved beneath a configured
-root without accepting caller path bytes. Owner, plan, materialization, release, and digest checks
+root without accepting caller path bytes. The archive source is constructed only after that check,
+opens the capture's canonical relative filename beneath the retained owner directory with no-follow
+and bounded regular-file checks, and closes all descriptors deterministically. Owner, plan,
+materialization, release, and digest checks
 precede every write. Defused parsing rejects DTD/entity input; XML construction changes only three
 owned fields. Archive capture and extraction enforce no-follow topology, NFC, entry and byte bounds,
 and content manifests. Recovery files use owner-only modes, exclusive/no-follow creation, atomic
@@ -245,6 +268,10 @@ must make the new tests fail. Composition tests prove the capability is not adve
 tests interleave lost responses and restarts across component writes. Focused tests, `just lint`,
 `just type`, `prek run`, and pre-push `just ci` remain required; live VM proof is deferred to the
 existing manually dispatched tier and must not be claimed locally.
+Archive-source tests additionally cover wrong-owner construction, traversal/absolute filenames,
+symlink and non-regular archive entries, foreign owner or non-private mode, over-reservation size,
+short/error reads, descriptor cleanup on every exit, absent restoration without a read, and exact
+source/capture digest and manifest verification before guest mutation.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
