@@ -190,6 +190,14 @@ or phase divergence refuses the affected lane and cannot acknowledge takeover. R
 operator restoration of the exact retained journal bytes; neither API moves the head backward nor
 declares a record absent.
 
+The journal limit is exact on-disk bytes, including newlines. Its constructor-configurable
+maximum defaults to 64 MiB per authority journal. Startup streams and validates every retained
+record with bounded per-record input; the cached trusted tail then makes appends independent of
+retained-history length. A prospective append beyond the maximum fails before file bytes,
+database CAS, or provider progress and leaves readiness false. Recovery is audited restoration or
+retention of exact bytes, never truncation or compaction. Production hosting configuration and
+advertisement remain deferred to #2127.
+
 ## Stable recovery-object ownership
 
 A recovery object is keyed by `(System, activation, recovery reference)` and repeats that owner in

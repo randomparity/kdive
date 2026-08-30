@@ -68,7 +68,11 @@ bytes`, `record_digest(record) -> str`, and `FileAuthorityJournal.append(record)
    expect failures for missing codec and journal.
 4. Implement the canonical JSON codec and journal using descriptor-based exclusive/no-follow open,
    restrictive mode checks, `flush`, file `os.fsync`, and parent-directory `os.fsync` on creation.
-   Reject rather than repair invalid bytes. Rerun both files; expect all tests to pass.
+   Reject rather than repair invalid bytes. Use a constructor-configurable exact on-disk byte
+   maximum, defaulting to 64 MiB, stream bounded recovery, and cache the validated tail/state so
+   later appends validate only the candidate. Over-limit append fails before any write; repair is
+   exact-byte restoration/retention, never truncation or compaction. Production hosting wiring is
+   deferred to #2127. Rerun both files; expect all tests to pass.
 5. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit the explicit Task 1
    paths as `feat(providers): define authority journal protocol`.
 

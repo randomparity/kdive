@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kdive.providers.external_boot_authority.protocol import (
@@ -30,14 +32,37 @@ _NEXT_OPERATION_PHASES = {
 _INITIAL_OPERATION_PHASES = frozenset(
     {JournalPhase.WATERMARK_INSTALLED, JournalPhase.TAKEOVER_SUPERSEDED, JournalPhase.ADMITTED}
 )
+DEFAULT_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(slots=True)
+class _ValidationState:
+    previous_digest: str = GENESIS_DIGEST
+    lane: tuple[str, str] | None = None
+    ownership: dict[str, tuple[str, str]] = field(default_factory=dict)
+    operation_phases: dict[str, JournalPhase] = field(default_factory=dict)
+    operation_bindings: dict[str, tuple[object, ...]] = field(default_factory=dict)
+    watermarks: dict[int, JournalRecordV1] = field(default_factory=dict)
+    consumed_watermarks: set[tuple[int, str]] = field(default_factory=set)
+    count: int = 0
 
 
 class FileAuthorityJournal:
     """One private newline-delimited journal whose writes are fsynced before return."""
 
-    def __init__(self, path: Path, *, owner_uid: int | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        owner_uid: int | None = None,
+        max_bytes: int = DEFAULT_MAX_JOURNAL_BYTES,
+    ) -> None:
+        if max_bytes < 1:
+            raise ValueError("authority journal maximum must be positive")
         self._path = path
         self._owner_uid = os.geteuid() if owner_uid is None else owner_uid
+        self._max_bytes = max_bytes
+        self._cache: tuple[tuple[JournalRecordV1, ...], _ValidationState, int] | None = None
 
     def _validate_descriptor(self, descriptor: int) -> None:
         status = os.fstat(descriptor)
@@ -76,123 +101,138 @@ class FileAuthorityJournal:
         return descriptor, created
 
     @staticmethod
-    def _validate_records(records: tuple[JournalRecordV1, ...]) -> None:
-        previous_digest = GENESIS_DIGEST
-        lane: tuple[str, str] | None = None
-        ownership: dict[str, tuple[str, str]] = {}
-        operation_phases: dict[str, JournalPhase] = {}
-        operation_bindings: dict[str, tuple[object, ...]] = {}
-        watermarks: dict[int, JournalRecordV1] = {}
-        consumed_watermarks: set[tuple[int, str]] = set()
-        for expected_sequence, record in enumerate(records, start=1):
-            if record.sequence != expected_sequence:
-                raise ValueError("authority journal sequence is not contiguous")
-            if record.previous_digest != previous_digest:
-                raise ValueError("authority journal digest chain is invalid")
-            current_lane = (record.authority_instance, str(record.system_id))
-            if lane is None:
-                lane = current_lane
-            elif current_lane != lane:
-                raise ValueError("authority journal contains a foreign lane")
-            operation_binding = (
-                record.authority_id,
-                record.generation,
-                record.activation_id,
-                record.run_id,
-                record.plan_identity,
-                record.purpose,
-                record.operation,
-                record.provider_kind,
-                record.operation_digest,
-                record.attempt_id,
-                record.expected_source_identity,
-                record.intended_target_identity,
-                record.recovery_objects,
+    def _validate_record(state: _ValidationState, record: JournalRecordV1) -> None:
+        expected_sequence = state.count + 1
+        if record.sequence != expected_sequence:
+            raise ValueError("authority journal sequence is not contiguous")
+        if record.previous_digest != state.previous_digest:
+            raise ValueError("authority journal digest chain is invalid")
+        current_lane = (record.authority_instance, str(record.system_id))
+        if state.lane is None:
+            state.lane = current_lane
+        elif current_lane != state.lane:
+            raise ValueError("authority journal contains a foreign lane")
+        operation_binding = (
+            record.authority_id,
+            record.generation,
+            record.activation_id,
+            record.run_id,
+            record.plan_identity,
+            record.purpose,
+            record.operation,
+            record.provider_kind,
+            record.operation_digest,
+            record.attempt_id,
+            record.expected_source_identity,
+            record.intended_target_identity,
+            record.recovery_objects,
+        )
+        if record.phase in {
+            JournalPhase.TAKEOVER_SUPERSEDED,
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        }:
+            linked_generation = (
+                record.predecessor_generation
+                if record.phase is JournalPhase.TAKEOVER_SUPERSEDED
+                else record.generation
             )
-            if record.phase in {
-                JournalPhase.TAKEOVER_SUPERSEDED,
-                JournalPhase.TAKEOVER_ACKNOWLEDGED,
-            }:
-                linked_generation = (
-                    record.predecessor_generation
-                    if record.phase is JournalPhase.TAKEOVER_SUPERSEDED
-                    else record.generation
+            if linked_generation is None:
+                raise ValueError("authority journal takeover watermark link is invalid")
+            watermark = state.watermarks.get(linked_generation)
+            if watermark is None or (
+                record.watermark_sequence != watermark.sequence
+                or record.watermark_digest != record_digest(watermark)
+                or (
+                    record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+                    and record.operation_identity != watermark.operation_identity
                 )
-                if linked_generation is None:
-                    raise ValueError("authority journal takeover watermark link is invalid")
-                watermark = watermarks.get(linked_generation)
-                if watermark is None or (
-                    record.watermark_sequence != watermark.sequence
-                    or record.watermark_digest != record_digest(watermark)
-                    or (
-                        record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
-                        and record.operation_identity != watermark.operation_identity
-                    )
-                ):
-                    raise ValueError("authority journal takeover watermark link is invalid")
-                watermark_identity = (linked_generation, watermark.operation_identity)
-                if watermark_identity in consumed_watermarks:
-                    raise ValueError("authority journal watermark is already superseded")
-            prior_phase = operation_phases.get(record.operation_identity)
-            allowed = (
-                _INITIAL_OPERATION_PHASES
-                if prior_phase is None
-                else _NEXT_OPERATION_PHASES.get(prior_phase, frozenset())
-            )
-            if record.phase not in allowed:
-                raise ValueError("authority journal phase ordering is invalid")
-            prior_binding = operation_bindings.setdefault(
-                record.operation_identity, operation_binding
-            )
-            if prior_binding != operation_binding:
-                raise ValueError("authority journal operation binding changed")
-            operation_phases[record.operation_identity] = record.phase
-            if record.phase is JournalPhase.TAKEOVER_SUPERSEDED:
-                consumed_watermarks.add(watermark_identity)
-            if record.phase is JournalPhase.WATERMARK_INSTALLED:
-                if record.generation in watermarks:
-                    raise ValueError("authority journal generation has multiple watermarks")
-                watermarks[record.generation] = record
-            for item in record.recovery_objects:
-                current_owner = (str(item.system_id), str(item.activation_id))
-                prior_owner = ownership.setdefault(item.reference, current_owner)
-                if prior_owner != current_owner:
-                    raise ValueError("authority journal recovery ownership changed")
-            previous_digest = record_digest(record)
+            ):
+                raise ValueError("authority journal takeover watermark link is invalid")
+            watermark_identity = (linked_generation, watermark.operation_identity)
+            if watermark_identity in state.consumed_watermarks:
+                raise ValueError("authority journal watermark is already superseded")
+        prior_phase = state.operation_phases.get(record.operation_identity)
+        allowed = (
+            _INITIAL_OPERATION_PHASES
+            if prior_phase is None
+            else _NEXT_OPERATION_PHASES.get(prior_phase, frozenset())
+        )
+        if record.phase not in allowed:
+            raise ValueError("authority journal phase ordering is invalid")
+        prior_binding = state.operation_bindings.setdefault(
+            record.operation_identity, operation_binding
+        )
+        if prior_binding != operation_binding:
+            raise ValueError("authority journal operation binding changed")
+        state.operation_phases[record.operation_identity] = record.phase
+        if record.phase is JournalPhase.TAKEOVER_SUPERSEDED:
+            state.consumed_watermarks.add(watermark_identity)
+        if record.phase is JournalPhase.WATERMARK_INSTALLED:
+            if record.generation in state.watermarks:
+                raise ValueError("authority journal generation has multiple watermarks")
+            state.watermarks[record.generation] = record
+        for item in record.recovery_objects:
+            current_owner = (str(item.system_id), str(item.activation_id))
+            prior_owner = state.ownership.setdefault(item.reference, current_owner)
+            if prior_owner != current_owner:
+                raise ValueError("authority journal recovery ownership changed")
+        state.previous_digest = record_digest(record)
+        state.count += 1
+
+    @classmethod
+    def _validate_records(cls, records: tuple[JournalRecordV1, ...]) -> _ValidationState:
+        state = _ValidationState()
+        for record in records:
+            cls._validate_record(state, record)
+        return state
 
     def load(self) -> tuple[JournalRecordV1, ...]:
         """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
         if not self._path.exists() and not self._path.is_symlink():
+            self._cache = ((), _ValidationState(), 0)
             return ()
         descriptor = self._open_read()
         try:
             with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                data = stream.read()
+                size = os.fstat(descriptor).st_size
+                if size > self._max_bytes:
+                    raise ValueError("authority journal exceeds configured byte maximum")
+                records: list[JournalRecordV1] = []
+                state = _ValidationState()
+                consumed = 0
+                while line := stream.readline(MAX_MESSAGE_BYTES + 2):
+                    consumed += len(line)
+                    if consumed > self._max_bytes:
+                        raise ValueError("authority journal exceeds configured byte maximum")
+                    if not line.endswith(b"\n"):
+                        raise ValueError("authority journal has a partial final record")
+                    payload = line[:-1]
+                    if not payload or len(payload) > MAX_MESSAGE_BYTES:
+                        raise ValueError("authority journal record is empty or oversized")
+                    record = JournalRecordV1.model_validate_json(payload)
+                    if canonical_record_bytes(record) != payload:
+                        raise ValueError("authority journal record is not canonical JSON")
+                    self._validate_record(state, record)
+                    records.append(record)
         finally:
             os.close(descriptor)
-        if not data:
-            return ()
-        if not data.endswith(b"\n"):
-            raise ValueError("authority journal has a partial final record")
-        records: list[JournalRecordV1] = []
-        for line in data[:-1].split(b"\n"):
-            if not line or len(line) > MAX_MESSAGE_BYTES:
-                raise ValueError("authority journal record is empty or oversized")
-            record = JournalRecordV1.model_validate_json(line)
-            if canonical_record_bytes(record) != line:
-                raise ValueError("authority journal record is not canonical JSON")
-            records.append(record)
         result = tuple(records)
-        self._validate_records(result)
+        self._cache = (result, state, size)
         return result
 
     def append(self, record: JournalRecordV1) -> None:
         """Append one record, fsyncing file and newly created parent entry before return."""
-        current = self.load()
-        self._validate_records((*current, record))
+        current = self.load() if self._cache is None else self._cache[0]
+        assert self._cache is not None
+        state = deepcopy(self._cache[1])
         encoded = canonical_record_bytes(record) + b"\n"
+        if self._cache[2] + len(encoded) > self._max_bytes:
+            raise ValueError("authority journal append exceeds configured byte maximum")
+        self._validate_record(state, record)
         descriptor, created = self._open_append()
         try:
+            if os.fstat(descriptor).st_size != self._cache[2]:
+                raise ValueError("authority journal changed since validation")
             written = 0
             while written < len(encoded):
                 written += os.write(descriptor, encoded[written:])
@@ -205,3 +245,4 @@ class FileAuthorityJournal:
                 os.fsync(parent)
             finally:
                 os.close(parent)
+        self._cache = ((*current, record), state, self._cache[2] + len(encoded))

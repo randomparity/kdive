@@ -5,11 +5,15 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
 
-from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.journal import (
+    DEFAULT_MAX_JOURNAL_BYTES,
+    FileAuthorityJournal,
+)
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     JournalPhase,
@@ -95,6 +99,68 @@ def test_append_creates_private_file_and_loads_exact_records(tmp_path: Path) -> 
         path.read_bytes()
         == canonical_record_bytes(first) + b"\n" + canonical_record_bytes(second) + b"\n"
     )
+
+
+def test_journal_byte_limit_accepts_exact_size_and_rejects_growth(tmp_path: Path) -> None:
+    path = tmp_path / "journal.ndjson"
+    first = _record()
+    encoded = canonical_record_bytes(first) + b"\n"
+    journal = FileAuthorityJournal(path, max_bytes=len(encoded))
+
+    journal.append(first)
+    before = path.read_bytes()
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_digest=record_digest(first),
+    )
+    with pytest.raises(ValueError, match="configured byte maximum"):
+        journal.append(second)
+
+    assert path.read_bytes() == before
+    assert FileAuthorityJournal(path, max_bytes=len(encoded)).load() == (first,)
+    with pytest.raises(ValueError, match="configured byte maximum"):
+        FileAuthorityJournal(path, max_bytes=len(encoded) - 1).load()
+    assert DEFAULT_MAX_JOURNAL_BYTES == 64 * 1024 * 1024
+
+
+def test_append_validates_only_candidate_after_streamed_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "journal.ndjson"
+    records: list[JournalRecordV1] = []
+    previous = GENESIS_DIGEST
+    for generation in range(1, 101):
+        record = _record(
+            generation,
+            previous,
+            generation=generation,
+            operation_identity=f"takeover-{generation}",
+        )
+        records.append(record)
+        previous = record_digest(record)
+    path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    journal = FileAuthorityJournal(path)
+    assert journal.load() == tuple(records)
+    calls = 0
+    original = journal._validate_record
+
+    def counting_validate(state: Any, record: JournalRecordV1) -> None:
+        nonlocal calls
+        calls += 1
+        original(state, record)
+
+    monkeypatch.setattr(journal, "_validate_record", counting_validate)
+    candidate = _record(
+        101,
+        previous,
+        generation=101,
+        operation_identity="takeover-101",
+    )
+    journal.append(candidate)
+
+    assert calls == 1
 
 
 def test_append_fsyncs_parent_on_first_creation(
