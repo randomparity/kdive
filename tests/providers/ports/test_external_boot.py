@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
     ExternalBootPorts,
@@ -24,6 +25,7 @@ ZERO_DIGEST = "sha256:" + "0" * 64
 SYSTEM_ID = "00000000-0000-0000-0000-000000000003"
 RUN_ID = "00000000-0000-0000-0000-000000000002"
 BUILD_GENERATION = "00000000-0000-0000-0000-000000000001"
+ACTIVATION_ID = "00000000-0000-0000-0000-000000000004"
 
 
 def _plan_data() -> dict[str, object]:
@@ -273,7 +275,10 @@ class _ContractConsumer:
         raise NotImplementedError
 
     def prepare(
-        self, materialization: ExternalBootMaterialization, authority: OpaqueProviderRef
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
         raise NotImplementedError
 
@@ -304,7 +309,10 @@ def test_fault_inject_consumes_all_six_operations_without_provider_types() -> No
     plan = ExternalBootPlan.model_validate(_plan_data())
 
     materialization = provider.materialize(plan, authority)
-    recovery = provider.prepare(materialization, authority)
+    binding = ExternalBootActivationBinding(
+        system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+    )
+    recovery = provider.prepare(materialization, binding, authority)
     provider.activate(recovery, authority)
 
     assert provider.observe(recovery, authority) == materialization.kernel_observation
@@ -312,3 +320,58 @@ def test_fault_inject_consumes_all_six_operations_without_provider_types() -> No
     provider.cleanup(recovery, authority)
     with pytest.raises(KeyError):
         provider.observe(recovery, authority)
+
+
+def test_recovery_point_binding_canonical_round_trip_and_closed_schema() -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    materialization = provider.materialize(ExternalBootPlan.model_validate(_plan_data()), authority)
+    binding = ExternalBootActivationBinding(
+        system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+    )
+    point = provider.prepare(materialization, binding, authority)
+
+    assert RecoveryPoint.from_canonical_json(point.to_canonical_json()) == point
+    assert point.binding == binding
+    for mutation in ({"binding": None}, {"extra": True}, {"ownership": binding.model_dump()}):
+        data = point.model_dump(by_alias=True)
+        data.update(mutation)
+        if "binding" not in mutation:
+            data.pop("binding")
+        with pytest.raises(ValidationError):
+            RecoveryPoint.model_validate(data)
+
+
+@pytest.mark.parametrize("field", ["system_id", "run_id"])
+def test_prepare_rejects_materialization_owner_mismatch(field: str) -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    materialization = provider.materialize(ExternalBootPlan.model_validate(_plan_data()), authority)
+    values = {"system_id": SYSTEM_ID, "run_id": RUN_ID, "activation_id": ACTIVATION_ID}
+    values[field] = "11111111-1111-1111-1111-111111111111"
+
+    with pytest.raises(ValueError, match="does not match"):
+        provider.prepare(materialization, ExternalBootActivationBinding(**values), authority)
+
+
+def test_activation_binding_changes_recovery_point_identity() -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    materialization = provider.materialize(ExternalBootPlan.model_validate(_plan_data()), authority)
+    first = provider.prepare(
+        materialization,
+        ExternalBootActivationBinding(
+            system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+        ),
+        authority,
+    )
+    second = first.model_copy(
+        update={
+            "binding": ExternalBootActivationBinding(
+                system_id=SYSTEM_ID,
+                run_id=RUN_ID,
+                activation_id="11111111-1111-1111-1111-111111111111",
+            )
+        }
+    )
+    assert first != second

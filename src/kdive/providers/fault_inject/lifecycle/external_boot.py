@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
+    ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
     MaterializedArtifacts,
@@ -52,14 +53,22 @@ class FaultInjectExternalBoot:
         )
 
     def prepare(
-        self, materialization: ExternalBootMaterialization, authority: OpaqueProviderRef
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
         del authority
+        if (
+            binding.system_id != materialization.ownership.system_id
+            or binding.run_id != materialization.ownership.run_id
+        ):
+            raise ValueError("activation binding does not match materialization ownership")
         recovery_ref = OpaqueProviderRef(
             ref=f"recovery/{materialization.identity.removeprefix('sha256:')}"
         )
         point = RecoveryPoint(
-            ownership=materialization.ownership,
+            binding=binding,
             plan_identity=materialization.plan_identity,
             materialization_identity=materialization.identity,
             recovery_ref=recovery_ref,

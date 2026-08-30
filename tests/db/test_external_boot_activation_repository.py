@@ -137,9 +137,10 @@ def _recovery_point(
 ) -> RecoveryPoint:
     return RecoveryPoint.model_validate(
         {
-            "ownership": {
+            "binding": {
                 "system_id": str(activation.system_id),
                 "run_id": str(activation.run_id),
+                "activation_id": str(activation.id),
             },
             "plan_identity": activation.plan_identity,
             "materialization_identity": materialization.identity,
@@ -599,6 +600,18 @@ def test_prepared_activation_deadline_and_terminal_evidence_round_trip(
                 expected_state=ExternalBootActivationState.PREPARING,
                 recovery_max_bytes=reservation.reserved_bytes,
             )
+            wrong_values = recovery_point.model_dump(by_alias=True)
+            wrong_values["binding"]["activation_id"] = str(uuid4())
+            before = await _ledger_snapshot(conn)
+            with pytest.raises(ValueError, match="durable materialization"):
+                await repo.transition(
+                    conn,
+                    **_authority(activation),
+                    expected_state=ExternalBootActivationState.PREPARING,
+                    new_state=ExternalBootActivationState.PREPARED,
+                    recovery_point=RecoveryPoint.model_validate(wrong_values),
+                )
+            assert await _ledger_snapshot(conn) == before
             prepared = await repo.transition(
                 conn,
                 **_authority(activation),

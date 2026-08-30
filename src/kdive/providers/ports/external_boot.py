@@ -92,6 +92,12 @@ class ActivationOwnership(_ClosedValue):
     run_id: CanonicalUuid
 
 
+class ExternalBootActivationBinding(_ClosedValue):
+    system_id: CanonicalUuid
+    run_id: CanonicalUuid
+    activation_id: CanonicalUuid
+
+
 class RootSource(_ClosedValue):
     kind: Literal["staged-image", "catalog-image"]
     identity: Digest
@@ -291,7 +297,7 @@ class RecoveryPoint(_ClosedValue):
     schema_: Literal["external-boot-recovery-v1"] = Field(
         "external-boot-recovery-v1", alias="schema"
     )
-    ownership: ActivationOwnership
+    binding: ExternalBootActivationBinding
     plan_identity: Digest
     materialization_identity: Digest
     recovery_ref: OpaqueProviderRef
@@ -307,7 +313,10 @@ class ExternalBootPorts(Protocol):
     ) -> ExternalBootMaterialization: ...
 
     def prepare(
-        self, materialization: ExternalBootMaterialization, authority: OpaqueProviderRef
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
     ) -> RecoveryPoint: ...
 
     def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None: ...

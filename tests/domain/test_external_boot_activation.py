@@ -28,7 +28,11 @@ from kdive.domain.external_boot_activation import (
     ExternalBootTeardownEvidenceV1,
     ExternalBootTerminalEvidenceV1,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.providers.ports.external_boot import (
+    ExternalBootMaterialization,
+    OpaqueProviderRef,
+    RecoveryPoint,
+)
 
 _ACTIVATION_ID = UUID("11111111-1111-1111-1111-111111111111")
 _SYSTEM_ID = UUID("22222222-2222-2222-2222-222222222222")
@@ -252,6 +256,64 @@ def test_activation_row_enforces_cleanup_matrix_and_positive_generation() -> Non
     with pytest.raises(ValidationError, match="materialization"):
         ExternalBootActivation.model_validate(
             common | {"state": "active", "activation_readiness_deadline": _AT}
+        )
+
+
+def test_activation_row_rejects_recovery_point_for_another_activation() -> None:
+    materialization = ExternalBootMaterialization.model_validate(
+        {
+            "architecture": "x86_64",
+            "provider_kind": "fault-inject",
+            "ownership": {"system_id": str(_SYSTEM_ID), "run_id": str(_RUN_ID)},
+            "plan_identity": _PLAN,
+            "extracted_vmlinuz_sha256": _STATE,
+            "source_module_manifest": _STATE,
+            "installed_module_tree": _STATE,
+            "verified_bundle_sha256": _STATE,
+            "verified_initrd_sha256": None,
+            "kernel_observation": {
+                "architecture": "x86_64",
+                "release": "6.12.0",
+                "gnu_build_id": "deadbeef",
+            },
+            "artifacts": {
+                "kernel": {"ref": "objects/kernel"},
+                "modules": {"ref": "objects/modules"},
+                "initrd": None,
+            },
+        }
+    )
+    point = RecoveryPoint.model_validate(
+        {
+            "binding": {
+                "system_id": str(_SYSTEM_ID),
+                "run_id": str(_RUN_ID),
+                "activation_id": str(_OBSERVATION_ID),
+            },
+            "plan_identity": _PLAN,
+            "materialization_identity": materialization.identity,
+            "recovery_ref": {"ref": "objects/recovery"},
+            "source_state": {"definition": _STATE, "modules": {"state": "absent"}},
+            "target_state": {"definition": _STATE, "modules": {"state": "absent"}},
+        }
+    )
+
+    with pytest.raises(ValidationError, match="recovery point ownership"):
+        ExternalBootActivation.model_validate(
+            {
+                "id": _ACTIVATION_ID,
+                "system_id": _SYSTEM_ID,
+                "run_id": _RUN_ID,
+                "plan_identity": _PLAN,
+                "operation_owner_id": _OBSERVATION_ID,
+                "authority_generation": 1,
+                "state": "prepared",
+                "cleanup_complete": False,
+                "materialization": materialization,
+                "recovery_point": point,
+                "created_at": _AT,
+                "updated_at": _AT,
+            }
         )
 
 

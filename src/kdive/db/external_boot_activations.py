@@ -432,8 +432,9 @@ class ExternalBootActivationRepository:
                     current["materialization"]
                 )
                 if (
-                    recovery_point.ownership.system_id != str(system_id)
-                    or recovery_point.ownership.run_id != str(current["run_id"])
+                    recovery_point.binding.system_id != str(system_id)
+                    or recovery_point.binding.run_id != str(current["run_id"])
+                    or recovery_point.binding.activation_id != str(activation_id)
                     or recovery_point.plan_identity != current["plan_identity"]
                     or recovery_point.materialization_identity != materialization.identity
                 ):
