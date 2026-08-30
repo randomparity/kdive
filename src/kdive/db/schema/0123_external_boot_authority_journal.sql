@@ -52,6 +52,8 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND octet_length(pending_takeover->>'operation_identity') BETWEEN 1 AND 255
             AND jsonb_typeof(pending_takeover->'authority_id') = 'string'
             AND jsonb_typeof(pending_takeover->'attempt_id') = 'string'
+            AND (pending_takeover->>'authority_id')::uuid IS NOT NULL
+            AND (pending_takeover->>'attempt_id')::uuid IS NOT NULL
         )
     ),
     CONSTRAINT external_boot_journal_suspended_bounded CHECK (
@@ -88,6 +90,10 @@ CREATE TABLE public.external_boot_authority_journal_heads (
             AND jsonb_typeof(suspended_operation->'authority_id') = 'string'
             AND jsonb_typeof(suspended_operation->'activation_id') = 'string'
             AND jsonb_typeof(suspended_operation->'attempt_id') = 'string'
+            AND (suspended_operation->>'authority_id')::uuid IS NOT NULL
+            AND (suspended_operation->>'activation_id')::uuid IS NOT NULL
+            AND (suspended_operation->>'attempt_id')::uuid IS NOT NULL
+            AND octet_length(suspended_operation->>'purpose') BETWEEN 1 AND 255
         )
     )
 );
@@ -239,6 +245,24 @@ BEGIN
        OR (p_record->>'generation')::numeric NOT BETWEEN 1 AND 9223372036854775807
        OR (p_record->>'sequence')::numeric NOT BETWEEN 1 AND 9223372036854775807
        OR jsonb_array_length(p_record->'recovery_objects') > 1024
+       OR (v_phase NOT IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
+           AND (octet_length(p_record->>'expected_source_identity') NOT BETWEEN 1 AND 1024
+                OR octet_length(p_record->>'intended_target_identity') NOT BETWEEN 1 AND 1024))
+       OR EXISTS (
+           SELECT 1 FROM jsonb_array_elements(p_record->'recovery_objects') AS item(value)
+           WHERE jsonb_typeof(item.value) <> 'object'
+              OR item.value <> jsonb_build_object(
+                  'system_id', item.value->'system_id',
+                  'activation_id', item.value->'activation_id',
+                  'reference', item.value->'reference'
+              )
+              OR jsonb_typeof(item.value->'system_id') <> 'string'
+              OR jsonb_typeof(item.value->'activation_id') <> 'string'
+              OR jsonb_typeof(item.value->'reference') <> 'string'
+              OR (item.value->>'system_id')::uuid <> (p_record->>'system_id')::uuid
+              OR (item.value->>'activation_id')::uuid <> (p_record->>'activation_id')::uuid
+              OR octet_length(item.value->>'reference') NOT BETWEEN 1 AND 1024
+       )
        OR EXISTS (
            SELECT 1 FROM (
                SELECT public.canonical_external_boot_authority_json(item.value) AS encoded,
@@ -271,6 +295,20 @@ BEGIN
     IF v_phase = 'observed' AND (
         jsonb_typeof(p_record->'observation') <> 'object'
         OR p_record->'outcome' <> 'null'::jsonb
+    ) THEN RETURN 'conflict'; END IF;
+    IF p_record->'observation' <> 'null'::jsonb AND (
+        p_record->'observation' <> jsonb_build_object(
+            'schema', p_record->'observation'->'schema',
+            'observation_id', p_record->'observation'->'observation_id',
+            'category', p_record->'observation'->'category',
+            'composite_state', p_record->'observation'->'composite_state'
+        )
+        OR p_record->'observation'->>'schema' <> 'external-boot-authority-v1'
+        OR jsonb_typeof(p_record->'observation'->'observation_id') <> 'string'
+        OR (p_record->'observation'->>'observation_id')::uuid IS NULL
+        OR p_record->'observation'->>'category'
+            NOT IN ('source', 'target', 'mixed', 'unreadable', 'conflict')
+        OR p_record->'observation'->>'composite_state' !~ '^sha256:[0-9a-f]{64}$'
     ) THEN RETURN 'conflict'; END IF;
     IF v_phase = 'terminal' AND (
         p_record->>'outcome' NOT IN ('never-began', 'source', 'target', 'conflict')
@@ -342,6 +380,16 @@ BEGIN
         RETURN 'advanced';
     END IF;
     IF NOT FOUND OR v_head.sequence <> p_expected_sequence OR v_head.digest <> p_expected_digest
+    THEN RETURN 'conflict'; END IF;
+    IF v_head.phase IN ('admitted', 'mutation-started', 'provider-returned', 'observed')
+       AND v_head.operation_identity = p_record->>'operation_identity'
+       AND (p_record->>'attempt_id' IS DISTINCT FROM v_head.head_record->>'attempt_id'
+            OR p_record->>'expected_source_identity'
+                IS DISTINCT FROM v_head.head_record->>'expected_source_identity'
+            OR p_record->>'intended_target_identity'
+                IS DISTINCT FROM v_head.head_record->>'intended_target_identity'
+            OR p_record->'recovery_objects'
+                IS DISTINCT FROM v_head.head_record->'recovery_objects')
     THEN RETURN 'conflict'; END IF;
     v_is_suspended := v_head.suspended_operation IS NOT NULL
         AND v_head.suspended_operation->>'authority_id' = v_authority.id::text
