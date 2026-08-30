@@ -253,58 +253,15 @@ def test_replacement_check_rejects_malformed_or_extra_binding(
         _insert(pg_conn, system_id, run_id, activation_id, point)
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "legacy",
-        "missing-binding",
-        "scalar-binding",
-        "array-binding",
-        "missing-key",
-        "extra-key",
-        "malformed-uuid",
-        "cross-system",
-        "cross-run",
-        "cross-activation",
-    ],
-)
-def test_incompatible_preflight_aborts_without_partial_ddl(
-    pg_conn: psycopg.Connection, case: str
+def test_reachable_legacy_preflight_aborts_without_partial_ddl(
+    pg_conn: psycopg.Connection,
 ) -> None:
     _apply_through(pg_conn, "0123")
     system_id, run_id, activation_id = _seed(pg_conn)
     point = _point(system_id, run_id, activation_id)
-    binding = cast(dict[str, object], point["binding"])
-    if case == "legacy":
-        point["ownership"] = point.pop("binding")
-    elif case == "missing-binding":
-        point.pop("binding")
-    elif case == "scalar-binding":
-        point["binding"] = "binding"
-    elif case == "array-binding":
-        point["binding"] = []
-    elif case == "missing-key":
-        binding.pop("activation_id")
-    elif case == "extra-key":
-        binding["extra"] = "value"
-    elif case == "malformed-uuid":
-        binding["activation_id"] = "not-a-uuid"
-    elif case == "cross-system":
-        binding["system_id"] = str(uuid4())
-    elif case == "cross-run":
-        binding["run_id"] = str(uuid4())
-    else:
-        binding["activation_id"] = str(uuid4())
+    point["ownership"] = point.pop("binding")
     before = _constraint(pg_conn)
-    if case == "legacy":
-        _insert(pg_conn, system_id, run_id, activation_id, point)
-    else:
-        pg_conn.execute(
-            "ALTER TABLE external_boot_activations "
-            "DROP CONSTRAINT external_boot_activation_evidence_ownership"
-        )
-        _insert(pg_conn, system_id, run_id, activation_id, point)
-        _install_old_check_not_valid(pg_conn, before)
+    _insert(pg_conn, system_id, run_id, activation_id, point)
     pg_conn.commit()
     installed_check = _constraint(pg_conn)
     ddl_before = _schema_snapshot(pg_conn)
@@ -329,6 +286,40 @@ def test_incompatible_preflight_aborts_without_partial_ddl(
     )
     assert "ownership,system_id" in before
     assert "binding,system_id" not in before
+
+
+def test_not_valid_0121_definition_is_rejected_without_partial_ddl(
+    pg_conn: psycopg.Connection,
+) -> None:
+    _apply_through(pg_conn, "0123")
+    before = _constraint(pg_conn)
+    pg_conn.execute(
+        "ALTER TABLE external_boot_activations "
+        "DROP CONSTRAINT external_boot_activation_evidence_ownership"
+    )
+    _install_old_check_not_valid(pg_conn, before)
+    pg_conn.commit()
+    installed_check = _constraint(pg_conn)
+    ddl_before = _schema_snapshot(pg_conn)
+    rows_before = pg_conn.execute(
+        "SELECT id, recovery_point::text FROM external_boot_activations ORDER BY id"
+    ).fetchall()
+    migration = next(item for item in migrate.discover_migrations() if item.version == "0124")
+
+    with (
+        pytest.raises(psycopg.errors.RaiseException, match="exact migration 0121"),
+        pg_conn.transaction(),
+    ):
+        pg_conn.execute(migration.sql.encode())
+
+    assert _constraint(pg_conn) == installed_check
+    assert _schema_snapshot(pg_conn) == ddl_before
+    assert (
+        pg_conn.execute(
+            "SELECT id, recovery_point::text FROM external_boot_activations ORDER BY id"
+        ).fetchall()
+        == rows_before
+    )
 
 
 def test_modified_non_recovery_arm_aborts_before_drop(pg_conn: psycopg.Connection) -> None:

@@ -32,8 +32,10 @@ DO $$
 DECLARE
     ownership_check text;
     expected_check text;
+    ownership_check_validated boolean;
 BEGIN
-    SELECT pg_get_constraintdef(oid, true) INTO ownership_check
+    SELECT pg_get_constraintdef(oid, true), convalidated
+    INTO ownership_check, ownership_check_validated
     FROM pg_constraint
     WHERE conrelid = 'public.external_boot_activations'::regclass
       AND conname = 'external_boot_activation_evidence_ownership'
@@ -45,7 +47,8 @@ BEGIN
       AND conname = 'external_boot_0124_expected_ownership'
       AND contype = 'c';
 
-    IF regexp_replace(ownership_check, ' NOT VALID$', '') IS DISTINCT FROM expected_check THEN
+    IF ownership_check IS DISTINCT FROM expected_check
+       OR ownership_check_validated IS DISTINCT FROM true THEN
         RAISE EXCEPTION '0124 requires the exact migration 0121 ownership CHECK';
     END IF;
 

@@ -95,19 +95,19 @@ def prepare(
    round-trip assertions. Repository-search `prepare(`, `.ownership`, and `RecoveryPoint(` and update
    every direct in-tree caller; discovery of an external/versioned caller stops at scope checkpoint.
    Add migration 0124 with a same-transaction compatibility preflight before any
-   `DROP CONSTRAINT`. The preflight aborts on an existing recovery point with legacy ownership,
-   missing binding, a scalar or array binding, missing or extra binding keys, a malformed UUID, or
-   binding ownership unequal to the ledger row. Only after it passes, drop and recreate
+   `DROP CONSTRAINT`. Require the exact normalized 0121 definition with `convalidated=true`, then
+   abort on a reachable existing recovery point with legacy ownership. Only after it passes, drop and recreate
    `external_boot_activation_evidence_ownership`, preserving every non-recovery arm. Require
    `jsonb_typeof(binding) = 'object'`, the exact keyset `{system_id, run_id, activation_id}`,
    canonical UUID casts, and equality of all three values to the ledger System, Run, and activation.
    Perform no data rewrite and add no table, role, or grant changes.
 
    In `tests/db/test_external_boot_activation_binding_migration.py`, prove the exact CHECK shape,
-   canonical persistence, each malformed/legacy/cross-owner row rejection after migration, and a
-   pre-migration fixture for every incompatibility above. Each preflight fixture must prove the
+   canonical persistence and each malformed/legacy/cross-owner row rejection after migration. A
+   validated-0121 legacy-row fixture and an exact-definition `NOT VALID` fixture must prove the
    migration transaction aborts before the drop and leaves the old CHECK installed with no partial
-   DDL. Prove the role/grant inventory is unchanged. In `tests/db/test_migrate.py`, add 0124 to the
+   DDL. Other malformed binding shapes are unreachable under validated 0121 and need no fabricated
+   pre-migration fixture. Prove the role/grant inventory is unchanged. In `tests/db/test_migrate.py`, add 0124 to the
    exact ordered inventory and immutable historical-prefix assertions without changing 0121.
    Run `just test-verbose tests/db/test_external_boot_activation_binding_migration.py` and
    `just test-verbose tests/db/test_migrate.py`; expect all passed. Application rollback is allowed

@@ -54,9 +54,11 @@ Migration 0124 replaces only the existing `external_boot_activation_evidence_own
 new recovery-point arm requires `jsonb_typeof(binding) = 'object'`, requires its key set to equal
 exactly `system_id`, `run_id`, and `activation_id`, and requires those three UUIDs to equal the
 activation row; all other arms are preserved. Before dropping the old CHECK, the same migration
-transaction scans every stored recovery point and aborts on legacy `ownership`, missing binding,
-scalar/array binding, extra/missing keys, malformed UUIDs, or owner mismatch. An abort preserves the
-old constraint because the migration runner is transactional. Migration 0124 rewrites no data and
+requires the exact normalized 0121 definition with `convalidated=true`, then scans stored recovery
+points. Under that provenance, legacy `ownership` is the only incompatible non-null recovery-point
+shape 0121 admits; its presence aborts. Missing, scalar/array, extra/missing-key, malformed-UUID, and
+cross-owner binding shapes are defensively rejected by the replacement CHECK after migration. An
+abort preserves the old constraint because the migration runner is transactional. Migration 0124 rewrites no data and
 creates no role or grant. Application rollback with immutable forward migration history is safe only
 before the first binding-shaped recovery point is written. After that write, recovery is roll-forward:
 the old application cannot deserialize the new point and its legacy write fails the replacement
@@ -246,7 +248,7 @@ existing manually dispatched tier and must not be claimed locally.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
-changing role grants. Upgrade fixtures inject each incompatible pre-existing row and prove migration
-abort leaves the prior CHECK installed with no partial DDL. Compatibility assertions cover both
+changing role grants. Upgrade fixtures prove a reachable legacy row aborts migration and that an
+exact-definition but `NOT VALID` 0121 constraint is rejected with no partial DDL. Compatibility assertions cover both
 sides of the first-binding-write boundary: pre-write application rollback and post-write
 roll-forward-only recovery.
