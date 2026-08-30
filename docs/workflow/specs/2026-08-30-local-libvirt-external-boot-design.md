@@ -38,8 +38,9 @@ immutable owner coordinate, not proof of authority. No compatibility overload re
 search identifies only fault-inject and tests as current consumers, and they update atomically. If
 implementation discovers an external or separately versioned caller, it stops at scope checkpoint.
 #2140 alone validates the authority protocol and constructs the binding in production.
-`RecoveryPoint` contains `binding: ExternalBootActivationBinding` in place of relying only on its
-existing System/Run ownership. `prepare` copies the exact input binding into the point. Every
+`RecoveryPoint` replaces `ownership: ActivationOwnership` with
+`binding: ExternalBootActivationBinding`; it never retains two owner representations. `prepare`
+copies the exact input binding into the point. Every
 recovery-consuming operation requires the complete closed point — binding, recovery reference, plan
 identity, materialization identity, source state, and target state — to equal reopened canonical
 recovery metadata before reading provider state. Reopened metadata supplies every expected identity

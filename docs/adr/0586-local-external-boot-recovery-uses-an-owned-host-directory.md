@@ -34,9 +34,10 @@ ownership, never authority. There are no verified external callers and fault-inj
 current implementation, so replace-by-default applies: update the protocol, fault-inject provider,
 contract tests, and direct internal consumers atomically with no compatibility overload. #2140 alone
 translates an authenticated authority request into this binding for production composition.
-`RecoveryPoint` also carries the same closed binding. Every later operation compares the complete
-closed point — binding, recovery reference, plan identity, materialization identity, source state,
-and target state — with reopened canonical metadata before observation or mutation. Reopened
+`RecoveryPoint.binding` replaces `RecoveryPoint.ownership`; the binding is the point's sole System,
+Run, and activation owner representation. Every later operation compares the complete closed point
+— binding, recovery reference, plan identity, materialization identity, source state, and target
+state — with reopened canonical metadata before observation or mutation. Reopened
 metadata, not caller-presented fields, supplies mutation truth. Any field mismatch is conflict with
 no provider write. This adjacent value change lets `activate`, `observe`, `recover`, and `cleanup`
 authenticate the selected owner and immutable state without decoding authority data.
@@ -77,9 +78,10 @@ owner, verifies absence, and fsyncs the parent. Teardown quarantines evidence it
 - The internal pre-release shared port changes incompatibly. Current in-tree fault-inject and test
   consumers move in the same change; any newly discovered external consumer requires a scope
   checkpoint rather than a silent compatibility shim.
-- Shared `RecoveryPoint` gains the activation binding. Serialization and contract tests must reject
-  missing bindings and cross-activation token substitution; no legacy serialized point exists in
-  production because the capability is not advertised.
+- Shared `RecoveryPoint` replaces its System/Run `ownership` field with the activation binding.
+  Serialization and contract tests reject the removed field, missing bindings, and cross-activation
+  token substitution; no legacy serialized point exists in production because the capability is not
+  advertised.
 
 ## Considered & rejected
 
