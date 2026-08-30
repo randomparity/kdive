@@ -94,7 +94,8 @@ repository protocol; it does not issue SQL directly.
 `JournalHead` includes bounded nullable `PendingTakeover` and `SuspendedOperation` values. The
 former retains takeover authority/generation/operation/attempt/request digest and watermark head;
 the latter retains the one serialized lower operation's authority/generation/activation,
-operation/attempt/purpose/request digest, prior phase, and source/target/ownership digests.
+operation identity/attempt/purpose/exact adapter operation or commit point/request digest, prior
+phase, and source/target/ownership digests.
 
 1. Write migration tests for the table constraints, genesis insertion, exact 0122 binding lookup,
    binding-scoped trusted-head read, authority-role execute grants, denied worker/reconciler/core

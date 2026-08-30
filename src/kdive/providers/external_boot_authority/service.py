@@ -98,7 +98,7 @@ class AuthorityServiceMetrics:
 
     def reject(
         self,
-        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
+        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
         category: str,
     ) -> None:
         key = (*self._labels(request), category)
@@ -152,10 +152,29 @@ class ExternalBootAuthorityService:
     def _lane(self, system_id: UUID) -> _Lane:
         return self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
 
-    @staticmethod
-    def _require_peer(peer: AuthenticatedPeer | None) -> AuthenticatedPeer:
+    def _reject(
+        self,
+        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
+        category: Literal["unauthenticated", "superseded", "journal_conflict"],
+    ) -> AuthorityServiceError:
+        self.metrics.reject(request, category)
+        self._logger.warning(
+            "authority request rejected",
+            extra={
+                "provider_kind": request.provider_kind,
+                "authority_instance": request.authority_instance,
+                "category": category,
+            },
+        )
+        return AuthorityServiceError(category)
+
+    def _require_peer(
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
+    ) -> AuthenticatedPeer:
         if peer is None or not isinstance(peer.incarnation_id, UUID):
-            raise AuthorityServiceError("unauthenticated")
+            raise self._reject(request, "unauthenticated")
         return peer
 
     @staticmethod
@@ -216,8 +235,8 @@ class ExternalBootAuthorityService:
             record,
         )
         if status != "advanced":
-            raise AuthorityServiceError(
-                "superseded" if status == "superseded" else "journal_conflict"
+            raise self._reject(
+                record, "superseded" if status == "superseded" else "journal_conflict"
             )
         self.metrics.record_checkpoint(record, time.perf_counter() - started)
         return (*records, record)
@@ -239,7 +258,7 @@ class ExternalBootAuthorityService:
     ) -> bool:
         """Return true only when local bytes exactly equal the scoped trusted head."""
         try:
-            authenticated = self._require_peer(peer)
+            authenticated = self._require_peer(peer, request)
             binding = await self._repository.resolve_allocating(authenticated, request)
             if binding is None or not self._binding_matches(binding, request):
                 return False
@@ -286,7 +305,6 @@ class ExternalBootAuthorityService:
                 "intended_target_identity": request.intended_target_identity,
                 "recovery_objects": request.recovery_objects,
             }
-            values.pop("operation", None)
         values.update(changes)
         return JournalRecordV1.model_validate(values)
 
@@ -304,7 +322,7 @@ class ExternalBootAuthorityService:
             authority_instance=record.authority_instance,
             operation_identity=record.operation_identity,
             operation_digest=record.operation_digest,
-            operation=record.purpose,
+            operation=record.operation or "",
             attempt_id=record.attempt_id,
             expected_source_identity=record.expected_source_identity or "",
             intended_target_identity=record.intended_target_identity or "",
@@ -335,7 +353,35 @@ class ExternalBootAuthorityService:
         journal: FileAuthorityJournal,
         records: tuple[JournalRecordV1, ...],
         prior: JournalRecordV1,
+        suspended: object,
     ) -> tuple[JournalRecordV1, ...]:
+        from kdive.db.external_boot_authority_journal import SuspendedOperation
+
+        ownership = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    [item.model_dump(mode="json") for item in prior.recovery_objects],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+        )
+        if not isinstance(suspended, SuspendedOperation) or (
+            suspended.authority_id != prior.authority_id
+            or suspended.generation != prior.generation
+            or suspended.activation_id != prior.activation_id
+            or suspended.operation_identity != prior.operation_identity
+            or suspended.attempt_id != prior.attempt_id
+            or suspended.purpose != prior.purpose
+            or suspended.operation != prior.operation
+            or suspended.request_digest != prior.operation_digest
+            or suspended.phase != prior.phase.value
+            or suspended.source_identity != prior.expected_source_identity
+            or suspended.target_identity != prior.intended_target_identity
+            or suspended.ownership_digest != ownership
+        ):
+            raise AuthorityServiceError("journal_conflict")
         request = self._mutation_from_record(prior)
         binding = self._binding_from_record(peer, prior)
         if prior.phase is JournalPhase.ADMITTED:
@@ -391,37 +437,50 @@ class ExternalBootAuthorityService:
     async def acknowledge_takeover(
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
     ) -> AuthorityAcknowledgementV1:
-        authenticated = self._require_peer(peer)
+        authenticated = self._require_peer(peer, request)
         lane = self._lane(request.system_id)
         async with lane.lock:
             if lane.failed:
                 raise AuthorityServiceError("journal_conflict")
             binding = await self._repository.resolve_allocating(authenticated, request)
             if binding is None or not self._binding_matches(binding, request):
-                raise AuthorityServiceError("superseded")
+                raise self._reject(request, "superseded")
             journal = self._journal_factory(request.system_id)
             try:
                 records = await self._recover(binding, journal)
+                trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
-                if records and records[-1].phase is JournalPhase.WATERMARK_INSTALLED:
-                    prior = records[-1]
-                    if (
-                        prior.generation == request.generation
-                        and prior.authority_id == request.authority_id
-                        and prior.operation_identity == request.operation_identity
-                        and prior.operation_digest == request.operation_digest
-                    ):
+                pending = trusted.pending_takeover if trusted is not None else None
+                if pending is not None:
+                    prior = next(
+                        (
+                            record
+                            for record in records
+                            if record.sequence == pending.watermark_sequence
+                            and record_digest(record) == pending.watermark_digest
+                        ),
+                        None,
+                    )
+                    if prior is None:
+                        raise AuthorityServiceError("journal_conflict")
+                    if pending.generation == request.generation:
+                        if (
+                            pending.authority_id != request.authority_id
+                            or pending.operation_identity != request.operation_identity
+                            or pending.request_digest != request.operation_digest
+                        ):
+                            raise AuthorityServiceError("superseded")
                         watermark = prior
-                    elif prior.generation >= request.generation:
+                    elif pending.generation >= request.generation:
                         raise AuthorityServiceError("superseded")
                     else:
                         superseded = self._record(
                             request,
                             records,
                             JournalPhase.TAKEOVER_SUPERSEDED,
-                            predecessor_generation=prior.generation,
-                            watermark_sequence=prior.sequence,
-                            watermark_digest=record_digest(prior),
+                            predecessor_generation=pending.generation,
+                            watermark_sequence=pending.watermark_sequence,
+                            watermark_digest=pending.watermark_digest,
                         )
                         records = await self._anchor(binding, journal, records, superseded)
                 if watermark is None:
@@ -456,8 +515,15 @@ class ExternalBootAuthorityService:
                             JournalPhase.OBSERVED,
                         }
                     )
+                    trusted_after_watermark = await self._repository.read_head(binding)
+                    if trusted_after_watermark is None:
+                        raise AuthorityServiceError("journal_conflict")
                     records = await self._recover_suspended(
-                        authenticated, journal, records, unresolved
+                        authenticated,
+                        journal,
+                        records,
+                        unresolved,
+                        trusted_after_watermark.suspended_operation,
                     )
                 if active is not None and active.generation < request.generation:
                     if active.phase is JournalPhase.ADMITTED:
@@ -537,7 +603,7 @@ class ExternalBootAuthorityService:
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1:
-        authenticated = self._require_peer(peer)
+        authenticated = self._require_peer(peer, request)
         lane = self._lane(request.system_id)
 
         async def run() -> AuthorityObservationV1:

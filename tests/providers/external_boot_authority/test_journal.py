@@ -57,6 +57,7 @@ def _record(
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     }:
         values |= {
+            "operation": "recover-commit",
             "expected_source_identity": _DIGEST,
             "intended_target_identity": _DIGEST,
             "recovery_objects": (),
