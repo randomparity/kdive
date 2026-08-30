@@ -201,6 +201,12 @@ The append cache stores records in append-friendly private storage and validates
 bounded delta containing only that record's touched keys. It applies the delta and publishes the
 new tail only after durable write success; validation, write, and fsync failures leave cached
 history and validation state unchanged. No retained-history tuple or validation map is copied.
+After exact binding resolution, the service retains that validated journal instance and its
+append-friendly record view for the lifetime of the serialized System lane. Phase checkpoints
+therefore reuse the same cache and perform only candidate validation plus descriptor identity and
+bounded-tail verification; they do not rescan retained history. Evicting an idle terminal lane
+drops the cache, and a fresh service or later lane performs exactly one streaming validation.
+Detected external change fails the lane closed rather than refreshing or accepting changed bytes.
 A prospective append beyond the maximum fails before file bytes,
 database CAS, or provider progress and leaves readiness false. Recovery is audited restoration or
 retention of exact bytes, never truncation or compaction. Production hosting configuration and

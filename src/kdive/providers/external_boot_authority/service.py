@@ -187,6 +187,8 @@ class _Lane:
     failed: bool = False
     watermark_generation: int = 0
     active: _ActiveOperation | None = None
+    journal: FileAuthorityJournal | None = None
+    records: list[JournalRecordV1] | None = None
 
 
 @dataclass(slots=True)
@@ -224,6 +226,15 @@ class ExternalBootAuthorityService:
         lane.users -= 1
         if lane.users == 0 and lane.active is None and self._lanes.get(system_id) is lane:
             self._lanes.pop(system_id)
+
+    def _lane_journal(
+        self, system_id: UUID, lane: _Lane
+    ) -> tuple[FileAuthorityJournal, list[JournalRecordV1]]:
+        if lane.journal is None:
+            lane.journal = self._journal_factory(system_id)
+            lane.records = list(lane.journal.load())
+        assert lane.records is not None
+        return lane.journal, lane.records
 
     @staticmethod
     def _trusted_labels(binding: AuthorityBinding | None) -> tuple[str, str]:
@@ -298,9 +309,13 @@ class ExternalBootAuthorityService:
         )
 
     async def _recover(
-        self, binding: AuthorityBinding, journal: FileAuthorityJournal
-    ) -> tuple[JournalRecordV1, ...]:
-        records = journal.load()
+        self,
+        binding: AuthorityBinding,
+        journal: FileAuthorityJournal,
+        records: list[JournalRecordV1] | None = None,
+    ) -> list[JournalRecordV1]:
+        if records is None:
+            records = list(journal.load())
         head = await self._repository.read_head(binding)
         if head is None:
             if records:
@@ -324,9 +339,9 @@ class ExternalBootAuthorityService:
         self,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
-        records: tuple[JournalRecordV1, ...],
+        records: list[JournalRecordV1],
         record: JournalRecordV1,
-    ) -> tuple[JournalRecordV1, ...]:
+    ) -> list[JournalRecordV1]:
         started = time.perf_counter()
         journal.append(record)
         status = await self._repository.advance(
@@ -342,7 +357,8 @@ class ExternalBootAuthorityService:
                 labels=self._trusted_labels(binding),
             )
         self.metrics.record_checkpoint(record, time.perf_counter() - started)
-        return (*records, record)
+        records.append(record)
+        return records
 
     def _provider_error(self, request: AuthorityMutationRequestV1) -> AuthorityServiceError:
         labels = self.metrics.reject_labels(
@@ -394,7 +410,7 @@ class ExternalBootAuthorityService:
     @staticmethod
     def _record(
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
-        records: tuple[JournalRecordV1, ...],
+        records: list[JournalRecordV1],
         phase: JournalPhase,
         **changes: object,
     ) -> JournalRecordV1:
@@ -438,10 +454,10 @@ class ExternalBootAuthorityService:
         self,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
-        records: tuple[JournalRecordV1, ...],
+        records: list[JournalRecordV1],
         prior: JournalRecordV1,
         suspended: object,
-    ) -> tuple[JournalRecordV1, ...]:
+    ) -> list[JournalRecordV1]:
         from kdive.db.external_boot_authority_journal import SuspendedOperation
 
         ownership = (
@@ -480,9 +496,9 @@ class ExternalBootAuthorityService:
         self,
         binding: AuthorityBinding,
         journal: FileAuthorityJournal,
-        records: tuple[JournalRecordV1, ...],
+        records: list[JournalRecordV1],
         prior: JournalRecordV1,
-    ) -> tuple[JournalRecordV1, ...]:
+    ) -> list[JournalRecordV1]:
         request = self._mutation_from_record(prior)
         if prior.phase is JournalPhase.ADMITTED:
             terminal = self._record(request, records, JournalPhase.TERMINAL, outcome="never-began")
@@ -562,9 +578,9 @@ class ExternalBootAuthorityService:
             confirmed = await self._repository.resolve_allocating(authenticated, request)
             if confirmed is None or confirmed != binding:
                 raise self._reject(request, "superseded", labels=self._trusted_labels(binding))
-            journal = self._journal_factory(request.system_id)
             try:
-                records = await self._recover(binding, journal)
+                journal, records = self._lane_journal(request.system_id, lane)
+                records = await self._recover(binding, journal, records)
                 trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
                 pending = trusted.pending_takeover if trusted is not None else None
@@ -664,7 +680,7 @@ class ExternalBootAuthorityService:
             try:
                 if lane.watermark_generation != request.generation:
                     raise AuthorityServiceError("superseded")
-                records = await self._recover(binding, journal)
+                records = await self._recover(binding, journal, records)
                 phases = {record.operation_identity: record.phase for record in records}
                 if any(
                     phase
@@ -730,22 +746,6 @@ class ExternalBootAuthorityService:
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         if trusted is None or not self._binding_matches(trusted, request):
             raise self._reject(request, "superseded", labels=self._trusted_labels(trusted))
-        journal = self._journal_factory(trusted.system_id)
-        records = journal.load()
-        acknowledgements = [
-            record
-            for record in records
-            if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
-            and record.generation == request.generation
-        ]
-        if not acknowledgements:
-            raise self._reject(request, "superseded")
-        acknowledgement = acknowledgements[-1]
-        confirmed = await self._repository.resolve_current(
-            authenticated, request, acknowledgement.sequence, record_digest(acknowledgement)
-        )
-        if confirmed is None or confirmed != trusted:
-            raise self._reject(request, "superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
         async def run() -> AuthorityObservationV1:
@@ -756,8 +756,7 @@ class ExternalBootAuthorityService:
                         raise AuthorityServiceError("journal_conflict")
                     if lane.active is not None:
                         raise AuthorityServiceError("superseded")
-                    journal = self._journal_factory(request.system_id)
-                    records = journal.load()
+                    journal, records = self._lane_journal(request.system_id, lane)
                     acknowledgements = [
                         record
                         for record in records
@@ -767,8 +766,16 @@ class ExternalBootAuthorityService:
                     if not acknowledgements:
                         raise AuthorityServiceError("superseded")
                     acknowledgement = acknowledgements[-1]
+                    confirmed = await self._repository.resolve_current(
+                        authenticated,
+                        request,
+                        acknowledgement.sequence,
+                        record_digest(acknowledgement),
+                    )
+                    if confirmed is None or confirmed != trusted:
+                        raise AuthorityServiceError("superseded")
                     binding = trusted
-                    records = await self._recover(binding, journal)
+                    records = await self._recover(binding, journal, records)
                     phases_by_operation: dict[str, JournalRecordV1] = {}
                     for record in reversed(records):
                         phases_by_operation.setdefault(record.operation_identity, record)
@@ -823,7 +830,6 @@ class ExternalBootAuthorityService:
                     lane.active = active
                 await asyncio.sleep(0)
                 async with lane.lock:
-                    records = journal.load()
                     if active.stop_before_start:
                         await self._anchor(
                             binding,
@@ -858,7 +864,6 @@ class ExternalBootAuthorityService:
                 except Exception:
                     raise self._provider_error(request) from None
                 async with lane.lock:
-                    records = journal.load()
                     records = await self._anchor(
                         binding,
                         journal,
@@ -870,7 +875,6 @@ class ExternalBootAuthorityService:
                 except Exception:
                     raise self._provider_error(request) from None
                 async with lane.lock:
-                    records = journal.load()
                     records = await self._anchor(
                         binding,
                         journal,
