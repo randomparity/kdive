@@ -247,6 +247,11 @@ binding's journal and require its exact anchored acknowledgement; the existing b
 still fences immediately before provider commit. Inactive, stale, cross-System, or high-cardinality
 hostile requests therefore cannot turn absent, malformed, oversized, or path failures into an
 oracle or allocate journal, lane, filesystem, or provider work.
+After `mutation-started` is durable, an adapter exception leaves that operation unresolved even if
+the in-memory lane becomes idle or the process restarts. Every later same-generation mutation first
+reconstructs the exact trusted/local head. It either observes and terminalizes the authorized prior
+operation, then returns `provider_conflict` for retry, or fails closed without admitting or calling
+the later commit. Only a subsequent request after exact terminal evidence may append `admitted`.
 Trusted metric coordinates use a construction-time registry capped at 256 by default. Operators
 may pre-register configured coordinates at library construction; production wiring remains #2127.
 After the cap, all new coordinates aggregate into one fixed `overflow` coordinate/series without
