@@ -7,9 +7,9 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Literal, Protocol
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, cast
 from uuid import UUID
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
@@ -88,34 +88,97 @@ class AuthorityServiceMetrics:
     unresolved: dict[tuple[str, str], int]
     checkpoints: dict[tuple[str, str], int]
     checkpoint_latency: dict[tuple[str, str], tuple[int, float]]
+    max_coordinates: int = 256
+    registered_coordinates: frozenset[tuple[str, str]] = frozenset()
+    _coordinates: set[tuple[str, str]] = field(default_factory=set)
+
+    _OVERFLOW = ("overflow", "overflow")
+    _UNTRUSTED = ("untrusted", "unresolved")
 
     @classmethod
-    def empty(cls) -> AuthorityServiceMetrics:
-        return cls({}, {}, {}, {}, {})
+    def empty(
+        cls,
+        *,
+        max_coordinates: int = 256,
+        registered_coordinates: frozenset[tuple[str, str]] = frozenset(),
+    ) -> AuthorityServiceMetrics:
+        if max_coordinates < 1:
+            raise ValueError("authority metrics coordinate maximum must be positive")
+        if len(registered_coordinates) > max_coordinates:
+            raise ValueError("registered authority metrics coordinates exceed maximum")
+        return cls(
+            {},
+            {},
+            {},
+            {},
+            {},
+            max_coordinates,
+            registered_coordinates,
+            set(registered_coordinates),
+        )
 
-    @staticmethod
     def _labels(
+        self,
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
     ) -> tuple[str, str]:
-        return request.provider_kind, request.authority_instance
+        return self.labels((request.provider_kind, request.authority_instance))
+
+    def labels(self, labels: tuple[str, str]) -> tuple[str, str]:
+        if labels in {self._UNTRUSTED, self._OVERFLOW}:
+            return labels
+        if labels in self._coordinates:
+            return labels
+        if len(self._coordinates) >= self.max_coordinates:
+            return self._OVERFLOW
+        self._coordinates.add(labels)
+        return labels
+
+    def _key(self, store: Iterable[tuple[str, ...]], key: tuple[str, ...]) -> tuple[str, ...]:
+        overflow = (*self._OVERFLOW, *("overflow" for _ in key[2:]))
+        entries = tuple(store)
+        if key[:2] == self._OVERFLOW:
+            return overflow
+        if key in entries or key[:2] == self._UNTRUSTED:
+            return key
+        if sum(existing[:2] != self._OVERFLOW for existing in entries) < self.max_coordinates:
+            return key
+        return overflow
+
+    def reject_labels(self, labels: tuple[str, str], category: str) -> tuple[str, str]:
+        bounded = self.labels(labels)
+        key = cast(tuple[str, str, str], self._key(self.rejections, (*bounded, category)))
+        self.rejections[key] = self.rejections.get(key, 0) + 1
+        return key[:2]
 
     def reject(
         self,
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | JournalRecordV1,
         category: str,
     ) -> None:
-        key = (*self._labels(request), category)
-        self.rejections[key] = self.rejections.get(key, 0) + 1
+        self.reject_labels((request.provider_kind, request.authority_instance), category)
 
-    def recovery_failed(self, request: AuthorityTakeoverRequestV1) -> None:
-        key = self._labels(request)
+    def recovery_failed(self, request: AuthorityTakeoverRequestV1) -> tuple[str, str]:
+        key = cast(tuple[str, str], self._key(self.recovery_failures, self._labels(request)))
         self.recovery_failures[key] = self.recovery_failures.get(key, 0) + 1
+        return key
 
     def record_checkpoint(self, request: JournalRecordV1, elapsed: float) -> None:
-        key = self._labels(request)
+        key = cast(tuple[str, str], self._key(self.checkpoints, self._labels(request)))
         self.checkpoints[key] = self.checkpoints.get(key, 0) + 1
+        key = cast(tuple[str, str], self._key(self.checkpoint_latency, self._labels(request)))
         count, total = self.checkpoint_latency.get(key, (0, 0.0))
         self.checkpoint_latency[key] = count + 1, total + elapsed
+
+    def set_unresolved(self, labels: tuple[str, str], unresolved: bool) -> None:
+        key = self.labels(labels)
+        if unresolved:
+            self.unresolved[key] = self.unresolved.get(key, 0) + 1 if key == self._OVERFLOW else 1
+        elif key in self.unresolved:
+            remaining = self.unresolved[key] - 1 if key == self._OVERFLOW else 0
+            if remaining:
+                self.unresolved[key] = remaining
+            else:
+                self.unresolved.pop(key)
 
 
 @dataclass(slots=True)
@@ -176,8 +239,7 @@ class ExternalBootAuthorityService:
         *,
         labels: tuple[str, str] = ("untrusted", "unresolved"),
     ) -> AuthorityServiceError:
-        key = (*labels, category)
-        self.metrics.rejections[key] = self.metrics.rejections.get(key, 0) + 1
+        labels = self.metrics.reject_labels(labels, category)
         self._logger.warning(
             "authority request rejected",
             extra={
@@ -195,12 +257,14 @@ class ExternalBootAuthorityService:
     ) -> None:
         if error.telemetry_recorded:
             return
-        self.metrics.reject(request, error.category)
+        labels = self.metrics.reject_labels(
+            (request.provider_kind, request.authority_instance), error.category
+        )
         self._logger.warning(
             "authority request rejected",
             extra={
-                "provider_kind": request.provider_kind,
-                "authority_instance": request.authority_instance,
+                "provider_kind": labels[0],
+                "authority_instance": labels[1],
                 "category": error.category,
             },
         )
@@ -282,12 +346,14 @@ class ExternalBootAuthorityService:
         return (*records, record)
 
     def _provider_error(self, request: AuthorityMutationRequestV1) -> AuthorityServiceError:
-        self.metrics.reject(request, "provider_conflict")
+        labels = self.metrics.reject_labels(
+            (request.provider_kind, request.authority_instance), "provider_conflict"
+        )
         self._logger.warning(
             "authority provider boundary failed",
             extra={
-                "provider_kind": request.provider_kind,
-                "authority_instance": request.authority_instance,
+                "provider_kind": labels[0],
+                "authority_instance": labels[1],
                 "category": "provider_conflict",
             },
         )
@@ -304,12 +370,12 @@ class ExternalBootAuthorityService:
                 return False
             records = await self._recover(binding, self._journal_factory(request.system_id))
         except AuthorityServiceError, OSError, ValueError:
-            self.metrics.recovery_failed(request)
+            labels = self.metrics.recovery_failed(request)
             self._logger.warning(
                 "authority recovery rejected",
                 extra={
-                    "provider_kind": request.provider_kind,
-                    "authority_instance": request.authority_instance,
+                    "provider_kind": labels[0],
+                    "authority_instance": labels[1],
                     "category": "journal_conflict",
                 },
             )
@@ -545,7 +611,9 @@ class ExternalBootAuthorityService:
                     for phase in phases_by_operation.values()
                 )
                 if unresolved_restart and active is None:
-                    self.metrics.unresolved[(request.provider_kind, request.authority_instance)] = 1
+                    self.metrics.set_unresolved(
+                        (request.provider_kind, request.authority_instance), True
+                    )
                     unresolved = next(
                         record
                         for record in reversed(records[:-1])
@@ -571,7 +639,9 @@ class ExternalBootAuthorityService:
                 if active is not None and active.generation < request.generation:
                     if active.phase is JournalPhase.ADMITTED:
                         active.stop_before_start = True
-                    self.metrics.unresolved[(request.provider_kind, request.authority_instance)] = 1
+                    self.metrics.set_unresolved(
+                        (request.provider_kind, request.authority_instance), True
+                    )
             except AuthorityServiceError as error:
                 self._ensure_rejection(request, error)
                 lane.failed = error.category == "journal_conflict"
@@ -614,7 +684,7 @@ class ExternalBootAuthorityService:
             except BaseException:
                 lane.failed = True
                 raise
-            self.metrics.unresolved.pop((request.provider_kind, request.authority_instance), None)
+            self.metrics.set_unresolved((request.provider_kind, request.authority_instance), False)
             quiescence = json.dumps(
                 {
                     "authority_instance": request.authority_instance,

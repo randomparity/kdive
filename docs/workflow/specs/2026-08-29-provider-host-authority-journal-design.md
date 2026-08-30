@@ -197,6 +197,10 @@ retained-history length. The cache binds the opened file's device, inode, size, 
 change timestamps plus the exact final-record bytes and offset. Append reopens once, verifies that
 identity and bounded tail on the same descriptor used for `O_APPEND`, and verifies the pathname
 still names that descriptor before and after fsync; replacement or same-size rewrite fails closed.
+The append cache stores records in append-friendly private storage and validates a candidate into a
+bounded delta containing only that record's touched keys. It applies the delta and publishes the
+new tail only after durable write success; validation, write, and fsync failures leave cached
+history and validation state unchanged. No retained-history tuple or validation map is copied.
 A prospective append beyond the maximum fails before file bytes,
 database CAS, or provider progress and leaves readiness false. Recovery is audited restoration or
 retention of exact bytes, never truncation or compaction. Production hosting configuration and
@@ -237,6 +241,12 @@ The service authenticates and resolves the exact trusted binding before allocati
 lane. Pre-binding rejection telemetry uses fixed `untrusted`/`unresolved` dimensions; later labels
 come only from the trusted binding. Idle terminal lanes are evicted after the last concurrent user,
 so rejected high-cardinality input and completed work cannot grow lane or metric dictionaries.
+Trusted metric coordinates use a construction-time registry capped at 256 by default. Operators
+may pre-register configured coordinates at library construction; production wiring remains #2127.
+After the cap, all new coordinates aggregate into one fixed `overflow` coordinate/series without
+raw provider or tenant values. Rejections, recovery failures, checkpoints, latency, and unresolved
+gauges remain bounded to the configured maximum plus that overflow series; overflow counts and
+latency remain aggregate, and unresolved drains as overflow operations resolve.
 it is never converted to source or target by elapsed time.
 
 Logs and exceptions contain authority, System, generation, sequence, phase, operation, and bounded
