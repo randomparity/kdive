@@ -3,10 +3,12 @@
 ## Scope and governing decisions
 
 Issue #2108 adapts local-libvirt to ADR-0583's `ExternalBootPorts`. ADR-0586 records the
-user-selected provider-host recovery directory. The implementation covers local provider primitives
-and tests only. `AuthorityMutationAdapter`, provider-host service composition, configured authority
-coordinates, and capability advertisement remain #2140; remote primitives, jobs, reconciliation,
-hosting, schemas, and migrations remain excluded.
+user-selected provider-host recovery directory and the later A1 decision to carry a closed
+provider-neutral activation binding into preparation. The implementation covers the shared value
+and signature adjustment, local provider primitives, fault-inject consistency, and tests only.
+`AuthorityMutationAdapter`, authority-reference translation, provider-host service composition,
+configured authority coordinates, and capability advertisement remain #2140; remote primitives,
+jobs, reconciliation, hosting, schemas, and migrations remain excluded.
 
 The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
 dependency. It reuses libvirt, defused XML parsing, `xml.etree.ElementTree.canonicalize`, libguestfs,
@@ -18,6 +20,24 @@ Create `local_libvirt/lifecycle/external_boot.py` containing `LocalLibvirtExtern
 synchronous `ExternalBootPorts` methods, ADR-0583 libvirt-definition identity helpers, recovery
 metadata models, and filesystem publication. Keep legacy `LocalLibvirtInstall` unchanged; shared
 helpers may move only when both callers need the identical behavior.
+
+Add closed `ExternalBootActivationBinding` beside the shared values with exactly canonical
+`system_id`, `run_id`, and `activation_id`. Replace the pre-release protocol signature with:
+
+```python
+def prepare(
+    self,
+    materialization: ExternalBootMaterialization,
+    binding: ExternalBootActivationBinding,
+    authority: OpaqueProviderRef,
+) -> RecoveryPoint: ...
+```
+
+Preparation rejects unless binding System and Run equal materialization ownership. Binding is an
+immutable owner coordinate, not proof of authority. No compatibility overload remains: repository
+search identifies only fault-inject and tests as current consumers, and they update atomically. If
+implementation discovers an external or separately versioned caller, it stops at scope checkpoint.
+#2140 alone validates the authority protocol and constructs the binding in production.
 
 Create `local_libvirt/lifecycle/boot/recovery.py` with a narrow `GuestRecoveryWriter` protocol and
 real libguestfs implementation. It owns only `/lib/modules/<validated-release>` and uses no shell or
@@ -44,7 +64,7 @@ definition digest, source and target boot-projection digests, source and target 
 power state, capture descriptor, and durable recovery phase. It contains no configured root or
 absolute path. The opaque reference has `local-recovery-v1/<system UUID>/<activation UUID>` and is
 accepted only when both UUIDs equal `RecoveryPoint.ownership` and the activation supplied to the
-local provider construction context.
+supplied activation binding.
 
 ## Materialize and prepare
 
