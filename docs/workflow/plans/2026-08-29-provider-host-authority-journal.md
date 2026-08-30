@@ -20,6 +20,8 @@ remote adapters share the same bounded port and contract tests.
 - Requests and diagnostics contain identities and bounded observations, never provider definitions,
   paths, commands, credentials, secrets, or raw provider output.
 - Postgres remains lifecycle truth. The journal records provider admission and observation only.
+- `watermark-installed` and `takeover-acknowledged` are anchored only for the newest exact
+  allocating binding; mutation phases require its promoted current binding.
 - `admitted` and `mutation-started` are locally fsynced and database-anchored before provider
   access. Every provider commit gets a fresh binding/generation check.
 - Takeover acknowledgement waits for positive resolution of every older admitted call. Timeout,
@@ -52,11 +54,14 @@ bytes`, `record_digest(record) -> str`, and `FileAuthorityJournal.append(record)
    collection to fail because the package does not exist.
 2. Implement closed Pydantic values, byte validators, canonical recovery ordering, and the
    serialized-size guard. Rerun the command; expect all protocol tests to pass.
-3. Write journal tests for genesis, previous-digest chaining, phase ordering, append+fsync,
+3. Write journal tests for genesis, previous-digest chaining, takeover and mutation phase ordering,
+   exclusive mode-0600 creation without symlink following, parent-directory fsync before the first
+   checkpoint,
    canonical newline-delimited encoding, partial final records, duplicate/reordered sequences,
    foreign lane identity, ownership mutation, and corrupt digests. Run the journal test file;
    expect failures for missing codec and journal.
-4. Implement the canonical JSON codec and journal using `Path.open`, `flush`, and `os.fsync`.
+4. Implement the canonical JSON codec and journal using descriptor-based exclusive/no-follow open,
+   restrictive mode checks, `flush`, file `os.fsync`, and parent-directory `os.fsync` on creation.
    Reject rather than repair invalid bytes. Rerun both files; expect all tests to pass.
 5. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit the explicit Task 1
    paths as `feat(providers): define authority journal protocol`.
@@ -88,15 +93,20 @@ repository protocol; it does not issue SQL directly.
    phase regression and operation switch conflict, generation/binding mismatches supersede, and
    signed-64-bit overflow fails without writes. Include foreign System/activation/Run/attempt,
    provider/instance/purpose/operation/digest/peer cases.
-3. Implement migration 0123 with the one-row-per-lane head, constraints, security-definer resolve
+3. Add a complete binding-state/phase matrix: only the newest exact allocating authority may anchor
+   `watermark-installed` then `takeover-acknowledged`; only the matching promoted current authority
+   may anchor mutation phases. Cross-state, cross-phase, stale, and concurrent takeover attempts
+   change zero rows. Assert the acknowledgement exposes the exact anchored sequence and digest used
+   by migration 0122.
+4. Implement migration 0123 with the one-row-per-lane head, constraints, security-definer resolve
    and compare-and-set functions, pinned `search_path`, explicit revokes, and exact execute grants.
    Acquire the System advisory lock before the head row and re-resolve the 0122 binding under lock.
-4. Implement the typed psycopg repository wrapper and prove it maps all three SQL outcomes without
+5. Implement the typed psycopg repository wrapper and prove it maps all three SQL outcomes without
    swallowing database failures. Rerun the migration file; expect all tests to pass.
-5. Update the existing migration-count/name assertions, regenerate nothing by hand, then run
+6. Update the existing migration-count/name assertions, regenerate nothing by hand, then run
    `just test-verbose tests/db/test_migrate.py tests/db/test_external_boot_authority_migration.py
    tests/db/test_external_boot_authority_journal_migration.py`; expect all tests to pass.
-6. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 2 paths
+7. Run `just lint`, `just type`, and `git diff --check`; expect exit 0. Commit explicit Task 2 paths
    as `feat(db): anchor authority journal heads`.
 
 **Acceptance:** Only the authority role can resolve and advance heads; every mismatch is zero-write;
@@ -120,7 +130,8 @@ repository.
    stale/cross-binding request, malformed ownership, and failed readiness all produce no journal or
    provider access. Run the service file; expect import failures.
 2. Prove takeover accepts only the newest exact `allocating` binding, performs no provider mutation,
-   and returns anchored acknowledgement evidence. Prove mutation is denied until core promotes the
+   anchors `watermark-installed` and then `takeover-acknowledged`, and returns the latter record's
+   exact sequence/digest. Prove mutation is denied until core promotes the
    binding to `current` with the exact acknowledgement sequence and digest.
 3. Add concurrency tests that pause an old operation before and after every commit point, admit a
    successor, and prove acknowledgement remains pending until the old call is positively observed.
@@ -128,10 +139,12 @@ repository.
 4. Add exact phase-order tests proving `admitted` and `mutation-started` are fsynced and anchored
    before the first adapter call, and later observations are anchored before acknowledgement or a
    later commit. Inject local-append, fsync, database-CAS, provider-return, and observation failures.
-5. Add restart matrices for every journal phase and reject empty-with-head, valid-prefix truncation,
-   extra suffix, corruption, reorder, duplicate sequence, foreign lane, divergent phase/operation,
-   and changed stable ownership. Include a trusted `mutation-started` head with unresolved provider
-   work and prove takeover remains withheld.
+5. Add restart matrices for every journal phase, including both takeover records, and reject
+   empty-with-head, valid-prefix truncation, extra suffix, corruption, reorder, duplicate sequence,
+   foreign lane, divergent phase/operation, and changed stable ownership. Include a trusted
+   `mutation-started` head with unresolved provider work and prove takeover remains withheld. Inject
+   crashes around exclusive journal creation, parent-directory fsync, and initial CAS; a committed
+   head must never survive a missing directory entry.
 6. Implement lane state, startup recovery, phase append+anchor, pre-commit binding rechecks,
    cancellation shielding, positive observation classification, and bounded structured errors.
    Do not add lease/deadline promotion or automatic journal repair.
