@@ -474,6 +474,15 @@ class ExternalBootAuthorityService:
             or suspended.ownership_digest != ownership
         ):
             raise AuthorityServiceError("journal_conflict")
+        return await self._finish_recovery(binding, journal, records, prior)
+
+    async def _finish_recovery(
+        self,
+        binding: AuthorityBinding,
+        journal: FileAuthorityJournal,
+        records: tuple[JournalRecordV1, ...],
+        prior: JournalRecordV1,
+    ) -> tuple[JournalRecordV1, ...]:
         request = self._mutation_from_record(prior)
         if prior.phase is JournalPhase.ADMITTED:
             terminal = self._record(request, records, JournalPhase.TERMINAL, outcome="never-began")
@@ -760,6 +769,51 @@ class ExternalBootAuthorityService:
                     acknowledgement = acknowledgements[-1]
                     binding = trusted
                     records = await self._recover(binding, journal)
+                    phases_by_operation: dict[str, JournalRecordV1] = {}
+                    for record in reversed(records):
+                        phases_by_operation.setdefault(record.operation_identity, record)
+                    unresolved = next(
+                        (
+                            record
+                            for record in phases_by_operation.values()
+                            if record.phase
+                            in {
+                                JournalPhase.ADMITTED,
+                                JournalPhase.MUTATION_STARTED,
+                                JournalPhase.PROVIDER_RETURNED,
+                                JournalPhase.OBSERVED,
+                            }
+                        ),
+                        None,
+                    )
+                    if unresolved is not None:
+                        head = await self._repository.read_head(binding)
+                        if head is None:
+                            raise AuthorityServiceError("journal_conflict")
+                        if head.suspended_operation is not None:
+                            await self._recover_suspended(
+                                binding,
+                                journal,
+                                records,
+                                unresolved,
+                                head.suspended_operation,
+                            )
+                        elif (
+                            binding.state == "current"
+                            and binding.authority_id == unresolved.authority_id
+                            and binding.generation == unresolved.generation
+                            and binding.system_id == unresolved.system_id
+                            and binding.activation_id == unresolved.activation_id
+                            and binding.run_id == unresolved.run_id
+                            and binding.plan_identity == unresolved.plan_identity
+                            and binding.purpose == unresolved.purpose
+                            and binding.provider_kind == unresolved.provider_kind
+                            and binding.authority_instance == unresolved.authority_instance
+                        ):
+                            await self._finish_recovery(binding, journal, records, unresolved)
+                        else:
+                            raise AuthorityServiceError("journal_conflict")
+                        raise AuthorityServiceError("provider_conflict")
                     records = await self._anchor(
                         binding,
                         journal,

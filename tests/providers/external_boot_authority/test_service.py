@@ -642,6 +642,55 @@ async def test_provider_boundary_failure_remains_unresolved_across_restart(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_failed_commit_must_recover_before_later_same_generation_admission(
+    tmp_path: Path, restart: bool
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    first = _mutation(takeover)
+    adapter.fail_commit = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, first)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+    before_recovery = len(repository.records)
+    adapter.fail_commit = False
+    second = first.model_copy(
+        update={
+            "operation_identity": "mutation-after-uncertain-commit",
+            "operation_digest": _DIGEST_B,
+            "attempt_id": uuid4(),
+        }
+    )
+    if restart:
+        service = ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path / f"{system_id}.journal"
+            ),
+            adapter=adapter,
+        )
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, second)
+
+    assert adapter.calls == [f"commit:{first.operation}", "observe"]
+    assert [record.phase for record in repository.records[before_recovery:]] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
+    assert all(
+        record.operation_identity == first.operation_identity
+        for record in repository.records[before_recovery:]
+    )
+    observation = await service.execute_mutation(peer, second)
+    assert observation.category == "target"
+    assert adapter.calls[-2:] == [f"commit:{second.operation}", "observe"]
+
+
+@pytest.mark.anyio
 async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: Path) -> None:
     source, source_repository, _, peer, request = _service(tmp_path / "source")
     (tmp_path / "source").mkdir()
