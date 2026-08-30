@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import LiteralString, cast
 from uuid import UUID, uuid4
 
@@ -173,6 +174,11 @@ def test_migration_replaces_only_recovery_ownership_and_preserves_grants(
     migration = next(item for item in migrate.discover_migrations() if item.version == "0124")
     pg_conn.execute(migration.sql.encode())
     definition = _constraint(pg_conn)
+    expected_definition_digest = (
+        "170315f062cfe27a9ea17052ee0e0b8e"  # pragma: allowlist secret
+        "fc9f9d3dbf72ea37ce33de54df6de646"  # pragma: allowlist secret
+    )
+    assert hashlib.sha256(definition.encode()).hexdigest() == expected_definition_digest
 
     assert "binding,system_id" in definition
     assert "binding,run_id" in definition
