@@ -215,6 +215,7 @@ BEGIN
        OR jsonb_typeof(p_record->'activation_id') <> 'string'
        OR jsonb_typeof(p_record->'run_id') <> 'string'
        OR jsonb_typeof(p_record->'attempt_id') <> 'string'
+       OR (p_record->>'attempt_id')::uuid IS NULL
        OR v_phase NOT IN (
            'watermark-installed', 'takeover-superseded', 'takeover-acknowledged',
            'admitted', 'mutation-started', 'provider-returned', 'observed', 'terminal'
