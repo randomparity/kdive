@@ -14,9 +14,9 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityTakeoverRequestV1,
     JournalPhase,
+    RecoveryObjectBindingV1,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )
@@ -138,39 +138,96 @@ async def test_every_observation_classification_is_terminal_and_bounded(
 
 @pytest.mark.anyio
 async def test_release_and_teardown_are_independently_fenced(tmp_path: Path) -> None:
-    service, repository, adapter, peer, request = _service(tmp_path)
-    await service.acknowledge_takeover(peer, request)
-    repository.current = True
-    for operation in ("release", "teardown"):
+    for purpose in ("release", "teardown"):
+        lane = tmp_path / purpose
+        lane.mkdir()
+        service, repository, adapter, peer, base = _service(lane)
+        request = base.model_copy(
+            update={"purpose": purpose, "operation_identity": f"takeover-{purpose}"}
+        )
+        repository.request = request
+        repository.allocating_request = request
+        await service.acknowledge_takeover(peer, request)
+        repository.current = True
         mutation = _mutation(request).model_copy(
             update={
-                "operation": operation,
-                "operation_identity": f"{operation}-identity",
+                "operation": purpose,
+                "operation_identity": f"{purpose}-identity",
                 "attempt_id": uuid4(),
             }
         )
+        stale = mutation.model_copy(
+            update={"purpose": "teardown" if purpose == "release" else "release"}
+        )
+        with pytest.raises(AuthorityServiceError, match="superseded"):
+            await service.execute_mutation(peer, stale)
+        assert adapter.calls == []
         await service.execute_mutation(peer, mutation)
-    assert adapter.calls == ["commit:release", "observe", "commit:teardown", "observe"]
+        assert adapter.calls == [f"commit:{purpose}", "observe"]
 
 
 @pytest.mark.anyio
-async def test_recovery_ownership_rejects_unrelated_peer_without_provider_access(
-    tmp_path: Path,
+@pytest.mark.parametrize("drift", ["system", "activation", "reference", "order", "digest"])
+async def test_recovery_ownership_rejects_drift_without_provider_or_journal_access(
+    tmp_path: Path, drift: str
 ) -> None:
     service, repository, adapter, peer, request = _service(tmp_path)
     await service.acknowledge_takeover(peer, request)
     repository.current = True
+    objects = tuple(
+        sorted(
+            (
+                RecoveryObjectBindingV1(
+                    system_id=request.system_id,
+                    activation_id=request.activation_id,
+                    reference=reference,
+                )
+                for reference in ("object-a", "object-b")
+            ),
+            key=lambda item: item.model_dump_json(),
+        )
+    )
+    mutation = _mutation(request).model_copy(update={"recovery_objects": objects})
     adapter.fail_commit = True
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
-        await service.execute_mutation(peer, _mutation(request))
+        await service.execute_mutation(peer, mutation)
     successor = _successor(request)
     repository.allocating_request = successor
-    before = tuple(repository.records)
+    adapter.fail_commit = False
+    adapter.fail_observe = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.acknowledge_takeover(peer, successor)
+    labels = (request.provider_kind, request.authority_instance)
+    assert service.metrics.unresolved == {labels: 1}
+    assert repository.head is not None and repository.head.suspended_operation is not None
+    exact = repository.head.suspended_operation
+    field = "system_id" if drift == "system" else "activation_id"
+    changes = (
+        {field: uuid4()}
+        if drift in {"system", "activation"}
+        else {"ownership_digest": "sha256:" + ("c" if drift == "reference" else "d") * 64}
+    )
+    repository.head = replace(repository.head, suspended_operation=replace(exact, **changes))
+    path = tmp_path / f"{request.system_id}.journal"
+    before = path.read_bytes()
     calls = tuple(adapter.calls)
-    with pytest.raises(AuthorityServiceError, match="superseded"):
-        await service.acknowledge_takeover(AuthenticatedPeer(uuid4()), successor)
-    assert tuple(repository.records) == before
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(path),
+        adapter=adapter,
+    )
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.acknowledge_takeover(peer, successor)
+    assert path.read_bytes() == before
     assert tuple(adapter.calls) == calls
+    repository.head = replace(repository.head, suspended_operation=exact)
+    adapter.fail_observe = False
+    resumed = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(path),
+        adapter=adapter,
+    )
+    assert (await resumed.acknowledge_takeover(peer, successor)).generation == 2
 
 
 @pytest.mark.anyio
@@ -182,6 +239,8 @@ async def test_readiness_requires_exact_recovered_continuity(tmp_path: Path) -> 
     exact = repository.head
     repository.head = replace(exact, digest="sha256:" + "f" * 64)
     assert not await service.readiness(peer, request)
+    labels = (request.provider_kind, request.authority_instance)
+    assert service.metrics.recovery_failures == {labels: 1}
     repository.head = exact
     repository.current = True
     adapter.fail_commit = True
@@ -214,6 +273,17 @@ async def test_checkpoint_conflict_exposes_no_provider_output_in_telemetry(tmp_p
     assert all(
         request.plan_identity not in label for key in service.metrics.rejections for label in key
     )
+    success_dir = tmp_path / "success"
+    success_dir.mkdir()
+    successful, _, _, success_peer, success_request = _service(success_dir)
+    await successful.acknowledge_takeover(success_peer, success_request)
+    success_labels = (success_request.provider_kind, success_request.authority_instance)
+    count, elapsed = successful.metrics.checkpoint_latency[success_labels]
+    assert count == 2
+    assert elapsed >= 0
+    bounded_labels = [*labels, *success_labels, "journal_conflict"]
+    assert all(len(label.encode()) <= 255 for label in bounded_labels)
+    assert all("provider output" not in label for label in bounded_labels)
 
 
 def test_production_composition_does_not_advertise_authority_v1() -> None:
