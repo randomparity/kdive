@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import stat
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,6 +47,18 @@ class _ValidationState:
 
 
 @dataclass(frozen=True, slots=True)
+class _ValidationDelta:
+    lane: tuple[str, str] | None
+    operation_identity: str
+    operation_binding: tuple[object, ...] | None
+    phase: JournalPhase
+    watermark: tuple[int, JournalRecordV1] | None
+    consumed_watermark: tuple[int, str] | None
+    ownership: tuple[tuple[str, tuple[str, str]], ...]
+    previous_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class _FileIdentity:
     device: int
     inode: int
@@ -58,7 +69,7 @@ class _FileIdentity:
 
 @dataclass(slots=True)
 class _JournalCache:
-    records: tuple[JournalRecordV1, ...]
+    records: list[JournalRecordV1]
     state: _ValidationState
     identity: _FileIdentity | None
     tail_offset: int
@@ -129,7 +140,7 @@ class FileAuthorityJournal:
         return descriptor, created
 
     @staticmethod
-    def _validate_record(state: _ValidationState, record: JournalRecordV1) -> None:
+    def _prepare_record(state: _ValidationState, record: JournalRecordV1) -> _ValidationDelta:
         expected_sequence = state.count + 1
         if record.sequence != expected_sequence:
             raise ValueError("authority journal sequence is not contiguous")
@@ -137,9 +148,11 @@ class FileAuthorityJournal:
             raise ValueError("authority journal digest chain is invalid")
         current_lane = (record.authority_instance, str(record.system_id))
         if state.lane is None:
-            state.lane = current_lane
+            new_lane = current_lane
         elif current_lane != state.lane:
             raise ValueError("authority journal contains a foreign lane")
+        else:
+            new_lane = None
         operation_binding = (
             record.authority_id,
             record.generation,
@@ -187,25 +200,56 @@ class FileAuthorityJournal:
         )
         if record.phase not in allowed:
             raise ValueError("authority journal phase ordering is invalid")
-        prior_binding = state.operation_bindings.setdefault(
-            record.operation_identity, operation_binding
-        )
+        prior_binding = state.operation_bindings.get(record.operation_identity)
         if prior_binding != operation_binding:
-            raise ValueError("authority journal operation binding changed")
-        state.operation_phases[record.operation_identity] = record.phase
-        if record.phase is JournalPhase.TAKEOVER_SUPERSEDED:
-            state.consumed_watermarks.add(watermark_identity)
+            if prior_binding is not None:
+                raise ValueError("authority journal operation binding changed")
+            new_binding: tuple[object, ...] | None = operation_binding
+        else:
+            new_binding = None
+        consumed = watermark_identity if record.phase is JournalPhase.TAKEOVER_SUPERSEDED else None
+        new_watermark = None
         if record.phase is JournalPhase.WATERMARK_INSTALLED:
             if record.generation in state.watermarks:
                 raise ValueError("authority journal generation has multiple watermarks")
-            state.watermarks[record.generation] = record
+            new_watermark = (record.generation, record)
+        new_ownership: list[tuple[str, tuple[str, str]]] = []
         for item in record.recovery_objects:
             current_owner = (str(item.system_id), str(item.activation_id))
-            prior_owner = state.ownership.setdefault(item.reference, current_owner)
-            if prior_owner != current_owner:
+            prior_owner = state.ownership.get(item.reference)
+            if prior_owner is not None and prior_owner != current_owner:
                 raise ValueError("authority journal recovery ownership changed")
-        state.previous_digest = record_digest(record)
+            if prior_owner is None:
+                new_ownership.append((item.reference, current_owner))
+        return _ValidationDelta(
+            new_lane,
+            record.operation_identity,
+            new_binding,
+            record.phase,
+            new_watermark,
+            consumed,
+            tuple(new_ownership),
+            record_digest(record),
+        )
+
+    @staticmethod
+    def _apply_delta(state: _ValidationState, delta: _ValidationDelta) -> None:
+        if delta.lane is not None:
+            state.lane = delta.lane
+        if delta.operation_binding is not None:
+            state.operation_bindings[delta.operation_identity] = delta.operation_binding
+        state.operation_phases[delta.operation_identity] = delta.phase
+        if delta.watermark is not None:
+            state.watermarks[delta.watermark[0]] = delta.watermark[1]
+        if delta.consumed_watermark is not None:
+            state.consumed_watermarks.add(delta.consumed_watermark)
+        state.ownership.update(delta.ownership)
+        state.previous_digest = delta.previous_digest
         state.count += 1
+
+    @classmethod
+    def _validate_record(cls, state: _ValidationState, record: JournalRecordV1) -> None:
+        cls._apply_delta(state, cls._prepare_record(state, record))
 
     @classmethod
     def _validate_records(cls, records: tuple[JournalRecordV1, ...]) -> _ValidationState:
@@ -217,7 +261,7 @@ class FileAuthorityJournal:
     def load(self) -> tuple[JournalRecordV1, ...]:
         """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
         if not self._path.exists() and not self._path.is_symlink():
-            self._cache = _JournalCache((), _ValidationState(), None, 0, b"")
+            self._cache = _JournalCache([], _ValidationState(), None, 0, b"")
             return ()
         descriptor = self._open_read()
         try:
@@ -248,20 +292,21 @@ class FileAuthorityJournal:
         result = tuple(records)
         tail_bytes = canonical_record_bytes(result[-1]) + b"\n" if result else b""
         self._cache = _JournalCache(
-            result, state, self._identity(status), size - len(tail_bytes), tail_bytes
+            records, state, self._identity(status), size - len(tail_bytes), tail_bytes
         )
         return result
 
     def append(self, record: JournalRecordV1) -> None:
         """Append one record, fsyncing file and newly created parent entry before return."""
-        current = self.load() if self._cache is None else self._cache.records
+        if self._cache is None:
+            self.load()
         assert self._cache is not None
-        state = deepcopy(self._cache.state)
+        state = self._cache.state
         encoded = canonical_record_bytes(record) + b"\n"
         cached_size = self._cache.identity.size if self._cache.identity is not None else 0
         if cached_size + len(encoded) > self._max_bytes:
             raise ValueError("authority journal append exceeds configured byte maximum")
-        self._validate_record(state, record)
+        delta = self._prepare_record(state, record)
         descriptor, created = self._open_append()
         try:
             before = os.fstat(descriptor)
@@ -303,6 +348,8 @@ class FileAuthorityJournal:
             finally:
                 os.close(parent)
         final_identity = self._identity(final_status)
-        self._cache = _JournalCache(
-            (*current, record), state, final_identity, final_identity.size - len(encoded), encoded
-        )
+        self._apply_delta(state, delta)
+        self._cache.records.append(record)
+        self._cache.identity = final_identity
+        self._cache.tail_offset = final_identity.size - len(encoded)
+        self._cache.tail_bytes = encoded

@@ -178,15 +178,15 @@ def test_append_validates_only_candidate_after_streamed_load(
     assert journal.load() == tuple(records)
     calls = 0
     reads: list[tuple[int, int]] = []
-    original = journal._validate_record
+    original = journal._prepare_record
     original_pread = os.pread
 
-    def counting_validate(state: Any, record: JournalRecordV1) -> None:
+    def counting_validate(state: Any, record: JournalRecordV1) -> Any:
         nonlocal calls
         calls += 1
-        original(state, record)
+        return original(state, record)
 
-    monkeypatch.setattr(journal, "_validate_record", counting_validate)
+    monkeypatch.setattr(journal, "_prepare_record", counting_validate)
 
     def bounded_pread(descriptor: int, length: int, offset: int) -> bytes:
         reads.append((length, offset))
@@ -204,6 +204,83 @@ def test_append_validates_only_candidate_after_streamed_load(
     assert calls == 1
     tail_length = len(canonical_record_bytes(records[-1])) + 1
     assert reads == [(tail_length, loaded_size - tail_length)]
+
+
+@pytest.mark.parametrize("history_length", [1, 100])
+def test_append_reuses_history_and_validation_storage_at_any_scale(
+    tmp_path: Path, history_length: int
+) -> None:
+    path = tmp_path / "journal.ndjson"
+    records: list[JournalRecordV1] = []
+    previous = GENESIS_DIGEST
+    for generation in range(1, history_length + 1):
+        record = _record(
+            generation,
+            previous,
+            generation=generation,
+            operation_identity=f"takeover-{generation}",
+        )
+        records.append(record)
+        previous = record_digest(record)
+    path.write_bytes(b"".join(canonical_record_bytes(record) + b"\n" for record in records))
+    journal = FileAuthorityJournal(path)
+    journal.load()
+    assert journal._cache is not None
+    storage_ids = (
+        id(journal._cache.records),
+        id(journal._cache.state.operation_phases),
+        id(journal._cache.state.operation_bindings),
+        id(journal._cache.state.watermarks),
+        id(journal._cache.state.consumed_watermarks),
+        id(journal._cache.state.ownership),
+    )
+    candidate = _record(
+        history_length + 1,
+        previous,
+        generation=history_length + 1,
+        operation_identity=f"takeover-{history_length + 1}",
+    )
+
+    journal.append(candidate)
+
+    assert journal._cache is not None
+    assert storage_ids == (
+        id(journal._cache.records),
+        id(journal._cache.state.operation_phases),
+        id(journal._cache.state.operation_bindings),
+        id(journal._cache.state.watermarks),
+        id(journal._cache.state.consumed_watermarks),
+        id(journal._cache.state.ownership),
+    )
+
+
+@pytest.mark.parametrize("failure", ["write", "fsync"])
+def test_failed_append_does_not_publish_validation_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    path = tmp_path / "journal.ndjson"
+    journal = FileAuthorityJournal(path)
+    first = _record()
+    journal.append(first)
+    assert journal._cache is not None
+    before_count = journal._cache.state.count
+    before_records = tuple(journal._cache.records)
+    second = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_digest=record_digest(first),
+    )
+
+    if failure == "write":
+        monkeypatch.setattr(os, "write", lambda *_args: (_ for _ in ()).throw(OSError("write")))
+    else:
+        monkeypatch.setattr(os, "fsync", lambda *_args: (_ for _ in ()).throw(OSError("fsync")))
+    with pytest.raises(OSError, match=failure):
+        journal.append(second)
+
+    assert journal._cache.state.count == before_count
+    assert tuple(journal._cache.records) == before_records
 
 
 def test_append_fsyncs_parent_on_first_creation(
