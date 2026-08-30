@@ -130,10 +130,7 @@ class FileAuthorityJournal:
                 ):
                     raise ValueError("authority journal takeover watermark link is invalid")
                 watermark_identity = (linked_generation, watermark.operation_identity)
-                if (
-                    record.phase is JournalPhase.TAKEOVER_SUPERSEDED
-                    and watermark_identity in consumed_watermarks
-                ):
+                if watermark_identity in consumed_watermarks:
                     raise ValueError("authority journal watermark is already superseded")
             prior_phase = operation_phases.get(record.operation_identity)
             allowed = (

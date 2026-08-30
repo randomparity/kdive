@@ -362,3 +362,50 @@ def test_predecessor_watermark_can_be_superseded_only_once(tmp_path: Path) -> No
     path.write_bytes(before + canonical_record_bytes(crossed) + b"\n")
     with pytest.raises(ValueError, match="already superseded"):
         journal.load()
+
+
+def test_superseded_watermark_cannot_later_be_acknowledged(tmp_path: Path) -> None:
+    path = tmp_path / "journal"
+    journal = FileAuthorityJournal(path)
+    first = _record(generation=1, operation_identity="takeover-a")
+    journal.append(first)
+    superseded = _record(
+        2,
+        record_digest(first),
+        phase=JournalPhase.TAKEOVER_SUPERSEDED,
+        authority_id=uuid4(),
+        generation=2,
+        operation_identity="takeover-b",
+        attempt_id=uuid4(),
+        predecessor_generation=1,
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
+    )
+    journal.append(superseded)
+    successor_watermark = _record(
+        3,
+        record_digest(superseded),
+        authority_id=superseded.authority_id,
+        generation=2,
+        operation_identity="takeover-b",
+        attempt_id=superseded.attempt_id,
+    )
+    journal.append(successor_watermark)
+    before = path.read_bytes()
+    stale_acknowledgement = _record(
+        4,
+        record_digest(successor_watermark),
+        phase=JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        generation=1,
+        operation_identity="takeover-a",
+        watermark_sequence=first.sequence,
+        watermark_digest=record_digest(first),
+    )
+
+    with pytest.raises(ValueError, match="already superseded"):
+        journal.append(stale_acknowledgement)
+    assert path.read_bytes() == before
+
+    path.write_bytes(before + canonical_record_bytes(stale_acknowledgement) + b"\n")
+    with pytest.raises(ValueError, match="already superseded"):
+        journal.load()
