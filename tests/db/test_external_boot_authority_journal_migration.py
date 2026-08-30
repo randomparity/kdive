@@ -174,3 +174,34 @@ def test_allocating_binding_can_create_and_read_exact_genesis_head(
             ),
         ).fetchone()
         assert head == (1, record_digest(record), "watermark-installed")
+        advance_parameters = (
+            case.worker_id,
+            authority.authority_id,
+            authority.generation,
+            0,
+            GENESIS_DIGEST,
+        )
+        assert provider_authority.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
+            (*advance_parameters, Jsonb(payload)),
+        ).fetchone() == ("advanced",)
+        noncanonical = payload | {"canonical_record": " " + payload["canonical_record"]}
+        assert provider_authority.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
+            (*advance_parameters, Jsonb(noncanonical)),
+        ).fetchone() == ("conflict",)
+        extra = payload | {"unexpected": "field"}
+        extra["canonical_record"] = extra["canonical_record"][:-1] + ',"unexpected":"field"}'
+        assert provider_authority.execute(
+            "SELECT advance_external_boot_authority_journal_head(%s,%s,%s,%s,%s,%s)",
+            (*advance_parameters, Jsonb(extra)),
+        ).fetchone() == ("conflict",)
+        assert provider_authority.execute(
+            "SELECT sequence, digest FROM read_external_boot_authority_journal_head(%s,%s,%s,%s)",
+            (
+                case.worker_id,
+                authority.authority_id,
+                authority.generation,
+                case.authority_instance,
+            ),
+        ).fetchone() == (1, record_digest(record))

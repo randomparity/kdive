@@ -52,7 +52,9 @@ CREATE TABLE public.external_boot_authority_journal_heads (
                 'attempt_id', 'purpose', 'request_digest', 'phase', 'source_identity',
                 'target_identity', 'ownership_digest'
             ]
-            AND suspended_operation->>'phase' IN ('admitted', 'mutation-started')
+            AND suspended_operation->>'phase' IN (
+                'admitted', 'mutation-started', 'provider-returned', 'observed'
+            )
             AND (suspended_operation->>'generation')::numeric BETWEEN 1 AND 9223372036854775807
             AND suspended_operation->>'request_digest' ~ '^sha256:[0-9a-f]{64}$'
             AND suspended_operation->>'ownership_digest' ~ '^sha256:[0-9a-f]{64}$'
@@ -62,6 +64,25 @@ CREATE TABLE public.external_boot_authority_journal_heads (
         )
     )
 );
+
+CREATE FUNCTION public.canonical_external_boot_authority_json(p_value jsonb) RETURNS text
+LANGUAGE sql IMMUTABLE STRICT SET search_path = '' AS $$
+    SELECT CASE jsonb_typeof(p_value)
+        WHEN 'object' THEN '{' || coalesce((
+            SELECT string_agg(
+                to_json(entry.key)::text || ':' ||
+                public.canonical_external_boot_authority_json(entry.value), ',' ORDER BY entry.key
+            ) FROM jsonb_each(p_value) AS entry
+        ), '') || '}'
+        WHEN 'array' THEN '[' || coalesce((
+            SELECT string_agg(
+                public.canonical_external_boot_authority_json(element.value),
+                ',' ORDER BY element.ordinality
+            ) FROM jsonb_array_elements(p_value) WITH ORDINALITY AS element(value, ordinality)
+        ), '') || ']'
+        ELSE p_value::text
+    END
+$$;
 
 CREATE FUNCTION public.resolve_allocating_external_boot_authority(
     p_peer_incarnation text, p_authority_id uuid, p_generation bigint
@@ -160,7 +181,9 @@ BEGIN
            'watermark-installed', 'takeover-superseded', 'takeover-acknowledged',
            'admitted', 'mutation-started', 'provider-returned', 'observed', 'terminal'
        ) OR v_canonical_record IS NULL OR octet_length(v_canonical_record) > 1048576
-       OR v_canonical_record::jsonb <> p_record - 'canonical_record' THEN
+       OR v_canonical_record <> public.canonical_external_boot_authority_json(
+           p_record - 'canonical_record'
+       ) THEN
         RETURN 'conflict';
     END IF;
     IF v_phase IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
@@ -175,6 +198,50 @@ BEGIN
             OR jsonb_typeof(p_record->'intended_target_identity') <> 'string'
             OR jsonb_typeof(p_record->'recovery_objects') <> 'array')
     THEN RETURN 'conflict'; END IF;
+    IF octet_length(p_record->>'authority_instance') NOT BETWEEN 1 AND 255
+       OR octet_length(p_record->>'operation_identity') NOT BETWEEN 1 AND 255
+       OR octet_length(p_record->>'provider_kind') NOT BETWEEN 1 AND 255
+       OR (p_record->>'generation')::numeric NOT BETWEEN 1 AND 9223372036854775807
+       OR (p_record->>'sequence')::numeric NOT BETWEEN 1 AND 9223372036854775807
+       OR jsonb_array_length(p_record->'recovery_objects') > 1024
+       OR EXISTS (
+           SELECT 1 FROM (
+               SELECT public.canonical_external_boot_authority_json(item.value) AS encoded,
+                      lag(public.canonical_external_boot_authority_json(item.value)) OVER (
+                          ORDER BY item.ordinality
+                      ) AS prior
+               FROM jsonb_array_elements(p_record->'recovery_objects')
+                    WITH ORDINALITY AS item(value, ordinality)
+           ) AS ordered WHERE ordered.prior >= ordered.encoded
+       )
+    THEN RETURN 'conflict'; END IF;
+    IF v_phase = 'watermark-installed' AND (
+        p_record->'predecessor_generation' <> 'null'::jsonb
+        OR p_record->'watermark_sequence' <> 'null'::jsonb
+        OR p_record->'watermark_digest' <> 'null'::jsonb
+    ) THEN RETURN 'conflict'; END IF;
+    IF v_phase = 'takeover-superseded' AND (
+        jsonb_typeof(p_record->'predecessor_generation') <> 'number'
+        OR jsonb_typeof(p_record->'watermark_sequence') <> 'number'
+        OR p_record->>'watermark_digest' !~ '^sha256:[0-9a-f]{64}$'
+    ) THEN RETURN 'conflict'; END IF;
+    IF v_phase = 'takeover-acknowledged' AND (
+        p_record->'predecessor_generation' <> 'null'::jsonb
+        OR jsonb_typeof(p_record->'watermark_sequence') <> 'number'
+        OR p_record->>'watermark_digest' !~ '^sha256:[0-9a-f]{64}$'
+    ) THEN RETURN 'conflict'; END IF;
+    IF v_phase IN ('admitted', 'mutation-started', 'provider-returned')
+       AND (p_record->'observation' <> 'null'::jsonb OR p_record->'outcome' <> 'null'::jsonb)
+    THEN RETURN 'conflict'; END IF;
+    IF v_phase = 'observed' AND (
+        jsonb_typeof(p_record->'observation') <> 'object'
+        OR p_record->'outcome' <> 'null'::jsonb
+    ) THEN RETURN 'conflict'; END IF;
+    IF v_phase = 'terminal' AND (
+        p_record->>'outcome' NOT IN ('never-began', 'source', 'target', 'conflict')
+        OR ((p_record->>'outcome' = 'never-began')
+            IS DISTINCT FROM (p_record->'observation' = 'null'::jsonb))
+    ) THEN RETURN 'conflict'; END IF;
     v_digest := 'sha256:' || encode(
         sha256(convert_to(v_canonical_record, 'UTF8')), 'hex'
     );
@@ -210,6 +277,10 @@ BEGIN
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
     WHERE authority_instance = v_authority.authority_instance
       AND system_id = v_authority.system_id FOR UPDATE;
+    IF FOUND AND (p_record->>'sequence')::bigint = v_head.sequence THEN
+        IF v_digest = v_head.digest AND p_record - 'canonical_record' = v_head.head_record
+        THEN RETURN 'advanced'; ELSE RETURN 'conflict'; END IF;
+    END IF;
     IF p_expected_sequence = 0 THEN
         IF FOUND OR p_expected_digest <> 'sha256:' || repeat('0', 64)
            OR v_phase <> 'watermark-installed' OR v_authority.state <> 'allocating'
@@ -233,10 +304,6 @@ BEGIN
             )
         );
         RETURN 'advanced';
-    END IF;
-    IF FOUND AND (p_record->>'sequence')::bigint = v_head.sequence THEN
-        IF v_digest = v_head.digest AND p_record - 'canonical_record' = v_head.head_record
-        THEN RETURN 'advanced'; ELSE RETURN 'conflict'; END IF;
     END IF;
     IF NOT FOUND OR v_head.sequence <> p_expected_sequence OR v_head.digest <> p_expected_digest
     THEN RETURN 'conflict'; END IF;
@@ -295,7 +362,11 @@ BEGIN
         IF (v_head.suspended_operation->>'phase' = 'admitted'
             AND NOT (v_phase = 'terminal' AND p_record->>'outcome' = 'never-began'))
            OR (v_head.suspended_operation->>'phase' = 'mutation-started'
-               AND v_phase <> 'provider-returned') THEN RETURN 'conflict'; END IF;
+               AND v_phase <> 'provider-returned')
+           OR (v_head.suspended_operation->>'phase' = 'provider-returned'
+               AND v_phase <> 'observed')
+           OR (v_head.suspended_operation->>'phase' = 'observed'
+               AND v_phase <> 'terminal') THEN RETURN 'conflict'; END IF;
     ELSIF v_head.operation_identity <> p_record->>'operation_identity' OR NOT (
         (v_head.phase = 'takeover-acknowledged' AND v_phase = 'admitted')
         OR (v_head.phase = 'admitted' AND v_phase IN ('mutation-started', 'terminal'))
@@ -332,6 +403,9 @@ BEGIN
                     (v_head.head_record->'recovery_objects')::text, 'UTF8')), 'hex')
             )
             WHEN v_is_suspended AND v_phase = 'terminal' THEN NULL
+            WHEN v_is_suspended THEN jsonb_set(
+                v_head.suspended_operation, '{phase}', to_jsonb(v_phase)
+            )
             ELSE suspended_operation END
     WHERE authority_instance = v_authority.authority_instance
       AND system_id = v_authority.system_id;
@@ -345,6 +419,7 @@ REVOKE ALL ON TABLE public.external_boot_authority_journal_heads
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
     kdive_provider_authority;
 REVOKE ALL ON FUNCTION
+    public.canonical_external_boot_authority_json(jsonb),
     public.resolve_allocating_external_boot_authority(text, uuid, bigint),
     public.resolve_current_external_boot_authority(text, uuid, bigint, bigint, text),
     public.read_external_boot_authority_journal_head(text, uuid, bigint, text),

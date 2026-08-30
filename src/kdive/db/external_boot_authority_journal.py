@@ -76,7 +76,7 @@ class SuspendedOperation:
     attempt_id: UUID
     purpose: str
     request_digest: str
-    phase: Literal["admitted", "mutation-started"]
+    phase: Literal["admitted", "mutation-started", "provider-returned", "observed"]
     source_identity: str
     target_identity: str
     ownership_digest: str
