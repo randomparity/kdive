@@ -13,10 +13,28 @@ from psycopg.types.json import Jsonb
 from kdive.providers.external_boot_authority.protocol import (
     JournalPhase,
     JournalRecordV1,
-    record_digest,
+    canonical_record_bytes,
 )
 
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]
+
+
+def _uuid(value: object) -> UUID:
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
+def _bounded(value: object, maximum: int = 255) -> str:
+    text = str(value)
+    if not text or len(text.encode("utf-8")) > maximum:
+        raise ValueError("journal-head text value is outside its byte bound")
+    return text
+
+
+def _positive(value: object) -> int:
+    integer = int(str(value))
+    if not 1 <= integer <= 9_223_372_036_854_775_807:
+        raise ValueError("journal-head integer is outside signed positive bigint")
+    return integer
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +97,23 @@ class JournalHead:
 
 
 def _binding(row: dict[str, Any] | None) -> AuthorityBinding | None:
-    return None if row is None else AuthorityBinding(**row)
+    if row is None:
+        return None
+    return AuthorityBinding(
+        peer_incarnation_id=_bounded(row["peer_incarnation_id"], 512),
+        authority_id=_uuid(row["authority_id"]),
+        generation=_positive(row["generation"]),
+        system_id=_uuid(row["system_id"]),
+        activation_id=_uuid(row["activation_id"]),
+        run_id=_uuid(row["run_id"]),
+        plan_identity=_bounded(row["plan_identity"]),
+        purpose=_bounded(row["purpose"]),
+        provider_kind=_bounded(row["provider_kind"]),
+        authority_instance=_bounded(row["authority_instance"]),
+        operation_identity=_bounded(row["operation_identity"]),
+        operation_digest=_bounded(row["operation_digest"]),
+        state=row["state"],
+    )
 
 
 async def resolve_allocating_authority_binding(
@@ -123,11 +157,35 @@ async def resolve_current_authority_binding(
 
 
 def _pending(value: dict[str, Any] | None) -> PendingTakeover | None:
-    return None if value is None else PendingTakeover(**value)
+    if value is None:
+        return None
+    return PendingTakeover(
+        authority_id=_uuid(value["authority_id"]),
+        generation=_positive(value["generation"]),
+        operation_identity=_bounded(value["operation_identity"]),
+        attempt_id=_uuid(value["attempt_id"]),
+        request_digest=_bounded(value["request_digest"]),
+        watermark_sequence=_positive(value["watermark_sequence"]),
+        watermark_digest=_bounded(value["watermark_digest"]),
+    )
 
 
 def _suspended(value: dict[str, Any] | None) -> SuspendedOperation | None:
-    return None if value is None else SuspendedOperation(**value)
+    if value is None:
+        return None
+    return SuspendedOperation(
+        authority_id=_uuid(value["authority_id"]),
+        generation=_positive(value["generation"]),
+        activation_id=_uuid(value["activation_id"]),
+        operation_identity=_bounded(value["operation_identity"]),
+        attempt_id=_uuid(value["attempt_id"]),
+        purpose=_bounded(value["purpose"]),
+        request_digest=_bounded(value["request_digest"]),
+        phase=value["phase"],
+        source_identity=_bounded(value["source_identity"], 1024),
+        target_identity=_bounded(value["target_identity"], 1024),
+        ownership_digest=_bounded(value["ownership_digest"]),
+    )
 
 
 async def read_journal_head(
@@ -147,7 +205,14 @@ async def read_journal_head(
         row = await cursor.fetchone()
     if row is None:
         return None
+    row["authority_instance"] = _bounded(row["authority_instance"])
+    row["system_id"] = _uuid(row["system_id"])
+    row["sequence"] = _positive(row["sequence"])
+    row["digest"] = _bounded(row["digest"])
     row["phase"] = JournalPhase(row["phase"])
+    row["authority_id"] = _uuid(row["authority_id"])
+    row["generation"] = _positive(row["generation"])
+    row["operation_identity"] = _bounded(row["operation_identity"])
     row["pending_takeover"] = _pending(row["pending_takeover"])
     row["suspended_operation"] = _suspended(row["suspended_operation"])
     return JournalHead(**row)
@@ -173,7 +238,7 @@ async def advance_journal_head(
                 expected_digest,
                 Jsonb(
                     record.model_dump(mode="json", by_alias=True)
-                    | {"record_digest": record_digest(record)}
+                    | {"canonical_record": canonical_record_bytes(record).decode("utf-8")}
                 ),
             ),
         )

@@ -9,6 +9,7 @@ CREATE TABLE public.external_boot_authority_journal_heads (
     authority_id uuid NOT NULL,
     generation bigint NOT NULL,
     operation_identity text NOT NULL,
+    head_record jsonb NOT NULL,
     pending_takeover jsonb,
     suspended_operation jsonb,
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -20,6 +21,8 @@ CREATE TABLE public.external_boot_authority_journal_heads (
         CHECK (octet_length(authority_instance) BETWEEN 1 AND 255),
     CONSTRAINT external_boot_journal_operation_bounded
         CHECK (octet_length(operation_identity) BETWEEN 1 AND 255),
+    CONSTRAINT external_boot_journal_head_record_bounded
+        CHECK (jsonb_typeof(head_record) = 'object' AND octet_length(head_record::text) <= 1048576),
     CONSTRAINT external_boot_journal_phase CHECK (phase IN (
         'watermark-installed', 'takeover-superseded', 'takeover-acknowledged',
         'admitted', 'mutation-started', 'provider-returned', 'observed', 'terminal'
@@ -132,8 +135,10 @@ DECLARE
     v_head public.external_boot_authority_journal_heads%ROWTYPE;
     v_phase text := p_record->>'phase';
     v_sequence bigint;
-    v_digest text := p_record->>'record_digest';
-    v_state_required text;
+    v_canonical_record text := p_record->>'canonical_record';
+    v_digest text;
+    v_is_suspended boolean := false;
+    v_pending_matches boolean := false;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_provider_authority', 'member') THEN
         RAISE EXCEPTION 'provider authority is required' USING ERRCODE = '42501';
@@ -141,12 +146,38 @@ BEGIN
     IF p_expected_sequence < 0 OR p_expected_sequence >= 9223372036854775807
        OR p_expected_digest !~ '^sha256:[0-9a-f]{64}$'
        OR jsonb_typeof(p_record) IS DISTINCT FROM 'object'
+       OR (SELECT count(*) FROM jsonb_object_keys(p_record)) <> 25
+       OR NOT p_record ?& ARRAY[
+           'schema', 'authority_id', 'generation', 'system_id', 'activation_id', 'run_id',
+           'plan_identity', 'purpose', 'provider_kind', 'authority_instance',
+           'operation_identity', 'operation_digest', 'sequence', 'previous_digest', 'phase',
+           'attempt_id', 'predecessor_generation', 'watermark_sequence', 'watermark_digest',
+           'expected_source_identity', 'intended_target_identity', 'recovery_objects',
+           'observation', 'outcome', 'canonical_record'
+       ]
+       OR p_record->>'schema' <> 'external-boot-authority-v1'
        OR v_phase NOT IN (
            'watermark-installed', 'takeover-superseded', 'takeover-acknowledged',
            'admitted', 'mutation-started', 'provider-returned', 'observed', 'terminal'
-       ) OR v_digest !~ '^sha256:[0-9a-f]{64}$' THEN
+       ) OR v_canonical_record IS NULL OR octet_length(v_canonical_record) > 1048576
+       OR v_canonical_record::jsonb <> p_record - 'canonical_record' THEN
         RETURN 'conflict';
     END IF;
+    IF v_phase IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
+       AND (p_record->'expected_source_identity' <> 'null'::jsonb
+            OR p_record->'intended_target_identity' <> 'null'::jsonb
+            OR p_record->'recovery_objects' <> '[]'::jsonb
+            OR p_record->'observation' <> 'null'::jsonb
+            OR p_record->'outcome' <> 'null'::jsonb)
+    THEN RETURN 'conflict'; END IF;
+    IF v_phase NOT IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
+       AND (jsonb_typeof(p_record->'expected_source_identity') <> 'string'
+            OR jsonb_typeof(p_record->'intended_target_identity') <> 'string'
+            OR jsonb_typeof(p_record->'recovery_objects') <> 'array')
+    THEN RETURN 'conflict'; END IF;
+    v_digest := 'sha256:' || encode(
+        sha256(convert_to(v_canonical_record, 'UTF8')), 'hex'
+    );
     v_sequence := p_expected_sequence + 1;
     SELECT a.* INTO v_authority FROM public.external_boot_authorities AS a
     WHERE a.id = p_authority_id AND a.generation = p_generation;
@@ -161,9 +192,6 @@ BEGIN
     WHERE a.id = p_authority_id AND a.generation = p_generation
       AND w.incarnation = p_peer_incarnation AND w.state = 'active' AND w.fence_protocol = 4;
     IF NOT FOUND THEN RETURN 'superseded'; END IF;
-    v_state_required := CASE WHEN v_phase LIKE 'takeover-%' OR v_phase = 'watermark-installed'
-                             THEN 'allocating' ELSE 'current' END;
-    IF v_authority.state <> v_state_required THEN RETURN 'superseded'; END IF;
     IF (p_record->>'sequence')::bigint <> v_sequence
        OR p_record->>'previous_digest' <> p_expected_digest
        OR (p_record->>'authority_id')::uuid <> v_authority.id
@@ -184,13 +212,19 @@ BEGIN
       AND system_id = v_authority.system_id FOR UPDATE;
     IF p_expected_sequence = 0 THEN
         IF FOUND OR p_expected_digest <> 'sha256:' || repeat('0', 64)
-           OR v_phase <> 'watermark-installed' THEN RETURN 'conflict'; END IF;
+           OR v_phase <> 'watermark-installed' OR v_authority.state <> 'allocating'
+           OR EXISTS (
+               SELECT 1 FROM public.external_boot_authorities AS newer
+               WHERE newer.system_id = v_authority.system_id
+                 AND newer.state = 'allocating' AND newer.generation > v_authority.generation
+           ) THEN RETURN 'superseded'; END IF;
         INSERT INTO public.external_boot_authority_journal_heads (
             authority_instance, system_id, sequence, digest, phase, authority_id,
-            generation, operation_identity, pending_takeover
+            generation, operation_identity, head_record, pending_takeover
         ) VALUES (
             v_authority.authority_instance, v_authority.system_id, v_sequence, v_digest,
             v_phase, v_authority.id, v_authority.generation, p_record->>'operation_identity',
+            p_record - 'canonical_record',
             jsonb_build_object(
                 'authority_id', v_authority.id, 'generation', v_authority.generation,
                 'operation_identity', p_record->>'operation_identity',
@@ -200,12 +234,80 @@ BEGIN
         );
         RETURN 'advanced';
     END IF;
+    IF FOUND AND (p_record->>'sequence')::bigint = v_head.sequence THEN
+        IF v_digest = v_head.digest AND p_record - 'canonical_record' = v_head.head_record
+        THEN RETURN 'advanced'; ELSE RETURN 'conflict'; END IF;
+    END IF;
     IF NOT FOUND OR v_head.sequence <> p_expected_sequence OR v_head.digest <> p_expected_digest
     THEN RETURN 'conflict'; END IF;
+    v_is_suspended := v_head.suspended_operation IS NOT NULL
+        AND v_head.suspended_operation->>'authority_id' = v_authority.id::text
+        AND (v_head.suspended_operation->>'generation')::bigint = v_authority.generation
+        AND v_head.suspended_operation->>'activation_id' = v_authority.activation_id::text
+        AND v_head.suspended_operation->>'operation_identity' = p_record->>'operation_identity'
+        AND v_head.suspended_operation->>'attempt_id' = p_record->>'attempt_id'
+        AND v_head.suspended_operation->>'purpose' = p_record->>'purpose'
+        AND v_head.suspended_operation->>'request_digest' = p_record->>'operation_digest'
+        AND v_head.suspended_operation->>'source_identity' = p_record->>'expected_source_identity'
+        AND v_head.suspended_operation->>'target_identity' = p_record->>'intended_target_identity'
+        AND v_head.suspended_operation->>'ownership_digest' = 'sha256:' || encode(
+            sha256(convert_to((p_record->'recovery_objects')::text, 'UTF8')), 'hex'
+        );
+    v_pending_matches := v_head.pending_takeover IS NOT NULL
+        AND v_head.pending_takeover->>'authority_id' = v_authority.id::text
+        AND (v_head.pending_takeover->>'generation')::bigint = v_authority.generation
+        AND v_head.pending_takeover->>'operation_identity' = p_record->>'operation_identity'
+        AND v_head.pending_takeover->>'attempt_id' = p_record->>'attempt_id'
+        AND v_head.pending_takeover->>'request_digest' = p_record->>'operation_digest';
+    IF v_phase IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged') THEN
+        IF v_authority.state <> 'allocating' OR EXISTS (
+            SELECT 1 FROM public.external_boot_authorities AS newer
+            WHERE newer.system_id = v_authority.system_id
+              AND newer.state = 'allocating' AND newer.generation > v_authority.generation
+        ) THEN RETURN 'superseded'; END IF;
+    ELSIF v_phase IN ('admitted', 'mutation-started') THEN
+        IF v_authority.state <> 'current' OR NOT EXISTS (
+            SELECT 1 FROM public.external_boot_authority_acknowledgements AS ack
+            WHERE ack.authority_id = v_authority.id
+        ) THEN RETURN 'superseded'; END IF;
+    ELSIF v_authority.state <> 'current' AND NOT v_is_suspended THEN
+        RETURN 'superseded';
+    END IF;
+    IF v_phase = 'watermark-installed' THEN
+        IF v_head.phase = 'takeover-superseded'
+           AND v_head.operation_identity = p_record->>'operation_identity' THEN NULL;
+        ELSIF v_head.phase IN ('admitted', 'mutation-started') THEN NULL;
+        ELSE RETURN 'conflict'; END IF;
+    ELSIF v_phase = 'takeover-superseded' THEN
+        IF v_head.phase <> 'watermark-installed'
+           OR v_authority.generation <= v_head.generation
+           OR (p_record->>'predecessor_generation')::bigint <> v_head.generation
+           OR (p_record->>'watermark_sequence')::bigint <> v_head.sequence
+           OR p_record->>'watermark_digest' <> v_head.digest THEN RETURN 'conflict'; END IF;
+    ELSIF v_phase = 'takeover-acknowledged' THEN
+        IF NOT v_pending_matches OR v_head.suspended_operation IS NOT NULL
+           OR v_head.phase NOT IN ('watermark-installed', 'terminal')
+           OR (p_record->>'watermark_sequence')::bigint
+                <> (v_head.pending_takeover->>'watermark_sequence')::bigint
+           OR p_record->>'watermark_digest' <> v_head.pending_takeover->>'watermark_digest'
+        THEN RETURN 'conflict'; END IF;
+    ELSIF v_is_suspended THEN
+        IF (v_head.suspended_operation->>'phase' = 'admitted'
+            AND NOT (v_phase = 'terminal' AND p_record->>'outcome' = 'never-began'))
+           OR (v_head.suspended_operation->>'phase' = 'mutation-started'
+               AND v_phase <> 'provider-returned') THEN RETURN 'conflict'; END IF;
+    ELSIF v_head.operation_identity <> p_record->>'operation_identity' OR NOT (
+        (v_head.phase = 'takeover-acknowledged' AND v_phase = 'admitted')
+        OR (v_head.phase = 'admitted' AND v_phase IN ('mutation-started', 'terminal'))
+        OR (v_head.phase = 'mutation-started' AND v_phase = 'provider-returned')
+        OR (v_head.phase = 'provider-returned' AND v_phase = 'observed')
+        OR (v_head.phase = 'observed' AND v_phase = 'terminal')
+    ) THEN RETURN 'conflict'; END IF;
     UPDATE public.external_boot_authority_journal_heads SET
         sequence = v_sequence, digest = v_digest, phase = v_phase,
         authority_id = v_authority.id, generation = v_authority.generation,
         operation_identity = p_record->>'operation_identity', updated_at = clock_timestamp(),
+        head_record = p_record - 'canonical_record',
         pending_takeover = CASE
             WHEN v_phase = 'takeover-acknowledged' THEN NULL
             WHEN v_phase = 'watermark-installed' THEN jsonb_build_object(
@@ -213,7 +315,24 @@ BEGIN
                 'operation_identity', p_record->>'operation_identity',
                 'attempt_id', p_record->>'attempt_id', 'request_digest', p_record->>'operation_digest',
                 'watermark_sequence', v_sequence, 'watermark_digest', v_digest
-            ) ELSE pending_takeover END
+            ) ELSE pending_takeover END,
+        suspended_operation = CASE
+            WHEN v_phase = 'watermark-installed'
+                 AND v_head.phase IN ('admitted', 'mutation-started') THEN jsonb_build_object(
+                'authority_id', v_head.authority_id, 'generation', v_head.generation,
+                'activation_id', v_head.head_record->>'activation_id',
+                'operation_identity', v_head.operation_identity,
+                'attempt_id', v_head.head_record->>'attempt_id',
+                'purpose', v_head.head_record->>'purpose',
+                'request_digest', v_head.head_record->>'operation_digest',
+                'phase', v_head.phase,
+                'source_identity', v_head.head_record->>'expected_source_identity',
+                'target_identity', v_head.head_record->>'intended_target_identity',
+                'ownership_digest', 'sha256:' || encode(sha256(convert_to(
+                    (v_head.head_record->'recovery_objects')::text, 'UTF8')), 'hex')
+            )
+            WHEN v_is_suspended AND v_phase = 'terminal' THEN NULL
+            ELSE suspended_operation END
     WHERE authority_instance = v_authority.authority_instance
       AND system_id = v_authority.system_id;
     RETURN 'advanced';
