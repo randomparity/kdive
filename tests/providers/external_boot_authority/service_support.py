@@ -242,6 +242,7 @@ class _Adapter:
         self.release.set()
         self.fail_commit = False
         self.fail_observe = False
+        self.provider_output = "bounded observation failure"
         self.operations: list[str] = []
 
     async def commit(
@@ -258,7 +259,7 @@ class _Adapter:
         self.calls.append("observe")
         self.operations.append(request.operation)
         if self.fail_observe:
-            raise RuntimeError("bounded observation failure")
+            raise RuntimeError(self.provider_output)
         return self._observation("target")
 
     @staticmethod
