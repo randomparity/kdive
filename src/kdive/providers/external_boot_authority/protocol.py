@@ -162,6 +162,15 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
 
     _objects_are_canonical = field_validator("recovery_objects")(_canonical_recovery_objects)
 
+    @model_validator(mode="after")
+    def _recovery_objects_belong_to_request(self) -> Self:
+        if any(
+            item.system_id != self.system_id or item.activation_id != self.activation_id
+            for item in self.recovery_objects
+        ):
+            raise ValueError("recovery object does not belong to request binding")
+        return self
+
 
 type AuthorityRequestV1 = AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1
 _AUTHORITY_REQUEST_ADAPTER = TypeAdapter(AuthorityRequestV1)

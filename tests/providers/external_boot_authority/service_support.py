@@ -55,8 +55,6 @@ def _takeover() -> AuthorityTakeoverRequestV1:
 def _mutation(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1:
     values = request.model_dump(mode="json", by_alias=True)
     values |= {
-        "operation_identity": "mutation-a",
-        "operation_digest": _DIGEST_A,
         "attempt_id": str(uuid4()),
         "expected_source_identity": "source-a",
         "intended_target_identity": "target-a",

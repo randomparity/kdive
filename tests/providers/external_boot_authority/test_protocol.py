@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -55,15 +55,23 @@ def _object(ref: str = "recovery/object-a") -> RecoveryObjectBindingV1:
 
 
 def _mutation(**changes: object) -> AuthorityMutationRequestV1:
-    first = _object()
     values = _binding() | {
         "operation": "recovery-attempt",
         "attempt_id": uuid4(),
         "expected_source_identity": _DIGEST,
         "intended_target_identity": _OTHER_DIGEST,
-        "recovery_objects": (first,),
     }
     values.update(changes)
+    values.setdefault(
+        "recovery_objects",
+        (
+            RecoveryObjectBindingV1(
+                system_id=UUID(str(values["system_id"])),
+                activation_id=UUID(str(values["activation_id"])),
+                reference="recovery/object-a",
+            ),
+        ),
+    )
     return AuthorityMutationRequestV1.model_validate(values)
 
 
@@ -140,15 +148,21 @@ def test_values_are_closed() -> None:
 
 
 def test_mutation_requires_sorted_unique_recovery_objects() -> None:
-    first = _object("a")
+    owner = _binding()
+    first = RecoveryObjectBindingV1(
+        system_id=UUID(str(owner["system_id"])),
+        activation_id=UUID(str(owner["activation_id"])),
+        reference="a",
+    )
     second = RecoveryObjectBindingV1(
         system_id=first.system_id, activation_id=first.activation_id, reference="b"
     )
-    assert _mutation(recovery_objects=(first, second)).recovery_objects == (first, second)
+    changes = owner | {"recovery_objects": (first, second)}
+    assert _mutation(**changes).recovery_objects == (first, second)
     with pytest.raises(ValidationError):
-        _mutation(recovery_objects=(second, first))
+        _mutation(**(owner | {"recovery_objects": (second, first)}))
     with pytest.raises(ValidationError):
-        _mutation(recovery_objects=(first, first))
+        _mutation(**(owner | {"recovery_objects": (first, first)}))
 
 
 def test_mutation_rejects_recovery_object_from_another_binding() -> None:
@@ -168,6 +182,9 @@ def test_mutation_rejects_recovery_object_from_another_binding() -> None:
                 "recovery_objects": (foreign,),
             }
         )
+
+    with pytest.raises(ValidationError, match="request binding"):
+        _mutation(recovery_objects=(foreign,))
 
 
 def test_mutation_rejects_over_cardinality() -> None:
