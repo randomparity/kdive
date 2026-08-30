@@ -163,7 +163,11 @@ repository.
 1. Write a fake repository, journal, and controllable adapter. Test unauthenticated/inactive peer,
    stale/cross-binding request, malformed ownership, and failed readiness all produce no journal or
    provider access. The fake's binding-scoped `read_journal_head` drives startup equality and
-   mismatch cases. Run the service file; expect import failures.
+   mismatch cases. Resolve and authenticate the trusted binding before lane allocation, use fixed
+   pre-binding telemetry dimensions and trusted dimensions afterwards, and evict idle terminal
+   lanes after their last concurrent user. Prove rejected high-cardinality input cannot grow lane
+   or metric dictionaries or touch journal/provider state. Run the service file; expect import
+   failures.
 2. Prove takeover accepts only the newest exact `allocating` binding, performs no provider mutation,
    anchors `watermark-installed` before quiescing older calls, and returns the final
    `takeover-acknowledged` sequence/digest plus the canonical positive-quiescence digest. Prove an

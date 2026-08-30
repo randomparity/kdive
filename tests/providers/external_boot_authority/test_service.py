@@ -58,9 +58,33 @@ async def test_rejections_precede_journal_and_provider_access(tmp_path: Path) ->
     assert repository.records == []
     assert adapter.calls == []
     assert service.metrics.rejections == {
-        (request.provider_kind, request.authority_instance, "unauthenticated"): 1,
-        (request.provider_kind, request.authority_instance, "superseded"): 1,
+        ("untrusted", "unresolved", "unauthenticated"): 1,
+        ("untrusted", "unresolved", "superseded"): 1,
     }
+
+
+@pytest.mark.anyio
+async def test_untrusted_cardinality_cannot_allocate_lanes_or_metric_series(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, _peer, request = _service(tmp_path)
+
+    for index in range(100):
+        hostile = request.model_copy(
+            update={
+                "system_id": uuid4(),
+                "provider_kind": f"provider-{index}",
+                "authority_instance": f"instance-{index}",
+            }
+        )
+        with pytest.raises(AuthorityServiceError, match="unauthenticated"):
+            await service.acknowledge_takeover(None, hostile)
+
+    assert service._lanes == {}
+    assert service.metrics.rejections == {("untrusted", "unresolved", "unauthenticated"): 100}
+    assert repository.records == []
+    assert adapter.calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.anyio
