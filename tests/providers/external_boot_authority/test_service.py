@@ -243,11 +243,21 @@ def test_registered_metric_coordinate_keeps_exact_labels() -> None:
     metrics = AuthorityServiceMetrics.empty(
         max_coordinates=1, registered_coordinates=frozenset({registered})
     )
-    assert metrics.labels(registered) == registered
-    assert metrics.labels(("another-provider", "another-instance")) == (
-        "overflow",
-        "overflow",
-    )
+    metrics.reject_labels(registered, "superseded")
+    metrics.reject_labels(registered, "journal_conflict")
+    second = ("another-provider", "another-instance")
+    metrics.reject_labels(second, "superseded")
+    metrics.reject_labels(second, "provider_conflict")
+
+    assert metrics.rejections == {
+        (*registered, "superseded"): 1,
+        (*registered, "journal_conflict"): 1,
+        ("overflow", "overflow", "overflow"): 2,
+    }
+    assert {key[:2] for key in metrics.rejections} == {
+        registered,
+        ("overflow", "overflow"),
+    }
 
 
 @pytest.mark.anyio
