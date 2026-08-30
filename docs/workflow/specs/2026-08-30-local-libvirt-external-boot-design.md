@@ -67,18 +67,20 @@ class GuestRecoveryWriter(Protocol):
 
 `ModuleCapture` is either explicit absence or an archive descriptor containing the canonical
 manifest digest, entry count, uncompressed bytes, archive SHA-256, and relative archive filename.
-The manifest hashes sorted entries containing relative NFC path, kind, mode, size, content SHA-256
-for regular files, and link target for links. Absolute paths, traversal, devices, FIFOs, sockets,
-escaping links, duplicates, non-NFC names, more than 200,000 entries, or more than 8 GiB of regular
-content reject before publication. Observation uses the same walk and manifest algorithm.
+Its `recovery-module-tree-v1` manifest is exactly ADR-0583's installed entry metadata and path
+grammar: sorted relative NFC entry path, kind, mode, uid, gid, size and content SHA-256 for regular
+files, every xattr including POSIX ACL and `security.*` values, and `xattrs_supported`. Symlink lstat
+targets are recorded verbatim as UTF-8 NFC and may be absolute; capture, hashing, and restore never
+follow them. Hard links, special files, undecodable names/targets, noncanonical entry paths,
+duplicates, more than 200,000 entries, or more than 8 GiB of regular content reject before
+publication. Observation uses the same walk and manifest algorithm.
 
 `LocalRecoveryMetadataV1` is closed canonical JSON with schema, System and activation UUIDs, Run,
 plan and materialization identities, release, exact source inactive XML SHA-256, canonical preserved
 definition digest, source and target boot-projection digests, source and target module states, prior
 power state, capture descriptor, and durable recovery phase. It contains no configured root or
 absolute path. The opaque reference has `local-recovery-v1/<system UUID>/<activation UUID>` and is
-accepted only when both UUIDs equal `RecoveryPoint.ownership` and the activation supplied to the
-supplied activation binding.
+accepted only when both UUIDs equal the supplied `RecoveryPoint.binding`.
 
 ## Materialize and prepare
 
@@ -116,10 +118,14 @@ boot and readiness responsibility. Retry classifies source, target, or its own d
 phase. A source/target mixture is resumable only when metadata proves the completed component write;
 every other mixture is conflict.
 
-`observe` reads inactive XML and the release tree independently. It returns source or target only
-when both component identities match the same recorded composite state. A provider-owned partial
-phase is reported internally for same-operation resumption. Missing domain, malformed/forbidden XML,
-unreadable overlay, unowned metadata, or an unclassified mixture is conflict, never absence.
+The internal `_observe_composite(recovery)` helper reads inactive XML and the release tree
+independently. It classifies source or target only when both component identities match the same
+recorded composite state; it may classify a provider-owned partial phase for same-operation
+resumption. Missing domain, malformed/forbidden XML, unreadable overlay, unowned metadata, or an
+unclassified mixture is conflict, never absence. Public `ExternalBootPorts.observe` retains its
+existing `RunningKernelObservation` return contract: after authenticating the complete point and
+requiring composite target state, it uses the existing bounded readiness/running-kernel seam and
+returns architecture, release, and GNU build ID. It never exposes internal composite classification.
 
 `recover` requires the authenticated recovery point and a source, target, or owned-partial state.
 It restores the captured module tree (or verifies/removes it for recorded absence), fsyncs durable
@@ -129,11 +135,11 @@ both persistent components match source. A running prior state requires a fresh 
 an inactive prior state remains inactive. Retry from complete source performs only the conditional
 power restoration.
 
-`cleanup` requires complete source state, or the owning lifecycle's separately authenticated
-destroyed-System cleanup context. It deletes materialized kernel/initrd files and the exact recovery
-directory idempotently, verifies absence, and fsyncs each parent. It never follows symlinks or
-deletes an object whose metadata owner does not exactly match. Missing authenticated metadata is
-quarantined rather than guessed.
+`cleanup` requires complete source state. It deletes materialized kernel/initrd files and the exact
+recovery directory idempotently, verifies absence, and fsyncs each parent. It never follows symlinks
+or deletes an object whose metadata owner does not exactly match. Missing authenticated metadata is
+quarantined rather than guessed. Destroyed-System cleanup is not a second six-port entry point;
+teardown-owned invocation and authentication remain outside #2108.
 
 ## Error and observability contract
 
