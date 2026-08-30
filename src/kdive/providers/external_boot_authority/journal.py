@@ -109,8 +109,8 @@ class FileAuthorityJournal:
             raise OSError("authority journal must be a regular file")
         if status.st_uid != self._owner_uid:
             raise PermissionError("authority journal is not owned by the service identity")
-        if stat.S_IMODE(status.st_mode) & 0o022:
-            raise PermissionError("authority journal must not be group- or other-writable")
+        if stat.S_IMODE(status.st_mode) != 0o600:
+            raise PermissionError("authority journal must have exact mode 0600")
 
     def _open_read(self) -> int:
         descriptor = os.open(self._path, os.O_RDONLY | _OPEN_BASE)
