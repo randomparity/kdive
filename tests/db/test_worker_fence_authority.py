@@ -47,6 +47,7 @@ _PROTECTED_TABLES = {
     "external_boot_authority_acknowledgements",
     "external_boot_authority_audit",
     "external_boot_authority_counters",
+    "external_boot_authority_journal_heads",
     "investigation_build_use_recoveries",
     "investigation_build_uses",
     "schema_migrations",

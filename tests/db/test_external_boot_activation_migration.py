@@ -197,6 +197,7 @@ def test_migration_creates_four_ledgers_and_run_system_key(migrated_url: str) ->
             "external_boot_authority_acknowledgements",
             "external_boot_authority_audit",
             "external_boot_authority_counters",
+            "external_boot_authority_journal_heads",
             "external_boot_reservations",
             "external_boot_reservation_releases",
             "external_boot_recovery_attempts",
