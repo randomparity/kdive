@@ -56,6 +56,38 @@ class _ClosedValue(BaseModel):
         return self
 
 
+class AuthorityOperation(StrEnum):
+    ACTIVATE = "activate"
+    RECOVER = "recover"
+    RESOLVE_CONFLICT = "resolve-conflict"
+    RELEASE = "release"
+    CLEANUP = "cleanup"
+    TEARDOWN = "teardown"
+    DEADLINE = "deadline"
+    RECOVERY_ATTEMPT = "recovery-attempt"
+    FAIL = "fail"
+
+
+_PURPOSE_OPERATIONS: dict[str, frozenset[AuthorityOperation]] = {
+    "activate": frozenset(
+        {AuthorityOperation.ACTIVATE, AuthorityOperation.DEADLINE, AuthorityOperation.FAIL}
+    ),
+    "recover": frozenset(
+        {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.DEADLINE,
+            AuthorityOperation.RECOVERY_ATTEMPT,
+            AuthorityOperation.FAIL,
+        }
+    ),
+    "resolve-conflict": frozenset({AuthorityOperation.RESOLVE_CONFLICT, AuthorityOperation.FAIL}),
+    "release": frozenset(
+        {AuthorityOperation.RELEASE, AuthorityOperation.CLEANUP, AuthorityOperation.FAIL}
+    ),
+    "teardown": frozenset({AuthorityOperation.TEARDOWN, AuthorityOperation.FAIL}),
+}
+
+
 class _AuthorityBinding(_ClosedValue):
     schema_: Literal["external-boot-authority-v1"] = Field(
         "external-boot-authority-v1", alias="schema"
@@ -67,6 +99,7 @@ class _AuthorityBinding(_ClosedValue):
     run_id: UUID
     plan_identity: Digest
     purpose: Purpose
+    operation: AuthorityOperation
     provider_kind: str
     authority_instance: str
     operation_identity: str
@@ -76,6 +109,12 @@ class _AuthorityBinding(_ClosedValue):
     @classmethod
     def _identifiers_are_bounded(cls, value: str) -> str:
         return _bounded_text(value)
+
+    @model_validator(mode="after")
+    def _operation_matches_purpose(self) -> Self:
+        if self.operation not in _PURPOSE_OPERATIONS[self.purpose]:
+            raise ValueError("authority operation is not allowed for its purpose")
+        return self
 
 
 class AuthorityTakeoverRequestV1(_AuthorityBinding):
@@ -109,18 +148,12 @@ def _canonical_recovery_objects(
 class AuthorityMutationRequestV1(_AuthorityBinding):
     """One current-authority provider mutation request."""
 
-    operation: str
     attempt_id: UUID
     expected_source_identity: str
     intended_target_identity: str
     recovery_objects: Annotated[
         tuple[RecoveryObjectBindingV1, ...], Field(max_length=MAX_RECOVERY_OBJECTS)
     ]
-
-    @field_validator("operation")
-    @classmethod
-    def _operation_is_bounded(cls, value: str) -> str:
-        return _bounded_text(value)
 
     @field_validator("expected_source_identity", "intended_target_identity")
     @classmethod
@@ -205,7 +238,6 @@ class JournalRecordV1(_AuthorityBinding):
     previous_digest: Digest
     phase: JournalPhase
     attempt_id: UUID
-    operation: str | None = None
     predecessor_generation: PositiveBigInt | None = None
     watermark_sequence: PositiveBigInt | None = None
     watermark_digest: Digest | None = None
@@ -226,11 +258,6 @@ class JournalRecordV1(_AuthorityBinding):
 
     _objects_are_canonical = field_validator("recovery_objects")(_canonical_recovery_objects)
 
-    @field_validator("operation")
-    @classmethod
-    def _optional_operation_is_bounded(cls, value: str | None) -> str | None:
-        return None if value is None else _bounded_text(value)
-
     @model_validator(mode="after")
     def _phase_shape_is_closed(self) -> JournalRecordV1:
         has_mutation_fields = (
@@ -241,8 +268,6 @@ class JournalRecordV1(_AuthorityBinding):
             or self.outcome is not None
         )
         if self.phase in _TAKEOVER_PHASES:
-            if self.operation is not None:
-                raise ValueError("takeover records forbid adapter operations")
             if has_mutation_fields:
                 raise ValueError("takeover records forbid mutation fields")
             if (self.phase is JournalPhase.TAKEOVER_SUPERSEDED) != (
@@ -256,8 +281,6 @@ class JournalRecordV1(_AuthorityBinding):
             ):
                 raise ValueError("takeover completion must carry the exact watermark link")
         else:
-            if self.operation is None:
-                raise ValueError("mutation records require the exact adapter operation")
             if any(
                 value is not None
                 for value in (

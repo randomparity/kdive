@@ -37,6 +37,7 @@ def _binding() -> dict[str, object]:
         "run_id": uuid4(),
         "plan_identity": _DIGEST,
         "purpose": "recover",
+        "operation": "recover",
         "provider_kind": "remote-libvirt",
         "authority_instance": "authority-a",
         "operation_identity": "operation-a",
@@ -56,7 +57,7 @@ def _object(ref: str = "recovery/object-a") -> RecoveryObjectBindingV1:
 def _mutation(**changes: object) -> AuthorityMutationRequestV1:
     first = _object()
     values = _binding() | {
-        "operation": "restore-source",
+        "operation": "recovery-attempt",
         "attempt_id": uuid4(),
         "expected_source_identity": _DIGEST,
         "intended_target_identity": _OTHER_DIGEST,
@@ -64,6 +65,35 @@ def _mutation(**changes: object) -> AuthorityMutationRequestV1:
     }
     values.update(changes)
     return AuthorityMutationRequestV1.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    ("purpose", "operation"),
+    [
+        ("activate", "activate"),
+        ("activate", "deadline"),
+        ("activate", "fail"),
+        ("recover", "recover"),
+        ("recover", "deadline"),
+        ("recover", "recovery-attempt"),
+        ("recover", "fail"),
+        ("resolve-conflict", "resolve-conflict"),
+        ("resolve-conflict", "fail"),
+        ("release", "release"),
+        ("release", "cleanup"),
+        ("release", "fail"),
+        ("teardown", "teardown"),
+        ("teardown", "fail"),
+    ],
+)
+def test_every_authorized_purpose_operation_pair_is_accepted(purpose: str, operation: str) -> None:
+    _takeover(purpose=purpose, operation=operation)
+
+
+@pytest.mark.parametrize("operation", ["unknown", "cleanup"])
+def test_unknown_or_cross_purpose_operation_is_rejected(operation: str) -> None:
+    with pytest.raises(ValidationError):
+        _takeover(purpose="activate", operation=operation)
 
 
 @pytest.mark.parametrize(
@@ -132,7 +162,7 @@ def test_mutation_rejects_recovery_object_from_another_binding() -> None:
                 "previous_digest": "sha256:" + "0" * 64,
                 "phase": JournalPhase.ADMITTED,
                 "attempt_id": uuid4(),
-                "operation": "recover-commit",
+                "operation": "recover",
                 "expected_source_identity": _DIGEST,
                 "intended_target_identity": _OTHER_DIGEST,
                 "recovery_objects": (foreign,),
@@ -190,7 +220,7 @@ def _record(phase: JournalPhase, **changes: object) -> JournalRecordV1:
         JournalPhase.TAKEOVER_SUPERSEDED,
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     }:
-        values["operation"] = "recover-commit"
+        values["operation"] = "recover"
     values.update(changes)
     return JournalRecordV1.model_validate(values)
 

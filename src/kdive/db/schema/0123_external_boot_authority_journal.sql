@@ -137,11 +137,11 @@ CREATE FUNCTION public.resolve_allocating_external_boot_authority(
     p_peer_incarnation text, p_authority_id uuid, p_generation bigint
 ) RETURNS TABLE (
     peer_incarnation_id text, authority_id uuid, generation bigint, system_id uuid,
-    activation_id uuid, run_id uuid, plan_identity text, purpose text, provider_kind text,
+    activation_id uuid, run_id uuid, plan_identity text, purpose text, operation text, provider_kind text,
     authority_instance text, operation_identity text, operation_digest text, state text
 ) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
     SELECT a.worker_incarnation, a.id, a.generation, a.system_id, a.activation_id, a.run_id,
-           a.plan_identity, a.purpose, a.provider_kind, a.authority_instance,
+           a.plan_identity, a.purpose, a.operation, a.provider_kind, a.authority_instance,
            a.operation_identity, a.operation_digest, a.state
     FROM public.external_boot_authorities AS a
     JOIN public.worker_incarnations AS w ON w.incarnation = a.worker_incarnation
@@ -160,11 +160,11 @@ CREATE FUNCTION public.resolve_current_external_boot_authority(
     p_ack_sequence bigint, p_ack_digest text
 ) RETURNS TABLE (
     peer_incarnation_id text, authority_id uuid, generation bigint, system_id uuid,
-    activation_id uuid, run_id uuid, plan_identity text, purpose text, provider_kind text,
+    activation_id uuid, run_id uuid, plan_identity text, purpose text, operation text, provider_kind text,
     authority_instance text, operation_identity text, operation_digest text, state text
 ) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
     SELECT a.worker_incarnation, a.id, a.generation, a.system_id, a.activation_id, a.run_id,
-           a.plan_identity, a.purpose, a.provider_kind, a.authority_instance,
+           a.plan_identity, a.purpose, a.operation, a.provider_kind, a.authority_instance,
            a.operation_identity, a.operation_digest, a.state
     FROM public.external_boot_authorities AS a
     JOIN public.worker_incarnations AS w ON w.incarnation = a.worker_incarnation
@@ -179,11 +179,11 @@ CREATE FUNCTION public.resolve_current_external_boot_authority_candidate(
     p_peer_incarnation text, p_authority_id uuid, p_generation bigint
 ) RETURNS TABLE (
     peer_incarnation_id text, authority_id uuid, generation bigint, system_id uuid,
-    activation_id uuid, run_id uuid, plan_identity text, purpose text, provider_kind text,
+    activation_id uuid, run_id uuid, plan_identity text, purpose text, operation text, provider_kind text,
     authority_instance text, operation_identity text, operation_digest text, state text
 ) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
     SELECT a.worker_incarnation, a.id, a.generation, a.system_id, a.activation_id, a.run_id,
-           a.plan_identity, a.purpose, a.provider_kind, a.authority_instance,
+           a.plan_identity, a.purpose, a.operation, a.provider_kind, a.authority_instance,
            a.operation_identity, a.operation_digest, a.state
     FROM public.external_boot_authorities AS a
     JOIN public.worker_incarnations AS w ON w.incarnation = a.worker_incarnation
@@ -267,20 +267,30 @@ BEGIN
             OR p_record->'observation' <> 'null'::jsonb
             OR p_record->'outcome' <> 'null'::jsonb)
     THEN RETURN 'conflict'; END IF;
-    IF v_phase IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
-       AND p_record->'operation' <> 'null'::jsonb
+    IF jsonb_typeof(p_record->'operation') <> 'string'
+       OR p_record->>'operation' NOT IN (
+           'activate', 'recover', 'resolve-conflict', 'release', 'cleanup', 'teardown',
+           'deadline', 'recovery-attempt', 'fail'
+       )
+       OR NOT (CASE p_record->>'purpose'
+           WHEN 'activate' THEN (p_record->>'operation') = ANY (ARRAY['activate', 'deadline', 'fail'])
+           WHEN 'recover' THEN (p_record->>'operation') = ANY (
+               ARRAY['recover', 'deadline', 'recovery-attempt', 'fail']
+           )
+           WHEN 'resolve-conflict' THEN (p_record->>'operation') = ANY (ARRAY['resolve-conflict', 'fail'])
+           WHEN 'release' THEN (p_record->>'operation') = ANY (ARRAY['release', 'cleanup', 'fail'])
+           WHEN 'teardown' THEN (p_record->>'operation') = ANY (ARRAY['teardown', 'fail'])
+           ELSE false
+       END)
     THEN RETURN 'conflict'; END IF;
     IF v_phase NOT IN ('watermark-installed', 'takeover-superseded', 'takeover-acknowledged')
        AND (jsonb_typeof(p_record->'expected_source_identity') <> 'string'
             OR jsonb_typeof(p_record->'intended_target_identity') <> 'string'
-            OR jsonb_typeof(p_record->'recovery_objects') <> 'array'
-            OR jsonb_typeof(p_record->'operation') <> 'string')
+            OR jsonb_typeof(p_record->'recovery_objects') <> 'array')
     THEN RETURN 'conflict'; END IF;
     IF octet_length(p_record->>'authority_instance') NOT BETWEEN 1 AND 255
        OR octet_length(p_record->>'operation_identity') NOT BETWEEN 1 AND 255
        OR octet_length(p_record->>'provider_kind') NOT BETWEEN 1 AND 255
-       OR (p_record->'operation' <> 'null'::jsonb
-           AND octet_length(p_record->>'operation') NOT BETWEEN 1 AND 255)
        OR p_record->>'plan_identity' !~ '^sha256:[0-9a-f]{64}$'
        OR p_record->>'operation_digest' !~ '^sha256:[0-9a-f]{64}$'
        OR p_record->>'previous_digest' !~ '^sha256:[0-9a-f]{64}$'
@@ -409,6 +419,9 @@ BEGIN
         );
     v_inherited_completion := v_successor_pending AND v_is_suspended
         AND v_phase IN ('provider-returned', 'observed', 'terminal');
+    IF p_record->>'operation' IS DISTINCT FROM v_authority.operation
+       AND NOT v_inherited_completion
+    THEN RETURN 'conflict'; END IF;
     IF (p_record->>'authority_id')::uuid IS DISTINCT FROM v_authority.id
        OR (p_record->>'generation')::bigint IS DISTINCT FROM v_authority.generation
        OR (p_record->>'system_id')::uuid IS DISTINCT FROM v_authority.system_id

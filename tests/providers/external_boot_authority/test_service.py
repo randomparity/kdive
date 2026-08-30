@@ -12,6 +12,7 @@ import pytest
 
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityOperation,
     JournalPhase,
     JournalRecordV1,
     record_digest,
@@ -122,6 +123,28 @@ async def test_mutation_rejects_before_caller_journal_construction(
     assert adapter.calls == []
     assert service._lanes == {}
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_stored_operation_drift_rejects_before_journal_lane_or_provider(
+    tmp_path: Path,
+) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    repository.current = True
+    repository.operation_override = AuthorityOperation.DEADLINE
+    journal_calls = 0
+
+    def forbidden_journal(_system_id: object) -> FileAuthorityJournal:
+        nonlocal journal_calls
+        journal_calls += 1
+        raise AssertionError("operation drift reached the journal")
+
+    service = ExternalBootAuthorityService(
+        repository=repository, journal_factory=forbidden_journal, adapter=adapter
+    )
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, _mutation(takeover))
+    assert (journal_calls, adapter.calls, service._lanes) == (0, [], {})
 
 
 @pytest.mark.anyio
@@ -775,7 +798,7 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
     (tmp_path / "source").mkdir()
     await source.acknowledge_takeover(peer, request)
     source_repository.current = True
-    mutation = _mutation(request).model_copy(update={"operation": "commit-boot"})
+    mutation = _mutation(request).model_copy(update={"operation": "deadline"})
     await source.execute_mutation(peer, mutation)
     source_records = tuple(source_repository.records)
     source_lines = (
@@ -827,7 +850,7 @@ async def test_worker_death_recovers_every_suspended_phase_before_ack(tmp_path: 
         acknowledgement = await restarted.acknowledge_takeover(peer, successor)
         assert acknowledgement.generation == 2
         assert adapter.calls == expected_calls
-        assert adapter.operations == (["commit-boot"] if expected_calls else [])
+        assert adapter.operations == (["deadline"] if expected_calls else [])
         assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
         terminal = next(
             record
@@ -846,7 +869,7 @@ async def test_restart_rejects_divergent_trusted_continuation_before_recovery_ac
     await service.acknowledge_takeover(peer, request)
     repository.current = True
     adapter.fail_commit = True
-    mutation = _mutation(request).model_copy(update={"operation": "commit-boot"})
+    mutation = _mutation(request).model_copy(update={"operation": "deadline"})
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await service.execute_mutation(peer, mutation)
     successor = request.model_copy(
@@ -863,7 +886,7 @@ async def test_restart_rejects_divergent_trusted_continuation_before_recovery_ac
     if divergence == "missing":
         corrupted = None
     elif divergence == "operation":
-        corrupted = replace(suspended, operation="different-commit")
+        corrupted = replace(suspended, operation="fail")
     else:
         corrupted = replace(suspended, phase=JournalPhase.PROVIDER_RETURNED)
     repository.head = replace(repository.head, suspended_operation=corrupted)
