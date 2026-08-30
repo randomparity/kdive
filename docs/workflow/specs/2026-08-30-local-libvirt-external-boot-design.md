@@ -40,10 +40,12 @@ implementation discovers an external or separately versioned caller, it stops at
 #2140 alone validates the authority protocol and constructs the binding in production.
 `RecoveryPoint` contains `binding: ExternalBootActivationBinding` in place of relying only on its
 existing System/Run ownership. `prepare` copies the exact input binding into the point. Every
-recovery-consuming operation requires point binding, opaque token, and canonical recovery metadata
-to agree on all three UUIDs before reading provider state. Contract tests substitute a point and
-token independently across two activation IDs with the same System, Run, plan, and source, and prove
-zero observation, mutation, or deletion.
+recovery-consuming operation requires the complete closed point — binding, recovery reference, plan
+identity, materialization identity, source state, and target state — to equal reopened canonical
+recovery metadata before reading provider state. Reopened metadata supplies every expected identity
+used for comparison and mutation; caller-presented point fields never override it. Contract tests
+substitute each field independently, including a point and token across two activation IDs with the
+same System, Run, plan, and source, and prove zero observation, mutation, or deletion.
 
 Recovery identity is deterministic within one activation. A retry with the same binding, plan, and
 source returns byte-identical point metadata and reference. A distinct activation ID always selects

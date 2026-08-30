@@ -34,11 +34,12 @@ ownership, never authority. There are no verified external callers and fault-inj
 current implementation, so replace-by-default applies: update the protocol, fault-inject provider,
 contract tests, and direct internal consumers atomically with no compatibility overload. #2140 alone
 translates an authenticated authority request into this binding for production composition.
-`RecoveryPoint` also carries the same closed binding. Every later operation compares its System,
-Run, and activation against the opaque token and reopened canonical metadata before observation or
-mutation; matching token and metadata alone is insufficient. This adjacent value change is required
-so `activate`, `observe`, `recover`, and `cleanup` can authenticate the selected owner without
-decoding authority data.
+`RecoveryPoint` also carries the same closed binding. Every later operation compares the complete
+closed point — binding, recovery reference, plan identity, materialization identity, source state,
+and target state — with reopened canonical metadata before observation or mutation. Reopened
+metadata, not caller-presented fields, supplies mutation truth. Any field mismatch is conflict with
+no provider write. This adjacent value change lets `activate`, `observe`, `recover`, and `cleanup`
+authenticate the selected owner and immutable state without decoding authority data.
 
 This record refines ADR-0583's deterministic-prepare statement: identical retries within one
 activation return the same recovery point, while distinct activation UUIDs intentionally produce
