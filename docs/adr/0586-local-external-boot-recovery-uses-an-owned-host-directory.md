@@ -87,6 +87,12 @@ successful or confirmed finalization, #2118/core releases the reservation and co
 `cleanup_complete`; neither may occur earlier. Production advertisement is blocked until that
 ordering is wired and tested. There is no post-cleanup receipt, generic sweeper, retention timeout,
 or separate tombstone budget.
+
+#2140 also owns terminal-result replay. If finalization has already reached an anchored terminal
+journal record but its response was lost, an identical operation identity, attempt, request digest,
+authority binding, and terminal chain returns the recorded observation without admitting a new
+mutation or invoking local-libvirt. Only an unresolved exact `mutation-started` operation re-presents
+the U1a deletion proof. A different retry is a new operation and cannot treat absence as its success.
 Teardown likewise quarantines evidence it cannot authenticate.
 
 ## Consequences
@@ -99,7 +105,8 @@ Teardown likewise quarantines evidence it cannot authenticate.
   finalization, never tombstone creation; core cleanup completion follows capacity release.
 - #2140 gains the integration obligation to construct the current journal proof and call
   finalization before #2118/core releases capacity and commits cleanup completion. Advertisement is
-  withheld until crash-ordering, stale-proof, and lost-response tests pass.
+  withheld until crash-ordering, stale-proof, unresolved-operation recovery, and terminal-result
+  replay tests pass.
 - The configured recovery root becomes durable provider state and must share the worker's lifecycle,
   permissions, backup expectations, and provisioning parity on x86_64 and ppc64le hosts.
 - The design adds a fixed libguestfs recovery seam but no generic guest filesystem editor.

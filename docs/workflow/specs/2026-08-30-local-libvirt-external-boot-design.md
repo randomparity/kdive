@@ -143,7 +143,7 @@ verifies absence, and atomically replaces metadata with a 0600 canonical `cleane
 retains the complete point identity plus explicit payload-absence facts. It fsyncs the tombstone,
 directory, and parent before success. A lost-response retry authenticates the tombstone and returns
 success without provider mutation; missing metadata without the exact tombstone is quarantined. The
-The tombstone remains reservation-owned recovery evidence. Add closed
+tombstone remains reservation-owned recovery evidence. Add closed
 `FinalizeCleanupProof(point_digest, binding, operation_id, attempt_id, journal_sequence,
 journal_digest, phase="mutation-started")` and the narrow local primitive
 `finalize_cleanup_tombstone(point: RecoveryPoint, proof: FinalizeCleanupProof,
@@ -156,9 +156,13 @@ Generic, stale, superseded, cross-binding, cross-operation, or unjournaled absen
 #2140 calls finalization while cleanup remains incomplete and the reservation charged. Only after
 success or exact U1a confirmation does #2118/core release the reservation and durably commit
 `cleanup_complete`. Advertisement remains blocked until crash-before-delete,
-crash-after-delete-before-terminal-journal, stale-proof, and lost-response tests pass. No receipt,
-generic reconciliation sweep, separate budget, or retention timer exists.
-Cleanup never
+crash-after-delete-before-terminal-journal, stale-proof, and lost-response tests pass. If the
+authority already anchored a terminal record before losing its response, #2140 replays the recorded
+terminal observation only when operation identity, attempt, request digest, binding, and terminal
+chain are identical; it admits no new mutation and does not invoke local-libvirt. Only an unresolved
+exact `mutation-started` operation may re-present the U1a proof. Tests cover both response-loss
+windows independently. No receipt, generic reconciliation sweep, separate budget, or retention
+timer exists. Cleanup never
 follows symlinks or deletes an object whose metadata owner does not exactly match. Destroyed-System
 cleanup is not a second six-port entry point; teardown-owned invocation and authentication remain
 outside #2108.
