@@ -142,8 +142,9 @@ fsync `publication-complete`; it performs no further guest mutation. Boot and re
 forbidden until that evidence is durable.
 
 Restoring recorded absence uses the same first move without a staging-to-live move. After
-`move-ready`, Task 3 moves live to old-aside, guest-syncs, verifies live absent and old-aside=prior,
-and fsyncs `absence-live`; exact absence is then the verified desired state. It removes old-aside only
+`move-ready`, Task 3 requires staging absent, moves live to old-aside, guest-syncs, verifies live and
+staging absent plus old-aside=prior, and fsyncs `absence-live`; exact absence is then the verified
+desired state. It removes old-aside only
 after fsyncing `absence-complete`, then guest-syncs and fsyncs `absence-cleaned`. An already-absent
 live tree is verified and records both completion phases without a move. On restart, live absent,
 old-aside=prior, and durable `absence-complete` means removal pending; the sole permitted guest
@@ -153,7 +154,8 @@ the deterministic old-aside owned; only the exact authenticated prior tree or it
 partial-deletion continuation may be removed. A wrong identity, unowned entry, symlink, wrong type,
 or path escape conflicts. Under durable `absence-complete`, any present live name is conflict with
 zero mutation and the domain kept inactive, regardless of whether old-aside is present, partial, or
-absent. Live absent,
+absent. Every desired-absence state requires staging absent; a present, partial, unowned, unreadable,
+or malformed staging name is conflict with zero guest mutation and the domain kept inactive. Live absent,
 old-aside absent, and durable `absence-complete` permits only guest sync plus `absence-cleaned`
 evidence. Boot, readiness, and lifecycle advancement remain forbidden until `absence-cleaned` is
 durable. A crash between a guest move and its evidence fsync is classified from the three names and
