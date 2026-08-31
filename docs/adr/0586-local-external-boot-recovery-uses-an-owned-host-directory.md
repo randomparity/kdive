@@ -116,9 +116,17 @@ classify the deterministic staging tree. Task 3 alone decides whether retry resu
 Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed content.
 Task 2 validates the manifest and writes only through the supplied staging-tree capability. It never
 renames that tree into the live release or emits durable phase evidence. Task 3 verifies the staged
-manifest, fsyncs its phase evidence, performs the same-filesystem publication, and fsyncs the parent.
-On restart, Task 3 alone classifies source, target, and its authenticated partial state; any unowned,
-unreadable, over-limit, or third state is conflict and causes no further mutation.
+manifest and fsyncs `exchange-ready` evidence before publication. Publication is a
+descriptor-relative Linux `renameat2(..., RENAME_EXCHANGE)` between the authenticated nonempty live
+release directory and deterministic staged directory on the same filesystem. If atomic exchange is
+unsupported, Task 3 fails before altering the live tree; remove-then-rename and old-aside sequences
+are forbidden. After exchange, the live name always resolves to one complete tree and the staging
+name owns the displaced source tree. Task 3 verifies both identities, fsyncs `exchange-complete`
+evidence and the containing directory, then removes the displaced tree only under that evidence.
+On restart before or after either evidence fsync, Task 3 compares the complete expected source and
+target manifests at both authenticated names: source-at-live/target-at-staging means not exchanged;
+target-at-live/source-at-staging means exchanged. Any absent, mixed, unowned, unreadable, over-limit,
+or third state is conflict and causes no further mutation.
 
 Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
 activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
@@ -182,7 +190,10 @@ Teardown likewise quarantines evidence it cannot authenticate.
   caller-owned partial is durably retry-classifiable.
 - Task 2 unit tests use an in-memory authenticated-tree fake and prove it requests no overlay path,
   guest path, staging name, rename, fsync-phase, or restart-classification operation. Task 3 owns
-  integration and crash tests for staging capabilities, atomic rename/fsync ordering, and restart.
+  integration and crash tests for staging capabilities, `RENAME_EXCHANGE`, fsync ordering, and
+  restart immediately before/after the exchange and each evidence fsync. Those tests prove the live
+  release name is never absent, unsupported exchange changes nothing, and the displaced tree is
+  removed only after durable `exchange-complete` evidence.
 
 ## Considered & rejected
 
