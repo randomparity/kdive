@@ -714,6 +714,7 @@ class _ExternalIO:
         self.metadata = metadata
         self.actions: list[str] = []
         self.tombstone = False
+        self.finalized_proof: FinalizeCleanupProof | None = None
 
     def materialize(
         self, plan: object, authority: OpaqueProviderRef
@@ -770,6 +771,7 @@ class _ExternalIO:
 
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         self.actions.append("finalize")
+        self.finalized_proof = proof
         self.tombstone = False
 
 
@@ -965,3 +967,33 @@ def test_finalize_requires_exact_cleanup_proof_binding_and_point() -> None:
     wrong = proof.model_copy(update={"point_digest": "sha256:" + "e" * 64})
     with pytest.raises(ValueError, match="proof"):
         ports.finalize_cleanup_tombstone(point, wrong, OpaqueProviderRef(ref="authority/current"))
+
+
+def test_finalize_passes_authenticated_journal_fields_without_local_interpretation() -> None:
+    io = _ExternalIO(_metadata("recovered"))
+    ports = LocalLibvirtExternalBoot(io)
+    point = _point(io.metadata)
+    proof = FinalizeCleanupProof(
+        point_digest=ports.point_digest(point),
+        binding=point.binding,
+        operation_id="00000000-0000-0000-0000-000000000099",
+        attempt_id="00000000-0000-0000-0000-000000000098",
+        journal_sequence=999,
+        journal_digest="sha256:" + "f" * 64,
+    )
+    ports.finalize_cleanup_tombstone(
+        point, proof, OpaqueProviderRef(ref="authority/authenticated-by-2140")
+    )
+    assert io.finalized_proof is proof
+
+    crossed = proof.model_copy(
+        update={
+            "binding": proof.binding.model_copy(
+                update={"activation_id": "00000000-0000-0000-0000-000000000097"}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="proof"):
+        ports.finalize_cleanup_tombstone(
+            point, crossed, OpaqueProviderRef(ref="authority/authenticated-by-2140")
+        )

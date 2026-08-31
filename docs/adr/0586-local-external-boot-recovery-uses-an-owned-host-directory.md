@@ -179,13 +179,16 @@ idempotent local `finalize_cleanup_tombstone(point, proof, authority)` primitive
 `FinalizeCleanupProof` contains the complete point digest, current activation binding, exact
 finalize operation and attempt identities, authority-journal sequence and digest, and literal
 `phase="mutation-started"`. #2140 alone authenticates the current binding and journal head and
-constructs this proof; local-libvirt compares its closed fields but never decodes authority.
+constructs this proof. Local-libvirt validates the closed shape plus exact point digest and binding;
+it treats operation, attempt, and journal fields as authenticated opaque values and never claims an
+independent journal check.
 
-With a present tombstone, finalization requires exact proof/point/tombstone equality, deletes only
+With a present tombstone, local finalization requires exact point/binding equality, deletes only
 that directory, verifies absence, and fsyncs the parent. With an absent tombstone, it succeeds only
-when #2140 re-presents the same proof for the exact still-current finalize operation whose
-`mutation-started` record is durable. Generic absence and a stale, superseded, cross-binding,
-cross-operation, or unjournaled proof are conflict. This narrowly resolves a crash or lost response
+after #2140 has authenticated the same exact still-current finalize operation whose
+`mutation-started` record is durable. #2140 rejects generic, stale, superseded, cross-operation, or
+unjournaled proofs; local-libvirt independently rejects a cross-binding or cross-point proof. This
+narrowly resolves a crash or lost response
 between deletion and journal terminalization without treating absence generally as success. After
 successful or confirmed finalization, #2118/core releases the reservation and commits
 `cleanup_complete`; neither may occur earlier. Production advertisement is blocked until that

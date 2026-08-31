@@ -340,9 +340,11 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
    remains inactive. Boot/readiness/lifecycle advancement is allowed only after terminal
    `publication-complete` or `absence-cleaned`, never after rollback.
 7. Implement cleanup as payload deletion plus authenticated accounted tombstone. Implement U1a
-   finalization: present tombstone requires exact proof equality; absent success requires the exact
-   current-binding, same-operation `mutation-started` proof supplied by #2140. Reject every stale,
-   cross-binding, cross-operation, or unjournaled proof. Do not release capacity or set core state.
+   finalization: local-libvirt requires exact point digest and binding for a present tombstone or
+   absent retry. #2140 alone authenticates the exact current-binding, same-operation
+   `mutation-started` proof and rejects stale, cross-operation, or unjournaled input before invoking
+   local finalization. Keep operation/attempt/journal fields opaque locally. Do not release capacity
+   or set core state.
 8. Run `just test-verbose tests/providers/local_libvirt/test_external_boot.py`; expect all passed.
    Run the legacy install file to prove behavior preservation. Run lint/type/diff and commit as
    `feat(local-libvirt): implement external boot ports`.

@@ -301,11 +301,13 @@ tombstone remains reservation-owned recovery evidence. Add closed
 journal_digest, phase="mutation-started")` and the narrow local primitive
 `finalize_cleanup_tombstone(point: RecoveryPoint, proof: FinalizeCleanupProof,
 authority: OpaqueProviderRef) -> None`. #2140 authenticates the exact current binding and journal
-head before constructing the proof; local-libvirt validates only closed equality and never parses
-authority. A present tombstone is deleted only after complete point/proof/tombstone equality, then
+head before constructing the proof; local-libvirt validates the closed shape plus exact point digest
+and binding, treats operation/attempt/journal fields as opaque, and never parses authority. A
+present tombstone is deleted only after complete point/binding/tombstone equality, then
 absence and parent fsync are verified. An absent tombstone succeeds only when #2140 re-presents the
 same exact still-current proof whose `mutation-started` record predates the attempted delete.
-Generic, stale, superseded, cross-binding, cross-operation, or unjournaled absence is conflict.
+#2140 rejects generic, stale, superseded, cross-operation, or unjournaled absence before invocation;
+local-libvirt rejects cross-binding and cross-point input.
 #2140 calls finalization while cleanup remains incomplete and the reservation charged. Only after
 success or exact U1a confirmation does #2118/core release the reservation and durably commit
 `cleanup_complete`. Advertisement remains blocked until crash-before-delete,
