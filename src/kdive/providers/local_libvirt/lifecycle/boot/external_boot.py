@@ -104,6 +104,36 @@ class LocalRecoveryMetadataV1(_ClosedValue):
         return self
 
 
+class LocalPreStopIntentV1(_ClosedValue):
+    """Information established without mutating libvirt or the guest overlay."""
+
+    schema_: Literal["local-libvirt-pre-stop-intent-v1"] = Field(
+        "local-libvirt-pre-stop-intent-v1", alias="schema"
+    )
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    materialization_identity: Digest
+    release: str
+    materialized_modules: OpaqueProviderRef
+    materialized_modules_sha256: Digest
+    materialized_modules_bytes: Annotated[int, Field(ge=0)]
+    source_xml_sha256: Digest
+    source_xml: str
+    source_definition: Digest
+    source_boot: Digest
+    target_boot: Digest
+    prior_power: Literal["running", "inactive"]
+
+    @model_validator(mode="after")
+    def _source_xml_matches_digest(self) -> LocalPreStopIntentV1:
+        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
+            raise ValueError("source domain XML must be NFC")
+        digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
+        if digest != self.source_xml_sha256:
+            raise ValueError("source domain XML digest does not match bytes")
+        return self
+
+
 class FinalizeCleanupProof(_ClosedValue):
     point_digest: Digest
     binding: ExternalBootActivationBinding
@@ -328,6 +358,108 @@ class LocalExternalBootIO(Protocol):
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
 
 
+class LocalExternalBootHost(Protocol):
+    """Injected libvirt, libguestfs, artifact, and readiness operations."""
+
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization: ...
+    def inspect_prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> LocalPreStopIntentV1: ...
+    def complete_prepare(self, intent: LocalPreStopIntentV1) -> LocalRecoveryMetadataV1: ...
+    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
+    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+
+
+class RealLocalExternalBootIO:
+    """Concrete durable adapter that orders host mutations behind recovery evidence."""
+
+    def __init__(self, recovery_root: Path, host: LocalExternalBootHost) -> None:
+        self._recovery_root = recovery_root
+        self._host = host
+
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization:
+        return self._host.materialize(plan, authority)
+
+    def prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> LocalRecoveryMetadataV1:
+        intent = self._host.inspect_prepare(materialization, binding, authority)
+        if (
+            intent.binding != binding
+            or intent.materialization_identity != materialization.identity
+            or intent.plan_identity != materialization.plan_identity
+        ):
+            raise ValueError("pre-stop intent does not match activation")
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            reference = store.publish_pre_stop(intent)
+        metadata = self._host.complete_prepare(intent)
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.complete_preparation(reference, intent, metadata)
+
+    @staticmethod
+    def recovery_ref(binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
+        return _recovery_ref(binding)
+
+    def reopen(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> LocalRecoveryMetadataV1:
+        del authority
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.reopen(recovery.recovery_ref, recovery.binding)
+
+    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self._host.activate_modules(metadata)
+
+    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self._host.define_target(metadata)
+
+    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
+        return self._host.observe_running(metadata)
+
+    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self._host.recover_modules(metadata)
+
+    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self._host.define_source(metadata)
+
+    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self._host.restore_power(metadata)
+
+    def record_phase(
+        self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
+    ) -> LocalRecoveryMetadataV1:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.record_phase(
+                _recovery_ref(metadata.binding), metadata.binding, metadata, phase
+            )
+
+    def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None:
+        self._host.cleanup_payloads(metadata)
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store.publish_tombstone(
+                _recovery_ref(metadata.binding), metadata.binding, metadata, point_digest
+            )
+
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
+
+
 class LocalLibvirtExternalBoot:
     """Six-port local lifecycle coordinator over authenticated, injected host I/O."""
 
@@ -492,6 +624,15 @@ def _metadata_bytes(metadata: LocalRecoveryMetadataV1) -> bytes:
     ).encode()
 
 
+def _pre_stop_bytes(intent: LocalPreStopIntentV1) -> bytes:
+    return json.dumps(
+        intent.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
 def _tombstone_bytes(tombstone: CleanupTombstoneV1) -> bytes:
     return json.dumps(
         tombstone.model_dump(mode="json", by_alias=True),
@@ -567,6 +708,70 @@ class RecoveryMetadataStore:
         if reopened != metadata:
             raise ValueError("published recovery metadata failed exact reopen")
         return reference
+
+    def publish_pre_stop(self, intent: LocalPreStopIntentV1) -> OpaqueProviderRef:
+        """Durably publish the first partial entry before any provider mutation."""
+        self._require_open()
+        reference = _recovery_ref(intent.binding)
+        final_name = recovery_directory_name(reference, intent.binding)
+        if self._try_read(final_name) is not None:
+            raise ValueError("complete recovery metadata already exists")
+        partial_name = f".{final_name}.partial"
+        directory_fd = self._open_or_create_partial(partial_name)
+        try:
+            entries = os.listdir(directory_fd)
+            if entries:
+                if entries != [_INTENT_NAME] or self._read_pre_stop(directory_fd) != intent:
+                    raise ValueError("recovery partial is not the exact pre-stop intent")
+            else:
+                _write_exclusive(directory_fd, _INTENT_NAME, _pre_stop_bytes(intent))
+                os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.fsync(self._root_fd)
+        if self.reopen_pre_stop(reference, intent.binding) != intent:
+            raise ValueError("pre-stop intent failed exact reopen")
+        return reference
+
+    def reopen_pre_stop(
+        self, reference: OpaqueProviderRef, binding: ExternalBootActivationBinding
+    ) -> LocalPreStopIntentV1:
+        self._require_open()
+        final_name = recovery_directory_name(reference, binding)
+        directory_fd = _open_private_directory(self._root_fd, f".{final_name}.partial")
+        try:
+            return self._read_pre_stop(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def complete_preparation(
+        self,
+        reference: OpaqueProviderRef,
+        intent: LocalPreStopIntentV1,
+        metadata: LocalRecoveryMetadataV1,
+    ) -> LocalRecoveryMetadataV1:
+        """Replace exact partial intent and publish complete recovery metadata atomically."""
+        self._require_open()
+        if not _metadata_extends_intent(metadata, intent):
+            raise ValueError("complete recovery metadata does not extend pre-stop intent")
+        final_name = recovery_directory_name(reference, intent.binding)
+        partial_name = f".{final_name}.partial"
+        directory_fd = _open_private_directory(self._root_fd, partial_name)
+        try:
+            if self._read_pre_stop(directory_fd) != intent:
+                raise ValueError("pre-stop intent changed before completion")
+            temporary = ".intent.complete"
+            _write_exclusive(directory_fd, temporary, _metadata_bytes(metadata))
+            os.rename(temporary, _INTENT_NAME, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.rename(partial_name, final_name, src_dir_fd=self._root_fd, dst_dir_fd=self._root_fd)
+        os.fsync(self._root_fd)
+        reopened = self._read_named(final_name)
+        if reopened != metadata:
+            raise ValueError("completed recovery metadata failed exact reopen")
+        return reopened
 
     def reopen(
         self, reference: OpaqueProviderRef, binding: ExternalBootActivationBinding
@@ -715,6 +920,14 @@ class RecoveryMetadataStore:
             raise ValueError("recovery intent is not canonical JSON")
         return metadata
 
+    @staticmethod
+    def _read_pre_stop(directory_fd: int) -> LocalPreStopIntentV1:
+        data = _read_private_file(directory_fd, _INTENT_NAME)
+        intent = LocalPreStopIntentV1.model_validate_json(data)
+        if _pre_stop_bytes(intent) != data:
+            raise ValueError("pre-stop intent is not canonical JSON")
+        return intent
+
     def _require_open(self) -> None:
         if self._root_fd < 0:
             raise ValueError("recovery metadata store is closed")
@@ -722,6 +935,27 @@ class RecoveryMetadataStore:
 
 def _recovery_ref(binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
     return OpaqueProviderRef(ref=f"local-recovery-v1/{binding.system_id}/{binding.activation_id}")
+
+
+def _metadata_extends_intent(
+    metadata: LocalRecoveryMetadataV1, intent: LocalPreStopIntentV1
+) -> bool:
+    shared = (
+        "binding",
+        "plan_identity",
+        "materialization_identity",
+        "release",
+        "materialized_modules",
+        "materialized_modules_sha256",
+        "materialized_modules_bytes",
+        "source_xml_sha256",
+        "source_xml",
+        "source_definition",
+        "source_boot",
+        "target_boot",
+        "prior_power",
+    )
+    return all(getattr(metadata, field) == getattr(intent, field) for field in shared)
 
 
 def _require_private_owned_directory(fd: int, label: str) -> None:

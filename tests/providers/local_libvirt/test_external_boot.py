@@ -13,9 +13,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
     LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
+    LocalPreStopIntentV1,
     LocalRecoveryMetadataV1,
     ModuleLayout,
     PublicationPhase,
+    RealLocalExternalBootIO,
     RecoveryMetadataStore,
     RecoveryPhase,
     advance_absence_publication,
@@ -27,6 +29,8 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
+    ExternalBootPlan,
+    MaterializedArtifacts,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -362,6 +366,15 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
     )
 
 
+def _pre_stop(metadata: LocalRecoveryMetadataV1) -> LocalPreStopIntentV1:
+    return LocalPreStopIntentV1.model_validate(
+        metadata.model_dump(
+            exclude={"schema_", "source_state", "target_state", "capture", "phase"},
+            by_alias=True,
+        )
+    )
+
+
 def test_recovery_metadata_store_publishes_reopens_and_advances_phase(tmp_path: Path) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
@@ -375,6 +388,60 @@ def test_recovery_metadata_store_publishes_reopens_and_advances_phase(tmp_path: 
     directory = root / recovery_directory_name(reference, metadata.binding)
     assert oct(directory.stat().st_mode & 0o777) == "0o700"
     assert oct((directory / "intent.json").stat().st_mode & 0o777) == "0o600"
+
+
+def test_pre_stop_intent_is_durable_before_complete_publication(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish_pre_stop(intent)
+        assert store.reopen_pre_stop(reference, intent.binding) == intent
+        assert store.complete_preparation(reference, intent, metadata) == metadata
+        assert store.reopen(reference, intent.binding) == metadata
+
+
+def test_pre_stop_substitution_conflicts_before_complete_publication(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish_pre_stop(intent)
+        crossed = intent.model_copy(update={"plan_identity": "sha256:" + "e" * 64})
+        with pytest.raises(ValueError, match="exact pre-stop"):
+            store.publish_pre_stop(crossed)
+        with pytest.raises(ValueError, match="does not extend"):
+            store.complete_preparation(
+                reference,
+                intent,
+                metadata.model_copy(update={"plan_identity": "sha256:" + "e" * 64}),
+            )
+
+
+def _materialization() -> ExternalBootMaterialization:
+    return ExternalBootMaterialization(
+        architecture="x86_64",
+        provider_kind="local-libvirt",
+        ownership={"system_id": _BINDING.system_id, "run_id": _BINDING.run_id},
+        plan_identity="sha256:" + "6" * 64,
+        extracted_vmlinuz_sha256="sha256:" + "1" * 64,
+        source_module_manifest="sha256:" + "2" * 64,
+        installed_module_tree="sha256:" + "3" * 64,
+        verified_bundle_sha256="sha256:" + "4" * 64,
+        verified_initrd_sha256=None,
+        kernel_observation={
+            "architecture": "x86_64",
+            "release": "6.12.0",
+            "gnu_build_id": "01020304",
+        },
+        artifacts=MaterializedArtifacts(
+            kernel=OpaqueProviderRef(ref="artifacts/system/run/kernel"),
+            modules=OpaqueProviderRef(ref="artifacts/system/run/modules"),
+            initrd=None,
+        ),
+    )
 
 
 def test_recovery_metadata_store_rejects_hostile_root_and_partial(tmp_path: Path) -> None:
@@ -580,6 +647,87 @@ class _ExternalIO:
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         self.actions.append("finalize")
         self.tombstone = False
+
+
+class _RealHost:
+    def __init__(self, metadata: LocalRecoveryMetadataV1, root: Path) -> None:
+        self.metadata = metadata
+        self.root = root
+        self.actions: list[str] = []
+
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization:
+        raise AssertionError("not used")
+
+    def inspect_prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> LocalPreStopIntentV1:
+        self.actions.append("inspect")
+        return _pre_stop(self.metadata)
+
+    def complete_prepare(self, intent: LocalPreStopIntentV1) -> LocalRecoveryMetadataV1:
+        reference = OpaqueProviderRef(
+            ref=f"local-recovery-v1/{intent.binding.system_id}/{intent.binding.activation_id}"
+        )
+        with RecoveryMetadataStore(self.root) as store:
+            assert store.reopen_pre_stop(reference, intent.binding) == intent
+        self.actions.append("first-mutation")
+        return self.metadata
+
+    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("activate")
+
+    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("target")
+
+    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
+        return RunningKernelObservation(
+            architecture="x86_64", release=metadata.release, gnu_build_id="01020304"
+        )
+
+    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("recover")
+
+    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("source")
+
+    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("power")
+
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("cleanup")
+
+
+def test_real_adapter_persists_intent_before_first_host_mutation(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    host = _RealHost(metadata, root)
+    io = RealLocalExternalBootIO(root, host)
+    prepared = io.prepare(materialization, _BINDING, OpaqueProviderRef(ref="authority/current"))
+    assert prepared == metadata
+    assert host.actions == ["inspect", "first-mutation"]
+
+
+def test_real_adapter_intent_fsync_fault_prevents_first_host_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    host = _RealHost(metadata, root)
+    monkeypatch.setattr(os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fault")))
+    with pytest.raises(OSError, match="fault"):
+        RealLocalExternalBootIO(root, host).prepare(
+            materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
+        )
+    assert host.actions == ["inspect"]
 
 
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
