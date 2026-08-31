@@ -8,6 +8,9 @@ uses an atomically published provider-host directory plus a narrow libguestfs se
 translation, orchestration, capacity release, and advertisement remain #2140/#2118.
 The operator's 2026-08-30 Task 2 decision requires a symmetric owner-bound archive source; the
 guest writer receives that capability and the closed capture descriptor, never a host path.
+The follow-up boundary selected that day keeps Task 2 as pure validated tree I/O over a
+Task-3-provided authenticated guest-tree capability. Task 3 owns persistent staging names, durable
+phase evidence, publication, and restart classification.
 
 Tech stack: Python 3.14, Pydantic closed values, libvirt-python, libguestfs, stdlib tar/XML/hash/fsync,
 pytest, Ruff, ty, and prek.
@@ -133,12 +136,14 @@ ownership; no production composition changes.
 
 ```python
 class GuestRecoveryWriter(Protocol):
-    def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture: ...
-    def observe(self, overlay: str, release: str) -> ComponentState: ...
-    def install(self, overlay: str, release: str, source: Path) -> str: ...
+    def capture(
+        self, tree: AuthenticatedGuestTree, release: str, sink: RecoveryArchiveSink
+    ) -> ModuleCapture: ...
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState: ...
+    def install(self, tree: AuthenticatedGuestTree, release: str, source: Path) -> str: ...
     def restore(
         self,
-        overlay: str,
+        tree: AuthenticatedGuestTree,
         release: str,
         capture: ModuleCapture,
         source: RecoveryArchiveSource,
@@ -146,9 +151,19 @@ class GuestRecoveryWriter(Protocol):
 
 
 class RealGuestRecoveryWriter:
-    # implements GuestRecoveryWriter through one mounted, inactive qcow2 overlay
+    # implements pure tree I/O through the supplied authenticated capability
     ...
 ```
+
+Task 3 constructs and owns `AuthenticatedGuestTree` after authenticating System ownership,
+verifying the domain inactive, opening the owned overlay, and binding either the live release tree
+for read-only capture/observation or a private staging tree for install/restore. Before passing a
+mutable staging capability, Task 3 writes and fsyncs intent binding its deterministic staging name,
+System, activation, release, operation, and expected identity. Its Task 2 surface
+contains only relative inspection/mutation operations. It exposes no overlay or guest path, staging
+name, live rename/publication, durable phase write, fsync-ordering decision, or restart classifier.
+Task 2 creates and recognizes no persistent `.kdive-partial`, `.kdive-previous`, or equivalent
+namespace. Task 3 closes the capability and decides staging cleanup after Task 2 returns.
 
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are injected owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` after resolving and authenticating the recovery token beneath its
@@ -169,17 +184,19 @@ Absent restoration never opens the source.
 2. Implement the ADR-0583 canonical walker: lstat/no-follow, UTF-8 byte path ordering, exact compact
    JSON escaping, modes, uid/gid, unpadded standard base64 xattrs, domain-separated SHA-256, and
    explicit absence. Use directory-relative guestfs operations; accept no caller destination path.
-3. Add capture/install/restore tests proving same-filesystem staged rename, parent sync, source/target
-   manifest verification, exact absent restoration, partial failure cleanup, and that symlink targets
-   are copied but never followed. Cover wrong-owner source construction, absolute/traversal capture
+3. Add capture/install/restore tests proving source/target manifest verification, exact absent
+   restoration, stopped mutation after failure, and that symlink targets are copied but never
+   followed. Cover wrong-owner source construction, absolute/traversal capture
    names, archive symlink/non-regular/foreign-owner/non-private/over-reservation rejection, bounded
    reads, absent restore without source access, source reuse rejection after success or failure, and
    descriptor cleanup on every exit. Contract tests pin
-   `restore(overlay, release, capture, source)`. Validate lookup, owner, release, capture, metadata,
-   and bounds before staging and assert each rejection causes zero guest mutation. After staging
-   begins, inject short/error reads and close faults; assert no live-release rename or publication,
-   durable owned-partial classification, stopped mutation, and deterministic retry or removal of the
-   owned partial. Inject a manifest comparator fault and observe red before restoring.
+   `restore(tree, release, capture, source)`. Validate lookup, owner, release, capture, metadata, and
+   bounds before writes and assert each rejection causes zero tree mutation. After writes begin,
+   inject short/error reads and close faults and assert Task 2 stops mutation. Use a capability fake
+   with no overlay/guest path, staging-name, rename/publication, phase-write, fsync-ordering, or
+   restart-classification method; assert Task 2 never creates `.kdive-partial`, `.kdive-previous`,
+   or an equivalent persistent name. Inject a manifest comparator fault and observe red before
+   restoring.
 4. Run `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_recovery.py`; expect all
    tests passed. Run lint/type/diff checks and commit as
    `feat(local-libvirt): preserve external boot modules`.
@@ -231,11 +248,18 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
 4. Implement materialization by reusing streaming bundle extraction and staged writes. Verify every
    digest/obligation; publish only complete deterministic System/Run-owned artifacts.
 5. Implement prepare ordering: read initial power/XML, write and fsync `pre-stop-intent`, stop and
-   verify inactive, capture modules, render target, publish complete recovery directory. Retry uses
-   intent rather than re-deriving power/XML and restores source on failure when evidence permits.
-6. Implement private inactive `_observe_composite`; activate modules then XML with durable phases.
-   Recover modules then exact XML, verify their complete source composite while inactive, and fsync
-   a `source-restored` phase before restoring prior power/readiness. At every entry reopen metadata
+   verify inactive, construct the authenticated live-tree capability, capture modules, render target,
+   and publish the complete recovery directory. Retry uses intent rather than re-deriving power/XML
+   and restores source on failure when evidence permits.
+6. Implement private inactive `_observe_composite`; Task 3 creates the deterministic staging tree,
+   writes and fsyncs its fully bound intent, constructs the private staging-tree capability, and only
+   then passes it to Task 2 install/restore. On Task 2 failure it records the observed owned partial
+   phase before returning and never publishes it; a crash inside Task 2 remains restart-classifiable
+   from the pre-call intent. On success it independently verifies the
+   staged manifest, fsyncs phase evidence, performs the same-filesystem live-tree rename, and fsyncs
+   the containing directory. Activate modules then XML with durable phases. Recover modules then
+   exact XML, verify their complete source composite while inactive, and fsync a `source-restored`
+   phase before restoring prior power/readiness. At every entry reopen metadata
    and compare the entire point. Public observe uses durable target-defined evidence plus existing
    running-kernel readiness only and never opens a live overlay. Cleanup after `recovered`
    authenticates complete point equality and `source-restored`; it performs no fresh guestfs/live

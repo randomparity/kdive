@@ -13,6 +13,9 @@ The sole schema change is additive migration 0124, authorized by the operator on
 implementation exposed migration 0121's immutable CHECK dependency.
 For Task 2, the operator selected an owner-bound `RecoveryArchiveSource` on 2026-08-30 so restart
 restoration never accepts or derives a provider-host path inside the guest writer.
+The operator then selected a pure-I/O Task 2 boundary on the same date: Task 2 receives an
+authenticated guest-tree capability and owns no persistent staging namespace, phase evidence,
+publication, or restart classification. Task 3 owns those lifecycle operations.
 
 The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
 dependency. It reuses libvirt, defused XML parsing, `xml.etree.ElementTree.canonicalize`, libguestfs,
@@ -77,17 +80,30 @@ guest executable. Its operations are:
 
 ```python
 class GuestRecoveryWriter(Protocol):
-    def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture: ...
-    def observe(self, overlay: str, release: str) -> ComponentState: ...
-    def install(self, overlay: str, release: str, source: Path) -> str: ...
+    def capture(
+        self, tree: AuthenticatedGuestTree, release: str, sink: RecoveryArchiveSink
+    ) -> ModuleCapture: ...
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState: ...
+    def install(self, tree: AuthenticatedGuestTree, release: str, source: Path) -> str: ...
     def restore(
         self,
-        overlay: str,
+        tree: AuthenticatedGuestTree,
         release: str,
         capture: ModuleCapture,
         source: RecoveryArchiveSource,
     ) -> str: ...
 ```
+
+`AuthenticatedGuestTree` is a single-operation capability constructed and owned by Task 3 after
+System ownership authentication, inactive-domain verification, and owned-overlay opening. It is
+bound either to the live release tree for read-only capture/observation or to a private staging tree
+for install/restore. Before passing a mutable staging capability to Task 2, Task 3 durably writes and
+fsyncs intent binding its deterministic staging name, System, activation, release, operation, and
+expected identity. It exposes only relative tree inspection and mutation needed by the canonical
+walker; it exposes no overlay or guest path, staging name, live-tree rename/publication, durable
+phase write, fsync-ordering decision, or restart-classification operation. Task 2 neither creates nor
+recognizes persistent `.kdive-partial`, `.kdive-previous`, or equivalent names. Closing the tree and
+deciding staging cleanup remain the Task 3 caller's responsibility after Task 2 returns.
 
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are symmetric owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` only after it authenticates the recovery token and resolves the exact
@@ -193,13 +209,18 @@ both persistent components match source. A running prior state requires a fresh 
 an inactive prior state remains inactive. Retry from complete source performs only the conditional
 power restoration.
 
-Module restoration reads the owner-bound source into a guest-side staging directory before any
-same-filesystem publication replaces the live release. Lookup, identity, metadata, or bound failure
-before staging starts causes zero guest mutation. A source read or close failure after staging
-starts stops further mutation, never publishes or replaces the live release, and durably classifies
-the provider-owned partial staging state before returning conflict. Retry reopens and authenticates
-the recovery point and source, then resumes that owned partial or removes it before a fresh attempt;
-it never treats an unclassified or third partial as owned.
+Module restoration reads the owner-bound source into the caller-provided private staging-tree
+capability. Lookup, identity, metadata, or bound failure before writes start causes zero tree
+mutation. A source read or close failure after writes start stops further Task 2 mutation and
+returns failure; Task 2 has no live-tree publication or persistent-phase operation, so it cannot
+replace the live release. Task 3 then updates the pre-call durable intent with the observed partial
+phase before returning the provider result. A crash inside Task 2 remains recoverable because a fresh
+Task 3 instance authenticates the deterministic staging tree against that fsynced intent. Retry is a
+Task 3 operation: it reopens and authenticates the
+recovery point and source, then resumes that owned partial or removes it before a fresh attempt; it
+never treats an unclassified or third partial as owned. On success, Task 3 independently verifies
+the complete staged manifest, writes and fsyncs phase evidence, atomically renames the staged tree
+into place, and fsyncs the containing directory before advancing the lifecycle.
 
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
@@ -284,9 +305,12 @@ symlink and non-regular archive entries, foreign owner or non-private mode, over
 single-operation reuse rejection, rename/symlink substitution after lookup, short/error reads,
 descriptor cleanup on every exit, absent restoration without a read, and exact source/release/capture
 identity plus digest and manifest verification before guest mutation. Contract tests pin the exact
-`restore(overlay, release, capture, source)` signature. Faults injected after staging begins prove a
-read or close error never publishes the live release and leaves a durably classified owned partial;
-pre-staging rejection proves zero guest mutation.
+`restore(tree, release, capture, source)` signature. Faults injected after writes begin prove a
+read or close error stops Task 2 writes; pre-write rejection proves zero tree mutation. Contract
+tests pin `restore(tree, release, capture, source)` and use a capability fake that exposes no path,
+rename, phase, fsync-ordering, or restart operation. Task 3 crash tests prove it durably classifies
+the retained owned partial before returning, never publishes a failed staging tree, and alone owns
+atomic rename plus directory-fsync ordering.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without

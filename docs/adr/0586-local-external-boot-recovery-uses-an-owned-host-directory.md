@@ -31,6 +31,11 @@ writer neither owns the recovery root nor receives a path from the closed captur
 2026-08-30 the operator selected a symmetric owner-bound archive source rather than giving the
 guest writer path-resolution authority.
 
+After Task 2 implementation review, the operator selected a second boundary on 2026-08-30: Task 2
+is pure validated module-tree I/O over a caller-provided authenticated guest-tree capability. It
+owns no persistent staging namespace or restart evidence. Task 3 owns guest staging names,
+publication, durable phase evidence, and crash recovery.
+
 ## Decision
 
 Local-libvirt stores each recovery point beneath its configured provider-owned recovery root in a
@@ -78,11 +83,21 @@ the staging directory are fsynced before one atomic rename publishes the final d
 by a parent-directory fsync. An existing final directory is reusable only when every owner,
 identity, digest, size, and manifest matches.
 
-A narrow libguestfs seam captures, observes, installs, restores, and removes exactly the validated
-release directory on the System overlay. It accepts structured values, not caller paths or
-commands. Capture receives an owner-bound `RecoveryArchiveSink`; restore has the exact signature
-`restore(overlay, release, capture, source)`, where `capture` is the closed descriptor for that
-release and `source` is the matching owner-bound `RecoveryArchiveSource`. Local external-boot code
+A narrow libguestfs seam captures, observes, installs, and restores exactly one validated module
+tree through a caller-provided `AuthenticatedGuestTree` capability. Task 3 constructs the capability
+only after authenticating the System, verifying the domain inactive, opening the owned overlay, and
+selecting either the live release tree for read-only capture/observation or a private Task-3-owned
+staging tree for install/restoration. Before handing out a mutable staging capability, Task 3
+durably writes and fsyncs intent binding its deterministic staging name, System, activation,
+release, operation, and expected identity. The capability exposes structured tree operations, never an
+overlay path, guest path, staging name, rename, or phase-evidence operation. Task 2 creates no
+persistent `.kdive-partial`, `.kdive-previous`, or equivalent namespace and classifies no restart
+phase.
+
+Capture receives an owner-bound `RecoveryArchiveSink`; restore has the exact signature
+`restore(tree, release, capture, source)`, where `tree` is the authenticated private staging-tree
+capability, `capture` is the closed descriptor for that release, and `source` is the matching
+owner-bound `RecoveryArchiveSource`. Local external-boot code
 constructs both only after authenticating the recovery token and resolving its directory beneath
 the configured root. One source owns the already-open authenticated recovery-directory descriptor
 for one restore operation. It opens only the capture descriptor's relative archive filename via a
@@ -92,15 +107,18 @@ capture identity to agree before reading and applies regular-file, service-owner
 reservation-size, archive-entry, and uncompressed-byte bounds before guest mutation. It accepts and
 returns no host path, closes every archive and directory descriptor on success or error, and exposes
 no path-selection operation. Lookup, identity, metadata, or bound rejection completed before restore
-starts is a conflict with zero guest mutation. A read or close failure after guest staging starts
-must not publish or replace the live release; it durably classifies the provider-owned partial
-staging state and stops further mutation so retry can resume or remove that owned partial.
+starts is a conflict with zero tree mutation. A read or close failure after writes begin stops
+further Task 2 mutation and returns failure without publication authority. Task 3 retains ownership
+of the staging capability and updates its already-durable intent with the observed partial phase.
+If the process dies inside Task 2, the pre-call intent lets a fresh Task 3 instance authenticate and
+classify the deterministic staging tree. Task 3 alone decides whether retry resumes or removes it.
 
 Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed content.
-Restoration stages beside the release directory, verifies its manifest, and uses
-same-filesystem renames with durable phase metadata so retry can classify source, target, and the
-provider-owned partial state. Any unowned, unreadable, over-limit, or third state is a conflict and
-causes no further mutation.
+Task 2 validates the manifest and writes only through the supplied staging-tree capability. It never
+renames that tree into the live release or emits durable phase evidence. Task 3 verifies the staged
+manifest, fsyncs its phase evidence, performs the same-filesystem publication, and fsyncs the parent.
+On restart, Task 3 alone classifies source, target, and its authenticated partial state; any unowned,
+unreadable, over-limit, or third state is conflict and causes no further mutation.
 
 Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
 activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
@@ -159,8 +177,12 @@ Teardown likewise quarantines evidence it cannot authenticate.
   cross-owner/release/capture rejection, absolute or traversal-name rejection, symlink and rename
   substitution resistance, non-regular/foreign-owner/non-private/over-limit rejection, bounded
   short/error reads, host-path opacity, and close on success and error. Tests distinguish
-  pre-staging rejection with zero guest mutation from post-staging read/close failure, which must
-  leave the live release unpublished and the owned partial state durably retry-classifiable.
+  pre-write rejection with zero tree mutation from post-write read/close failure, which must stop
+  Task 2 mutation. Task 3 tests prove those failures cannot publish the live release and that the
+  caller-owned partial is durably retry-classifiable.
+- Task 2 unit tests use an in-memory authenticated-tree fake and prove it requests no overlay path,
+  guest path, staging name, rename, fsync-phase, or restart-classification operation. Task 3 owns
+  integration and crash tests for staging capabilities, atomic rename/fsync ordering, and restart.
 
 ## Considered & rejected
 
