@@ -253,6 +253,21 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
         _factory(events, foreign).open(_lease())
 
 
+@pytest.mark.parametrize(
+    ("xml", "reason"),
+    [
+        (_xml().replace('disk type="file"', 'disk type="block"'), "overlay"),
+        (_xml().replace("</disk>", "<readonly/></disk>"), "overlay"),
+        (_xml().replace('dev="vda"', 'dev="sdb"'), "overlay"),
+        (_xml().replace('bus="virtio"', 'bus="scsi"'), "overlay"),
+    ],
+)
+def test_domain_rejects_noncanonical_or_readonly_overlay(xml: str, reason: str) -> None:
+    events: list[str] = []
+    with pytest.raises(ValueError, match=reason):
+        _factory(events, Domain(events, xml)).open(_lease())
+
+
 def test_guest_fences_and_rechecks_overlay_and_can_reopen() -> None:
     events: list[str] = []
     session = _factory(events).open(_lease())

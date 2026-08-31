@@ -12,8 +12,10 @@ on Python 3.14 for x86_64 and ppc64le without a dependency or schema migration.
 `LocalExternalBootSessionFactory.open(lease)` accepts only a live nominal
 `LocalExternalBootOperationLease`. The provider-local ownership/lane context issues that capability
 after resolving an `ExternalBootActivationBinding` to its canonical System and acquiring the
-per-System advisory lane. The lease binds both values and exposes `pin()`. The factory acquires one
-pin before opening any libvirt/filesystem resource and owns that pin until the session has
+per-System advisory lane. The factory's injected lane-owned
+`pin_lease(lease) -> PinnedOperationOwnership` validates the opaque lease and atomically returns a
+private retained pin with immutable canonical System id and complete binding. The factory never
+rereads the caller lease and owns that pin until the session has
 irrevocably poisoned every guest/host wrapper and attempted every close. Lease release fails while
 any pin exists, so the database lane
 cannot be released while a guest context can still observe or mutate the overlay. A missing,
@@ -21,9 +23,11 @@ released, or foreign lease therefore opens nothing. #2144 will
 adapt its already-held database lane into this provider-local capability; this issue defines and
 tests the boundary without wiring the six-port adapter.
 
-The factory is constructed with an injected `open_artifact_root(lease) -> int` callback. That
-callback returns a no-follow, owner-validated directory descriptor already scoped to the lease's
-System/Run artifact directory. This issue does not introduce or guess a new environment setting:
+The factory is constructed with an injected
+`open_artifact_root(OperationOwnership) -> int` callback. `OperationOwnership` is frozen and
+pin-free; only the factory/session can access the pin returned by `pin_lease`. The callback returns
+a no-follow, owner-validated directory descriptor already scoped to the snapshot's System/Run
+artifact directory. This issue does not introduce or guess a new environment setting:
 #2144 will bind the callback to the provider-local artifact/recovery roots it owns. The factory
 itself binds only the existing local libvirt URI and overlay-root convention. It validates canonical
 System identity before opening resources and rejects domain ownership or overlay identity mismatch.

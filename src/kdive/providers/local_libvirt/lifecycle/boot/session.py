@@ -576,12 +576,18 @@ def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Ele
     for disk in root.findall("devices/disk"):
         source = disk.find("source")
         driver = disk.find("driver")
+        target = disk.find("target")
         if (
-            disk.get("device") == "disk"
+            disk.get("type") == "file"
+            and disk.get("device") == "disk"
             and source is not None
             and source.get("file") == expected_overlay
             and driver is not None
             and driver.get("type") == "qcow2"
+            and target is not None
+            and target.get("dev") == "vda"
+            and target.get("bus") == "virtio"
+            and disk.find("readonly") is None
         ):
             disks.append(disk)
     if len(disks) != 1:

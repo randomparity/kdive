@@ -17,10 +17,13 @@ ownership drift or mutation after the domain became active.
 Local external-boot host access is represented by one operation-scoped
 `LocalExternalBootSession`. Its factory requires a live `LocalExternalBootOperationLease`, a
 provider-local nominal capability issued only by the System ownership and serialization-lane
-context. The lease binds the canonical System id and activation binding and exposes a pin that
-keeps the lane held. Session construction acquires one pin before any host resource opens and
-retains it until every guest and host wrapper is irrevocably poisoned and its close has been
-attempted; lease release fails while a pin exists.
+context. An injected lane-owned `pin_lease(lease)` validates it and atomically returns
+`PinnedOperationOwnership`: a retained private pin plus immutable canonical System id and complete
+activation binding. Session construction does not reread the caller lease. It retains the pin until
+every guest and host wrapper is irrevocably poisoned and its close has been attempted; lease
+release fails while a pin exists. Artifact-root policy receives only the separate, frozen,
+pin-free `OperationOwnership` through `open_artifact_root(ownership) -> int`; only the factory and
+session can access the retained pin.
 A missing, foreign, or released lease rejects the operation before opening libvirt or filesystem
 resources, and the lane therefore cannot disappear between guest operations.
 Construction then opens and validates the expected KDIVE domain, exact System overlay, and an

@@ -22,9 +22,12 @@ Files: create `src/kdive/providers/local_libvirt/lifecycle/boot/session.py`; cre
 `tests/providers/local_libvirt/lifecycle/boot/test_session.py`.
 
 Interfaces: define immutable `ClosedDomainInspection` and `OverlayIdentity`; define
-`LocalExternalBootOperationLease` binding System and activation ownership with a retained `pin()`;
+opaque `LocalExternalBootOperationLease` plus injected
+`pin_lease(lease) -> PinnedOperationOwnership`, atomically binding immutable System/activation
+ownership to a factory-private retained pin;
 define the narrow `LocalExternalBootSession` protocol and concrete session/factory. The factory
-accepts `open(lease)` and an injected `open_artifact_root(lease) -> int`; the downstream adapter
+accepts `open(lease)` and an injected, pin-free
+`open_artifact_root(OperationOwnership) -> int`; the downstream adapter
 will rely on its inspection, inactive fence, descriptor, guest, XML, power, readiness, observation,
 cleanup, and close methods.
 
@@ -56,7 +59,8 @@ Files: modify `src/kdive/providers/local_libvirt/composition.py`; modify or crea
 composition tests under `tests/providers/local_libvirt/`.
 
 Interfaces: add an internal factory builder accepting the explicit
-`open_artifact_root: Callable[[LocalExternalBootOperationLease], int]` callback usable by #2144.
+`open_artifact_root: Callable[[OperationOwnership], int]` callback usable by #2144, plus the
+lane-owned `pin_lease` callback. Only the factory/session receives the retained pin.
 It binds the existing libvirt URI and overlay convention only. Do not add a root setting, attach
 external-boot support to `ProviderRuntime`, or change `ProviderSupport`.
 
