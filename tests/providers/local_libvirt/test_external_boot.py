@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -11,6 +15,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalRecoveryMetadataV1,
     ModuleLayout,
     PublicationPhase,
+    RecoveryMetadataStore,
     RecoveryPhase,
     advance_absence_publication,
     advance_module_publication,
@@ -343,7 +348,8 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         materialized_modules=OpaqueProviderRef(ref="artifacts/system/run/modules"),
         materialized_modules_sha256="sha256:" + "8" * 64,
         materialized_modules_bytes=123,
-        source_xml_sha256="sha256:" + "9" * 64,
+        source_xml_sha256="sha256:" + hashlib.sha256(_SOURCE_XML.encode()).hexdigest(),
+        source_xml=_SOURCE_XML,
         source_definition="sha256:" + "a" * 64,
         source_boot="sha256:" + "b" * 64,
         target_boot="sha256:" + "c" * 64,
@@ -353,6 +359,41 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         capture={"state": "absent"},
         phase=phase,
     )
+
+
+def test_recovery_metadata_store_publishes_reopens_and_advances_phase(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        assert store.reopen(reference, metadata.binding) == metadata
+        updated = store.record_phase(reference, metadata.binding, metadata, "publication-complete")
+        assert store.reopen(reference, metadata.binding) == updated
+
+    directory = root / recovery_directory_name(reference, metadata.binding)
+    assert oct(directory.stat().st_mode & 0o777) == "0o700"
+    assert oct((directory / "intent.json").stat().st_mode & 0o777) == "0o600"
+
+
+def test_recovery_metadata_store_rejects_hostile_root_and_partial(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o755)
+    with pytest.raises(ValueError, match="owner-only"):
+        RecoveryMetadataStore(root)
+
+    os.chmod(root, 0o700)
+    metadata = _metadata()
+    reference = OpaqueProviderRef(
+        ref=f"local-recovery-v1/{_BINDING.system_id}/{_BINDING.activation_id}"
+    )
+    partial = root / f".{recovery_directory_name(reference, _BINDING)}.partial"
+    partial.mkdir(mode=0o700)
+    (partial / "foreign").write_text("do not remove")
+    before = sorted(path.name for path in partial.iterdir())
+    with RecoveryMetadataStore(root) as store, pytest.raises(ValueError, match="partial"):
+        store.publish(metadata)
+    assert sorted(path.name for path in partial.iterdir()) == before
 
 
 def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:

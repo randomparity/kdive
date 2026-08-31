@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import stat
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Literal, Protocol
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import ModuleCapture
 from kdive.providers.ports.external_boot import (
@@ -78,6 +82,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     materialized_modules_sha256: Digest
     materialized_modules_bytes: Annotated[int, Field(ge=0)]
     source_xml_sha256: Digest
+    source_xml: str
     source_definition: Digest
     source_boot: Digest
     target_boot: Digest
@@ -86,6 +91,15 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     prior_power: Literal["running", "inactive"]
     capture: ModuleCapture
     phase: RecoveryPhase
+
+    @model_validator(mode="after")
+    def _source_xml_matches_digest(self) -> LocalRecoveryMetadataV1:
+        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
+            raise ValueError("source domain XML must be NFC")
+        digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
+        if digest != self.source_xml_sha256:
+            raise ValueError("source domain XML digest does not match bytes")
+        return self
 
 
 class FinalizeCleanupProof(_ClosedValue):
@@ -292,6 +306,187 @@ def recovery_directory_name(
     if parts[1] != binding.system_id or parts[2] != binding.activation_id:
         raise ValueError("external-boot recovery reference owner does not match binding")
     return f"{parts[1]}.{parts[2]}"
+
+
+_INTENT_NAME = "intent.json"
+_MAX_METADATA_BYTES = 262_144
+
+
+def _metadata_bytes(metadata: LocalRecoveryMetadataV1) -> bytes:
+    return json.dumps(
+        metadata.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+class RecoveryMetadataStore:
+    """Descriptor-relative publisher for one provider-owned recovery root."""
+
+    def __init__(self, root: Path) -> None:
+        self._root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _require_private_owned_directory(self._root_fd, "recovery root")
+        except BaseException:
+            os.close(self._root_fd)
+            raise
+
+    def close(self) -> None:
+        if self._root_fd >= 0:
+            os.close(self._root_fd)
+            self._root_fd = -1
+
+    def __enter__(self) -> RecoveryMetadataStore:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def publish(self, metadata: LocalRecoveryMetadataV1) -> OpaqueProviderRef:
+        """Publish canonical intent with file, directory, rename, and parent fsyncs."""
+        self._require_open()
+        reference = _recovery_ref(metadata.binding)
+        final_name = recovery_directory_name(reference, metadata.binding)
+        existing = self._try_read(final_name)
+        if existing is not None:
+            if existing != metadata:
+                raise ValueError("existing recovery metadata conflicts with requested point")
+            return reference
+        partial_name = f".{final_name}.partial"
+        directory_fd = self._open_or_create_partial(partial_name)
+        try:
+            entries = os.listdir(directory_fd)
+            if entries:
+                if entries != [_INTENT_NAME] or self._read(directory_fd) != metadata:
+                    raise ValueError("recovery partial is not the exact owned intent")
+            else:
+                _write_exclusive(directory_fd, _INTENT_NAME, _metadata_bytes(metadata))
+                os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.rename(partial_name, final_name, src_dir_fd=self._root_fd, dst_dir_fd=self._root_fd)
+        os.fsync(self._root_fd)
+        reopened = self._read_named(final_name)
+        if reopened != metadata:
+            raise ValueError("published recovery metadata failed exact reopen")
+        return reference
+
+    def reopen(
+        self, reference: OpaqueProviderRef, binding: ExternalBootActivationBinding
+    ) -> LocalRecoveryMetadataV1:
+        self._require_open()
+        return self._read_named(recovery_directory_name(reference, binding))
+
+    def record_phase(
+        self,
+        reference: OpaqueProviderRef,
+        binding: ExternalBootActivationBinding,
+        expected: LocalRecoveryMetadataV1,
+        phase: RecoveryPhase,
+    ) -> LocalRecoveryMetadataV1:
+        self._require_open()
+        name = recovery_directory_name(reference, binding)
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            if self._read(directory_fd) != expected:
+                raise ValueError("recovery metadata changed before phase publication")
+            updated = expected.model_copy(update={"phase": phase})
+            temporary = ".intent.next"
+            _write_exclusive(directory_fd, temporary, _metadata_bytes(updated))
+            os.rename(temporary, _INTENT_NAME, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return updated
+        finally:
+            os.close(directory_fd)
+
+    def _open_or_create_partial(self, name: str) -> int:
+        try:
+            os.mkdir(name, 0o700, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+        except FileExistsError:
+            pass
+        return _open_private_directory(self._root_fd, name)
+
+    def _try_read(self, name: str) -> LocalRecoveryMetadataV1 | None:
+        try:
+            return self._read_named(name)
+        except FileNotFoundError:
+            return None
+
+    def _read_named(self, name: str) -> LocalRecoveryMetadataV1:
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            return self._read(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _read(directory_fd: int) -> LocalRecoveryMetadataV1:
+        fd = os.open(_INTENT_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_uid != os.geteuid()
+                or opened.st_size > _MAX_METADATA_BYTES
+            ):
+                raise ValueError("recovery intent is not an owned private regular file")
+            data = os.read(fd, _MAX_METADATA_BYTES + 1)
+        finally:
+            os.close(fd)
+        metadata = LocalRecoveryMetadataV1.model_validate_json(data)
+        if _metadata_bytes(metadata) != data:
+            raise ValueError("recovery intent is not canonical JSON")
+        return metadata
+
+    def _require_open(self) -> None:
+        if self._root_fd < 0:
+            raise ValueError("recovery metadata store is closed")
+
+
+def _recovery_ref(binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
+    return OpaqueProviderRef(ref=f"local-recovery-v1/{binding.system_id}/{binding.activation_id}")
+
+
+def _require_private_owned_directory(fd: int, label: str) -> None:
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or stat.S_IMODE(opened.st_mode) != 0o700
+        or opened.st_uid != os.geteuid()
+    ):
+        raise ValueError(f"{label} must be an owner-only service-owned directory")
+
+
+def _open_private_directory(parent_fd: int, name: str) -> int:
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        _require_private_owned_directory(fd, "recovery directory")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _write_exclusive(directory_fd: int, name: str, data: bytes) -> None:
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written == 0:
+                raise OSError("short write while publishing recovery intent")
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _sync_phase(io: ModulePublicationIO, phase: PublicationPhase) -> None:
