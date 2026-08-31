@@ -236,12 +236,22 @@ complete identities at live, staging, and old-aside: prior/desired/absent is pre
 absent/desired/prior is old-aside; desired/absent/prior is new-live. Any mixed, missing, duplicated,
 unowned, unreadable, over-limit, or third layout conflicts with the domain kept inactive. A crash
 between a move and evidence fsync is classified from names and identities, not phase alone.
+The additional desired/absent/absent layout is post-removal with `publication-complete` pending.
+After fresh complete desired-identity verification, the only permitted action is fsyncing that
+evidence; no guest mutation or boot/readiness occurs first.
 
 Recorded desired absence uses only the first move. After `move-ready`, Task 3 moves live to
-old-aside, guest-syncs, verifies live absent and old-aside=prior, and fsyncs `absence-live`. It fsyncs
-`absence-complete` before removing old-aside. An already-absent live tree is verified and completes
-without a move. Boot, readiness, and lifecycle advancement are forbidden until a complete desired
-tree or exact desired absence is freshly verified and its completion evidence is durable. No
+old-aside, guest-syncs, verifies live and staging absent plus old-aside=prior, and fsyncs
+`absence-live`. It fsyncs `absence-complete` before removing old-aside, then guest-syncs and fsyncs
+`absence-cleaned`. Durable `absence-complete` with live/staging absent authorizes only bounded,
+no-follow continuation of exact authenticated prior old-aside removal, including a partial deletion;
+wrong identity, unowned content, symlink, wrong type, or escape conflicts. Any present live or any
+present, partial, unowned, unreadable, or malformed staging name conflicts with zero mutation and
+the domain inactive. Live/staging/old all absent with durable `absence-complete` permits only guest
+sync plus `absence-cleaned`. An already-absent live tree with staging absent is verified and records
+both completion phases without a move. Boot, readiness, and lifecycle advancement are forbidden
+until a complete desired tree has durable `publication-complete` or exact desired absence has durable
+`absence-cleaned`. No
 guestmount, `renameat2`, appliance helper, or new provisioning dependency is added.
 
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
@@ -350,9 +360,12 @@ tests inject loss immediately before/after each libguestfs move, guest sync, evi
 move, and old-aside removal. They assert the exact three-name layouts and identity classification
 above, cover present-empty and desired-absence paths, and prove live-name absence occurs only while
 inactive. Boot, readiness, and lifecycle advancement remain blocked until fresh desired-state
-verification plus durable `publication-complete` or `absence-complete`. Old-aside removal is
-completion-evidence-gated. Tests also prove no guestmount, `renameat2`, appliance helper, or new host
-prerequisite is used.
+verification plus durable `publication-complete` or `absence-cleaned`. Tests inject a crash after
+present old-aside removal but before publication evidence and prove only evidence fsync follows.
+Desired-absence tests cover partial old-aside deletion, every live/staging conflict,
+old-aside-absent before `absence-cleaned`, and crashes around final guest sync/evidence fsync.
+Old-aside removal is completion-evidence-gated. Tests also prove no guestmount, `renameat2`,
+appliance helper, or new host prerequisite is used.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
