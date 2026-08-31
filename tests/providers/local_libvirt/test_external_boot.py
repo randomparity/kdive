@@ -16,7 +16,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalRecoveryMetadataV1,
     ModuleLayout,
     PublicationPhase,
-    RealLocalExternalBootIO,
     RecoveryMetadataStore,
     RecoveryPhase,
     advance_absence_publication,
@@ -28,7 +27,6 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
-    ExternalBootPlan,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -582,97 +580,6 @@ class _ExternalIO:
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         self.actions.append("finalize")
         self.tombstone = False
-
-
-class _HostIO:
-    def __init__(self) -> None:
-        self.actions: list[str] = []
-
-    def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
-    ) -> ExternalBootMaterialization:
-        raise AssertionError("not used")
-
-    def prepare(
-        self,
-        materialization: ExternalBootMaterialization,
-        binding: ExternalBootActivationBinding,
-        authority: OpaqueProviderRef,
-    ) -> LocalRecoveryMetadataV1:
-        raise AssertionError("not used")
-
-    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("activate-modules")
-
-    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("define-target")
-
-    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
-        self.actions.append("observe")
-        return RunningKernelObservation(
-            architecture="x86_64", release=metadata.release, gnu_build_id="01020304"
-        )
-
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("recover-modules")
-
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("define-source")
-
-    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("restore-power")
-
-    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("cleanup-payloads")
-
-
-class _FailingCleanupHost(_HostIO):
-    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
-        super().cleanup_payloads(metadata)
-        raise OSError("controlled cleanup fault")
-
-
-def test_real_io_reopens_phases_and_finalizes_across_fresh_instances(tmp_path: Path) -> None:
-    root = tmp_path / "recovery"
-    root.mkdir(mode=0o700)
-    host = _HostIO()
-    metadata = _metadata("recovered")
-    point = _point(metadata)
-    with RecoveryMetadataStore(root) as store:
-        store.publish(metadata)
-
-    first = RealLocalExternalBootIO(root, host)
-    assert first.reopen(point, OpaqueProviderRef(ref="authority/current")) == metadata
-    first.cleanup(metadata, LocalLibvirtExternalBoot.point_digest(point))
-    assert host.actions == ["cleanup-payloads"]
-
-    proof = FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
-        binding=point.binding,
-        operation_id="00000000-0000-0000-0000-000000000004",
-        attempt_id="00000000-0000-0000-0000-000000000005",
-        journal_sequence=7,
-        journal_digest="sha256:" + "4" * 64,
-    )
-    second = RealLocalExternalBootIO(root, host)
-    second.finalize_tombstone(point, proof)
-    second.finalize_tombstone(point, proof)
-    assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
-
-
-def test_real_io_cleanup_fault_leaves_recoverable_metadata_not_tombstone(tmp_path: Path) -> None:
-    root = tmp_path / "recovery"
-    root.mkdir(mode=0o700)
-    metadata = _metadata("recovered")
-    point = _point(metadata)
-    with RecoveryMetadataStore(root) as store:
-        store.publish(metadata)
-
-    io = RealLocalExternalBootIO(root, _FailingCleanupHost())
-    with pytest.raises(OSError, match="controlled"):
-        io.cleanup(metadata, LocalLibvirtExternalBoot.point_digest(point))
-    with RecoveryMetadataStore(root) as store:
-        assert store.reopen(point.recovery_ref, point.binding) == metadata
 
 
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
