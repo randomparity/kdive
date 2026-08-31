@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
+    LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
     LocalRecoveryMetadataV1,
     ModuleLayout,
@@ -394,6 +395,84 @@ def test_recovery_metadata_store_rejects_hostile_root_and_partial(tmp_path: Path
     with RecoveryMetadataStore(root) as store, pytest.raises(ValueError, match="partial"):
         store.publish(metadata)
     assert sorted(path.name for path in partial.iterdir()) == before
+
+
+class _GuestTreeHandle:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def exists(self, path: str) -> int:
+        return 1
+
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int:
+        return int(path.endswith("-staging"))
+
+    def find(self, path: str) -> list[str]:
+        return ["module.ko"]
+
+    def lstatns(self, path: str) -> dict[str, int]:
+        return {"st_mode": 0o100600, "st_uid": 1, "st_gid": 2, "st_size": 3, "st_nlink": 1}
+
+    def readlink(self, path: str) -> str:
+        raise AssertionError("not a symlink")
+
+    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
+        return []
+
+    def download(self, remotefilename: str, filename: str) -> None:
+        with open(filename, "wb") as output:
+            output.write(b"elf")
+
+    def mkdir(self, path: str) -> None:
+        self.calls.append(("mkdir", path))
+
+    def upload(self, filename: str, remotefilename: str) -> None:
+        self.calls.append(("upload", remotefilename))
+
+    def ln_s(self, target: str, linkname: str) -> None:
+        self.calls.append(("symlink", target, linkname))
+
+    def chmod(self, mode: int, path: str) -> None:
+        self.calls.append(("chmod", mode, path))
+
+    def chown(self, owner: int, group: int, path: str) -> None:
+        self.calls.append(("chown", owner, group, path))
+
+    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
+        self.calls.append(("xattr", xattr, val, path))
+
+    def rm_rf(self, path: str) -> None:
+        self.calls.append(("remove", path))
+
+
+def test_libguestfs_tree_is_bound_private_and_no_follow() -> None:
+    guest = _GuestTreeHandle()
+    root = f"/lib/modules/.kdive-{_BINDING.activation_id}-staging"
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest, binding=_BINDING, release="6.12.0", root=root, mutable=False
+    )
+    assert tree.root_kind() == "directory"
+    entry = next(tree.entries())
+    assert entry.path == "module.ko"
+    with tree.open_regular(entry.path, entry.size) as content:
+        assert content.read() == b"elf"
+    with pytest.raises(ValueError, match="read-only"):
+        tree.remove_all()
+    with pytest.raises(ValueError, match="canonical relative"):
+        tree.open_regular("../escape", 0).__enter__()
+
+
+def test_libguestfs_tree_rejects_cross_activation_root_before_guest_call() -> None:
+    guest = _GuestTreeHandle()
+    with pytest.raises(ValueError, match="bound release"):
+        LibguestfsAuthenticatedGuestTree(
+            guest,
+            binding=_BINDING,
+            release="6.12.0",
+            root="/lib/modules/.kdive-00000000-0000-0000-0000-000000000009-staging",
+            mutable=True,
+        )
+    assert guest.calls == []
 
 
 def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:

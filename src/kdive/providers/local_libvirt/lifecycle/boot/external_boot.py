@@ -6,19 +6,21 @@ import hashlib
 import json
 import os
 import stat
+import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, BinaryIO, Literal, Protocol
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from kdive.providers.local_libvirt.lifecycle.boot.recovery import ModuleCapture
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import GuestTreeEntry, ModuleCapture
 from kdive.providers.ports.external_boot import (
     ComponentState,
     ExternalBootActivationBinding,
@@ -128,6 +130,162 @@ class ModulePublicationIO(Protocol):
     def remove_old(self) -> None: ...
     def guest_sync(self) -> None: ...
     def record_phase(self, phase: PublicationPhase) -> None: ...
+
+
+class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs binding)
+    def exists(self, path: str) -> int: ...
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int: ...
+    def find(self, path: str) -> list[str]: ...
+    def lstatns(self, path: str) -> dict[str, int]: ...
+    def readlink(self, path: str) -> str: ...
+    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
+    def download(self, remotefilename: str, filename: str) -> None: ...
+    def mkdir(self, path: str) -> None: ...
+    def upload(self, filename: str, remotefilename: str) -> None: ...
+    def ln_s(self, target: str, linkname: str) -> None: ...
+    def chmod(self, mode: int, path: str) -> None: ...
+    def chown(self, owner: int, group: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def rm_rf(self, path: str) -> None: ...
+
+
+class LibguestfsAuthenticatedGuestTree:
+    """Private, owner-bound capability for one deterministic guest tree."""
+
+    def __init__(
+        self,
+        guest: _GuestfsTreeHandle,
+        *,
+        binding: ExternalBootActivationBinding,
+        release: str,
+        root: str,
+        mutable: bool,
+    ) -> None:
+        expected_prefix = f"/lib/modules/.kdive-{binding.activation_id}-"
+        live = f"/lib/modules/{release}"
+        if root != live and not root.startswith(expected_prefix):
+            raise ValueError("guest-tree root is not the bound release or activation staging tree")
+        if mutable and root == live:
+            raise ValueError("mutable guest-tree capability requires an activation staging tree")
+        if not release or "/" in release or unicodedata.normalize("NFC", release) != release:
+            raise ValueError("guest-tree release is invalid")
+        self._guest = guest
+        self.binding = binding
+        self.release = release
+        self.mutable = mutable
+        self._root = root
+
+    def root_kind(self) -> Literal["absent", "directory", "other"]:
+        if not bool(self._guest.exists(self._root)):
+            return "absent"
+        if bool(self._guest.is_dir(self._root, followsymlinks=False)):
+            return "directory"
+        return "other"
+
+    def entries(self) -> Iterator[GuestTreeEntry]:
+        if self.root_kind() != "directory":
+            return
+        for relative in sorted(self._guest.find(self._root), key=lambda item: item.encode()):
+            path = _guest_relative(relative)
+            yield self._entry(path)
+
+    @contextmanager
+    def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]:
+        remote = self._remote(path)
+        opened = self._guest.lstatns(remote)
+        if opened["st_size"] != size or not stat.S_ISREG(opened["st_mode"]):
+            raise ValueError("guest regular file changed before content read")
+        with tempfile.TemporaryFile("w+b") as local:
+            self._guest.download(remote, f"/proc/self/fd/{local.fileno()}")
+            local.seek(0)
+            yield local
+
+    def create_directory(self, entry: GuestTreeEntry) -> None:
+        self._require_mutable()
+        remote = self._remote(entry.path)
+        self._guest.mkdir(remote)
+        self._apply_metadata(remote, entry)
+
+    def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None:
+        self._require_mutable()
+        with tempfile.NamedTemporaryFile("w+b") as local:
+            remaining = entry.size
+            while remaining:
+                chunk = content.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("guest regular content ended before declared size")
+                local.write(chunk)
+                remaining -= len(chunk)
+            local.flush()
+            self._guest.upload(local.name, self._remote(entry.path))
+        self._apply_metadata(self._remote(entry.path), entry)
+
+    def create_symlink(self, entry: GuestTreeEntry) -> None:
+        self._require_mutable()
+        if entry.target is None:
+            raise ValueError("guest symlink target is missing")
+        remote = self._remote(entry.path)
+        self._guest.ln_s(entry.target, remote)
+        self._guest.chown(entry.uid, entry.gid, remote)
+
+    def remove_all(self) -> None:
+        self._require_mutable()
+        self._guest.rm_rf(self._root)
+
+    def _entry(self, path: str) -> GuestTreeEntry:
+        remote = self._remote(path)
+        value = self._guest.lstatns(remote)
+        mode = value["st_mode"]
+        kind: Literal["directory", "regular", "symlink"]
+        if stat.S_ISDIR(mode):
+            kind = "directory"
+        elif stat.S_ISREG(mode):
+            kind = "regular"
+        elif stat.S_ISLNK(mode):
+            kind = "symlink"
+        else:
+            raise ValueError("guest tree contains an unsupported entry type")
+        xattrs = self._guest.lgetxattrs(remote)
+        return GuestTreeEntry(
+            path=path,
+            kind=kind,
+            mode=f"{stat.S_IMODE(mode):04o}",
+            uid=value["st_uid"],
+            gid=value["st_gid"],
+            size=value["st_size"] if kind == "regular" else 0,
+            target=self._guest.readlink(remote) if kind == "symlink" else None,
+            xattrs_supported=True,
+            xattrs={str(item["attrname"]): _xattr_bytes(item["attrval"]) for item in xattrs},
+            link_count=value["st_nlink"],
+        )
+
+    def _apply_metadata(self, remote: str, entry: GuestTreeEntry) -> None:
+        self._guest.chmod(int(entry.mode, 8), remote)
+        self._guest.chown(entry.uid, entry.gid, remote)
+        for name, value in entry.xattrs.items():
+            self._guest.lsetxattr(name, value, len(value), remote)
+
+    def _remote(self, relative: str) -> str:
+        return f"{self._root}/{_guest_relative(relative)}"
+
+    def _require_mutable(self) -> None:
+        if not self.mutable:
+            raise ValueError("guest-tree capability is read-only")
+
+
+def _guest_relative(path: str) -> str:
+    if (
+        not path
+        or path.startswith("/")
+        or unicodedata.normalize("NFC", path) != path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        raise ValueError("guest-tree entry path is not a canonical relative path")
+    return path
+
+
+def _xattr_bytes(value: str | bytes) -> bytes:
+    return value if isinstance(value, bytes) else value.encode()
 
 
 class LocalExternalBootIO(Protocol):
