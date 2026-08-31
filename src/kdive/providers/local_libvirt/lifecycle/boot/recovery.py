@@ -1,21 +1,17 @@
-"""Bounded module-tree capture and restoration for local external boot (ADR-0586)."""
+"""Pure, bounded module-tree recovery I/O (ADR-0586)."""
 
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
-import io
 import json
 import os
-import re
 import stat
 import tarfile
 import tempfile
 import unicodedata
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Annotated, BinaryIO, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,15 +19,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
+    ExternalBootActivationBinding,
     PresentComponentState,
 )
 
 MAX_ENTRIES = 200_000
 MAX_REGULAR_BYTES = 8_589_934_592
-MAX_ARCHIVE_BYTES = MAX_REGULAR_BYTES
-_DOMAIN = b"kdive-recovery-module-tree-v1\0"
+MAX_ARCHIVE_BYTES = MAX_REGULAR_BYTES + MAX_ENTRIES * 4096
 _ARCHIVE_NAME = "modules.tar"
-_RELEASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+_DOMAIN = b"kdive-recovery-module-tree-v1\0"
+_COPY_CHUNK = 1024 * 1024
 
 
 class _ClosedValue(BaseModel):
@@ -44,6 +41,7 @@ class ModuleArchiveCapture(_ClosedValue):
     entry_count: Annotated[int, Field(ge=0, le=MAX_ENTRIES)]
     uncompressed_bytes: Annotated[int, Field(ge=0, le=MAX_REGULAR_BYTES)]
     archive_sha256: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+    archive_bytes: Annotated[int, Field(ge=0, le=MAX_ARCHIVE_BYTES)]
     archive_filename: Literal["modules.tar"] = _ARCHIVE_NAME
 
 
@@ -54,103 +52,39 @@ class AbsentModuleCapture(_ClosedValue):
 type ModuleCapture = ModuleArchiveCapture | AbsentModuleCapture
 
 
-class RecoveryArchiveSink:
-    """Single-use archive publisher bound to an authenticated recovery directory."""
-
-    def __init__(self, directory_fd: int) -> None:
-        _validate_directory(directory_fd, os.geteuid())
-        self._directory_fd = os.dup(directory_fd)
-        self._used = False
-        self._closed = False
-
-    def close(self) -> None:
-        if not self._closed:
-            os.close(self._directory_fd)
-            self._closed = True
-
-    def publish(self, chunks: Iterable[bytes]) -> None:
-        if self._used:
-            raise ValueError("recovery archive sink was already used")
-        self._used = True
-        partial = f".{_ARCHIVE_NAME}.partial"
-        fd = -1
-        try:
-            fd = os.open(
-                partial,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=self._directory_fd,
-            )
-            total = 0
-            for chunk in chunks:
-                total += len(chunk)
-                if total > MAX_ARCHIVE_BYTES:
-                    raise ValueError("recovery archive exceeds its byte reservation")
-                _write_all(fd, chunk)
-            os.fsync(fd)
-            os.close(fd)
-            fd = -1
-            os.rename(
-                partial,
-                _ARCHIVE_NAME,
-                src_dir_fd=self._directory_fd,
-                dst_dir_fd=self._directory_fd,
-            )
-            os.fsync(self._directory_fd)
-        except Exception:
-            if fd >= 0:
-                os.close(fd)
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(partial, dir_fd=self._directory_fd)
-            raise
-        finally:
-            self.close()
+class GuestTreeEntry(_ClosedValue):
+    path: str
+    kind: Literal["directory", "regular", "symlink"]
+    mode: Annotated[str, Field(pattern=r"^[0-7]{4}$")]
+    uid: Annotated[int, Field(ge=0)]
+    gid: Annotated[int, Field(ge=0)]
+    size: Annotated[int, Field(ge=0, le=MAX_REGULAR_BYTES)]
+    target: str | None
+    xattrs_supported: bool
+    xattrs: dict[str, bytes]
+    link_count: Annotated[int, Field(ge=1)] = 1
 
 
-class RecoveryArchiveSource:
-    """Single-use bounded reader bound to an authenticated recovery directory."""
+class AuthenticatedGuestTree(Protocol):
+    """One-operation, no-follow tree capability created by Task 3."""
 
-    def __init__(self, directory_fd: int, *, service_uid: int | None = None) -> None:
-        self._service_uid = os.geteuid() if service_uid is None else service_uid
-        _validate_directory(directory_fd, self._service_uid)
-        self._directory_fd = os.dup(directory_fd)
-        self._used = False
-        self._closed = False
-
-    def close(self) -> None:
-        if not self._closed:
-            os.close(self._directory_fd)
-            self._closed = True
-
+    @property
+    def binding(self) -> ExternalBootActivationBinding: ...
+    @property
+    def release(self) -> str: ...
+    @property
+    def mutable(self) -> bool: ...
+    def root_kind(self) -> Literal["absent", "directory", "other"]: ...
+    def entries(self) -> Iterator[GuestTreeEntry]: ...
     @contextmanager
-    def open(self, capture: ModuleArchiveCapture) -> Iterator[BinaryIO]:
-        if self._used:
-            raise ValueError("recovery archive source was already used")
-        self._used = True
-        fd = -1
-        try:
-            fd = os.open(
-                capture.archive_filename,
-                os.O_RDONLY | os.O_NOFOLLOW,
-                dir_fd=self._directory_fd,
-            )
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("recovery archive is not a regular file")
-            if info.st_uid != self._service_uid or stat.S_IMODE(info.st_mode) != 0o600:
-                raise ValueError("recovery archive ownership or mode is invalid")
-            if info.st_size > MAX_ARCHIVE_BYTES:
-                raise ValueError("recovery archive exceeds its byte reservation")
-            with os.fdopen(fd, "rb", closefd=True) as stream:
-                fd = -1
-                yield cast(BinaryIO, stream)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            self.close()
+    def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]: ...
+    def create_directory(self, entry: GuestTreeEntry) -> None: ...
+    def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None: ...
+    def create_symlink(self, entry: GuestTreeEntry) -> None: ...
+    def remove_all(self) -> None: ...
 
 
-class _Entry(_ClosedValue):
+class _ManifestEntry(_ClosedValue):
     path: str
     kind: Literal["directory", "regular", "symlink"]
     mode: str
@@ -163,34 +97,236 @@ class _Entry(_ClosedValue):
     xattrs: dict[str, str]
 
 
-class _Guest(Protocol):  # pragma: no cover - libguestfs binding surface
-    def exists(self, path: str) -> int: ...
-    def ls(self, path: str) -> list[str]: ...
-    def lstatns(self, path: str) -> dict[str, int]: ...
-    def readlink(self, path: str) -> str: ...
-    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
-    def download(self, remote: str, local: str) -> None: ...
-    def upload(self, local: str, remote: str) -> None: ...
-    def mkdir(self, path: str) -> None: ...
-    def mkdir_p(self, path: str) -> None: ...
-    def ln_s(self, target: str, linkname: str) -> None: ...
-    def lchown(self, uid: int, gid: int, path: str) -> None: ...
-    def chmod(self, mode: int, path: str) -> None: ...
-    def lsetxattr(self, xattr: str, value: bytes, vallen: int, path: str) -> None: ...
-    def rm_rf(self, path: str) -> None: ...
-    def mv(self, source: str, target: str) -> None: ...
-    def sync(self) -> None: ...
-    def shutdown(self) -> None: ...
-    def close(self) -> None: ...
+class _SingleUseFile:
+    def __init__(self, fd: int, *, expected_size: int, expected_digest: str) -> None:
+        _validate_file(fd, expected_size)
+        self._fd = os.dup(fd)
+        self._expected_size = expected_size
+        self._expected_digest = expected_digest
+        self._used = False
+        self._closed = False
+
+    def close(self) -> None:
+        if not self._closed:
+            os.close(self._fd)
+            self._closed = True
+
+    @contextmanager
+    def stream(self) -> Iterator[BinaryIO]:
+        if self._used or self._closed:
+            raise ValueError("module source capability is not reusable")
+        self._used = True
+        duplicate = os.dup(self._fd)
+        primary: BaseException | None = None
+        try:
+            with os.fdopen(duplicate, "rb", closefd=True) as source:
+                duplicate = -1
+                bounded = _VerifiedReader(
+                    cast(BinaryIO, source), self._expected_size, self._expected_digest
+                )
+                yield cast(BinaryIO, bounded)
+                bounded.verify_complete()
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            cleanup = _close_fd(duplicate) if duplicate >= 0 else None
+            try:
+                self.close()
+            except BaseException as exc:
+                cleanup = cleanup or exc
+            if cleanup is not None:
+                if primary is None:
+                    raise cleanup
+                primary.add_note(f"module source cleanup failed: {type(cleanup).__name__}")
+
+
+class KernelBundleSource(_SingleUseFile):
+    """Authenticated materialized-module archive, with no path authority."""
+
+    def __init__(
+        self,
+        fd: int,
+        *,
+        binding: ExternalBootActivationBinding,
+        release: str,
+        size: int,
+        digest: str,
+    ) -> None:
+        super().__init__(fd, expected_size=size, expected_digest=digest)
+        self.binding = binding
+        self.release = _release(release)
+
+    def matches(self, tree: AuthenticatedGuestTree, release: str) -> bool:
+        return self.binding == tree.binding and self.release == release == tree.release
+
+
+class RecoveryArchiveSource(_SingleUseFile):
+    """Authenticated recovery archive bound to one capture and operation owner."""
+
+    def __init__(
+        self,
+        directory_fd: int,
+        *,
+        binding: ExternalBootActivationBinding,
+        release: str,
+        capture: ModuleArchiveCapture,
+    ) -> None:
+        _validate_directory(directory_fd)
+        fd = os.open(
+            capture.archive_filename,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        try:
+            super().__init__(
+                fd,
+                expected_size=capture.archive_bytes,
+                expected_digest=capture.archive_sha256,
+            )
+        finally:
+            os.close(fd)
+        self.binding = binding
+        self.release = _release(release)
+        self.capture = capture
+
+    def matches(
+        self,
+        tree: AuthenticatedGuestTree,
+        release: str,
+        capture: ModuleArchiveCapture,
+    ) -> bool:
+        return (
+            self.binding == tree.binding
+            and self.release == release == tree.release
+            and self.capture == capture
+        )
+
+
+class RecoveryArchiveSink:
+    """Authenticated, single-use archive publisher with no exposed host path."""
+
+    def __init__(
+        self,
+        directory_fd: int,
+        *,
+        binding: ExternalBootActivationBinding,
+        release: str,
+    ) -> None:
+        _validate_directory(directory_fd)
+        self._directory_fd = os.dup(directory_fd)
+        self.binding = binding
+        self.release = _release(release)
+        self._used = False
+        self._closed = False
+
+    def matches(self, tree: AuthenticatedGuestTree, release: str) -> bool:
+        return self.binding == tree.binding and self.release == release == tree.release
+
+    def close(self) -> None:
+        if not self._closed:
+            os.close(self._directory_fd)
+            self._closed = True
+
+    def publish(self, source: BinaryIO) -> tuple[str, int]:
+        if self._used or self._closed:
+            raise ValueError("recovery archive sink is not reusable")
+        self._used = True
+        partial = f".{_ARCHIVE_NAME}.partial"
+        fd = -1
+        primary: BaseException | None = None
+        try:
+            fd = os.open(
+                partial,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=self._directory_fd,
+            )
+            digest, size = _copy_to_fd(source, fd, MAX_ARCHIVE_BYTES)
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            os.rename(
+                partial,
+                _ARCHIVE_NAME,
+                src_dir_fd=self._directory_fd,
+                dst_dir_fd=self._directory_fd,
+            )
+            os.fsync(self._directory_fd)
+            return digest, size
+        except BaseException as exc:
+            primary = exc
+            cleanup: BaseException | None = None
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except BaseException as exc:
+                    cleanup = exc
+            try:
+                os.unlink(partial, dir_fd=self._directory_fd)
+            except FileNotFoundError:
+                pass
+            except BaseException as exc:
+                cleanup = cleanup or exc
+            if cleanup is not None:
+                exc.add_note(f"recovery archive cleanup failed: {type(cleanup).__name__}")
+            raise
+        finally:
+            try:
+                self.close()
+            except BaseException as exc:
+                if primary is None:
+                    raise
+                primary.add_note(f"recovery archive close failed: {type(exc).__name__}")
+
+
+class _VerifiedReader:
+    def __init__(self, source: BinaryIO, expected_size: int, expected_digest: str) -> None:
+        self._source = source
+        self._remaining = expected_size
+        self._expected_size = expected_size
+        self._expected_digest = expected_digest
+        self._digest = hashlib.sha256()
+        self._verified = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining == 0:
+            extra = self._source.read(1)
+            if extra:
+                raise ValueError("module source exceeds its authenticated size")
+            self._verify_digest()
+            return b""
+        count = self._remaining if size < 0 else min(size, self._remaining)
+        data = self._source.read(count)
+        if not data:
+            raise ValueError("module source ended before its authenticated size")
+        self._remaining -= len(data)
+        self._digest.update(data)
+        return data
+
+    def verify_complete(self) -> None:
+        while self.read(_COPY_CHUNK):
+            pass
+
+    def _verify_digest(self) -> None:
+        if self._verified:
+            return
+        if "sha256:" + self._digest.hexdigest() != self._expected_digest:
+            raise ValueError("module source digest does not match authenticated metadata")
+        self._verified = True
 
 
 class GuestRecoveryWriter(Protocol):
-    def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture: ...
-    def observe(self, overlay: str, release: str) -> ComponentState: ...
-    def install(self, overlay: str, release: str, source: Path) -> str: ...
+    def capture(
+        self, tree: AuthenticatedGuestTree, release: str, sink: RecoveryArchiveSink
+    ) -> ModuleCapture: ...
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState: ...
+    def install(
+        self, tree: AuthenticatedGuestTree, release: str, source: KernelBundleSource
+    ) -> str: ...
     def restore(
         self,
-        overlay: str,
+        tree: AuthenticatedGuestTree,
         release: str,
         capture: ModuleCapture,
         source: RecoveryArchiveSource,
@@ -198,351 +334,353 @@ class GuestRecoveryWriter(Protocol):
 
 
 class RealGuestRecoveryWriter:
-    """Use one inactive read-write libguestfs mount for each operation."""
+    """Validate and copy one module tree without lifecycle or publication authority."""
 
-    def __init__(self, opener: Callable[[str], _Guest] | None = None) -> None:
-        self._opener = opener or _open_guest
+    def capture(
+        self, tree: AuthenticatedGuestTree, release: str, sink: RecoveryArchiveSink
+    ) -> ModuleCapture:
+        _match_tree(tree, release, mutable=False)
+        if not sink.matches(tree, release):
+            sink.close()
+            raise ValueError("recovery archive sink owner does not match guest tree")
+        if tree.root_kind() == "absent":
+            sink.close()
+            return AbsentModuleCapture()
+        entries = _validated_entries(tree)
+        with tempfile.TemporaryFile() as archive:
+            manifests = _write_archive(tree, entries, archive)
+            _, manifest, count, size = _manifest(manifests)
+            archive.seek(0)
+            archive_digest, archive_size = sink.publish(archive)
+        return ModuleArchiveCapture(
+            manifest=manifest,
+            entry_count=count,
+            uncompressed_bytes=size,
+            archive_sha256=archive_digest,
+            archive_bytes=archive_size,
+        )
 
-    def capture(self, overlay: str, release: str, sink: RecoveryArchiveSink) -> ModuleCapture:
-        guest = self._opener(overlay)
-        try:
-            root = _release_root(release)
-            if not guest.exists(root):
-                sink.close()
-                return AbsentModuleCapture()
-            entries, contents = _walk(guest, root)
-            manifest, digest, count, size = _manifest(entries)
-            archive = _archive(entries, contents)
-            sink.publish((archive,))
-            return ModuleArchiveCapture(
-                manifest=digest,
-                entry_count=count,
-                uncompressed_bytes=size,
-                archive_sha256=_sha256(archive),
-            )
-        finally:
-            _close_guest(guest)
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
+        _match_tree(tree, release, mutable=False)
+        if tree.root_kind() == "absent":
+            return AbsentComponentState()
+        manifests = _hash_entries(tree, _validated_entries(tree))
+        return PresentComponentState(manifest=_manifest(manifests)[1])
 
-    def observe(self, overlay: str, release: str) -> ComponentState:
-        guest = self._opener(overlay)
-        try:
-            root = _release_root(release)
-            if not guest.exists(root):
-                return AbsentComponentState()
-            entries, _ = _walk(guest, root)
-            return PresentComponentState(manifest=_manifest(entries)[1])
-        finally:
-            _close_guest(guest)
-
-    def install(self, overlay: str, release: str, source: Path) -> str:
-        with source.open("rb") as stream:
-            return self._replace(overlay, release, stream, expected=None)
+    def install(
+        self, tree: AuthenticatedGuestTree, release: str, source: KernelBundleSource
+    ) -> str:
+        _match_tree(tree, release, mutable=True)
+        if not source.matches(tree, release):
+            source.close()
+            raise ValueError("kernel bundle source owner or release does not match guest tree")
+        with source.stream() as stream, tempfile.TemporaryFile() as staged:
+            _copy_stream(stream, staged, MAX_ARCHIVE_BYTES)
+            stream.read(1)
+            staged.seek(0)
+            entries = _validate_archive(staged)
+            staged.seek(0)
+            _populate_from_archive(tree, staged, entries)
+        return _manifest(entries)[1]
 
     def restore(
         self,
-        overlay: str,
+        tree: AuthenticatedGuestTree,
         release: str,
         capture: ModuleCapture,
         source: RecoveryArchiveSource,
     ) -> str:
+        _match_tree(tree, release, mutable=True)
         if isinstance(capture, AbsentModuleCapture):
             source.close()
-            guest = self._opener(overlay)
-            try:
-                guest.rm_rf(_release_root(release))
-                guest.sync()
-                return capture.state
-            finally:
-                _close_guest(guest)
-        with source.open(capture) as stream:
-            return self._replace(overlay, release, stream, expected=capture)
-
-    def _replace(
-        self,
-        overlay: str,
-        release: str,
-        stream: BinaryIO,
-        *,
-        expected: ModuleArchiveCapture | None,
-    ) -> str:
-        archive = stream.read(MAX_ARCHIVE_BYTES + 1)
-        if len(archive) > MAX_ARCHIVE_BYTES:
-            raise ValueError("recovery archive exceeds its byte reservation")
-        if expected is not None and _sha256(archive) != expected.archive_sha256:
-            raise ValueError("recovery archive digest does not match capture")
-        entries, contents = _read_archive(archive)
-        _, manifest, count, size = _manifest(entries)
-        if expected is not None and (manifest, count, size) != (
-            expected.manifest,
-            expected.entry_count,
-            expected.uncompressed_bytes,
-        ):
-            raise ValueError("recovery archive manifest does not match capture")
-        self._stage(overlay, release, entries, contents, manifest)
-        return manifest
-
-    def _stage(
-        self,
-        overlay: str,
-        release: str,
-        entries: list[_Entry],
-        contents: dict[str, bytes],
-        expected: str,
-    ) -> None:
-        guest = self._opener(overlay)
-        root = _release_root(release)
-        partial = f"{root}.kdive-partial"
-        previous = f"{root}.kdive-previous"
-        try:
-            guest.rm_rf(partial)
-            if guest.exists(previous):
-                raise ValueError("owned recovery partial requires classification")
-            guest.mkdir_p(partial)
-            _populate(guest, partial, entries, contents)
-            observed, _ = _walk(guest, partial)
-            if _manifest(observed)[1] != expected:
-                raise ValueError("staged recovery module manifest does not match source")
-            if guest.exists(root):
-                guest.mv(root, previous)
-            try:
-                guest.mv(partial, root)
-            except Exception:
-                if not guest.exists(root) and guest.exists(previous):
-                    guest.mv(previous, root)
-                raise
-            guest.rm_rf(previous)
-            guest.sync()
-        except Exception:
-            with contextlib.suppress(Exception):
-                guest.rm_rf(partial)
-            raise
-        finally:
-            _close_guest(guest)
+            tree.remove_all()
+            return capture.state
+        if not source.matches(tree, release, capture):
+            source.close()
+            raise ValueError("recovery archive source identity does not match guest tree")
+        with source.stream() as stream, tempfile.TemporaryFile() as staged:
+            _copy_stream(stream, staged, MAX_ARCHIVE_BYTES)
+            stream.read(1)
+            staged.seek(0)
+            entries = _validate_archive(staged)
+            if (_manifest(entries)[1], len(entries), _regular_size(entries)) != (
+                capture.manifest,
+                capture.entry_count,
+                capture.uncompressed_bytes,
+            ):
+                raise ValueError("recovery archive manifest does not match capture")
+            staged.seek(0)
+            _populate_from_archive(tree, staged, entries)
+        return capture.manifest
 
 
-def _manifest(entries: Iterable[_Entry]) -> tuple[bytes, str, int, int]:
-    ordered = sorted(entries, key=lambda item: item.path.encode("utf-8"))
-    if len(ordered) > MAX_ENTRIES:
-        raise ValueError("recovery module tree exceeds 200000 entries")
-    if len({entry.path for entry in ordered}) != len(ordered):
-        raise ValueError("recovery module tree contains duplicate paths")
-    size = sum(entry.size for entry in ordered if entry.kind == "regular")
-    if size > MAX_REGULAR_BYTES:
-        raise ValueError("recovery module tree exceeds 8589934592 regular bytes")
+def _validated_entries(tree: AuthenticatedGuestTree) -> list[GuestTreeEntry]:
+    if tree.root_kind() != "directory":
+        raise ValueError("authenticated module-tree root is not a directory")
+    result: list[GuestTreeEntry] = []
+    seen: set[str] = set()
+    total = 0
+    for entry in tree.entries():
+        path = _path(entry.path)
+        if path in seen:
+            raise ValueError("module tree contains duplicate paths")
+        seen.add(path)
+        if entry.kind == "regular":
+            if entry.link_count != 1:
+                raise ValueError("hard-linked module entries are forbidden")
+            total += entry.size
+            if total > MAX_REGULAR_BYTES:
+                raise ValueError("module tree exceeds 8589934592 regular bytes")
+        elif entry.size != 0:
+            raise ValueError("non-regular module entry has content bytes")
+        if entry.kind == "symlink":
+            _text(cast(str, entry.target), "symlink target")
+        elif entry.target is not None:
+            raise ValueError("non-symlink module entry has a target")
+        _xattrs(entry.xattrs)
+        result.append(entry.model_copy(update={"path": path}))
+        if len(result) > MAX_ENTRIES:
+            raise ValueError("module tree exceeds 200000 entries")
+    return sorted(result, key=lambda item: item.path.encode())
+
+
+def _hash_entries(
+    tree: AuthenticatedGuestTree, entries: list[GuestTreeEntry]
+) -> list[_ManifestEntry]:
+    return [_manifest_entry(tree, entry) for entry in entries]
+
+
+def _manifest_entry(tree: AuthenticatedGuestTree, entry: GuestTreeEntry) -> _ManifestEntry:
+    digest: str | None = None
+    if entry.kind == "regular":
+        with tree.open_regular(entry.path, entry.size) as content:
+            digest, size = _hash_stream(content, entry.size)
+        if size != entry.size:
+            raise ValueError("module entry changed during no-follow read")
+    return _ManifestEntry(
+        path=entry.path,
+        kind=entry.kind,
+        mode=entry.mode,
+        uid=entry.uid,
+        gid=entry.gid,
+        size=entry.size,
+        sha256=digest,
+        target=entry.target,
+        xattrs_supported=entry.xattrs_supported,
+        xattrs={
+            name: base64.b64encode(value).decode("ascii").rstrip("=")
+            for name, value in sorted(entry.xattrs.items(), key=lambda item: item[0].encode())
+        },
+    )
+
+
+def _write_archive(
+    tree: AuthenticatedGuestTree,
+    entries: list[GuestTreeEntry],
+    destination: BinaryIO,
+) -> list[_ManifestEntry]:
+    manifests: list[_ManifestEntry] = []
+    with tarfile.open(fileobj=destination, mode="w|", format=tarfile.PAX_FORMAT) as archive:
+        for entry in entries:
+            member = _tar_info(entry)
+            if entry.kind == "regular":
+                with (
+                    tree.open_regular(entry.path, entry.size) as source,
+                    tempfile.SpooledTemporaryFile(max_size=_COPY_CHUNK) as content,
+                ):
+                    digest, size = _copy_and_hash(source, cast(BinaryIO, content), entry.size)
+                    if size != entry.size:
+                        raise ValueError("module entry changed during no-follow read")
+                    content.seek(0)
+                    archive.addfile(member, content)
+                manifests.append(_manifest_entry_with_digest(entry, digest))
+            else:
+                archive.addfile(member)
+                manifests.append(_manifest_entry_with_digest(entry, None))
+    return manifests
+
+
+def _validate_archive(source: BinaryIO) -> list[_ManifestEntry]:
+    entries: list[_ManifestEntry] = []
+    seen: set[str] = set()
+    total = 0
+    with tarfile.open(fileobj=source, mode="r|") as archive:
+        for member in archive:
+            path = _path(member.name)
+            if path in seen:
+                raise ValueError("module archive contains duplicate paths")
+            seen.add(path)
+            kind = _member_kind(member)
+            if kind == "regular":
+                total += member.size
+                if total > MAX_REGULAR_BYTES:
+                    raise ValueError("module archive exceeds 8589934592 regular bytes")
+                content = cast(BinaryIO, archive.extractfile(member))
+                digest, size = _hash_stream(content, member.size)
+                if size != member.size:
+                    raise ValueError("module archive regular entry ended early")
+            else:
+                digest, size = None, 0
+            entries.append(_manifest_from_member(member, path, kind, digest, size))
+            if len(entries) > MAX_ENTRIES:
+                raise ValueError("module archive exceeds 200000 entries")
+    _manifest(entries)
+    return entries
+
+
+def _populate_from_archive(
+    tree: AuthenticatedGuestTree,
+    source: BinaryIO,
+    expected: list[_ManifestEntry],
+) -> None:
+    expected_by_path = {entry.path: entry for entry in expected}
+    with tarfile.open(fileobj=source, mode="r|") as archive:
+        for member in archive:
+            manifest = expected_by_path[_path(member.name)]
+            entry = _guest_entry(manifest)
+            if entry.kind == "directory":
+                tree.create_directory(entry)
+            elif entry.kind == "symlink":
+                tree.create_symlink(entry)
+            else:
+                tree.create_regular(entry, cast(BinaryIO, archive.extractfile(member)))
+
+
+def _manifest(entries: list[_ManifestEntry]) -> tuple[bytes, str, int, int]:
+    ordered = sorted(entries, key=lambda item: item.path.encode())
     data = json.dumps(
         {
             "entries": [entry.model_dump(mode="json") for entry in ordered],
             "schema": "recovery-module-tree-v1",
         },
-        ensure_ascii=False,
-        separators=(",", ":"),
         sort_keys=True,
-    ).encode("utf-8")
-    return data, "sha256:" + hashlib.sha256(_DOMAIN + data).hexdigest(), len(ordered), size
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return (
+        data,
+        "sha256:" + hashlib.sha256(_DOMAIN + data).hexdigest(),
+        len(ordered),
+        _regular_size(ordered),
+    )
 
 
-def _walk(guest: _Guest, root: str) -> tuple[list[_Entry], dict[str, bytes]]:
-    entries: list[_Entry] = []
-    contents: dict[str, bytes] = {}
-    xattrs_supported: bool | None = None
-    regular_bytes = 0
-
-    def visit(directory: str, relative: str = "") -> None:
-        nonlocal regular_bytes, xattrs_supported
-        names = sorted(guest.ls(directory), key=lambda value: _text(value, "entry name").encode())
-        for name in names:
-            canonical_name = _component(name)
-            path = f"{directory}/{canonical_name}"
-            relative_path = f"{relative}/{canonical_name}".lstrip("/")
-            info = guest.lstatns(path)
-            attrs, supported = _read_xattrs(guest, path, xattrs_supported)
-            xattrs_supported = supported if xattrs_supported is None else xattrs_supported
-            common = {
-                "path": relative_path,
-                "mode": f"{stat.S_IMODE(info['st_mode']):04o}",
-                "uid": info["st_uid"],
-                "gid": info["st_gid"],
-                "xattrs_supported": supported,
-                "xattrs": attrs,
-            }
-            mode = info["st_mode"]
-            if stat.S_ISDIR(mode):
-                entries.append(_Entry(kind="directory", size=0, sha256=None, target=None, **common))
-                visit(path, relative_path)
-            elif stat.S_ISREG(mode):
-                if info.get("st_nlink", 1) != 1:
-                    raise ValueError("hard-linked recovery entries are forbidden")
-                regular_bytes += info["st_size"]
-                if regular_bytes > MAX_REGULAR_BYTES:
-                    raise ValueError("recovery module tree exceeds 8589934592 regular bytes")
-                content = _download(guest, path)
-                if len(content) != info["st_size"]:
-                    raise ValueError("recovery entry changed while it was read")
-                contents[relative_path] = content
-                entries.append(
-                    _Entry(
-                        kind="regular",
-                        size=len(content),
-                        sha256=_sha256(content),
-                        target=None,
-                        **common,
-                    )
-                )
-            elif stat.S_ISLNK(mode):
-                target = _text(guest.readlink(path), "symlink target")
-                entries.append(_Entry(kind="symlink", size=0, sha256=None, target=target, **common))
-            else:
-                raise ValueError("special recovery entries are forbidden")
-            if len(entries) > MAX_ENTRIES:
-                raise ValueError("recovery module tree exceeds 200000 entries")
-
-    visit(root)
-    _manifest(entries)
-    return entries, contents
+def _tar_info(entry: GuestTreeEntry) -> tarfile.TarInfo:
+    member = tarfile.TarInfo(entry.path)
+    member.mode, member.uid, member.gid = int(entry.mode, 8), entry.uid, entry.gid
+    member.mtime = 0
+    member.size = entry.size
+    member.pax_headers = {
+        "KDIVE.xattrs-supported": "1" if entry.xattrs_supported else "0",
+        **{
+            f"KDIVE.xattr.{name}": base64.b64encode(value).decode().rstrip("=")
+            for name, value in entry.xattrs.items()
+        },
+    }
+    if entry.kind == "directory":
+        member.type, member.size = tarfile.DIRTYPE, 0
+    elif entry.kind == "symlink":
+        member.type, member.size, member.linkname = tarfile.SYMTYPE, 0, cast(str, entry.target)
+    return member
 
 
-def _read_xattrs(guest: _Guest, path: str, established: bool | None) -> tuple[dict[str, str], bool]:
-    if established is False:
-        return {}, False
-    try:
-        source = guest.lgetxattrs(path)
-    except NotImplementedError:
-        if established:
-            raise ValueError(
-                "recovery xattrs became unreadable after support was established"
-            ) from None
-        return {}, False
-    result: dict[str, str] = {}
-    for item in source:
-        name = _text(cast(str, item["attrname"]), "xattr name")
-        raw = item["attrval"]
-        value = raw if isinstance(raw, bytes) else raw.encode("latin1")
-        result[name] = base64.b64encode(value).decode("ascii").rstrip("=")
-    return dict(sorted(result.items(), key=lambda item: item[0].encode())), True
+def _manifest_from_member(
+    member: tarfile.TarInfo,
+    path: str,
+    kind: Literal["directory", "regular", "symlink"],
+    digest: str | None,
+    size: int,
+) -> _ManifestEntry:
+    supported = member.pax_headers.get("KDIVE.xattrs-supported")
+    if supported not in {"0", "1"}:
+        raise ValueError("module archive lacks canonical xattr support metadata")
+    attrs = {
+        key.removeprefix("KDIVE.xattr."): value
+        for key, value in member.pax_headers.items()
+        if key.startswith("KDIVE.xattr.")
+    }
+    for name, value in attrs.items():
+        _text(name, "xattr name")
+        base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+    return _ManifestEntry(
+        path=path,
+        kind=kind,
+        mode=f"{member.mode:04o}",
+        uid=member.uid,
+        gid=member.gid,
+        size=size,
+        sha256=digest,
+        target=_text(member.linkname, "symlink target") if kind == "symlink" else None,
+        xattrs_supported=supported == "1",
+        xattrs=dict(sorted(attrs.items(), key=lambda item: item[0].encode())),
+    )
 
 
-def _archive(entries: list[_Entry], contents: dict[str, bytes]) -> bytes:
-    output = io.BytesIO()
-    with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
-        for entry in sorted(entries, key=lambda item: item.path.encode()):
-            member = tarfile.TarInfo(entry.path)
-            member.mode, member.uid, member.gid = int(entry.mode, 8), entry.uid, entry.gid
-            member.mtime = 0
-            member.pax_headers = {
-                "KDIVE.xattrs-supported": "1" if entry.xattrs_supported else "0",
-                **{f"KDIVE.xattr.{name}": value for name, value in entry.xattrs.items()},
-            }
-            if entry.kind == "directory":
-                member.type = tarfile.DIRTYPE
-                archive.addfile(member)
-            elif entry.kind == "symlink":
-                member.type, member.linkname = tarfile.SYMTYPE, cast(str, entry.target)
-                archive.addfile(member)
-            else:
-                payload = contents[entry.path]
-                member.size = len(payload)
-                archive.addfile(member, io.BytesIO(payload))
-    return output.getvalue()
+def _manifest_entry_with_digest(entry: GuestTreeEntry, digest: str | None) -> _ManifestEntry:
+    return _ManifestEntry(
+        path=entry.path,
+        kind=entry.kind,
+        mode=entry.mode,
+        uid=entry.uid,
+        gid=entry.gid,
+        size=entry.size,
+        sha256=digest,
+        target=entry.target,
+        xattrs_supported=entry.xattrs_supported,
+        xattrs={
+            name: base64.b64encode(value).decode().rstrip("=")
+            for name, value in sorted(entry.xattrs.items(), key=lambda item: item[0].encode())
+        },
+    )
 
 
-def _read_archive(data: bytes) -> tuple[list[_Entry], dict[str, bytes]]:
-    entries: list[_Entry] = []
-    contents: dict[str, bytes] = {}
-    regular_bytes = 0
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
-        for member in archive:
-            if len(entries) >= MAX_ENTRIES:
-                raise ValueError("recovery module tree exceeds 200000 entries")
-            path = _relative_path(member.name)
-            if member.islnk() or not (member.isdir() or member.isfile() or member.issym()):
-                raise ValueError("recovery archive contains forbidden topology")
-            if member.isfile():
-                regular_bytes += member.size
-                if regular_bytes > MAX_REGULAR_BYTES:
-                    raise ValueError("recovery module tree exceeds 8589934592 regular bytes")
-            content = cast(BinaryIO, archive.extractfile(member)).read() if member.isfile() else b""
-            kind: Literal["directory", "regular", "symlink"]
-            kind = "directory" if member.isdir() else "symlink" if member.issym() else "regular"
-            attrs = {
-                key.removeprefix("KDIVE.xattr."): value
-                for key, value in member.pax_headers.items()
-                if key.startswith("KDIVE.xattr.")
-            }
-            supported = member.pax_headers.get("KDIVE.xattrs-supported")
-            if supported not in {"0", "1"}:
-                raise ValueError("recovery archive lacks canonical xattr metadata")
-            entry = _Entry(
-                path=path,
-                kind=kind,
-                mode=f"{member.mode:04o}",
-                uid=member.uid,
-                gid=member.gid,
-                size=len(content),
-                sha256=_sha256(content) if member.isfile() else None,
-                target=_text(member.linkname, "symlink target") if member.issym() else None,
-                xattrs_supported=supported == "1",
-                xattrs=dict(sorted(attrs.items(), key=lambda item: item[0].encode())),
-            )
-            entries.append(entry)
-            if member.isfile():
-                contents[path] = content
-    _manifest(entries)
-    return entries, contents
+def _guest_entry(entry: _ManifestEntry) -> GuestTreeEntry:
+    return GuestTreeEntry(
+        path=entry.path,
+        kind=entry.kind,
+        mode=entry.mode,
+        uid=entry.uid,
+        gid=entry.gid,
+        size=entry.size,
+        target=entry.target,
+        xattrs_supported=entry.xattrs_supported,
+        xattrs={
+            name: base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+            for name, value in entry.xattrs.items()
+        },
+    )
 
 
-def _populate(guest: _Guest, root: str, entries: list[_Entry], contents: dict[str, bytes]) -> None:
-    ordered = sorted(entries, key=lambda item: (item.path.count("/"), item.path.encode()))
-    for entry in ordered:
-        destination = f"{root}/{entry.path}"
-        if entry.kind == "directory":
-            guest.mkdir(destination)
-        elif entry.kind == "symlink":
-            guest.ln_s(cast(str, entry.target), destination)
-        else:
-            with tempfile.NamedTemporaryFile() as handle:
-                handle.write(contents[entry.path])
-                handle.flush()
-                guest.upload(handle.name, destination)
-        if entry.kind != "directory":
-            _apply_metadata(guest, destination, entry)
-    for entry in reversed(ordered):
-        if entry.kind == "directory":
-            _apply_metadata(guest, f"{root}/{entry.path}", entry)
+def _member_kind(member: tarfile.TarInfo) -> Literal["directory", "regular", "symlink"]:
+    if member.islnk() or not (member.isdir() or member.isfile() or member.issym()):
+        raise ValueError("module archive contains forbidden topology")
+    return "directory" if member.isdir() else "symlink" if member.issym() else "regular"
 
 
-def _apply_metadata(guest: _Guest, destination: str, entry: _Entry) -> None:
-    guest.lchown(entry.uid, entry.gid, destination)
-    if entry.kind != "symlink":
-        guest.chmod(int(entry.mode, 8), destination)
-    if entry.xattrs_supported:
-        for name, encoded in entry.xattrs.items():
-            value = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True)
-            guest.lsetxattr(name, value, len(value), destination)
+def _match_tree(tree: AuthenticatedGuestTree, release: str, *, mutable: bool) -> None:
+    release = _release(release)
+    if tree.release != release:
+        raise ValueError("guest-tree release does not match the requested release")
+    if tree.mutable != mutable:
+        raise ValueError("guest-tree access mode does not match the operation")
 
 
-def _download(guest: _Guest, path: str) -> bytes:
-    with tempfile.NamedTemporaryFile() as handle:
-        guest.download(path, handle.name)
-        return Path(handle.name).read_bytes()
-
-
-def _release_root(release: str) -> str:
-    if not _RELEASE.fullmatch(release):
-        raise ValueError("kernel release is not canonical")
-    return f"/lib/modules/{release}"
-
-
-def _component(value: str) -> str:
-    value = _text(value, "entry name")
-    if value in {"", ".", ".."} or "/" in value:
-        raise ValueError("recovery entry name is not canonical")
+def _path(value: str) -> str:
+    value = _text(value, "path")
+    if value.startswith("/") or any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError("module-tree path is not canonical relative text")
     return value
 
 
-def _relative_path(value: str) -> str:
-    value = _text(value, "archive path")
-    if value.startswith("/") or any(part in {"", ".", ".."} for part in value.split("/")):
-        raise ValueError("recovery archive path is not canonical")
+def _release(value: str) -> str:
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-"
+    if (
+        not value
+        or len(value) > 128
+        or value[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        or any(character not in allowed for character in value)
+    ):
+        raise ValueError("kernel release is not canonical")
     return value
 
 
@@ -550,52 +688,91 @@ def _text(value: str, field: str) -> str:
     try:
         value.encode("utf-8", "strict")
     except UnicodeError as exc:
-        raise ValueError(f"recovery {field} is not UTF-8") from exc
+        raise ValueError(f"module-tree {field} is not UTF-8") from exc
     if unicodedata.normalize("NFC", value) != value:
-        raise ValueError(f"recovery {field} is not NFC")
+        raise ValueError(f"module-tree {field} is not NFC")
     return value
 
 
-def _sha256(value: bytes) -> str:
-    return "sha256:" + hashlib.sha256(value).hexdigest()
+def _xattrs(values: dict[str, bytes]) -> None:
+    for name in values:
+        _text(name, "xattr name")
 
 
-def _write_all(fd: int, value: bytes) -> None:
-    view = memoryview(value)
-    while view:
-        written = os.write(fd, view)
-        if written == 0:
-            raise OSError("short write publishing recovery archive")
-        view = view[written:]
-
-
-def _validate_directory(directory_fd: int, service_uid: int) -> None:
-    info = os.fstat(directory_fd)
+def _validate_directory(fd: int) -> None:
+    info = os.fstat(fd)
     if not stat.S_ISDIR(info.st_mode):
-        raise ValueError("recovery archive capability requires a directory")
-    if info.st_uid != service_uid or stat.S_IMODE(info.st_mode) & 0o077:
-        raise ValueError("recovery archive directory ownership or mode is invalid")
+        raise ValueError("recovery archive root is not a directory")
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError("recovery archive root ownership or mode is invalid")
 
 
-def _open_guest(overlay: str) -> _Guest:  # pragma: no cover - live_vm
-    import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+def _validate_file(fd: int, expected_size: int) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("module source is not a regular file")
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError("module source ownership or mode is invalid")
+    if info.st_size != expected_size or info.st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("module source size does not match authenticated metadata")
 
-    guest = cast(_Guest, guestfs.GuestFS(python_return_dict=True))
+
+def _copy_to_fd(source: BinaryIO, fd: int, limit: int) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(_COPY_CHUNK):
+        size += len(chunk)
+        if size > limit:
+            raise ValueError("module archive exceeds its byte reservation")
+        digest.update(chunk)
+        view = memoryview(chunk)
+        while view:
+            written = os.write(fd, view)
+            if written == 0:
+                raise OSError("short write publishing module archive")
+            view = view[written:]
+    return "sha256:" + digest.hexdigest(), size
+
+
+def _copy_stream(source: BinaryIO, destination: BinaryIO, limit: int) -> None:
+    size = 0
+    while chunk := source.read(_COPY_CHUNK):
+        size += len(chunk)
+        if size > limit:
+            raise ValueError("module source exceeds its byte reservation")
+        destination.write(chunk)
+
+
+def _hash_stream(source: BinaryIO, expected: int) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(min(_COPY_CHUNK, expected - size + 1)):
+        size += len(chunk)
+        if size > expected:
+            raise ValueError("module content exceeds its authenticated size")
+        digest.update(chunk)
+    return "sha256:" + digest.hexdigest(), size
+
+
+def _copy_and_hash(source: BinaryIO, destination: BinaryIO, expected: int) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := source.read(min(_COPY_CHUNK, expected - size + 1)):
+        size += len(chunk)
+        if size > expected:
+            raise ValueError("module content exceeds its authenticated size")
+        digest.update(chunk)
+        destination.write(chunk)
+    return "sha256:" + digest.hexdigest(), size
+
+
+def _regular_size(entries: list[_ManifestEntry]) -> int:
+    return sum(entry.size for entry in entries if entry.kind == "regular")
+
+
+def _close_fd(fd: int) -> BaseException | None:
     try:
-        guest.add_drive_opts(overlay, format="qcow2", readonly=False)  # ty: ignore[unresolved-attribute]
-        guest.launch()  # ty: ignore[unresolved-attribute]
-        roots = guest.inspect_os()  # ty: ignore[unresolved-attribute]
-        if not roots:
-            raise ValueError("System overlay has no inspectable root")
-        guest.mount(roots[0], "/")  # ty: ignore[unresolved-attribute]
-        return guest
-    except Exception:
-        _close_guest(guest)
-        raise
-
-
-def _close_guest(guest: _Guest) -> None:
-    with contextlib.suppress(Exception):
-        guest.shutdown()
-    with contextlib.suppress(Exception):
-        guest.close()
+        os.close(fd)
+    except BaseException as exc:
+        return exc
+    return None
