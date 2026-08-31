@@ -592,7 +592,7 @@ def test_upgrade_counter_starts_above_existing_activation_and_recovery_generatio
     pg_conn: psycopg.Connection,
 ) -> None:
     _apply_through(pg_conn, "0121")
-    case = _seed_case(pg_conn, worker_suffix="u")
+    case = _seed_case(pg_conn, worker_suffix="u", legacy_recovery_point=True)
     pg_conn.execute(
         "UPDATE external_boot_activations SET authority_generation=17 WHERE id=%s",
         (case.activation_id,),

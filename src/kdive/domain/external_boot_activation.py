@@ -301,8 +301,9 @@ class ExternalBootActivation(_ClosedRow):
         ):
             raise ValueError("materialization ownership does not match activation")
         if self.recovery_point is not None and (
-            self.recovery_point.ownership.system_id != str(self.system_id)
-            or self.recovery_point.ownership.run_id != str(self.run_id)
+            self.recovery_point.binding.system_id != str(self.system_id)
+            or self.recovery_point.binding.run_id != str(self.run_id)
+            or self.recovery_point.binding.activation_id != str(self.id)
             or self.recovery_point.plan_identity != self.plan_identity
             or self.materialization is None
             or self.recovery_point.materialization_identity != self.materialization.identity

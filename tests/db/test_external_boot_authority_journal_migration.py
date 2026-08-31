@@ -316,11 +316,11 @@ def _allocate_successor(
     return successor_case, successor
 
 
-def test_migration_0123_is_the_unique_inventory_tail() -> None:
+def test_migration_0124_is_the_unique_inventory_tail() -> None:
     migrations = migrate.discover_migrations()
     assert (migrations[-1].version, migrations[-1].filename) == (
-        "0123",
-        "0123_external_boot_authority_journal.sql",
+        "0124",
+        "0124_external_boot_activation_binding.sql",
     )
 
 

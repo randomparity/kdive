@@ -109,7 +109,7 @@ def authority_role_dsns(migrated_url: str) -> Iterator[_RoleDsns]:
                 conn.execute(SQL("DROP ROLE IF EXISTS {}").format(Identifier(login)))
 
 
-def _activation_evidence(system_id: UUID, run_id: UUID) -> tuple[Jsonb, Jsonb]:
+def _activation_evidence(system_id: UUID, run_id: UUID, activation_id: UUID) -> tuple[Jsonb, Jsonb]:
     ownership = {"system_id": str(system_id), "run_id": str(run_id)}
     return (
         Jsonb(
@@ -122,7 +122,10 @@ def _activation_evidence(system_id: UUID, run_id: UUID) -> tuple[Jsonb, Jsonb]:
         Jsonb(
             {
                 "schema": "external-boot-recovery-v1",
-                "ownership": ownership,
+                "binding": {
+                    **ownership,
+                    "activation_id": str(activation_id),
+                },
                 "plan_identity": _PLAN,
             }
         ),
@@ -136,6 +139,7 @@ def _seed_case(
     operation: str | None = None,
     worker_protocol: int = 4,
     worker_suffix: str = "a",
+    legacy_recovery_point: bool = False,
 ) -> _AuthorityCase:
     resource_id, allocation_id, system_id = uuid4(), uuid4(), uuid4()
     investigation_id, run_id, activation_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
@@ -172,7 +176,15 @@ def _seed_case(
         "principal, project) VALUES (%s, %s, %s, 'local-libvirt', %s, '{}'::jsonb, 'p', 'proj')",
         (run_id, investigation_id, system_id, "failed" if purpose == "teardown" else "succeeded"),
     )
-    materialization, recovery_point = _activation_evidence(system_id, run_id)
+    materialization, recovery_point = _activation_evidence(system_id, run_id, activation_id)
+    if legacy_recovery_point:
+        recovery_point = Jsonb(
+            {
+                "schema": "external-boot-recovery-v1",
+                "ownership": {"system_id": str(system_id), "run_id": str(run_id)},
+                "plan_identity": _PLAN,
+            }
+        )
     if purpose == "teardown":
         attempt_id = uuid4()
         conn.execute(
