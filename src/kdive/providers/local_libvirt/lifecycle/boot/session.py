@@ -66,7 +66,16 @@ class LocalExternalBootOperationPin(Protocol):
     def close(self) -> None: ...
 
 
-type PinOperationLease = Callable[[LocalExternalBootOperationLease], LocalExternalBootOperationPin]
+@dataclass(frozen=True)
+class PinnedOperationOwnership:
+    """Atomic lane-owned snapshot returned together with its retained pin."""
+
+    pin: LocalExternalBootOperationPin
+    system_id: UUID
+    binding: ExternalBootActivationBinding
+
+
+type PinOperationLease = Callable[[LocalExternalBootOperationLease], PinnedOperationOwnership]
 
 
 class _Domain(Protocol):
@@ -418,7 +427,7 @@ class LocalExternalBootSessionFactory:
         *,
         pin_lease: PinOperationLease,
         connect: Callable[[], _Connection],
-        open_artifact_root: Callable[[LocalExternalBootOperationLease], int],
+        open_artifact_root: Callable[[PinnedOperationOwnership], int],
         open_guest: Callable[[], _Guest],
         stat_overlay: Callable[[str], tuple[int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
@@ -441,9 +450,10 @@ class LocalExternalBootSessionFactory:
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
 
     def open(self, lease: LocalExternalBootOperationLease) -> LocalExternalBootSession:
-        pin = self._pin_lease(lease)
-        system_id = lease.system_id
-        binding = lease.binding
+        ownership = self._pin_lease(lease)
+        pin = ownership.pin
+        system_id = ownership.system_id
+        binding = ownership.binding
         if binding.system_id != str(system_id):
             pin.close()
             raise ValueError("operation lease binding does not own the System")
@@ -459,7 +469,7 @@ class LocalExternalBootSessionFactory:
             _parse_owned_xml(xml, system_id, expected_overlay)
             device, inode = self._stat_overlay(expected_overlay)
             overlay = _BoundOverlay(device, inode, expected_overlay)
-            artifact_fd = self._open_artifact_root(lease)
+            artifact_fd = self._open_artifact_root(ownership)
             return _ConcreteSession(
                 system_id=system_id,
                 binding=binding,
