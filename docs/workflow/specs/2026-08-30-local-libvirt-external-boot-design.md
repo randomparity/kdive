@@ -220,7 +220,15 @@ Task 3 operation: it reopens and authenticates the
 recovery point and source, then resumes that owned partial or removes it before a fresh attempt; it
 never treats an unclassified or third partial as owned. On success, Task 3 independently verifies
 the complete staged manifest, writes and fsyncs phase evidence, atomically renames the staged tree
-into place, and fsyncs the containing directory before advancing the lifecycle.
+into place, and fsyncs the containing directory before advancing the lifecycle. Concretely, Task 3
+fsyncs `exchange-ready`, then uses descriptor-relative same-filesystem
+`renameat2(..., RENAME_EXCHANGE)` between the authenticated nonempty live and staged directories.
+Unsupported exchange fails before live mutation; no remove/rename fallback exists. After exchange,
+Task 3 verifies target-at-live and source-at-staging, fsyncs `exchange-complete` and the containing
+directory, and only then removes the displaced source tree. Restart before or after the syscall or
+either evidence fsync compares both complete identities: source-at-live/target-at-staging resumes
+pre-exchange, target-at-live/source-at-staging resumes post-exchange, and absent, mixed, or third
+state conflicts without mutation. The live release name is never absent.
 
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
@@ -309,8 +317,11 @@ identity plus digest and manifest verification before guest mutation. Contract t
 read or close error stops Task 2 writes; pre-write rejection proves zero tree mutation. Contract
 tests pin `restore(tree, release, capture, source)` and use a capability fake that exposes no path,
 rename, phase, fsync-ordering, or restart operation. Task 3 crash tests prove it durably classifies
-the retained owned partial before returning, never publishes a failed staging tree, and alone owns
-atomic rename plus directory-fsync ordering.
+the retained owned partial before returning and never publishes a failed staging tree. Publication
+tests require descriptor-relative same-filesystem `RENAME_EXCHANGE`; unsupported exchange changes
+nothing; crashes immediately before/after exchange and each evidence fsync classify the two expected
+name/identity arrangements; absent/mixed/third arrangements conflict; the live name is never absent;
+and displaced-source removal occurs only after durable `exchange-complete` plus directory fsync.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
