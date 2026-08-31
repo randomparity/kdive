@@ -222,13 +222,23 @@ never treats an unclassified or third partial as owned. On success, Task 3 indep
 the complete staged manifest, writes and fsyncs phase evidence, atomically renames the staged tree
 into place, and fsyncs the containing directory before advancing the lifecycle. Concretely, Task 3
 fsyncs `exchange-ready`, then uses descriptor-relative same-filesystem
-`renameat2(..., RENAME_EXCHANGE)` between the authenticated nonempty live and staged directories.
+`renameat2(..., RENAME_EXCHANGE)` between the authenticated live and staged directories; a
+present-empty directory follows the same path.
 Unsupported exchange fails before live mutation; no remove/rename fallback exists. After exchange,
 Task 3 verifies target-at-live and source-at-staging, fsyncs `exchange-complete` and the containing
 directory, and only then removes the displaced source tree. Restart before or after the syscall or
 either evidence fsync compares both complete identities: source-at-live/target-at-staging resumes
 pre-exchange, target-at-live/source-at-staging resumes post-exchange, and absent, mixed, or third
-state conflicts without mutation. The live release name is never absent.
+state conflicts without mutation. This present-source path never makes the live release name absent.
+
+Recorded absence uses a separate Task 3 path. Task 3 fsyncs `absence-ready` with an authenticated
+empty placeholder at the deterministic staging name, exchanges it with the live target, verifies
+empty-at-live and target-at-staging, and fsyncs `absence-exchanged`. It removes the empty live
+directory, fsyncs `absence-complete` plus the parent, and only then removes the displaced target.
+Restart classifies target-at-live/empty-at-staging as pre-exchange,
+empty-at-live/target-at-staging as post-exchange, and absent-live/target-at-staging as post-removal.
+Absence therefore appears only as the intended final state. An already-absent source is verified and
+does not exchange.
 
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
@@ -320,8 +330,13 @@ rename, phase, fsync-ordering, or restart operation. Task 3 crash tests prove it
 the retained owned partial before returning and never publishes a failed staging tree. Publication
 tests require descriptor-relative same-filesystem `RENAME_EXCHANGE`; unsupported exchange changes
 nothing; crashes immediately before/after exchange and each evidence fsync classify the two expected
-name/identity arrangements; absent/mixed/third arrangements conflict; the live name is never absent;
+name/identity arrangements; absent/mixed/third arrangements conflict; the present-source live name
+is never absent;
 and displaced-source removal occurs only after durable `exchange-complete` plus directory fsync.
+Separate tests cover present-empty exchange and absent recovery before/after placeholder exchange,
+empty-live removal, each `absence-*` evidence fsync, and displaced-target removal. They narrow the
+never-absent assertion to present-source publication and require absence only as the recorded final
+state.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without

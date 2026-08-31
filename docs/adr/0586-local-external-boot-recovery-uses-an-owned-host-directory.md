@@ -117,8 +117,9 @@ Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompr
 Task 2 validates the manifest and writes only through the supplied staging-tree capability. It never
 renames that tree into the live release or emits durable phase evidence. Task 3 verifies the staged
 manifest and fsyncs `exchange-ready` evidence before publication. Publication is a
-descriptor-relative Linux `renameat2(..., RENAME_EXCHANGE)` between the authenticated nonempty live
-release directory and deterministic staged directory on the same filesystem. If atomic exchange is
+descriptor-relative Linux `renameat2(..., RENAME_EXCHANGE)` between authenticated live and staged
+directories on the same filesystem; a present-empty tree is a valid directory and follows this same
+path. If atomic exchange is
 unsupported, Task 3 fails before altering the live tree; remove-then-rename and old-aside sequences
 are forbidden. After exchange, the live name always resolves to one complete tree and the staging
 name owns the displaced source tree. Task 3 verifies both identities, fsyncs `exchange-complete`
@@ -127,6 +128,16 @@ On restart before or after either evidence fsync, Task 3 compares the complete e
 target manifests at both authenticated names: source-at-live/target-at-staging means not exchanged;
 target-at-live/source-at-staging means exchanged. Any absent, mixed, unowned, unreadable, over-limit,
 or third state is conflict and causes no further mutation.
+
+Restoring recorded absence uses a distinct Task 3 sequence. It fsyncs `absence-ready` with an
+authenticated empty placeholder at the deterministic staging name, exchanges that placeholder with
+the live target directory, verifies empty-at-live and target-at-staging, and fsyncs
+`absence-exchanged`. It then removes the empty live directory and fsyncs `absence-complete` plus the
+parent before removing the displaced target. Restart classifies target-at-live/empty-at-staging as
+pre-exchange, empty-at-live/target-at-staging as post-exchange, and absent-live/target-at-staging as
+post-removal. Thus a present-source publication never makes the live name absent; absence appears
+only as the intended final state of absent-source recovery. An already-absent source is verified and
+does not require exchange.
 
 Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
 activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
@@ -191,9 +202,10 @@ Teardown likewise quarantines evidence it cannot authenticate.
 - Task 2 unit tests use an in-memory authenticated-tree fake and prove it requests no overlay path,
   guest path, staging name, rename, fsync-phase, or restart-classification operation. Task 3 owns
   integration and crash tests for staging capabilities, `RENAME_EXCHANGE`, fsync ordering, and
-  restart immediately before/after the exchange and each evidence fsync. Those tests prove the live
-  release name is never absent, unsupported exchange changes nothing, and the displaced tree is
-  removed only after durable `exchange-complete` evidence.
+  restart immediately before/after each exchange, removal, and evidence fsync. Those tests cover a
+  present-empty tree and every absent-source state, prove a present-source live name is never absent,
+  prove unsupported exchange changes nothing, and remove a displaced tree only after the matching
+  durable completion evidence.
 
 ## Considered & rejected
 
