@@ -144,10 +144,17 @@ forbidden until that evidence is durable.
 Restoring recorded absence uses the same first move without a staging-to-live move. After
 `move-ready`, Task 3 moves live to old-aside, guest-syncs, verifies live absent and old-aside=prior,
 and fsyncs `absence-live`; exact absence is then the verified desired state. It removes old-aside only
-after fsyncing `absence-complete`. An already-absent live tree is verified and records
-`absence-complete` without a move. A crash between a guest move and its evidence fsync is classified
-from the three names and complete manifests. No guestmount, `renameat2`, appliance command helper, or
-new provisioning dependency is introduced.
+after fsyncing `absence-complete`, then guest-syncs and fsyncs `absence-cleaned`. An already-absent
+live tree is verified and records both completion phases without a move. On restart, live absent,
+old-aside=prior, and durable `absence-complete` means removal pending; the sole permitted guest
+mutation is descriptor-bounded, no-follow continuation of that authenticated old-aside removal.
+Because removal may fail partway, durable completion evidence—not a now-incomplete manifest—keeps
+the deterministic old-aside owned; a symlink, wrong type, or path escape conflicts. Live absent,
+old-aside absent, and durable `absence-complete` permits only guest sync plus `absence-cleaned`
+evidence. Boot, readiness, and lifecycle advancement remain forbidden until `absence-cleaned` is
+durable. A crash between a guest move and its evidence fsync is classified from the three names and
+complete manifests. No guestmount, `renameat2`, appliance command helper, or new provisioning
+dependency is introduced.
 
 Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
 activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
@@ -215,7 +222,8 @@ Teardown likewise quarantines evidence it cannot authenticate.
   and restart immediately before/after each move, sync, evidence fsync, and removal. Those tests
   cover present-empty and absent desired trees, bound the live-name absence to verified inactivity,
   distinguish the post-removal/evidence-pending layout, forbid boot/readiness until verified durable
-  completion, and remove old-aside only after matching new-live evidence.
+  completion, retry partial absence cleanup under durable ownership, and remove old-aside only after
+  matching new-live or absence-complete evidence.
 
 ## Considered & rejected
 
