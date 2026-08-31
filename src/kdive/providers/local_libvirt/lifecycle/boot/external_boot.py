@@ -114,6 +114,17 @@ class FinalizeCleanupProof(_ClosedValue):
     phase: Literal["mutation-started"] = "mutation-started"
 
 
+class CleanupTombstoneV1(_ClosedValue):
+    """Accounted cleanup evidence retained until authority finalization."""
+
+    schema_: Literal["local-libvirt-cleanup-tombstone-v1"] = Field(
+        "local-libvirt-cleanup-tombstone-v1", alias="schema"
+    )
+    binding: ExternalBootActivationBinding
+    point_digest: Digest
+    payload_absent: Literal[True] = True
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleLayout:
     live: ComponentState | None
@@ -314,9 +325,7 @@ class LocalExternalBootIO(Protocol):
         self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
     ) -> LocalRecoveryMetadataV1: ...
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None: ...
-    def finalize_tombstone(
-        self, metadata: LocalRecoveryMetadataV1, proof: FinalizeCleanupProof
-    ) -> None: ...
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
 
 
 class LocalLibvirtExternalBoot:
@@ -432,8 +441,11 @@ class LocalLibvirtExternalBoot:
     ) -> None:
         if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
             raise ValueError("external-boot cleanup proof does not match recovery point")
-        metadata = self._reopen(recovery, authority)
-        self._io.finalize_tombstone(metadata, proof)
+        # #2140 authenticates ``authority`` and supplies only an unresolved exact
+        # mutation-started proof.  The local seam deliberately does not decode it;
+        # it compares the closed owner/point fields and handles present or
+        # post-delete absence idempotently.
+        self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(
         self, recovery: RecoveryPoint, authority: OpaqueProviderRef
@@ -467,6 +479,7 @@ def recovery_directory_name(
 
 
 _INTENT_NAME = "intent.json"
+_TOMBSTONE_NAME = "tombstone.json"
 _MAX_METADATA_BYTES = 262_144
 
 
@@ -477,6 +490,31 @@ def _metadata_bytes(metadata: LocalRecoveryMetadataV1) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode()
+
+
+def _tombstone_bytes(tombstone: CleanupTombstoneV1) -> bytes:
+    return json.dumps(
+        tombstone.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+def _read_private_file(directory_fd: int, name: str) -> bytes:
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_uid != os.geteuid()
+            or opened.st_size > _MAX_METADATA_BYTES
+        ):
+            raise ValueError("recovery evidence is not an owned private regular file")
+        return os.read(fd, _MAX_METADATA_BYTES + 1)
+    finally:
+        os.close(fd)
 
 
 class RecoveryMetadataStore:
@@ -558,6 +596,81 @@ class RecoveryMetadataStore:
         finally:
             os.close(directory_fd)
 
+    def publish_tombstone(
+        self,
+        reference: OpaqueProviderRef,
+        binding: ExternalBootActivationBinding,
+        expected: LocalRecoveryMetadataV1,
+        point_digest: Digest,
+    ) -> CleanupTombstoneV1:
+        """Atomically replace recovered metadata with accounted cleanup evidence."""
+        self._require_open()
+        name = recovery_directory_name(reference, binding)
+        directory_fd = _open_private_directory(self._root_fd, name)
+        tombstone = CleanupTombstoneV1(binding=binding, point_digest=point_digest)
+        try:
+            if expected.binding != binding or self._read(directory_fd) != expected:
+                raise ValueError("recovery metadata changed before cleanup")
+            if expected.phase != "recovered":
+                raise ValueError("recovery must complete before cleanup")
+            temporary = ".tombstone.next"
+            _write_exclusive(directory_fd, temporary, _tombstone_bytes(tombstone))
+            os.rename(
+                temporary,
+                _TOMBSTONE_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.unlink(_INTENT_NAME, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.fsync(self._root_fd)
+        if self._read_tombstone_named(name) != tombstone:
+            raise ValueError("cleanup tombstone failed exact reopen")
+        return tombstone
+
+    def finalize_tombstone(
+        self,
+        reference: OpaqueProviderRef,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+    ) -> None:
+        """Delete an exact tombstone or confirm the exact U1a post-delete retry."""
+        self._require_open()
+        name = recovery_directory_name(reference, recovery.binding)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        if proof.binding != recovery.binding or proof.point_digest != expected.point_digest:
+            raise ValueError("cleanup finalization proof does not match recovery point")
+        try:
+            actual = self._read_tombstone_named(name)
+        except FileNotFoundError:
+            # Absence is success only for the closed exact mutation-started proof
+            # re-presented by #2140 for the still-current operation.
+            return
+        if actual != expected:
+            raise ValueError("cleanup tombstone does not match recovery point")
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            if os.listdir(directory_fd) != [_TOMBSTONE_NAME]:
+                raise ValueError("cleanup tombstone directory contains unexpected payload")
+            if self._read_tombstone(directory_fd) != expected:
+                raise ValueError("cleanup tombstone changed before finalization")
+            os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.rmdir(name, dir_fd=self._root_fd)
+        os.fsync(self._root_fd)
+        try:
+            _open_private_directory(self._root_fd, name)
+        except FileNotFoundError:
+            return
+        raise ValueError("cleanup tombstone remained after finalization")
+
     def _open_or_create_partial(self, name: str) -> int:
         try:
             os.mkdir(name, 0o700, dir_fd=self._root_fd)
@@ -579,21 +692,24 @@ class RecoveryMetadataStore:
         finally:
             os.close(directory_fd)
 
+    def _read_tombstone_named(self, name: str) -> CleanupTombstoneV1:
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            return self._read_tombstone(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _read_tombstone(directory_fd: int) -> CleanupTombstoneV1:
+        data = _read_private_file(directory_fd, _TOMBSTONE_NAME)
+        tombstone = CleanupTombstoneV1.model_validate_json(data)
+        if _tombstone_bytes(tombstone) != data:
+            raise ValueError("cleanup tombstone is not canonical JSON")
+        return tombstone
+
     @staticmethod
     def _read(directory_fd: int) -> LocalRecoveryMetadataV1:
-        fd = os.open(_INTENT_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-        try:
-            opened = os.fstat(fd)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or stat.S_IMODE(opened.st_mode) != 0o600
-                or opened.st_uid != os.geteuid()
-                or opened.st_size > _MAX_METADATA_BYTES
-            ):
-                raise ValueError("recovery intent is not an owned private regular file")
-            data = os.read(fd, _MAX_METADATA_BYTES + 1)
-        finally:
-            os.close(fd)
+        data = _read_private_file(directory_fd, _INTENT_NAME)
         metadata = LocalRecoveryMetadataV1.model_validate_json(data)
         if _metadata_bytes(metadata) != data:
             raise ValueError("recovery intent is not canonical JSON")

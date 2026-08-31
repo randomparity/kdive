@@ -397,6 +397,36 @@ def test_recovery_metadata_store_rejects_hostile_root_and_partial(tmp_path: Path
     assert sorted(path.name for path in partial.iterdir()) == before
 
 
+def test_cleanup_tombstone_finalization_is_exact_and_absent_retry_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    digest = LocalLibvirtExternalBoot.point_digest(point)
+    proof = FinalizeCleanupProof(
+        point_digest=digest,
+        binding=point.binding,
+        operation_id="00000000-0000-0000-0000-000000000004",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=7,
+        journal_digest="sha256:" + "4" * 64,
+    )
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, digest)
+        directory = root / recovery_directory_name(reference, metadata.binding)
+        assert sorted(path.name for path in directory.iterdir()) == ["tombstone.json"]
+        store.finalize_tombstone(reference, point, proof)
+        assert not directory.exists()
+        store.finalize_tombstone(reference, point, proof)
+
+        wrong = proof.model_copy(update={"point_digest": "sha256:" + "e" * 64})
+        with pytest.raises(ValueError, match="does not match"):
+            store.finalize_tombstone(reference, point, wrong)
+
+
 class _GuestTreeHandle:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
@@ -547,9 +577,7 @@ class _ExternalIO:
         self.actions.append("cleanup")
         self.tombstone = True
 
-    def finalize_tombstone(
-        self, metadata: LocalRecoveryMetadataV1, proof: FinalizeCleanupProof
-    ) -> None:
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         self.actions.append("finalize")
         self.tombstone = False
 
@@ -620,7 +648,7 @@ def test_finalize_requires_exact_cleanup_proof_binding_and_point() -> None:
         journal_digest="sha256:" + "d" * 64,
     )
     ports.finalize_cleanup_tombstone(point, proof, OpaqueProviderRef(ref="authority/current"))
-    assert io.actions[-2:] == ["reopen", "finalize"]
+    assert io.actions[-2:] == ["cleanup", "finalize"]
 
     wrong = proof.model_copy(update={"point_digest": "sha256:" + "e" * 64})
     with pytest.raises(ValueError, match="proof"):
