@@ -193,13 +193,20 @@ class RecoveryArchiveSource(_SingleUseFile):
                 expected_digest=capture.archive_sha256,
             )
         except BaseException as primary:
-            cleanup = _close_fd(fd) if fd >= 0 else None
+            cleanups: list[BaseException] = []
+            if fd >= 0 and (cleanup := _close_fd(fd)) is not None:
+                cleanups.append(cleanup)
             if self._directory_fd >= 0:
-                cleanup = cleanup or _close_fd(self._directory_fd)
-            self._directory_closed = True
-            if cleanup is not None:
+                cleanup = _close_fd(self._directory_fd)
+                if cleanup is None:
+                    self._directory_closed = True
+                else:
+                    cleanups.append(cleanup)
+            for index, cleanup in enumerate(cleanups):
                 primary.add_note(
-                    f"recovery source constructor cleanup failed: {type(cleanup).__name__}"
+                    "recovery source constructor "
+                    f"{'cleanup' if index == 0 else 'later cleanup'} failed: "
+                    f"{type(cleanup).__name__}"
                 )
             raise
         cleanup = _close_fd(fd)

@@ -556,6 +556,58 @@ def test_recovery_source_open_and_validation_failures_close_all_descriptors(tmp_
         os.close(directory_fd)
 
 
+@pytest.mark.parametrize("failure", ["open", "validation"])
+def test_recovery_source_constructor_attempts_every_cleanup_and_keeps_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    (tmp_path / "modules.tar").write_bytes(b"x")
+    (tmp_path / "modules.tar").chmod(0o600)
+    capture = ModuleArchiveCapture(
+        manifest="sha256:" + "0" * 64,
+        entry_count=0,
+        uncompressed_bytes=0,
+        archive_sha256=_digest(b"x"),
+        archive_bytes=2 if failure == "validation" else 1,
+    )
+    directory_fd = _dir_fd(tmp_path)
+    original_open, original_close, original_fstat = os.open, os.close, os.fstat
+    cleanup_attempts: list[str] = []
+
+    def open_failure(
+        path: str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if failure == "open" and path == "modules.tar":
+            raise OSError("primary archive open")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def close_failure(fd: int) -> None:
+        if fd == directory_fd:
+            original_close(fd)
+            return
+        kind = "directory" if stat.S_ISDIR(original_fstat(fd).st_mode) else "archive"
+        cleanup_attempts.append(kind)
+        original_close(fd)
+        raise OSError(f"injected {kind} cleanup")
+
+    before = len(list(Path("/proc/self/fd").iterdir()))
+    monkeypatch.setattr(os, "open", open_failure)
+    monkeypatch.setattr(os, "close", close_failure)
+    expected = "archive open" if failure == "open" else "size"
+    with pytest.raises((OSError, ValueError), match=expected) as caught:
+        RecoveryArchiveSource(directory_fd, binding=BINDING, release=RELEASE, capture=capture)
+    assert cleanup_attempts == (["directory"] if failure == "open" else ["archive", "directory"])
+    assert len(caught.value.__notes__) == len(cleanup_attempts)
+    if len(cleanup_attempts) == 2:
+        assert "later cleanup" in caught.value.__notes__[1]
+    assert len(list(Path("/proc/self/fd").iterdir())) == before
+    monkeypatch.setattr(os, "close", original_close)
+    os.close(directory_fd)
+
+
 @pytest.mark.parametrize("kind", ["directory", "mode", "overbound"])
 def test_source_and_kernel_reject_actual_file_shape_without_fd_leaks(
     tmp_path: Path, kind: str
