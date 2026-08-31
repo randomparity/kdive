@@ -684,6 +684,7 @@ class LocalExternalBootIO(Protocol):
     def record_phase(
         self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
     ) -> LocalRecoveryMetadataV1: ...
+    def cleanup_complete(self, recovery: RecoveryPoint) -> bool: ...
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None: ...
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
 
@@ -785,6 +786,10 @@ class RealLocalExternalBootIO:
             return store.record_phase(
                 _recovery_ref(metadata.binding), metadata.binding, metadata, phase
             )
+
+    def cleanup_complete(self, recovery: RecoveryPoint) -> bool:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.cleanup_complete(recovery.recovery_ref, recovery)
 
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None:
         self._host.cleanup_payloads(metadata)
@@ -909,6 +914,8 @@ class LocalLibvirtExternalBoot:
             self._io.record_phase(metadata, "recovered")
 
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        if self._io.cleanup_complete(recovery):
+            return
         metadata = self._reopen(recovery, authority)
         if metadata.phase == "cleaned":
             return
@@ -1193,6 +1200,22 @@ class RecoveryMetadataStore:
         if self._read_tombstone_named(name) != tombstone:
             raise ValueError("cleanup tombstone failed exact reopen")
         return tombstone
+
+    def cleanup_complete(self, reference: OpaqueProviderRef, recovery: RecoveryPoint) -> bool:
+        """Return whether the exact recovery point already has a durable tombstone."""
+        self._require_open()
+        name = recovery_directory_name(reference, recovery.binding)
+        try:
+            actual = self._read_tombstone_named(name)
+        except FileNotFoundError:
+            return False
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        if actual != expected:
+            raise ValueError("cleanup tombstone does not match recovery point")
+        return True
 
     def finalize_tombstone(
         self,

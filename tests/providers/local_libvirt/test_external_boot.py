@@ -1020,6 +1020,9 @@ class _ExternalIO:
         self.metadata = metadata.model_copy(update={"phase": phase})
         return self.metadata
 
+    def cleanup_complete(self, recovery: RecoveryPoint) -> bool:
+        return self.tombstone
+
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: str) -> None:
         self.actions.append("cleanup")
         self.tombstone = True
@@ -1149,6 +1152,29 @@ def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path
             materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
         )
     assert host.actions == []
+
+
+def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealHost(metadata, root)
+    io = RealLocalExternalBootIO(root, host)
+    ports = LocalLibvirtExternalBoot(io)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    ports.cleanup(point, OpaqueProviderRef(ref="authority/current"))
+    assert host.actions == ["cleanup"]
+
+    ports.cleanup(point, OpaqueProviderRef(ref="authority/current"))
+    assert host.actions == ["cleanup"]
+
+    crossed = point.model_copy(update={"plan_identity": "sha256:" + "f" * 64})
+    with pytest.raises(ValueError, match="tombstone does not match"):
+        ports.cleanup(crossed, OpaqueProviderRef(ref="authority/current"))
+    assert host.actions == ["cleanup"]
 
 
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
