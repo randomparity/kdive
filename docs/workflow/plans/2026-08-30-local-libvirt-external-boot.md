@@ -172,10 +172,13 @@ name, live rename/publication, durable phase write, fsync-ordering decision, or 
 Task 2 creates and recognizes no persistent `.kdive-partial`, `.kdive-previous`, or equivalent
 namespace. Task 3 closes the capability and decides staging cleanup after Task 2 returns.
 
-Task 3 constructs single-use `KernelBundleSource` only after authenticating the materialization and
-resolving its provider-owned artifact. It retains an already-open no-follow regular-file descriptor,
-binds expected digest and bounded size, verifies service owner/private mode, exposes only a bounded
-read stream, and closes on every exit. It accepts and returns no path.
+During prepare, Task 3 resolves `ExternalBootMaterialization.artifacts.modules` descriptor-relative
+beneath the authenticated System/Run artifact root, computes archive SHA-256 and bounded byte size,
+and stores its opaque ref, digest, and size in `LocalRecoveryMetadataV1`. On activate/restart, Task 3
+authenticates complete point/metadata equality, resolves only that stored ref beneath the same owner
+root, and requires digest/size equality before constructing single-use `KernelBundleSource`. It
+retains the already-open no-follow regular-file descriptor, verifies service owner/private mode,
+exposes only a bounded read stream, and closes on every exit. It accepts and returns no path.
 
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are injected owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` after resolving and authenticating the recovery token beneath its
@@ -211,7 +214,11 @@ Absent restoration never opens the source.
    restoring.
    Add install-source tests for wrong binding, symlink/non-regular/foreign-owner/non-private/
    over-limit input, substitution, digest/short-read failure, reuse, close, and path opacity. Pin
-   `install(tree, release, source: KernelBundleSource)` and inject a digest-comparator fault.
+   `install(tree, release, source: KernelBundleSource)` and inject a digest-comparator fault. Fresh
+   process tests construct the source from reopened metadata without caller materialization and
+   reject substituted ref/digest/size/System/Run before staging mutation. Inject ordinary read and
+   close errors; assert pre-write failure leaves staging unchanged and post-write failure stops later
+   Task 2 writes with no publication authority.
 4. Run `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_recovery.py`; expect all
    tests passed. Run lint/type/diff checks and commit as
    `feat(local-libvirt): preserve external boot modules`.

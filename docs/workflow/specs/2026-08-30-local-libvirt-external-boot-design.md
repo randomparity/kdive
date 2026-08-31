@@ -110,10 +110,15 @@ phase write, fsync-ordering decision, or restart-classification operation. Task 
 recognizes persistent `.kdive-partial`, `.kdive-previous`, or equivalent names. Closing the tree and
 deciding staging cleanup remain the Task 3 caller's responsibility after Task 2 returns.
 
-`KernelBundleSource` is a single-use read-only capability constructed by Task 3 only after
-authenticating the materialization and resolving its provider-owned artifact beneath the configured
-root. It retains an already-open no-follow regular-file descriptor, binds the expected digest and
-bounded size, verifies service ownership and private mode, exposes only a bounded stream, and closes
+`KernelBundleSource` is a single-use read-only capability constructed by Task 3 from reopened
+canonical recovery metadata, never from a caller field. During prepare, Task 3 resolves
+`ExternalBootMaterialization.artifacts.modules` beneath the authenticated System/Run artifact root,
+opens it descriptor-relative with no-follow, computes its archive SHA-256 and bounded byte size, and
+stores the opaque modules ref, digest, and size in canonical recovery metadata before publication.
+On activate or restart, Task 3 authenticates the complete recovery point/metadata identity, resolves
+that stored ref beneath the same owner root, and requires the reopened file to match stored digest
+and size before constructing the source. The source retains the already-open regular-file
+descriptor, verifies service ownership and private mode, exposes only a bounded stream, and closes
 on success or error. It accepts and returns no host path. A digest, size, owner, mode, type,
 substitution, reuse, or read failure stops Task 2 mutation under the same pre-write/post-write rules
 as `RecoveryArchiveSource`.
@@ -156,7 +161,8 @@ unpadded-base64 ACL/security xattr set, and an absolute `build` symlink. Unsuppo
 not unsupported. Timestamps are excluded; uid, gid, and lstat permission bits are preserved exactly.
 
 `LocalRecoveryMetadataV1` is closed canonical JSON with schema, System and activation UUIDs, Run,
-plan and materialization identities, release, exact source inactive XML SHA-256, canonical preserved
+plan and materialization identities, release, opaque materialized-modules ref, its archive SHA-256
+and bounded byte size, exact source inactive XML SHA-256, canonical preserved
 definition digest, source and target boot-projection digests, source and target module states, prior
 power state, capture descriptor, and durable recovery phase. It contains no configured root or
 absolute path. The opaque reference has `local-recovery-v1/<system UUID>/<activation UUID>` and is
@@ -389,6 +395,10 @@ Kernel-bundle-source tests cover wrong materialization binding, symlink/non-regu
 non-private/over-limit input, descriptor substitution, digest and short-read failure, single-use
 rejection, deterministic close, and path opacity. Contract tests pin
 `install(tree, release, source)` with `KernelBundleSource`, never `Path`.
+Fresh-process tests reopen metadata and prove exact source construction succeeds without caller
+materialization, while substituted ref, digest, size, System, or Run fails before staging mutation.
+Inject ordinary read and close errors: pre-write failures leave staging unchanged; post-write
+failures stop subsequent Task 2 writes and cannot publish because publication remains Task 3-only.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without
