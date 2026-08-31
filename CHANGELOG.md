@@ -173,6 +173,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recover authority lane handoffs
 - Adapt authority mutations to libvirt
 - Bound raw authority request decoding
+- Bind external boot recovery points
+- Preserve external boot modules
+- Add external boot recovery core
+- Validate recovery ownership tokens
+- Define durable recovery metadata
+- Coordinate external boot lifecycle
+- Persist external boot recovery intent
+- Add authenticated guest tree seam
+- Finalize cleanup tombstones
+- Add external boot persistence adapter
+- Persist pre-stop recovery intent
+- Canonicalize external boot modules
+- Persist target boot projection
 
 ### Changed
 
@@ -334,6 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Append authority journal in constant work
 - Reuse authority journal lane cache
 - Simplify authority core
+- Bind external boot to activation
 
 ### Documentation
 
@@ -1004,6 +1018,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist authority continuation evidence
 - Complete authority implementation plan
 - Narrow provider authority core scope
+- Define local external-boot recovery
+- Bind local recovery to activation
+- Close activation ownership
+- Seal local recovery evidence
+- Unify recovery ownership
+- Align local recovery contracts
+- Make local cleanup retryable
+- Account cleanup tombstones
+- Prove cleanup finalization retries
+- Replay finalized cleanup results
+- Harden preparation recovery
+- Map local external boot implementation
+- Ground local recovery tasks
+- Gate cleanup on restored evidence
+- Assign activation binding migration
+- Bound activation binding migration
+- Define binding migration boundary
+- Specify activation binding migration
+- Bind recovery archive reads
+- Close recovery archive source
+- Classify restore read failures
+- Define recovery source lifetime
+- Stage bounded recovery reads
+- Separate recovery tree lifecycle
+- Make module publication atomic
+- Define atomic module exchange
+- Classify absent module recovery
+- Correct recovery exchange identities
+- Define inactive module moves
+- Classify completed module move
+- Finish absent module cleanup
+- Reject reappeared module trees
+- Close absent recovery matrix
+- Complete module move recovery
+- Close absence replay states
+- Close module source capability
+- Persist module source coordinates
+- Enumerate module restart dispatch
+- Classify ambiguous module moves
+- Disambiguate failed module moves
+- Define recovery archive locking
+- Clarify cleanup proof boundary
 
 ### Fixed
 
@@ -1634,6 +1690,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind stored authority operation
 - Align authority mutation journal binding
 - Redact authority recovery logs
+- Harden activation binding migration
+- Require validated binding provenance
+- Isolate module recovery I/O
+- Harden module recovery boundaries
+- Serialize recovery publication
+- Preserve recovery cleanup failures
+- Complete source constructor cleanup
+- Classify ambiguous module publication
+- Classify all module move failures
+- Close publication terminal rows
+- Resume durable prepare intent
+- Retry interrupted artifact publication
+- Harden initial intent publication
+- Sync resumed initial intent
+- Make cleanup retry tombstone-aware
 
 ### Security
 
