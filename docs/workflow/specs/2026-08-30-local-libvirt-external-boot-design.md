@@ -87,7 +87,9 @@ class GuestRecoveryWriter(Protocol):
         self, tree: AuthenticatedGuestTree, release: str, sink: RecoveryArchiveSink
     ) -> ModuleCapture: ...
     def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState: ...
-    def install(self, tree: AuthenticatedGuestTree, release: str, source: Path) -> str: ...
+    def install(
+        self, tree: AuthenticatedGuestTree, release: str, source: KernelBundleSource
+    ) -> str: ...
     def restore(
         self,
         tree: AuthenticatedGuestTree,
@@ -107,6 +109,14 @@ walker; it exposes no overlay or guest path, staging name, live-tree rename/publ
 phase write, fsync-ordering decision, or restart-classification operation. Task 2 neither creates nor
 recognizes persistent `.kdive-partial`, `.kdive-previous`, or equivalent names. Closing the tree and
 deciding staging cleanup remain the Task 3 caller's responsibility after Task 2 returns.
+
+`KernelBundleSource` is a single-use read-only capability constructed by Task 3 only after
+authenticating the materialization and resolving its provider-owned artifact beneath the configured
+root. It retains an already-open no-follow regular-file descriptor, binds the expected digest and
+bounded size, verifies service ownership and private mode, exposes only a bounded stream, and closes
+on success or error. It accepts and returns no host path. A digest, size, owner, mode, type,
+substitution, reuse, or read failure stops Task 2 mutation under the same pre-write/post-write rules
+as `RecoveryArchiveSource`.
 
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are symmetric owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` only after it authenticates the recovery token and resolves the exact
@@ -375,6 +385,10 @@ They exercise exact and mismatched three-name layouts under `absence-live`, `abs
 `absence-cleaned`, including terminal idempotent replay and reappearance conflicts.
 Old-aside removal is completion-evidence-gated. Tests also prove no guestmount, `renameat2`,
 appliance helper, or new host prerequisite is used.
+Kernel-bundle-source tests cover wrong materialization binding, symlink/non-regular/foreign-owner/
+non-private/over-limit input, descriptor substitution, digest and short-read failure, single-use
+rejection, deterministic close, and path opacity. Contract tests pin
+`install(tree, release, source)` with `KernelBundleSource`, never `Path`.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without

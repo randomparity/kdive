@@ -145,7 +145,9 @@ class GuestRecoveryWriter(Protocol):
         self, tree: AuthenticatedGuestTree, release: str, sink: RecoveryArchiveSink
     ) -> ModuleCapture: ...
     def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState: ...
-    def install(self, tree: AuthenticatedGuestTree, release: str, source: Path) -> str: ...
+    def install(
+        self, tree: AuthenticatedGuestTree, release: str, source: KernelBundleSource
+    ) -> str: ...
     def restore(
         self,
         tree: AuthenticatedGuestTree,
@@ -169,6 +171,11 @@ contains only relative inspection/mutation operations. It exposes no overlay or 
 name, live rename/publication, durable phase write, fsync-ordering decision, or restart classifier.
 Task 2 creates and recognizes no persistent `.kdive-partial`, `.kdive-previous`, or equivalent
 namespace. Task 3 closes the capability and decides staging cleanup after Task 2 returns.
+
+Task 3 constructs single-use `KernelBundleSource` only after authenticating the materialization and
+resolving its provider-owned artifact. It retains an already-open no-follow regular-file descriptor,
+binds expected digest and bounded size, verifies service owner/private mode, exposes only a bounded
+read stream, and closes on every exit. It accepts and returns no path.
 
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are injected owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` after resolving and authenticating the recovery token beneath its
@@ -202,6 +209,9 @@ Absent restoration never opens the source.
    restart-classification method; assert Task 2 never creates `.kdive-partial`, `.kdive-previous`,
    or an equivalent persistent name. Inject a manifest comparator fault and observe red before
    restoring.
+   Add install-source tests for wrong binding, symlink/non-regular/foreign-owner/non-private/
+   over-limit input, substitution, digest/short-read failure, reuse, close, and path opacity. Pin
+   `install(tree, release, source: KernelBundleSource)` and inject a digest-comparator fault.
 4. Run `just test-verbose tests/providers/local_libvirt/lifecycle/boot/test_recovery.py`; expect all
    tests passed. Run lint/type/diff checks and commit as
    `feat(local-libvirt): preserve external boot modules`.
@@ -279,6 +289,21 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
    running-kernel readiness only and never opens a live overlay. Cleanup after `recovered`
    authenticates complete point equality and `source-restored`; it performs no fresh guestfs/live
    composite observation even when the restored source is running.
+
+   Implement restart dispatch as the following exact phase/layout rules; unmatched, duplicated,
+   unowned, unreadable, malformed, or third layouts conflict with zero mutation and remain inactive:
+
+   - present prior/desired/absent resumes pre-move or rollback; absent/desired/prior resumes
+     old-aside; desired/absent/prior resumes new-live;
+   - desired/absent/absent with completion pending freshly verifies desired and may only fsync
+     `publication-complete`;
+   - `absence-live` accepts only absent/absent/prior and may only fsync `absence-complete` before
+     bounded cleanup;
+   - `absence-complete` requires live/staging absent and permits only bounded no-follow removal of
+     authenticated prior old-aside or its partial-deletion continuation; all names absent permits
+     only guest sync plus `absence-cleaned`; any present live or staging conflicts;
+   - `absence-cleaned` is terminal only with all names absent; any reappearance or malformed name
+     conflicts. Boot/readiness/lifecycle advancement remains blocked until `absence-cleaned`.
 7. Implement cleanup as payload deletion plus authenticated accounted tombstone. Implement U1a
    finalization: present tombstone requires exact proof equality; absent success requires the exact
    current-binding, same-operation `mutation-started` proof supplied by #2140. Reject every stale,
@@ -303,6 +328,10 @@ unreadable, or cross-owner state makes zero writes; exact recovery and cleanup a
    and assert exact continuation or conflict. Cover present, present-empty, and desired-absence
    matrices; assert the live-name absence window occurs only while verified inactive and no
    boot/readiness/lifecycle advancement precedes durable desired-state verification.
+   Parameterize every exact and one-field-mismatched live/staging/old layout under `old-aside`,
+   `new-live`, publication pending, `absence-live`, `absence-complete`, and `absence-cleaned`.
+   Include partial old-aside deletion, post-removal evidence-only completion, terminal replay, and
+   live/staging reappearance conflicts; snapshot guest trees before and after every rejected case.
 2. Race/replay two bindings across same System/Run with different activation IDs; substitute every
    RecoveryPoint field and U1a proof field; assert before/after filesystem/XML snapshots are equal.
 3. Model U1a windows: unresolved exact mutation-started after delete succeeds; stale/current-binding
