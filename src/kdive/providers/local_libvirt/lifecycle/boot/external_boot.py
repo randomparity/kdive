@@ -11,7 +11,11 @@ from typing import Protocol
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
-from kdive.providers.ports.external_boot import ComponentState
+from kdive.providers.ports.external_boot import (
+    ComponentState,
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+)
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 
 
@@ -42,6 +46,18 @@ class ModulePublicationIO(Protocol):
     def remove_old(self) -> None: ...
     def guest_sync(self) -> None: ...
     def record_phase(self, phase: PublicationPhase) -> None: ...
+
+
+def recovery_directory_name(
+    reference: OpaqueProviderRef, binding: ExternalBootActivationBinding
+) -> str:
+    """Resolve a closed recovery token to its owner-derived directory name."""
+    parts = reference.ref.split("/")
+    if len(parts) != 3 or parts[0] != "local-recovery-v1":
+        raise ValueError("external-boot recovery reference is malformed")
+    if parts[1] != binding.system_id or parts[2] != binding.activation_id:
+        raise ValueError("external-boot recovery reference owner does not match binding")
+    return f"{parts[1]}.{parts[2]}"
 
 
 def _sync_phase(io: ModulePublicationIO, phase: PublicationPhase) -> None:

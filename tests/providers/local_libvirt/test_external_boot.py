@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     ModuleLayout,
     PublicationPhase,
     advance_absence_publication,
     advance_module_publication,
+    recovery_directory_name,
     render_target_xml,
 )
-from kdive.providers.ports.external_boot import PresentComponentState
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    PresentComponentState,
+)
 
 _SOURCE_XML = """<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
   <name>kdive-system</name>
@@ -153,3 +159,36 @@ def test_absence_terminal_rejects_reappeared_tree() -> None:
             io, phase=PublicationPhase.ABSENCE_CLEANED, layout=layout, prior=_PRIOR
         )
     assert io.actions == ["inactive"]
+
+
+_BINDING = ExternalBootActivationBinding(
+    system_id="00000000-0000-0000-0000-000000000001",
+    run_id="00000000-0000-0000-0000-000000000002",
+    activation_id="00000000-0000-0000-0000-000000000003",
+)
+
+
+def test_recovery_reference_resolves_only_exact_binding() -> None:
+    reference = OpaqueProviderRef(
+        ref=(
+            "local-recovery-v1/00000000-0000-0000-0000-000000000001/"
+            "00000000-0000-0000-0000-000000000003"
+        )
+    )
+    assert recovery_directory_name(reference, _BINDING) == (
+        "00000000-0000-0000-0000-000000000001.00000000-0000-0000-0000-000000000003"
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "local-recovery-v1/00000000-0000-0000-0000-000000000009/"
+        "00000000-0000-0000-0000-000000000003",
+        "local-recovery-v1/00000000-0000-0000-0000-000000000001/not-a-uuid",
+        "other/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000003",
+    ],
+)
+def test_recovery_reference_rejects_cross_owner_or_malformed(reference: str) -> None:
+    with pytest.raises((ValueError, ValidationError), match="recovery"):
+        recovery_directory_name(OpaqueProviderRef(ref=reference), _BINDING)
