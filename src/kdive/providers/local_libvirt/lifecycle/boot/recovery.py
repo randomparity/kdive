@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -154,9 +155,10 @@ class KernelBundleSource(_SingleUseFile):
         size: int,
         digest: str,
     ) -> None:
+        release = _release(release)
         super().__init__(fd, expected_size=size, expected_digest=digest)
         self.binding = binding
-        self.release = _release(release)
+        self.release = release
 
     def matches(self, tree: AuthenticatedGuestTree, release: str) -> bool:
         return self.binding == tree.binding and self.release == release == tree.release
@@ -173,28 +175,33 @@ class RecoveryArchiveSource(_SingleUseFile):
         release: str,
         capture: ModuleArchiveCapture,
     ) -> None:
+        release = _release(release)
         _validate_directory(directory_fd)
-        self._directory_fd = os.dup(directory_fd)
+        self._directory_fd = -1
         self._directory_closed = False
-        fd = os.open(
-            capture.archive_filename,
-            os.O_RDONLY | os.O_NOFOLLOW,
-            dir_fd=directory_fd,
-        )
+        fd = -1
         try:
+            self._directory_fd = os.dup(directory_fd)
+            fd = os.open(
+                capture.archive_filename,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=self._directory_fd,
+            )
             super().__init__(
                 fd,
                 expected_size=capture.archive_bytes,
                 expected_digest=capture.archive_sha256,
             )
         except BaseException:
-            os.close(self._directory_fd)
+            if self._directory_fd >= 0:
+                os.close(self._directory_fd)
             self._directory_closed = True
             raise
         finally:
-            os.close(fd)
+            if fd >= 0:
+                os.close(fd)
         self.binding = binding
-        self.release = _release(release)
+        self.release = release
         self.capture = capture
 
     def close(self) -> None:
@@ -237,10 +244,11 @@ class RecoveryArchiveSink:
         binding: ExternalBootActivationBinding,
         release: str,
     ) -> None:
+        release = _release(release)
         _validate_directory(directory_fd)
         self._directory_fd = os.dup(directory_fd)
         self.binding = binding
-        self.release = _release(release)
+        self.release = release
         self._used = False
         self._closed = False
 
@@ -260,7 +268,10 @@ class RecoveryArchiveSink:
         fd = -1
         created: tuple[int, int] | None = None
         primary: BaseException | None = None
+        locked = False
         try:
+            fcntl.flock(self._directory_fd, fcntl.LOCK_EX)
+            locked = True
             fd = os.open(
                 partial,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -298,12 +309,20 @@ class RecoveryArchiveSink:
                 exc.add_note(f"recovery archive cleanup failed: {type(cleanup).__name__}")
             raise
         finally:
+            cleanup: BaseException | None = None
+            if locked:
+                try:
+                    fcntl.flock(self._directory_fd, fcntl.LOCK_UN)
+                except BaseException as exc:
+                    cleanup = exc
             try:
                 self.close()
             except BaseException as exc:
+                cleanup = cleanup or exc
+            if cleanup is not None:
                 if primary is None:
-                    raise
-                primary.add_note(f"recovery archive close failed: {type(exc).__name__}")
+                    raise cleanup
+                primary.add_note(f"recovery archive cleanup failed: {type(cleanup).__name__}")
 
 
 class _VerifiedReader:
@@ -463,6 +482,8 @@ def _validated_entries(tree: AuthenticatedGuestTree) -> list[GuestTreeEntry]:
             _text(cast(str, entry.target), "symlink target")
         elif entry.target is not None:
             raise ValueError("non-symlink module entry has a target")
+        if not entry.xattrs_supported and entry.xattrs:
+            raise ValueError("module tree has xattrs while support is false")
         _xattrs(entry.xattrs)
         result.append(entry.model_copy(update={"path": path}))
         if len(result) > MAX_ENTRIES:

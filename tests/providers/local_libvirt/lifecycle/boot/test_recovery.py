@@ -7,6 +7,7 @@ import inspect
 import io
 import os
 import tarfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -440,6 +441,144 @@ def test_sink_cleanup_rechecks_created_inode_before_unlink(
         _sink(tmp_path).publish(io.BytesIO(b"ours"))
     monkeypatch.setattr(recovery, "_copy_to_fd", original)
     assert (tmp_path / ".modules.tar.partial").read_bytes() == b"replacement"
+
+
+def test_sink_publishers_hold_one_directory_lock_through_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    second_opened = threading.Event()
+    calls: list[bytes] = []
+    original = recovery._copy_to_fd
+    original_open = os.open
+
+    def controlled(source: BinaryIO, fd: int, limit: int) -> tuple[str, int]:
+        value = source.read()
+        calls.append(value)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(2)
+        return original(io.BytesIO(value), fd, limit)
+
+    monkeypatch.setattr(recovery, "_copy_to_fd", controlled)
+
+    def tracked_open(path: str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        is_second_partial = threading.current_thread().name == "second-publisher" and os.fspath(
+            path
+        ).startswith(".")
+        if is_second_partial:
+            second_opened.set()
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    errors: list[BaseException] = []
+
+    def publish(value: bytes) -> None:
+        try:
+            _sink(tmp_path).publish(io.BytesIO(value))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=publish, args=(b"first",))
+    second = threading.Thread(target=publish, args=(b"second",), name="second-publisher")
+    first.start()
+    assert entered.wait(2)
+    second.start()
+    assert not second_opened.wait(0.1)
+    assert calls == [b"first"]
+    release.set()
+    first.join(2)
+    second.join(2)
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert calls == [b"first", b"second"]
+    assert (tmp_path / "modules.tar").read_bytes() == b"second"
+
+
+def test_capability_constructor_failures_leave_descriptor_count_unchanged(tmp_path: Path) -> None:
+    capture = ModuleArchiveCapture(
+        manifest="sha256:" + "0" * 64,
+        entry_count=0,
+        uncompressed_bytes=0,
+        archive_sha256=_digest(b"x"),
+        archive_bytes=1,
+    )
+    (tmp_path / "modules.tar").write_bytes(b"x")
+    (tmp_path / "modules.tar").chmod(0o600)
+    directory_fd = _dir_fd(tmp_path)
+    bundle_fd = _file_fd(tmp_path / "bundle", b"x")
+    try:
+        before = len(list(Path("/proc/self/fd").iterdir()))
+        for constructor in (
+            lambda: RecoveryArchiveSink(directory_fd, binding=BINDING, release="../bad"),
+            lambda: RecoveryArchiveSource(
+                directory_fd, binding=BINDING, release="../bad", capture=capture
+            ),
+            lambda: KernelBundleSource(
+                bundle_fd,
+                binding=BINDING,
+                release="../bad",
+                size=1,
+                digest=_digest(b"x"),
+            ),
+        ):
+            with pytest.raises(ValueError, match="release"):
+                constructor()
+            assert len(list(Path("/proc/self/fd").iterdir())) == before
+    finally:
+        os.close(bundle_fd)
+        os.close(directory_fd)
+
+
+def test_recovery_source_open_and_validation_failures_close_all_descriptors(tmp_path: Path) -> None:
+    capture = ModuleArchiveCapture(
+        manifest="sha256:" + "0" * 64,
+        entry_count=0,
+        uncompressed_bytes=0,
+        archive_sha256=_digest(b"x"),
+        archive_bytes=1,
+    )
+    directory_fd = _dir_fd(tmp_path)
+    try:
+        before = len(list(Path("/proc/self/fd").iterdir()))
+        with pytest.raises(FileNotFoundError):
+            RecoveryArchiveSource(directory_fd, binding=BINDING, release=RELEASE, capture=capture)
+        assert len(list(Path("/proc/self/fd").iterdir())) == before
+        (tmp_path / "modules.tar").write_bytes(b"xx")
+        (tmp_path / "modules.tar").chmod(0o600)
+        with pytest.raises(ValueError, match="size"):
+            RecoveryArchiveSource(directory_fd, binding=BINDING, release=RELEASE, capture=capture)
+        assert len(list(Path("/proc/self/fd").iterdir())) == before
+    finally:
+        os.close(directory_fd)
+
+
+def test_tree_xattr_support_mismatch_rejects_before_read_or_publish(tmp_path: Path) -> None:
+    tree = FakeTree(
+        [_entry("x", b"x", xattrs_supported=False, xattrs={"security.x": b"value"})],
+        {"x": b"x"},
+    )
+    with pytest.raises(ValueError, match="xattrs while support is false"):
+        RealGuestRecoveryWriter().capture(tree, RELEASE, _sink(tmp_path))
+    assert tree.opened == []
+    assert not (tmp_path / "modules.tar").exists()
+
+
+def test_tree_population_stops_after_first_write_failure(tmp_path: Path) -> None:
+    source_tree = FakeTree([_entry("a", b"a"), _entry("b", b"b")], {"a": b"a", "b": b"b"})
+    capture = RealGuestRecoveryWriter().capture(source_tree, RELEASE, _sink(tmp_path))
+    assert isinstance(capture, ModuleArchiveCapture)
+
+    class FailingTree(FakeTree):
+        def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None:
+            self.writes.append(("regular", entry.path))
+            raise OSError("injected guest write")
+
+    target = FailingTree(mutable=True)
+    with pytest.raises(OSError, match="guest write"):
+        RealGuestRecoveryWriter().restore(target, RELEASE, capture, _source(tmp_path, capture))
+    assert target.writes == [("regular", "a")]
 
 
 def test_pax_xattrs_and_archive_digest_are_insertion_and_architecture_stable(
