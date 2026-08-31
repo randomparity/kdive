@@ -186,6 +186,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist pre-stop recovery intent
 - Canonicalize external boot modules
 - Persist target boot projection
+- Add external boot operation session
+- Build external boot sessions lazily
 
 ### Changed
 
@@ -1060,6 +1062,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disambiguate failed module moves
 - Define recovery archive locking
 - Clarify cleanup proof boundary
+- Design external boot session
 
 ### Fixed
 
@@ -1705,6 +1708,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden initial intent publication
 - Sync resumed initial intent
 - Make cleanup retry tombstone-aware
+- Narrow external boot session authority
+- Bind sessions to lane pinner
+- Fence every guest operation
+- Snapshot pinned operation ownership
+- Keep operation pins session-private
+- Authenticate external boot disk shape
+- Bind guest transfers to artifact root
+- Retain exact overlay descriptor
+- Harden guest descriptor operations
+- Mount inspected guest root
 
 ### Security
 
