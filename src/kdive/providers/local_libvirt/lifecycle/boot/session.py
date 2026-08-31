@@ -222,6 +222,7 @@ class _GuardedGuest:
     def _handle(self) -> _Guest:
         if self._owner._closed:
             raise RuntimeError("guest wrapper is closed")
+        self._owner._session._guard_guest_operation(self._owner)
         return self._guest
 
 
@@ -229,7 +230,8 @@ class _ConcreteSession:
     def __init__(
         self,
         *,
-        lease: LocalExternalBootOperationLease,
+        system_id: UUID,
+        binding: ExternalBootActivationBinding,
         pin: LocalExternalBootOperationPin,
         connection: _Connection,
         domain: _Domain,
@@ -244,7 +246,8 @@ class _ConcreteSession:
         observe_running: Callable[[UUID], RunningKernelObservation],
         cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None],
     ) -> None:
-        self._lease = lease
+        self._system_id = system_id
+        self._binding = binding
         self._pin: LocalExternalBootOperationPin | None = pin
         self._connection: _Connection | None = connection
         self._domain: _Domain | None = domain
@@ -264,14 +267,14 @@ class _ConcreteSession:
     def inspect_closed(self) -> ClosedDomainInspection:
         domain = self._require_open_domain()
         xml = domain.XMLDesc(0)
-        root = _parse_owned_xml(xml, self._lease.system_id, self._overlay.path)
+        root = _parse_owned_xml(xml, self._system_id, self._overlay.path)
         active = _active(domain)
         return ClosedDomainInspection(
             xml=xml.encode(),
             active=active,
             definition_identity=_preserved_identity(root),
             source_boot_identity=_boot_identity(root),
-            domain_name=domain_name_for(self._lease.system_id),
+            domain_name=domain_name_for(self._system_id),
             overlay=OverlayIdentity(self._overlay.device, self._overlay.inode),
         )
 
@@ -301,7 +304,7 @@ class _ConcreteSession:
 
     def define_xml(self, xml: str) -> None:
         self.require_inactive()
-        _parse_owned_xml(xml, self._lease.system_id, self._overlay.path)
+        _parse_owned_xml(xml, self._system_id, self._overlay.path)
         assert self._connection is not None
         prior = self._domain
         replacement = self._connection.defineXML(xml)
@@ -310,18 +313,21 @@ class _ConcreteSession:
             prior.free()
 
     def start(self) -> None:
+        self._require_no_guest_context()
         self._require_open_domain().create()
 
     def readiness(self) -> ReadinessResult:
         self._require_open_domain()
-        return self._readiness(self._lease.system_id)
+        return self._readiness(self._system_id)
 
     def observe_running(self) -> RunningKernelObservation:
         self._require_open_domain()
-        return self._observe_running(self._lease.system_id)
+        return self._observe_running(self._system_id)
 
     def restore_power(self, prior: Literal["running", "inactive"]) -> None:
         domain = self._require_open_domain()
+        if prior == "running":
+            self._require_no_guest_context()
         active = _active(domain)
         if prior == "running" and not active:
             domain.create()
@@ -331,7 +337,7 @@ class _ConcreteSession:
     def cleanup_payloads(self) -> None:
         self.require_inactive()
         assert self._artifact_fd is not None
-        self._cleanup_payloads(self._artifact_fd, self._lease.binding)
+        self._cleanup_payloads(self._artifact_fd, self._binding)
 
     def close(self) -> None:
         if self._closed:
@@ -363,6 +369,8 @@ class _ConcreteSession:
             raise ExceptionGroup("failed to close local external-boot session", errors)
 
     def _open_guest_context(self, wrapper: _GuestContext) -> _Guest:
+        if self._guests:
+            raise RuntimeError("an inactive guest context is already open")
         self.require_inactive()
         if self._stat_overlay(self._overlay.path) != (
             self._overlay.device,
@@ -382,6 +390,21 @@ class _ConcreteSession:
 
     def _discard_guest(self, guest: _GuestContext) -> None:
         self._guests.discard(guest)
+
+    def _guard_guest_operation(self, guest: _GuestContext) -> None:
+        if guest not in self._guests:
+            raise RuntimeError("guest wrapper is closed")
+        self.require_inactive()
+        if self._stat_overlay(self._overlay.path) != (
+            self._overlay.device,
+            self._overlay.inode,
+        ):
+            raise ValueError("System overlay changed before guest operation")
+
+    def _require_no_guest_context(self) -> None:
+        self._require_open_domain()
+        if self._guests:
+            raise RuntimeError("power activation is forbidden while a guest context is open")
 
     def _require_open_domain(self) -> _Domain:
         if self._closed or self._domain is None:
@@ -419,21 +442,27 @@ class LocalExternalBootSessionFactory:
 
     def open(self, lease: LocalExternalBootOperationLease) -> LocalExternalBootSession:
         pin = self._pin_lease(lease)
+        system_id = lease.system_id
+        binding = lease.binding
+        if binding.system_id != str(system_id):
+            pin.close()
+            raise ValueError("operation lease binding does not own the System")
         connection: _Connection | None = None
         domain: _Domain | None = None
         artifact_fd: int | None = None
         try:
             connection = self._connect()
-            expected_name = domain_name_for(lease.system_id)
+            expected_name = domain_name_for(system_id)
             domain = connection.lookupByName(expected_name)
-            expected_overlay = overlay_path(lease.system_id)
+            expected_overlay = overlay_path(system_id)
             xml = domain.XMLDesc(0)
-            _parse_owned_xml(xml, lease.system_id, expected_overlay)
+            _parse_owned_xml(xml, system_id, expected_overlay)
             device, inode = self._stat_overlay(expected_overlay)
             overlay = _BoundOverlay(device, inode, expected_overlay)
             artifact_fd = self._open_artifact_root(lease)
             return _ConcreteSession(
-                lease=lease,
+                system_id=system_id,
+                binding=binding,
                 pin=pin,
                 connection=connection,
                 domain=domain,

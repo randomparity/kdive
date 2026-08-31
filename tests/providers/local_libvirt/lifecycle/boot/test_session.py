@@ -260,6 +260,54 @@ def test_guest_fences_and_rechecks_overlay_and_can_reopen() -> None:
     session.close()
 
 
+def test_guest_rechecks_inactive_and_overlay_before_every_operation() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    stats = [(8, 9)]
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, domain),
+        open_artifact_root=lambda _lease: 41,
+        open_guest=lambda: Guest(events),
+        stat_overlay=lambda _path: stats[-1],
+        close_descriptor=lambda _fd: None,
+    )
+    session = factory.open(_lease())
+    with session.guest() as guest:
+        domain.active = True
+        before = events.count("guest.exists:/etc/os-release")
+        with pytest.raises(RuntimeError, match="inactive"):
+            guest.exists("/etc/os-release")
+        assert events.count("guest.exists:/etc/os-release") == before
+        domain.active = False
+        stats.append((8, 10))
+        with pytest.raises(ValueError, match="overlay changed"):
+            guest.exists("/etc/os-release")
+        assert events.count("guest.exists:/etc/os-release") == before
+    session.close()
+
+
+def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    session = _factory(events, domain).open(_lease())
+    first = session.guest()
+    first.__enter__()
+    guest_opens = events.count("guest.open")
+    with pytest.raises(RuntimeError, match="already open"):
+        session.guest().__enter__()
+    assert events.count("guest.open") == guest_opens
+    with pytest.raises(RuntimeError, match="guest context"):
+        session.start()
+    with pytest.raises(RuntimeError, match="guest context"):
+        session.restore_power("running")
+    assert "domain.create" not in events
+    first.__exit__(None, None, None)
+    with session.guest():
+        pass
+    session.close()
+
+
 def test_close_poisons_wrappers_and_releases_pin_last() -> None:
     events: list[str] = []
     lease = _lease()
@@ -395,6 +443,44 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     ):
         with pytest.raises(RuntimeError, match="closed"):
             call()
+
+
+def test_session_snapshots_ownership_after_lane_pin() -> None:
+    events: list[str] = []
+    observed_ids: list[UUID] = []
+    cleaned: list[ExternalBootActivationBinding] = []
+    lease = _lease()
+    original_binding = lease.binding
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _lease: 41,
+        open_guest=lambda: Guest(events),
+        stat_overlay=lambda _path: (8, 9),
+        close_descriptor=lambda _fd: None,
+        readiness=lambda system_id: observed_ids.append(system_id) or ReadinessResult(True, True),
+        observe_running=lambda system_id: (
+            observed_ids.append(system_id)
+            or RunningKernelObservation(
+                architecture="x86_64", release="6.1.0", gnu_build_id="00112233"
+            )
+        ),
+        cleanup_payloads=lambda _root, binding: cleaned.append(binding),
+    )
+    session = factory.open(lease)
+    lease.system_id = UUID(int=9)
+    lease.binding = ExternalBootActivationBinding(
+        system_id=str(UUID(int=9)),
+        run_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        activation_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    )
+    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    session.readiness()
+    session.observe_running()
+    session.cleanup_payloads()
+    assert observed_ids == [SYSTEM_ID, SYSTEM_ID]
+    assert cleaned == [original_binding]
+    session.close()
 
 
 def test_define_frees_distinct_prior_domain_reference() -> None:
