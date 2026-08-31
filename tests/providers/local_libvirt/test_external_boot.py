@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RecoveryPhase,
     advance_absence_publication,
     advance_module_publication,
+    convert_kernel_bundle_modules,
     recovery_directory_name,
     render_target_xml,
 )
@@ -83,6 +86,70 @@ def test_render_target_xml_omits_optional_initrd() -> None:
 def test_render_target_xml_rejects_malformed_forbidden_or_non_nfc(source: str) -> None:
     with pytest.raises(ValueError, match="domain XML"):
         render_target_xml(source, kernel="kernel", initrd=None, cmdline="root=/dev/vda1")
+
+
+def _raw_bundle(names: list[tuple[str, bytes]]) -> bytes:
+    result = io.BytesIO()
+    with tarfile.open(fileobj=result, mode="w:gz") as archive:
+        for name, content in names:
+            member = tarfile.TarInfo(name)
+            member.mode, member.uid, member.gid = 0o640, 17, 23
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    return result.getvalue()
+
+
+def test_bundle_converter_is_deterministic_and_declares_xattrs_unsupported() -> None:
+    entries = [
+        ("lib/modules/6.12.0/kernel/z.ko", b"z"),
+        ("lib/modules/6.12.0/kernel/a.ko", b"a"),
+    ]
+    outputs: list[bytes] = []
+    for ordered in (entries, list(reversed(entries))):
+        destination = io.BytesIO()
+        digest, size = convert_kernel_bundle_modules(
+            io.BytesIO(_raw_bundle(ordered)), destination, release="6.12.0"
+        )
+        assert digest == "sha256:" + hashlib.sha256(destination.getvalue()).hexdigest()
+        assert size == len(destination.getvalue())
+        outputs.append(destination.getvalue())
+    assert outputs[0] == outputs[1]
+    with tarfile.open(fileobj=io.BytesIO(outputs[0]), mode="r:") as archive:
+        members = archive.getmembers()
+    assert [member.name for member in members] == ["kernel/a.ko", "kernel/z.ko"]
+    assert all(member.pax_headers == {"KDIVE.xattrs-supported": "0"} for member in members)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "lib/modules/6.12.0/../escape",
+        "/lib/modules/6.12.0/kernel/a.ko",
+        "lib/modules/other/kernel/a.ko",
+    ],
+)
+def test_bundle_converter_rejects_hostile_or_cross_release_name_before_output(name: str) -> None:
+    destination = io.BytesIO()
+    with pytest.raises(ValueError, match="module bundle"):
+        convert_kernel_bundle_modules(
+            io.BytesIO(_raw_bundle([(name, b"x")])), destination, release="6.12.0"
+        )
+    assert destination.getvalue() == b""
+
+
+def test_bundle_converter_omits_only_root_absolute_build_link() -> None:
+    source = io.BytesIO()
+    with tarfile.open(fileobj=source, mode="w:gz") as archive:
+        link = tarfile.TarInfo("lib/modules/6.12.0/build")
+        link.type, link.linkname = tarfile.SYMTYPE, "/build/tree"
+        archive.addfile(link)
+        regular = tarfile.TarInfo("lib/modules/6.12.0/kernel/a.ko")
+        regular.size = 1
+        archive.addfile(regular, io.BytesIO(b"a"))
+    destination = io.BytesIO()
+    convert_kernel_bundle_modules(io.BytesIO(source.getvalue()), destination, release="6.12.0")
+    with tarfile.open(fileobj=io.BytesIO(destination.getvalue()), mode="r:") as archive:
+        assert archive.getnames() == ["kernel/a.ko"]
 
 
 _PRIOR = PresentComponentState(manifest="sha256:" + "1" * 64)

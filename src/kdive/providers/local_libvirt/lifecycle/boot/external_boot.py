@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import stat
+import tarfile
 import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
@@ -14,13 +16,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, BinaryIO, Literal, Protocol
+from typing import Annotated, BinaryIO, Literal, Protocol, cast
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from kdive.providers.local_libvirt.lifecycle.boot.recovery import GuestTreeEntry, ModuleCapture
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    MAX_ARCHIVE_BYTES,
+    MAX_ENTRIES,
+    MAX_REGULAR_BYTES,
+    GuestTreeEntry,
+    ModuleCapture,
+)
 from kdive.providers.ports.external_boot import (
     ComponentState,
     ExternalBootActivationBinding,
@@ -160,6 +168,165 @@ class ModuleLayout:
     live: ComponentState | None
     staging: ComponentState | None
     old: ComponentState | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ConvertedMember:
+    name: str
+    mode: int
+    uid: int
+    gid: int
+    kind: Literal["directory", "regular", "symlink"]
+    size: int
+    target: str
+    offset: int
+
+
+def convert_kernel_bundle_modules(
+    source: BinaryIO, destination: BinaryIO, *, release: str
+) -> tuple[str, int]:
+    """Convert one raw bundle module tree into Task 2's canonical archive."""
+    prefix = f"lib/modules/{release}/"
+    entries: list[_ConvertedMember] = []
+    seen: set[str] = set()
+    regular_bytes = 0
+    with tempfile.TemporaryFile() as content:
+        with tarfile.open(fileobj=source, mode="r|gz") as archive:
+            for member in archive:
+                if member.name == "boot/vmlinuz" or member.name in {
+                    "lib",
+                    "lib/modules",
+                    f"lib/modules/{release}",
+                }:
+                    continue
+                if not member.name.startswith(prefix):
+                    raise ValueError("module bundle contains a cross-release or unknown entry")
+                name = _canonical_bundle_path(member.name[len(prefix) :])
+                if (
+                    member.issym()
+                    and member.linkname.startswith("/")
+                    and name
+                    in {
+                        "build",
+                        "source",
+                    }
+                ):
+                    continue
+                if name in seen:
+                    raise ValueError("module bundle contains duplicate entries")
+                seen.add(name)
+                kind = _bundle_member_kind(member)
+                target = (
+                    _canonical_bundle_target(name, member.linkname) if kind == "symlink" else ""
+                )
+                size, offset = 0, content.tell()
+                if kind == "regular":
+                    regular_bytes += member.size
+                    if regular_bytes > MAX_REGULAR_BYTES:
+                        raise ValueError("module bundle exceeds the regular-byte bound")
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        raise ValueError("module bundle regular entry is unreadable")
+                    size = _copy_exact(cast(BinaryIO, extracted), content, member.size)
+                entries.append(
+                    _ConvertedMember(
+                        name,
+                        member.mode,
+                        member.uid,
+                        member.gid,
+                        kind,
+                        size,
+                        target,
+                        offset,
+                    )
+                )
+                if len(entries) > MAX_ENTRIES:
+                    raise ValueError("module bundle exceeds the entry-count bound")
+        with tempfile.TemporaryFile() as converted:
+            with tarfile.open(fileobj=converted, mode="w", format=tarfile.PAX_FORMAT) as output:
+                for entry in sorted(entries, key=lambda value: value.name.encode()):
+                    info = tarfile.TarInfo(entry.name)
+                    info.mode, info.uid, info.gid, info.mtime = (
+                        entry.mode,
+                        entry.uid,
+                        entry.gid,
+                        0,
+                    )
+                    info.uname = info.gname = ""
+                    info.pax_headers = {"KDIVE.xattrs-supported": "0"}
+                    reader: BinaryIO | None = None
+                    if entry.kind == "directory":
+                        info.type = tarfile.DIRTYPE
+                    elif entry.kind == "symlink":
+                        info.type, info.linkname = tarfile.SYMTYPE, entry.target
+                    else:
+                        info.size = entry.size
+                        content.seek(entry.offset)
+                        reader = cast(BinaryIO, _BoundedSlice(content, entry.size))
+                    output.addfile(info, reader)
+            size = converted.tell()
+            if size > MAX_ARCHIVE_BYTES:
+                raise ValueError("canonical module archive exceeds its byte bound")
+            converted.seek(0)
+            digest = hashlib.sha256()
+            while chunk := converted.read(1024 * 1024):
+                digest.update(chunk)
+                destination.write(chunk)
+    return "sha256:" + digest.hexdigest(), size
+
+
+class _BoundedSlice:
+    def __init__(self, source: BinaryIO, remaining: int) -> None:
+        self._source, self._remaining = source, remaining
+
+    def read(self, size: int = -1) -> bytes:
+        count = self._remaining if size < 0 else min(size, self._remaining)
+        data = self._source.read(count)
+        self._remaining -= len(data)
+        return data
+
+
+def _copy_exact(source: BinaryIO, destination: BinaryIO, expected: int) -> int:
+    remaining = expected
+    while remaining:
+        chunk = source.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ValueError("module bundle entry ended before its declared size")
+        destination.write(chunk)
+        remaining -= len(chunk)
+    return expected
+
+
+def _canonical_bundle_path(value: str) -> str:
+    if (
+        not value
+        or value.startswith("/")
+        or unicodedata.normalize("NFC", value) != value
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError("module bundle path is not canonical relative text")
+    return value
+
+
+def _bundle_member_kind(member: tarfile.TarInfo) -> Literal["directory", "regular", "symlink"]:
+    if member.isdir():
+        return "directory"
+    if member.isfile() and not member.islnk():
+        return "regular"
+    if member.issym():
+        return "symlink"
+    raise ValueError("module bundle contains forbidden topology")
+
+
+def _canonical_bundle_target(name: str, target: str) -> str:
+    if unicodedata.normalize("NFC", target) != target:
+        raise ValueError("module bundle symlink target is not NFC")
+    if target.startswith("/"):
+        raise ValueError("module bundle symlink escapes the release tree")
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+    if resolved == ".." or resolved.startswith("../"):
+        raise ValueError("module bundle symlink escapes the release tree")
+    return target
 
 
 class ModulePublicationIO(Protocol):
