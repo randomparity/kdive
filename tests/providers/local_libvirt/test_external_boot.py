@@ -595,6 +595,67 @@ def test_recovery_metadata_store_retries_interrupted_initial_intent(
     assert not (published_directory / ".intent.initial").exists()
 
 
+@pytest.mark.parametrize("publication", ["complete", "pre-stop"])
+def test_existing_exact_initial_intent_syncs_child_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publication: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    intent = _pre_stop(metadata)
+    reference = OpaqueProviderRef(
+        ref=f"local-recovery-v1/{metadata.binding.system_id}/{metadata.binding.activation_id}"
+    )
+    directory = root / f".{recovery_directory_name(reference, metadata.binding)}.partial"
+    directory.mkdir(mode=0o700)
+    expected_model = metadata if publication == "complete" else intent
+    (directory / "intent.json").write_bytes(
+        json.dumps(
+            expected_model.model_dump(mode="json", by_alias=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    )
+    (directory / "intent.json").chmod(0o600)
+    directory_inode = directory.stat().st_ino
+    real_fsync = os.fsync
+    real_rename = os.rename
+    child_synced = False
+
+    def tracking_fsync(fd: int) -> None:
+        nonlocal child_synced
+        opened = os.fstat(fd)
+        if stat.S_ISDIR(opened.st_mode) and opened.st_ino == directory_inode:
+            child_synced = True
+        real_fsync(fd)
+
+    def checked_rename(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        assert child_synced
+        real_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    monkeypatch.setattr(os, "rename", checked_rename)
+    with RecoveryMetadataStore(root) as store:
+        actual = (
+            store.publish(metadata) if publication == "complete" else store.publish_pre_stop(intent)
+        )
+
+    assert actual == reference
+    assert child_synced
+
+
 def test_retry_fsyncs_existing_exact_temporary_before_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

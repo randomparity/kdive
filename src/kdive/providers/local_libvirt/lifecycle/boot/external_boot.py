@@ -1376,6 +1376,7 @@ def _publish_initial_intent(directory_fd: int, data: bytes, *, conflict: str) ->
     if _INTENT_NAME in entries:
         if _read_private_file(directory_fd, _INTENT_NAME) != data:
             raise ValueError(conflict)
+        os.fsync(directory_fd)
         return
     _replace_private_file(
         directory_fd,
