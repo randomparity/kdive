@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
@@ -298,6 +299,29 @@ def _sync_phase(io: ModulePublicationIO, phase: PublicationPhase) -> None:
     io.record_phase(phase)
 
 
+def _move_with_reclassification(
+    io: ModulePublicationIO,
+    move: Callable[[], None],
+    *,
+    before: ModuleLayout,
+    after: ModuleLayout,
+    after_phase: PublicationPhase,
+) -> None:
+    """Retry a no-effect move or record its exact after-effect layout."""
+    try:
+        move()
+    except OSError as exc:
+        io.require_inactive()
+        observed = io.observe_layout()
+        if observed == before:
+            move()
+            return
+        if observed == after:
+            _sync_phase(io, after_phase)
+            return
+        raise ValueError("external-boot module publication conflict") from exc
+
+
 def advance_module_publication(
     io: ModulePublicationIO,
     *,
@@ -323,14 +347,30 @@ def advance_module_publication(
             raise ValueError("external-boot module publication conflict") from exc
         return
     rows = {
-        (PublicationPhase.MOVE_READY, ModuleLayout(prior, desired, None)): io.move_live_to_old,
+        (PublicationPhase.MOVE_READY, ModuleLayout(prior, desired, None)): lambda: (
+            _move_with_reclassification(
+                io,
+                io.move_live_to_old,
+                before=ModuleLayout(prior, desired, None),
+                after=ModuleLayout(None, desired, prior),
+                after_phase=PublicationPhase.OLD_ASIDE,
+            )
+        ),
         (PublicationPhase.MOVE_READY, ModuleLayout(None, desired, prior)): lambda: _sync_phase(
             io, PublicationPhase.OLD_ASIDE
         ),
         (PublicationPhase.OLD_ASIDE, ModuleLayout(desired, None, prior)): lambda: _sync_phase(
             io, PublicationPhase.NEW_LIVE
         ),
-        (PublicationPhase.ROLLBACK_READY, ModuleLayout(None, desired, prior)): io.move_old_to_live,
+        (PublicationPhase.ROLLBACK_READY, ModuleLayout(None, desired, prior)): lambda: (
+            _move_with_reclassification(
+                io,
+                io.move_old_to_live,
+                before=ModuleLayout(None, desired, prior),
+                after=ModuleLayout(prior, desired, None),
+                after_phase=PublicationPhase.ROLLBACK_COMPLETE,
+            )
+        ),
         (PublicationPhase.ROLLBACK_READY, ModuleLayout(prior, desired, None)): lambda: _sync_phase(
             io, PublicationPhase.ROLLBACK_COMPLETE
         ),
@@ -357,7 +397,15 @@ def advance_absence_publication(
     """Perform the sole ADR-0586 action allowed by an absent-tree restart row."""
     io.require_inactive()
     rows = {
-        (PublicationPhase.MOVE_READY, ModuleLayout(prior, None, None)): io.move_live_to_old,
+        (PublicationPhase.MOVE_READY, ModuleLayout(prior, None, None)): lambda: (
+            _move_with_reclassification(
+                io,
+                io.move_live_to_old,
+                before=ModuleLayout(prior, None, None),
+                after=ModuleLayout(None, None, prior),
+                after_phase=PublicationPhase.ABSENCE_LIVE,
+            )
+        ),
         (PublicationPhase.MOVE_READY, ModuleLayout(None, None, prior)): lambda: _sync_phase(
             io, PublicationPhase.ABSENCE_LIVE
         ),

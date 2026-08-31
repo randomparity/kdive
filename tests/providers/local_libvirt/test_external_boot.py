@@ -80,10 +80,10 @@ _DESIRED = PresentComponentState(manifest="sha256:" + "2" * 64)
 
 
 class _PublicationIO:
-    def __init__(self, layout: ModuleLayout, *, fail_staging_move: bool = False) -> None:
+    def __init__(self, layout: ModuleLayout, *, fail_move: str | None = None) -> None:
         self.layout = layout
         self.actions: list[str] = []
-        self.fail_staging_move = fail_staging_move
+        self.fail_move = fail_move
 
     def require_inactive(self) -> None:
         self.actions.append("inactive")
@@ -94,14 +94,18 @@ class _PublicationIO:
 
     def move_live_to_old(self) -> None:
         self.actions.append("live-to-old")
+        if self.fail_move == "live-to-old":
+            raise OSError("ambiguous move result")
 
     def move_staging_to_live(self) -> None:
         self.actions.append("staging-to-live")
-        if self.fail_staging_move:
+        if self.fail_move == "staging-to-live":
             raise OSError("ambiguous move result")
 
     def move_old_to_live(self) -> None:
         self.actions.append("old-to-live")
+        if self.fail_move == "old-to-live":
+            raise OSError("ambiguous move result")
 
     def remove_old(self) -> None:
         self.actions.append("remove-old")
@@ -158,7 +162,7 @@ def test_unlisted_restart_layout_conflicts_without_mutation() -> None:
 def test_staging_move_error_is_classified_from_three_names(
     after_error: ModuleLayout, tail: list[str]
 ) -> None:
-    io = _PublicationIO(after_error, fail_staging_move=True)
+    io = _PublicationIO(after_error, fail_move="staging-to-live")
     advance_module_publication(
         io,
         phase=PublicationPhase.OLD_ASIDE,
@@ -170,7 +174,7 @@ def test_staging_move_error_is_classified_from_three_names(
 
 
 def test_staging_move_error_third_layout_conflicts_without_further_mutation() -> None:
-    io = _PublicationIO(ModuleLayout(_PRIOR, _DESIRED, _PRIOR), fail_staging_move=True)
+    io = _PublicationIO(ModuleLayout(_PRIOR, _DESIRED, _PRIOR), fail_move="staging-to-live")
     with pytest.raises(ValueError, match="conflict"):
         advance_module_publication(
             io,
@@ -180,6 +184,44 @@ def test_staging_move_error_third_layout_conflicts_without_further_mutation() ->
             desired=_DESIRED,
         )
     assert io.actions == ["inactive", "staging-to-live", "inactive", "observe"]
+
+
+@pytest.mark.parametrize(
+    ("phase", "before", "after", "move", "next_phase"),
+    [
+        (
+            "move-ready",
+            ModuleLayout(_PRIOR, _DESIRED, None),
+            ModuleLayout(None, _DESIRED, _PRIOR),
+            "live-to-old",
+            "old-aside",
+        ),
+        (
+            "rollback-ready",
+            ModuleLayout(None, _DESIRED, _PRIOR),
+            ModuleLayout(_PRIOR, _DESIRED, None),
+            "old-to-live",
+            "rollback-complete",
+        ),
+    ],
+)
+def test_other_present_move_errors_classify_before_and_after_effect(
+    phase: PublicationPhase,
+    before: ModuleLayout,
+    after: ModuleLayout,
+    move: str,
+    next_phase: str,
+) -> None:
+    before_io = _PublicationIO(before, fail_move=move)
+    with pytest.raises(OSError):
+        advance_module_publication(
+            before_io, phase=phase, layout=before, prior=_PRIOR, desired=_DESIRED
+        )
+    assert before_io.actions[-3:] == ["inactive", "observe", move]
+
+    after_io = _PublicationIO(after, fail_move=move)
+    advance_module_publication(after_io, phase=phase, layout=before, prior=_PRIOR, desired=_DESIRED)
+    assert after_io.actions[-3:] == ["observe", "guest-sync", f"phase:{next_phase}"]
 
 
 @pytest.mark.parametrize(
@@ -209,6 +251,35 @@ def test_absence_terminal_rejects_reappeared_tree() -> None:
             io, phase=PublicationPhase.ABSENCE_CLEANED, layout=layout, prior=_PRIOR
         )
     assert io.actions == ["inactive"]
+
+
+@pytest.mark.parametrize(
+    ("observed", "tail"),
+    [
+        (ModuleLayout(_PRIOR, None, None), ["inactive", "observe", "live-to-old"]),
+        (ModuleLayout(None, None, _PRIOR), ["observe", "guest-sync", "phase:absence-live"]),
+    ],
+)
+def test_absence_live_move_error_reclassifies_exact_layout(
+    observed: ModuleLayout, tail: list[str]
+) -> None:
+    io = _PublicationIO(observed, fail_move="live-to-old")
+    if observed.live is _PRIOR:
+        with pytest.raises(OSError):
+            advance_absence_publication(
+                io,
+                phase=PublicationPhase.MOVE_READY,
+                layout=ModuleLayout(_PRIOR, None, None),
+                prior=_PRIOR,
+            )
+    else:
+        advance_absence_publication(
+            io,
+            phase=PublicationPhase.MOVE_READY,
+            layout=ModuleLayout(_PRIOR, None, None),
+            prior=_PRIOR,
+        )
+    assert io.actions[-3:] == tail
 
 
 _BINDING = ExternalBootActivationBinding(
