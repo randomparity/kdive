@@ -67,15 +67,23 @@ class LocalExternalBootOperationPin(Protocol):
 
 
 @dataclass(frozen=True)
-class PinnedOperationOwnership:
-    """Atomic lane-owned snapshot returned together with its retained pin."""
+class OperationOwnership:
+    """Immutable pin-free ownership facts safe for descriptor policy callbacks."""
 
-    pin: LocalExternalBootOperationPin
     system_id: UUID
     binding: ExternalBootActivationBinding
 
 
+@dataclass(frozen=True)
+class PinnedOperationOwnership:
+    """Atomic lane result whose pin remains inside the session factory."""
+
+    ownership: OperationOwnership
+    _pin: LocalExternalBootOperationPin
+
+
 type PinOperationLease = Callable[[LocalExternalBootOperationLease], PinnedOperationOwnership]
+type OpenArtifactRoot = Callable[[OperationOwnership], int]
 
 
 class _Domain(Protocol):
@@ -427,7 +435,7 @@ class LocalExternalBootSessionFactory:
         *,
         pin_lease: PinOperationLease,
         connect: Callable[[], _Connection],
-        open_artifact_root: Callable[[PinnedOperationOwnership], int],
+        open_artifact_root: OpenArtifactRoot,
         open_guest: Callable[[], _Guest],
         stat_overlay: Callable[[str], tuple[int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
@@ -451,9 +459,10 @@ class LocalExternalBootSessionFactory:
 
     def open(self, lease: LocalExternalBootOperationLease) -> LocalExternalBootSession:
         ownership = self._pin_lease(lease)
-        pin = ownership.pin
-        system_id = ownership.system_id
-        binding = ownership.binding
+        pin = ownership._pin
+        facts = ownership.ownership
+        system_id = facts.system_id
+        binding = facts.binding
         if binding.system_id != str(system_id):
             pin.close()
             raise ValueError("operation lease binding does not own the System")
@@ -469,7 +478,7 @@ class LocalExternalBootSessionFactory:
             _parse_owned_xml(xml, system_id, expected_overlay)
             device, inode = self._stat_overlay(expected_overlay)
             overlay = _BoundOverlay(device, inode, expected_overlay)
-            artifact_fd = self._open_artifact_root(ownership)
+            artifact_fd = self._open_artifact_root(facts)
             return _ConcreteSession(
                 system_id=system_id,
                 binding=binding,

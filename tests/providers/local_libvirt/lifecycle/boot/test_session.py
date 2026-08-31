@@ -9,6 +9,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResu
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
+    OpenArtifactRoot,
+    OperationOwnership,
     PinnedOperationOwnership,
 )
 from kdive.providers.ports.external_boot import (
@@ -56,7 +58,9 @@ class FakeLane:
             raise TypeError("foreign operation lease")
         if lease.released:
             raise RuntimeError("operation lease is released")
-        return PinnedOperationOwnership(FakePin(lease), lease.system_id, lease.binding)
+        return PinnedOperationOwnership(
+            OperationOwnership(lease.system_id, lease.binding), FakePin(lease)
+        )
 
 
 LANE = FakeLane()
@@ -491,7 +495,7 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
     def pin_then_mutate(candidate: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
         assert isinstance(candidate, FakeLease)
         ownership = PinnedOperationOwnership(
-            FakePin(candidate), candidate.system_id, candidate.binding
+            OperationOwnership(candidate.system_id, candidate.binding), FakePin(candidate)
         )
         candidate.system_id = UUID(int=9)
         candidate.binding = ExternalBootActivationBinding(
@@ -522,9 +526,9 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
 def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -> None:
     events: list[str] = []
     lease = _lease()
-    received: list[PinnedOperationOwnership] = []
+    received: list[OperationOwnership] = []
 
-    def mutate_during_artifact(ownership: PinnedOperationOwnership) -> int:
+    def mutate_during_artifact(ownership: OperationOwnership) -> int:
         lease.system_id = UUID(int=9)
         lease.binding = ExternalBootActivationBinding(
             system_id=str(UUID(int=9)),
@@ -547,6 +551,35 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
     assert received[0].binding == BINDING
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
     session.close()
+
+
+def test_artifact_callback_type_is_pin_free_and_cannot_release_lane() -> None:
+    received: list[OperationOwnership] = []
+
+    def open_root(ownership: OperationOwnership) -> int:
+        received.append(ownership)
+        assert not hasattr(ownership, "pin")
+        assert not hasattr(ownership, "_pin")
+        assert not hasattr(ownership, "close")
+        return 41
+
+    callback: OpenArtifactRoot = open_root
+    lease = _lease()
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=callback,
+        open_guest=lambda: Guest(events),
+        stat_overlay=lambda _path: (8, 9),
+        close_descriptor=lambda _fd: None,
+    )
+    session = factory.open(lease)
+    assert received == [OperationOwnership(SYSTEM_ID, BINDING)]
+    with pytest.raises(RuntimeError, match="pinned"):
+        lease.release()
+    session.close()
+    lease.release()
 
 
 def test_define_frees_distinct_prior_domain_reference() -> None:
