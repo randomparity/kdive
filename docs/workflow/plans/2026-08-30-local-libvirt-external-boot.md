@@ -297,20 +297,39 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
    authenticates complete point equality and `source-restored`; it performs no fresh guestfs/live
    composite observation even when the restored source is running.
 
-   Implement restart dispatch as the following exact phase/layout rules; unmatched, duplicated,
-   unowned, unreadable, malformed, or third layouts conflict with zero mutation and remain inactive:
+   Implement restart dispatch from this exact table. `P` is the complete authenticated prior tree,
+   `D` the complete authenticated desired tree, `P*` a bounded partial deletion of the owned prior
+   tree, and `Ø` absence. Each action first rechecks inactive. Before rollback, fsync
+   `rollback-ready`; this distinguishes a crash after the rollback move from an impossible
+   old-aside-phase reversal. Only the live process that observes staging-to-live `mv` fail may enter
+   `rollback-ready`; a restart under `old-aside` retries that move and records rollback intent only if
+   the retry itself fails.
 
-   - present prior/desired/absent resumes pre-move or rollback; absent/desired/prior resumes
-     old-aside; desired/absent/prior resumes new-live;
-   - desired/absent/absent with completion pending freshly verifies desired and may only fsync
-     `publication-complete`;
-   - `absence-live` accepts only absent/absent/prior and may only fsync `absence-complete` before
-     bounded cleanup;
-   - `absence-complete` requires live/staging absent and permits only bounded no-follow removal of
-     authenticated prior old-aside or its partial-deletion continuation; all names absent permits
-     only guest sync plus `absence-cleaned`; any present live or staging conflicts;
-   - `absence-cleaned` is terminal only with all names absent; any reappearance or malformed name
-     conflicts. Boot/readiness/lifecycle advancement remains blocked until `absence-cleaned`.
+   | Durable phase | Desired mode | `(live, staging, old-aside)` | Sole permitted action |
+   | --- | --- | --- | --- |
+   | `move-ready` | present | `(P, D, Ø)` | Move live to old-aside. |
+   | `move-ready` | present | `(Ø, D, P)` | Guest-sync, verify, fsync `old-aside`. |
+   | `old-aside` | present | `(Ø, D, P)` | Move staging to live. |
+   | `old-aside` | present | `(D, Ø, P)` | Guest-sync, verify, fsync `new-live`. |
+   | `rollback-ready` | present | `(Ø, D, P)` | Move old-aside to live. |
+   | `rollback-ready` | present | `(P, D, Ø)` | Guest-sync, verify, fsync `rollback-complete`. |
+   | `rollback-complete` | present | `(P, D, Ø)` | Return the failed operation; no mutation or boot. |
+   | `new-live` | present | `(D, Ø, P)` | Remove authenticated old-aside. |
+   | `new-live` | present | `(D, Ø, Ø)` | Verify desired, guest-sync, fsync `publication-complete`. |
+   | `publication-complete` | present | `(D, Ø, Ø)` | Terminal idempotent success. |
+   | `move-ready` | absent | `(P, Ø, Ø)` | Move live to old-aside. |
+   | `move-ready` | absent | `(Ø, Ø, P)` | Guest-sync, verify, fsync `absence-live`. |
+   | `move-ready` | absent | `(Ø, Ø, Ø)` | Verify absence, fsync `absence-complete`. |
+   | `absence-live` | absent | `(Ø, Ø, P)` | Fsync `absence-complete`. |
+   | `absence-complete` | absent | `(Ø, Ø, P)` | Remove authenticated old-aside. |
+   | `absence-complete` | absent | `(Ø, Ø, P*)` | Continue bounded no-follow removal. |
+   | `absence-complete` | absent | `(Ø, Ø, Ø)` | Guest-sync, fsync `absence-cleaned`. |
+   | `absence-cleaned` | absent | `(Ø, Ø, Ø)` | Terminal idempotent success. |
+
+   Every unlisted phase/layout pair and every one-field mismatch, reappearance, duplicate,
+   unowned, unreadable, malformed, over-limit, or third identity conflicts with zero mutation and
+   remains inactive. Boot/readiness/lifecycle advancement is allowed only after terminal
+   `publication-complete` or `absence-cleaned`, never after rollback.
 7. Implement cleanup as payload deletion plus authenticated accounted tombstone. Implement U1a
    finalization: present tombstone requires exact proof equality; absent success requires the exact
    current-binding, same-operation `mutation-started` proof supplied by #2140. Reject every stale,
@@ -335,10 +354,10 @@ unreadable, or cross-owner state makes zero writes; exact recovery and cleanup a
    and assert exact continuation or conflict. Cover present, present-empty, and desired-absence
    matrices; assert the live-name absence window occurs only while verified inactive and no
    boot/readiness/lifecycle advancement precedes durable desired-state verification.
-   Parameterize every exact and one-field-mismatched live/staging/old layout under `old-aside`,
-   `new-live`, publication pending, `absence-live`, `absence-complete`, and `absence-cleaned`.
-   Include partial old-aside deletion, post-removal evidence-only completion, terminal replay, and
-   live/staging reappearance conflicts; snapshot guest trees before and after every rejected case.
+   Parameterize directly from every table row, asserting its named sole action. Generate every
+   one-field mismatch and selected unlisted cross-phase pair as zero-mutation inactive conflicts.
+   Include partial old-aside deletion, post-removal evidence-only completion, rollback-ready crashes,
+   terminal replay, and live/staging reappearance; snapshot guest trees around every rejected case.
 2. Race/replay two bindings across same System/Run with different activation IDs; substitute every
    RecoveryPoint field and U1a proof field; assert before/after filesystem/XML snapshots are equal.
 3. Model U1a windows: unresolved exact mutation-started after delete succeeds; stale/current-binding
