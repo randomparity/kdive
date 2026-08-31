@@ -962,6 +962,7 @@ def recovery_directory_name(
 
 
 _INTENT_NAME = "intent.json"
+_INITIAL_INTENT_TEMPORARY_NAME = ".intent.initial"
 _TOMBSTONE_NAME = "tombstone.json"
 _MAX_METADATA_BYTES = 262_144
 
@@ -993,7 +994,7 @@ def _tombstone_bytes(tombstone: CleanupTombstoneV1) -> bytes:
     ).encode()
 
 
-def _read_private_file(directory_fd: int, name: str) -> bytes:
+def _read_private_file(directory_fd: int, name: str, *, sync: bool = False) -> bytes:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
     try:
         opened = os.fstat(fd)
@@ -1005,7 +1006,10 @@ def _read_private_file(directory_fd: int, name: str) -> bytes:
             or opened.st_size > _MAX_METADATA_BYTES
         ):
             raise ValueError("recovery evidence is not an owned private regular file")
-        return os.read(fd, _MAX_METADATA_BYTES + 1)
+        data = os.read(fd, _MAX_METADATA_BYTES + 1)
+        if sync:
+            os.fsync(fd)
+        return data
     finally:
         os.close(fd)
 
@@ -1045,13 +1049,11 @@ class RecoveryMetadataStore:
         partial_name = f".{final_name}.partial"
         directory_fd = self._open_or_create_partial(partial_name)
         try:
-            entries = os.listdir(directory_fd)
-            if entries:
-                if entries != [_INTENT_NAME] or self._read(directory_fd) != metadata:
-                    raise ValueError("recovery partial is not the exact owned intent")
-            else:
-                _write_exclusive(directory_fd, _INTENT_NAME, _metadata_bytes(metadata))
-                os.fsync(directory_fd)
+            _publish_initial_intent(
+                directory_fd,
+                _metadata_bytes(metadata),
+                conflict="recovery partial is not the exact owned intent",
+            )
         finally:
             os.close(directory_fd)
         os.rename(partial_name, final_name, src_dir_fd=self._root_fd, dst_dir_fd=self._root_fd)
@@ -1071,13 +1073,11 @@ class RecoveryMetadataStore:
         partial_name = f".{final_name}.partial"
         directory_fd = self._open_or_create_partial(partial_name)
         try:
-            entries = os.listdir(directory_fd)
-            if entries:
-                if entries != [_INTENT_NAME] or self._read_pre_stop(directory_fd) != intent:
-                    raise ValueError("recovery partial is not the exact pre-stop intent")
-            else:
-                _write_exclusive(directory_fd, _INTENT_NAME, _pre_stop_bytes(intent))
-                os.fsync(directory_fd)
+            _publish_initial_intent(
+                directory_fd,
+                _pre_stop_bytes(intent),
+                conflict="recovery partial is not the exact pre-stop intent",
+            )
         finally:
             os.close(directory_fd)
         os.fsync(self._root_fd)
@@ -1361,11 +1361,29 @@ def _replace_private_file(directory_fd: int, temporary: str, final: str, data: b
     try:
         _write_exclusive(directory_fd, temporary, data)
     except FileExistsError:
-        existing = _read_private_file(directory_fd, temporary)
+        existing = _read_private_file(directory_fd, temporary, sync=True)
         if existing != data:
             os.unlink(temporary, dir_fd=directory_fd)
             _write_exclusive(directory_fd, temporary, data)
     os.rename(temporary, final, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+
+
+def _publish_initial_intent(directory_fd: int, data: bytes, *, conflict: str) -> None:
+    entries = set(os.listdir(directory_fd))
+    expected = {_INTENT_NAME, _INITIAL_INTENT_TEMPORARY_NAME}
+    if entries - expected or len(entries) > 1:
+        raise ValueError(conflict)
+    if _INTENT_NAME in entries:
+        if _read_private_file(directory_fd, _INTENT_NAME) != data:
+            raise ValueError(conflict)
+        return
+    _replace_private_file(
+        directory_fd,
+        _INITIAL_INTENT_TEMPORARY_NAME,
+        _INTENT_NAME,
+        data,
+    )
+    os.fsync(directory_fd)
 
 
 def _sync_phase(io: ModulePublicationIO, phase: PublicationPhase) -> None:

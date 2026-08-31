@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import stat
 import tarfile
 from pathlib import Path
 
@@ -552,6 +553,105 @@ def test_pre_stop_intent_is_durable_before_complete_publication(tmp_path: Path) 
         assert store.reopen_pre_stop(reference, intent.binding) == intent
         assert store.complete_preparation(reference, intent, metadata) == metadata
         assert store.reopen(reference, intent.binding) == metadata
+
+
+@pytest.mark.parametrize("interrupted", [b"", b'{"schema":', None])
+@pytest.mark.parametrize("publication", ["complete", "pre-stop"])
+def test_recovery_metadata_store_retries_interrupted_initial_intent(
+    tmp_path: Path, interrupted: bytes | None, publication: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    intent = _pre_stop(metadata)
+    reference = OpaqueProviderRef(
+        ref=f"local-recovery-v1/{metadata.binding.system_id}/{metadata.binding.activation_id}"
+    )
+    directory = root / f".{recovery_directory_name(reference, metadata.binding)}.partial"
+    directory.mkdir(mode=0o700)
+    expected_model = metadata if publication == "complete" else intent
+    expected_bytes = json.dumps(
+        expected_model.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    temporary = directory / ".intent.initial"
+    temporary.write_bytes(expected_bytes if interrupted is None else interrupted)
+    temporary.chmod(0o600)
+
+    with RecoveryMetadataStore(root) as store:
+        actual = (
+            store.publish(metadata) if publication == "complete" else store.publish_pre_stop(intent)
+        )
+
+    assert actual == reference
+    published_directory = (
+        root / recovery_directory_name(reference, metadata.binding)
+        if publication == "complete"
+        else directory
+    )
+    assert (published_directory / "intent.json").read_bytes() == expected_bytes
+    assert not (published_directory / ".intent.initial").exists()
+
+
+def test_retry_fsyncs_existing_exact_temporary_before_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata()
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+    updated = metadata.model_copy(update={"phase": "publication-complete"})
+    directory = root / recovery_directory_name(reference, metadata.binding)
+    temporary = directory / ".intent.next"
+    temporary.write_bytes(
+        json.dumps(
+            updated.model_dump(mode="json", by_alias=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    )
+    temporary.chmod(0o600)
+    real_fsync = os.fsync
+    real_rename = os.rename
+    file_synced = False
+
+    def tracking_fsync(fd: int) -> None:
+        nonlocal file_synced
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            file_synced = True
+        real_fsync(fd)
+
+    def checked_rename(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        assert file_synced
+        real_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    monkeypatch.setattr(os, "rename", checked_rename)
+    with RecoveryMetadataStore(root) as store:
+        assert (
+            store.record_phase(
+                reference,
+                metadata.binding,
+                metadata,
+                "publication-complete",
+            )
+            == updated
+        )
 
 
 @pytest.mark.parametrize("interrupted", [b"", b'{"schema":', None])
