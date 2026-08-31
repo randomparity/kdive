@@ -308,10 +308,11 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
    `old-aside` retries that move and records rollback intent only if the retry itself fails with the
    exact no-effect layout.
 
-   Apply the same error-result rule to every move: recheck inactive and observe all three names;
-   exact before-effect layout retries, exact after-effect layout guest-syncs/verifies/fsyncs the next
-   phase, and every other layout conflicts. This covers present and absent live-to-old plus
-   rollback-to-live, not only staging-to-live.
+   For present and absent live-to-old plus rollback-to-live errors, recheck inactive and observe all
+   three names: exact before-effect layout retries, exact after-effect layout guest-syncs, verifies,
+   and fsyncs the next phase, and every other layout conflicts. Staging-to-live is the deliberate
+   exception: its exact no-effect layout enters `rollback-ready` rather than retrying; its exact
+   after-effect layout advances to `new-live`.
 
    | Durable phase | Desired mode | `(live, staging, old-aside)` | Sole permitted action |
    | --- | --- | --- | --- |
@@ -368,7 +369,8 @@ unreadable, or cross-owner state makes zero writes; exact recovery and cleanup a
    terminal replay, and live/staging reappearance; snapshot guest trees around every rejected case.
    For each move, inject fail-before-effect and fail-after-effect. Assert inactive recheck and exact
    three-name reclassification; specifically, staging-to-live fail-after-effect must route
-   `(D, Ø, P)` to `new-live`, never `rollback-ready`.
+   `(D, Ø, P)` to `new-live`, never `rollback-ready`, while staging-to-live fail-before-effect must
+   route `(Ø, D, P)` to `rollback-ready`, never retry the forward move.
 2. Race/replay two bindings across same System/Run with different activation IDs; substitute every
    RecoveryPoint field and U1a proof field; assert before/after filesystem/XML snapshots are equal.
 3. Model U1a windows: unresolved exact mutation-started after delete succeeds; stale/current-binding
