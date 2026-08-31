@@ -192,14 +192,25 @@ class RecoveryArchiveSource(_SingleUseFile):
                 expected_size=capture.archive_bytes,
                 expected_digest=capture.archive_sha256,
             )
-        except BaseException:
+        except BaseException as primary:
+            cleanup = _close_fd(fd) if fd >= 0 else None
             if self._directory_fd >= 0:
-                os.close(self._directory_fd)
+                cleanup = cleanup or _close_fd(self._directory_fd)
             self._directory_closed = True
+            if cleanup is not None:
+                primary.add_note(
+                    f"recovery source constructor cleanup failed: {type(cleanup).__name__}"
+                )
             raise
-        finally:
-            if fd >= 0:
-                os.close(fd)
+        cleanup = _close_fd(fd)
+        if cleanup is not None:
+            try:
+                self.close()
+            except BaseException as secondary:
+                cleanup.add_note(
+                    f"recovery source constructor cleanup failed: {type(secondary).__name__}"
+                )
+            raise cleanup
         self.binding = binding
         self.release = release
         self.capture = capture
@@ -292,21 +303,21 @@ class RecoveryArchiveSink:
             )
             os.fsync(self._directory_fd)
             return digest, size
-        except BaseException as exc:
-            primary = exc
+        except BaseException as failure:
+            primary = failure
             cleanup: BaseException | None = None
             if fd >= 0:
                 try:
                     os.close(fd)
-                except BaseException as exc:
-                    cleanup = exc
+                except BaseException as close_failure:
+                    cleanup = close_failure
             if created is not None:
                 try:
                     _unlink_if_same(self._directory_fd, partial, created)
-                except BaseException as exc:
-                    cleanup = cleanup or exc
+                except BaseException as unlink_failure:
+                    cleanup = cleanup or unlink_failure
             if cleanup is not None:
-                exc.add_note(f"recovery archive cleanup failed: {type(cleanup).__name__}")
+                failure.add_note(f"recovery archive cleanup failed: {type(cleanup).__name__}")
             raise
         finally:
             cleanup: BaseException | None = None
@@ -854,7 +865,10 @@ def _close_fd(fd: int) -> BaseException | None:
 
 
 def _unlink_if_same(directory_fd: int, name: str, expected: tuple[int, int]) -> None:
-    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    try:
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
     if (current.st_dev, current.st_ino) != expected:
         return
     os.unlink(name, dir_fd=directory_fd)

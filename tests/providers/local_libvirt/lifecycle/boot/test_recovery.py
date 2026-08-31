@@ -7,11 +7,12 @@ import inspect
 import io
 import os
 import tarfile
+import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Literal
+from typing import Any, BinaryIO, Literal, cast
 
 import pytest
 
@@ -554,6 +555,191 @@ def test_recovery_source_open_and_validation_failures_close_all_descriptors(tmp_
         os.close(directory_fd)
 
 
+@pytest.mark.parametrize("kind", ["directory", "mode", "overbound"])
+def test_source_and_kernel_reject_actual_file_shape_without_fd_leaks(
+    tmp_path: Path, kind: str
+) -> None:
+    capture = ModuleArchiveCapture(
+        manifest="sha256:" + "0" * 64,
+        entry_count=0,
+        uncompressed_bytes=0,
+        archive_sha256=_digest(b""),
+        archive_bytes=0 if kind != "overbound" else recovery.MAX_ARCHIVE_BYTES,
+    )
+    archive = tmp_path / "modules.tar"
+    bundle = tmp_path / "bundle"
+    if kind == "directory":
+        archive.mkdir()
+        bundle.mkdir()
+    else:
+        archive.touch(mode=0o600)
+        bundle.touch(mode=0o600)
+        if kind == "mode":
+            archive.chmod(0o640)
+            bundle.chmod(0o640)
+        else:
+            with archive.open("wb") as stream:
+                stream.truncate(recovery.MAX_ARCHIVE_BYTES + 1)
+            with bundle.open("wb") as stream:
+                stream.truncate(recovery.MAX_ARCHIVE_BYTES + 1)
+            capture = capture.model_copy(update={"archive_bytes": recovery.MAX_ARCHIVE_BYTES})
+    directory_fd = _dir_fd(tmp_path)
+    bundle_fd = os.open(bundle, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = len(list(Path("/proc/self/fd").iterdir()))
+        with pytest.raises(ValueError, match="regular|mode|size"):
+            RecoveryArchiveSource(directory_fd, binding=BINDING, release=RELEASE, capture=capture)
+        assert len(list(Path("/proc/self/fd").iterdir())) == before
+        with pytest.raises(ValueError, match="regular|mode|size"):
+            KernelBundleSource(
+                bundle_fd,
+                binding=BINDING,
+                release=RELEASE,
+                size=recovery.MAX_ARCHIVE_BYTES,
+                digest=_digest(b""),
+            )
+        assert len(list(Path("/proc/self/fd").iterdir())) == before
+    finally:
+        os.close(bundle_fd)
+        os.close(directory_fd)
+
+
+@pytest.mark.parametrize("fault", ["write", "file-fsync", "rename", "dir-fsync", "lock"])
+def test_sink_syscall_failures_close_and_leave_only_durable_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    sink = _sink(tmp_path)
+    original_write, original_fsync = os.write, os.fsync
+    original_rename, original_flock = os.rename, recovery.fcntl.flock
+    fsync_calls = 0
+
+    def write(fd: int, value: bytes | memoryview) -> int:
+        if fault == "write":
+            raise OSError("injected write")
+        return original_write(fd, value)
+
+    def fsync(fd: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fault == "file-fsync" and fsync_calls == 1:
+            raise OSError("injected file fsync")
+        if fault == "dir-fsync" and fsync_calls == 2:
+            raise OSError("injected directory fsync")
+        original_fsync(fd)
+
+    def rename(
+        source: str,
+        target: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        if fault == "rename":
+            raise OSError("injected rename")
+        original_rename(source, target, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    def flock(fd: int, operation: int) -> None:
+        if fault == "lock" and operation == recovery.fcntl.LOCK_EX:
+            raise OSError("injected lock")
+        original_flock(fd, operation)
+
+    monkeypatch.setattr(os, "write", write)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(recovery.fcntl, "flock", flock)
+    with pytest.raises(OSError, match="injected"):
+        sink.publish(io.BytesIO(b"value"))
+    assert sink._closed is True
+    assert not (tmp_path / ".modules.tar.partial").exists()
+    assert (tmp_path / "modules.tar").exists() is (fault == "dir-fsync")
+
+
+def test_sink_primary_error_survives_close_and_unlock_cleanup_faults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink = _sink(tmp_path)
+    original_flock = recovery.fcntl.flock
+    original_close = os.close
+    failed_close = False
+
+    def copy_failure(source: BinaryIO, fd: int, limit: int) -> tuple[str, int]:
+        del source, fd, limit
+        raise ValueError("primary publisher error")
+
+    def flock(fd: int, operation: int) -> None:
+        if operation == recovery.fcntl.LOCK_UN:
+            raise OSError("unlock cleanup error")
+        original_flock(fd, operation)
+
+    def close(fd: int) -> None:
+        nonlocal failed_close
+        if fd == sink._directory_fd and not failed_close:
+            failed_close = True
+            raise OSError("close cleanup error")
+        original_close(fd)
+
+    monkeypatch.setattr(recovery, "_copy_to_fd", copy_failure)
+    monkeypatch.setattr(recovery.fcntl, "flock", flock)
+    monkeypatch.setattr(os, "close", close)
+    with pytest.raises(ValueError, match="primary publisher error") as caught:
+        sink.publish(io.BytesIO(b"value"))
+    assert any("cleanup failed" in note for note in caught.value.__notes__)
+    monkeypatch.setattr(recovery.fcntl, "flock", original_flock)
+    sink.close()
+    assert sink._closed is True
+
+
+@pytest.mark.parametrize("field", ["mode", "uid", "gid"])
+def test_hostile_later_archive_shape_rejects_on_public_install_before_writes(
+    tmp_path: Path, field: str
+) -> None:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for path in ("valid", "later"):
+            member = tarfile.TarInfo(path)
+            member.size = 1
+            member.pax_headers = {"KDIVE.xattrs-supported": "1"}
+            if path == "later":
+                setattr(member, field, -1 if field != "mode" else 0o10000)
+            archive.addfile(member, io.BytesIO(b"x"))
+    if field == "mode":
+        raw = bytearray(output.getvalue())
+        offset = next(
+            index for index in range(0, len(raw), 512) if raw[index : index + 6] == b"later\0"
+        )
+        raw[offset + 100 : offset + 108] = b"00010000"
+        raw[offset + 148 : offset + 156] = b"        "
+        checksum = sum(raw[offset : offset + 512])
+        raw[offset + 148 : offset + 156] = f"{checksum:06o}\0 ".encode()
+        output = io.BytesIO(raw)
+    target = FakeTree(mutable=True)
+    with pytest.raises(ValueError, match="canonical range|owner id"):
+        RealGuestRecoveryWriter().install(
+            target, RELEASE, _bundle(tmp_path / f"bad-{field}", output.getvalue())
+        )
+    assert target.writes == []
+
+
+def test_capture_rolls_regular_content_to_disk_and_bounds_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value = b"x" * (recovery._COPY_CHUNK + 1)
+    tree = FakeTree([_entry("large", value)], {"large": value})
+    original = tempfile.SpooledTemporaryFile
+    rolled: list[bool] = []
+
+    @contextmanager
+    def tracked_spool(max_size: int = 0) -> Iterator[BinaryIO]:
+        with original(max_size=max_size) as stream:
+            yield cast(BinaryIO, stream)
+            rolled.append(bool(cast(Any, stream)._rolled))
+
+    monkeypatch.setattr(tempfile, "SpooledTemporaryFile", tracked_spool)
+    capture = RealGuestRecoveryWriter().capture(tree, RELEASE, _sink(tmp_path))
+    assert isinstance(capture, ModuleArchiveCapture)
+    assert rolled == [True]
+
+
 def test_tree_xattr_support_mismatch_rejects_before_read_or_publish(tmp_path: Path) -> None:
     tree = FakeTree(
         [_entry("x", b"x", xattrs_supported=False, xattrs={"security.x": b"value"})],
@@ -579,6 +765,65 @@ def test_tree_population_stops_after_first_write_failure(tmp_path: Path) -> None
     with pytest.raises(OSError, match="guest write"):
         RealGuestRecoveryWriter().restore(target, RELEASE, capture, _source(tmp_path, capture))
     assert target.writes == [("regular", "a")]
+
+
+def test_tree_population_stops_after_second_write_failure(tmp_path: Path) -> None:
+    source_tree = FakeTree(
+        [_entry(name, name.encode()) for name in ("a", "b", "c")],
+        {name: name.encode() for name in ("a", "b", "c")},
+    )
+    capture = RealGuestRecoveryWriter().capture(source_tree, RELEASE, _sink(tmp_path))
+    assert isinstance(capture, ModuleArchiveCapture)
+
+    class SecondWriteFails(FakeTree):
+        def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None:
+            self.writes.append(("regular", entry.path))
+            if len(self.writes) == 2:
+                raise OSError("injected second guest write")
+            self.contents[entry.path] = content.read()
+
+    target = SecondWriteFails(mutable=True)
+    with pytest.raises(OSError, match="second guest write"):
+        RealGuestRecoveryWriter().restore(target, RELEASE, capture, _source(tmp_path, capture))
+    assert target.writes == [("regular", "a"), ("regular", "b")]
+
+
+def test_open_sources_detect_truncation_and_close_after_failed_use(tmp_path: Path) -> None:
+    source_tree = FakeTree([_entry("x", b"abc")], {"x": b"abc"})
+    capture = RealGuestRecoveryWriter().capture(source_tree, RELEASE, _sink(tmp_path))
+    assert isinstance(capture, ModuleArchiveCapture)
+    recovery_source = _source(tmp_path, capture)
+    (tmp_path / "modules.tar").write_bytes(b"")
+    with pytest.raises(ValueError, match="ended before"):
+        RealGuestRecoveryWriter().restore(FakeTree(mutable=True), RELEASE, capture, recovery_source)
+    assert recovery_source._closed is True
+
+    bundle_path = tmp_path / "bundle-truncated"
+    bundle = _bundle(bundle_path, b"abc")
+    bundle_path.write_bytes(b"")
+    with pytest.raises(ValueError, match="ended before"):
+        RealGuestRecoveryWriter().install(FakeTree(mutable=True), RELEASE, bundle)
+    assert bundle._closed is True
+
+
+@pytest.mark.parametrize("limit", ["entries", "bytes"])
+def test_public_archive_limits_reject_before_tree_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str
+) -> None:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for name in ("a", "b"):
+            member = tarfile.TarInfo(name)
+            member.size = 1
+            member.pax_headers = {"KDIVE.xattrs-supported": "1"}
+            archive.addfile(member, io.BytesIO(b"x"))
+    monkeypatch.setattr(recovery, "MAX_ENTRIES" if limit == "entries" else "MAX_REGULAR_BYTES", 1)
+    target = FakeTree(mutable=True)
+    with pytest.raises(ValueError, match="exceeds"):
+        RealGuestRecoveryWriter().install(
+            target, RELEASE, _bundle(tmp_path / f"limit-{limit}", output.getvalue())
+        )
+    assert target.writes == []
 
 
 def test_pax_xattrs_and_archive_digest_are_insertion_and_architecture_stable(
