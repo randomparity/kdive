@@ -14,6 +14,15 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    CleanupPayloads,
+    LocalExternalBootSessionFactory,
+    OpenArtifactRoot,
+    OpenGuest,
+    PinOperationLease,
+    ReadinessProbe,
+    RunningObserver,
+)
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
@@ -42,6 +51,34 @@ def test_discovery_registration_targets_local_libvirt() -> None:
 
 def test_build_reaper_is_local_libvirt_reaper() -> None:
     assert isinstance(composition.build_reaper(), LibvirtInfraReaper)
+
+
+def test_external_boot_session_factory_builder_is_lazy_and_unadvertised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+    assert runtime.external_boot is None
+    opened: list[str] = []
+    monkeypatch.setattr(composition.config, "require", lambda _setting: "qemu:///session")
+    monkeypatch.setattr(composition.libvirt, "open", lambda uri: opened.append(uri))
+    pin_lease = cast(PinOperationLease, lambda _lease: opened.append("pin"))
+    open_artifact_root = cast(OpenArtifactRoot, lambda _ownership: opened.append("artifact") or 41)
+    open_guest = cast(OpenGuest, lambda: opened.append("guest"))
+    readiness = cast(ReadinessProbe, lambda _system_id: opened.append("readiness"))
+    observe_running = cast(RunningObserver, lambda _system_id: opened.append("observation"))
+    cleanup_payloads = cast(CleanupPayloads, lambda _descriptor, _binding: opened.append("cleanup"))
+
+    factory = composition.build_external_boot_session_factory(
+        pin_lease=pin_lease,
+        open_artifact_root=open_artifact_root,
+        open_guest=open_guest,
+        readiness=readiness,
+        observe_running=observe_running,
+        cleanup_payloads=cleanup_payloads,
+    )
+
+    assert isinstance(factory, LocalExternalBootSessionFactory)
+    assert opened == []
 
 
 def test_build_runtime_wires_local_ports_and_capabilities() -> None:
