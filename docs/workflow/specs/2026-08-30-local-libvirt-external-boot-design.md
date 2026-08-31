@@ -228,7 +228,7 @@ Unsupported exchange fails before live mutation; no remove/rename fallback exist
 Task 3 verifies target-at-live and source-at-staging, fsyncs `exchange-complete` and the containing
 directory, and only then removes the displaced source tree. Restart before or after the syscall or
 either evidence fsync compares both complete identities: source-at-live/target-at-staging resumes
-pre-exchange, target-at-live/source-at-staging resumes post-exchange, and absent, mixed, or third
+post-exchange, target-at-live/source-at-staging resumes pre-exchange, and absent, mixed, or third
 state conflicts without mutation. This present-source path never makes the live release name absent.
 
 Recorded absence uses a separate Task 3 path. Task 3 fsyncs `absence-ready` with an authenticated

@@ -125,8 +125,8 @@ are forbidden. After exchange, the live name always resolves to one complete tre
 name owns the displaced source tree. Task 3 verifies both identities, fsyncs `exchange-complete`
 evidence and the containing directory, then removes the displaced tree only under that evidence.
 On restart before or after either evidence fsync, Task 3 compares the complete expected source and
-target manifests at both authenticated names: source-at-live/target-at-staging means not exchanged;
-target-at-live/source-at-staging means exchanged. Any absent, mixed, unowned, unreadable, over-limit,
+target manifests at both authenticated names: target-at-live/source-at-staging means not exchanged;
+source-at-live/target-at-staging means exchanged. Any absent, mixed, unowned, unreadable, over-limit,
 or third state is conflict and causes no further mutation.
 
 Restoring recorded absence uses a distinct Task 3 sequence. It fsyncs `absence-ready` with an
