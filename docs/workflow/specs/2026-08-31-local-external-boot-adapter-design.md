@@ -8,6 +8,9 @@ operation session from
 [ADR-0587](../../adr/0587-local-external-boot-uses-an-operation-session.md). Production capability
 advertisement, provider-host authority translation, schemas, migrations, dependencies, and public
 MCP contracts remain excluded. The implementation targets Python 3.14 on x86_64 and ppc64le.
+The operator clarified on 2026-08-31 that one authenticated operation session governs each of the
+six shared operations, while cleanup-tombstone finalization remains ADR-0586's separate
+proof-consuming provider-local operation invoked with #2140's authenticated durable proof.
 
 ## Design
 

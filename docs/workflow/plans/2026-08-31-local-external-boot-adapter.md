@@ -133,25 +133,25 @@ Acceptance: every listed durable phase resumes with one permitted action; every 
 fails inactive with no further mutation; XML, power, readiness, and observation agree exactly with
 stored metadata.
 
-## Task 4 — Wire cleanup and production composition without advertisement
+## Task 4 — Wire cleanup while leaving production composition excluded
 
-Files: modify `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`; modify
-`src/kdive/providers/local_libvirt/composition.py` only if construction needs the existing session
-factory callback; modify matching tests under `tests/providers/local_libvirt/`.
+Files: modify `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`; modify matching
+focused tests under `tests/providers/local_libvirt/`.
 
 Interfaces: retain `cleanup`, `cleanup_complete`, and `finalize_tombstone`, but call
-`cleanup_complete` only after opening and validating the operation session. Construct the concrete
-adapter from explicit recovery/artifact roots and the lazy session factory. Do not attach the ports
-to `ProviderRuntime` or change `ProviderSupport`.
+`cleanup_complete` only after opening and validating the operation session. Keep the concrete
+adapter dependency-injected; #2140 owns the authenticated resolver and production construction.
+Do not modify provider composition, attach the ports to `ProviderRuntime`, or change
+`ProviderSupport`.
 
 1. Add cleanup success/retry/substitution tests; present-tombstone finalization; absent-tombstone
    replay with the same exact `mutation-started` proof; stale, cross-binding, cross-point, and
    malformed proof rejection; stale/foreign authority against an already-complete tombstone;
    session-close failure after tombstone publication; and a composition
    assertion that support remains unadvertised. Assert finalization opens no libvirt or guest
-   session. Run the focused files; expect the unwired construction test to fail.
-2. Bind the concrete adapter to existing provider-local roots and session factory inputs without
-   opening resources at assembly. Re-run focused tests; expect all tests to pass.
+   session. Run the focused files; expect the delegated cleanup test to fail.
+2. Bind cleanup to the dependency-injected operation context and existing provider-local roots.
+   Re-run focused tests; expect all tests to pass.
 3. Run `just test-verbose tests/providers/local_libvirt/test_external_boot.py`, `just
    test-verbose tests/providers/local_libvirt/lifecycle/boot/test_recovery.py`, and `just
    test-verbose tests/providers/local_libvirt/lifecycle/boot/test_session.py`; expect all to pass.
