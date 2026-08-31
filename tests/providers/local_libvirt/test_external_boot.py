@@ -1242,6 +1242,7 @@ class _RealPreparation:
         self.actions: list[str] = []
         self.inspect_allowed = True
         self.work_fault = False
+        self.complete_override: LocalRecoveryMetadataV1 | None = None
 
     def materialize(self, plan: ExternalBootPlan, session: object) -> ExternalBootMaterialization:
         del plan, session
@@ -1271,7 +1272,7 @@ class _RealPreparation:
             assert store.reopen_pre_stop(reference, intent.binding) == intent
         if self.work_fault:
             raise LookupError("prepare primary")
-        return self.metadata
+        return self.complete_override or self.metadata
 
 
 class _RealSession:
@@ -1419,6 +1420,38 @@ def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path
     with pytest.raises(ValueError, match="pre-stop intent does not match"):
         _real_prepare(io, materialization)
     assert host.actions == []
+    assert session.close_attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "substitution"),
+    [
+        ("target_projection_sha256", "sha256:" + "f" * 64),
+        ("target_xml", "<domain><name>substituted</name></domain>"),
+    ],
+)
+def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_definition(
+    tmp_path: Path,
+    field: str,
+    substitution: str,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    preparation.complete_override = metadata.model_copy(update={field: substitution})
+    io, session = _real_io(root, preparation)
+
+    with pytest.raises(ValueError, match="does not extend pre-stop intent"):
+        _real_prepare(io, materialization)
+
+    point = _point(metadata)
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen_pre_stop(point.recovery_ref, metadata.binding) == _pre_stop(metadata)
+        with pytest.raises(FileNotFoundError):
+            store.reopen(point.recovery_ref, metadata.binding)
+    assert not any(action.startswith("define:") for action in preparation.actions)
     assert session.close_attempts == 1
 
 

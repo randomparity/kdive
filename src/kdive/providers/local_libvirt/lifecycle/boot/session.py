@@ -592,8 +592,12 @@ class LocalExternalBootSessionFactory:
             )
         )
         if not binding_matches_pin or not binding_matches_expected:
-            pin.close()
-            raise ValueError("operation lease does not match expected ownership")
+            mismatch = ValueError("operation lease does not match expected ownership")
+            try:
+                pin.close()
+            except BaseException as close_error:
+                mismatch.add_note(f"cleanup failed: {close_error!r}")
+            raise mismatch
         connection: _Connection | None = None
         domain: _Domain | None = None
         overlay_fd: int | None = None

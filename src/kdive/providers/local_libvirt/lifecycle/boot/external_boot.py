@@ -1419,6 +1419,8 @@ def _metadata_extends_intent(
         "source_definition",
         "source_boot",
         "target_boot",
+        "target_projection_sha256",
+        "target_xml",
         "prior_power",
     )
     return all(getattr(metadata, field) == getattr(intent, field) for field in shared)

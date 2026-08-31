@@ -15,6 +15,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     OpenArtifactRoot,
     OperationOwnership,
     PinnedOperationOwnership,
+    PinOperationLease,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -112,6 +113,31 @@ def test_expected_ownership_without_activation_accepts_exact_system_and_run() ->
 
     with pytest.raises(FrozenInstanceError):
         _expected().run_id = UUID(int=9)  # ty: ignore[invalid-assignment]
+
+
+def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() -> None:
+    events: list[str] = []
+
+    class CloseFaultPin:
+        close_attempts = 0
+
+        def close(self) -> None:
+            self.close_attempts += 1
+            raise OSError("pin close")
+
+    pin = CloseFaultPin()
+
+    def pin_lease(lease: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        del lease
+        return PinnedOperationOwnership(OperationOwnership(SYSTEM_ID, BINDING), pin)
+
+    crossed = ExpectedOperationOwnership(UUID(int=9), UUID(BINDING.run_id), ACTIVATION_ID)
+    with pytest.raises(ValueError, match="expected ownership") as raised:
+        _factory(events, pin_lease=pin_lease).open(_lease(), crossed)
+
+    assert raised.value.__notes__ == ["cleanup failed: OSError('pin close')"]
+    assert pin.close_attempts == 1
+    assert events == []
 
 
 def _xml(*, overlay: str = OVERLAY, system_id: UUID = SYSTEM_ID) -> str:
@@ -239,11 +265,16 @@ class Guest:
         self.events.append(f"rm:{path}")
 
 
-def _factory(events: list[str], domain: Domain | None = None) -> LocalExternalBootSessionFactory:
+def _factory(
+    events: list[str],
+    domain: Domain | None = None,
+    *,
+    pin_lease: PinOperationLease = LANE.pin,
+) -> LocalExternalBootSessionFactory:
     selected = domain or Domain(events)
     return LocalExternalBootSessionFactory(
         connect=lambda: events.append("connection.open") or Conn(events, selected),
-        pin_lease=LANE.pin,
+        pin_lease=pin_lease,
         open_artifact_root=lambda _lease: events.append("artifact.open") or 41,
         open_guest=lambda: events.append("guest.open") or Guest(events),
         worker_pid=4242,
