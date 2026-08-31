@@ -7,7 +7,6 @@ import pytest
 
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    LocalExternalBootLeaseIssuer,
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
 )
@@ -25,13 +24,45 @@ BINDING = ExternalBootActivationBinding(
 OVERLAY = f"/var/lib/kdive/rootfs/{SYSTEM_ID}-overlay.qcow2"
 
 
-class FakeIssuer:
+class FakeLease:
+    def __init__(self) -> None:
+        self.system_id = SYSTEM_ID
+        self.binding = BINDING
+        self.released = False
+        self.pins = 0
+
+    def release(self) -> None:
+        if self.pins:
+            raise RuntimeError("operation lease is pinned")
+        self.released = True
+
+
+class FakePin:
+    def __init__(self, lease: FakeLease) -> None:
+        self.lease = lease
+        lease.pins += 1
+
+    def close(self) -> None:
+        self.lease.pins -= 1
+
+
+class FakeLane:
     def issue(self) -> LocalExternalBootOperationLease:
-        return LocalExternalBootLeaseIssuer(SYSTEM_ID, BINDING).issue()
+        return FakeLease()
+
+    def pin(self, lease: LocalExternalBootOperationLease) -> FakePin:
+        if not isinstance(lease, FakeLease):
+            raise TypeError("foreign operation lease")
+        if lease.released:
+            raise RuntimeError("operation lease is released")
+        return FakePin(lease)
 
 
-def _lease() -> LocalExternalBootOperationLease:
-    return FakeIssuer().issue()
+LANE = FakeLane()
+
+
+def _lease() -> FakeLease:
+    return FakeLease()
 
 
 def _xml(*, overlay: str = OVERLAY, system_id: UUID = SYSTEM_ID) -> str:
@@ -112,11 +143,51 @@ class Guest:
         self.events.append(f"guest.exists:{path}")
         return 1
 
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int:
+        return int(bool(path) and not followsymlinks)
+
+    def find(self, path: str) -> list[str]:
+        return [path]
+
+    def lstatns(self, path: str) -> dict[str, int]:
+        return {"st_mode": len(path)}
+
+    def readlink(self, path: str) -> str:
+        return path
+
+    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
+        return [{"attrname": path}]
+
+    def download(self, remotefilename: str, filename: str) -> None:
+        self.events.append(f"download:{remotefilename}:{filename}")
+
+    def mkdir(self, path: str) -> None:
+        self.events.append(f"mkdir:{path}")
+
+    def upload(self, filename: str, remotefilename: str) -> None:
+        self.events.append(f"upload:{filename}:{remotefilename}")
+
+    def ln_s(self, target: str, linkname: str) -> None:
+        self.events.append(f"ln:{target}:{linkname}")
+
+    def chmod(self, mode: int, path: str) -> None:
+        self.events.append(f"chmod:{mode}:{path}")
+
+    def chown(self, owner: int, group: int, path: str) -> None:
+        self.events.append(f"chown:{owner}:{group}:{path}")
+
+    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
+        self.events.append(f"xattr:{xattr}:{val!r}:{vallen}:{path}")
+
+    def rm_rf(self, path: str) -> None:
+        self.events.append(f"rm:{path}")
+
 
 def _factory(events: list[str], domain: Domain | None = None) -> LocalExternalBootSessionFactory:
     selected = domain or Domain(events)
     return LocalExternalBootSessionFactory(
         connect=lambda: events.append("connection.open") or Conn(events, selected),
+        pin_lease=LANE.pin,
         open_artifact_root=lambda _lease: events.append("artifact.open") or 41,
         open_guest=lambda: events.append("guest.open") or Guest(events),
         stat_overlay=lambda _path: (8, 9),
@@ -162,6 +233,12 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     assert inspection.overlay.device == 8 and inspection.overlay.inode == 9
     assert inspection.definition_identity.startswith("sha256:")
     assert inspection.source_boot_identity.startswith("sha256:")
+    assert inspection.definition_identity == (
+        "sha256:b3a319e84c14ad49042057dab9c8ce445a144e7d4dea7b193674d9a35aef3110"
+    )
+    assert inspection.source_boot_identity == (
+        "sha256:af7c3d00f78226cd4b917aa70737e2557cfa5989c5efa9a42b2555992adbe176"
+    )
     with pytest.raises(FrozenInstanceError):
         inspection.active = True  # ty: ignore[invalid-assignment]
     session.close()
@@ -219,6 +296,7 @@ def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
     lease = _lease()
     domain = FaultingDomain(events)
     factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
         connect=lambda: FaultingConn(events, domain),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
@@ -247,6 +325,7 @@ def test_overlay_substitution_fails_before_guest_open() -> None:
     events: list[str] = []
     stats = iter(((8, 9), (8, 10)))
     factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: events.append("guest.open") or Guest(events),
@@ -272,11 +351,13 @@ def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> N
 
 def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     events: list[str] = []
+    domain = Domain(events)
     observation = RunningKernelObservation(
         architecture="x86_64", release="6.1.0", gnu_build_id="00112233"
     )
     factory = LocalExternalBootSessionFactory(
-        connect=lambda: Conn(events, Domain(events)),
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, domain),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
         stat_overlay=lambda _path: (8, 9),
@@ -297,11 +378,23 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     assert session.readiness() == ReadinessResult(True, True)
     assert session.observe_running() == observation
     session.cleanup_payloads()
+    session.restore_power("running")
+    assert domain.active
+    session.restore_power("inactive")
+    assert not domain.active
     assert not hasattr(session.inspect_closed().overlay, "path")
     assert not hasattr(session, "artifact_root_descriptor")
     with pytest.raises(ValueError, match="relative"):
         session.open_artifact("../escape", 0)
     session.close()
+    for call in (
+        session.readiness,
+        session.observe_running,
+        lambda: session.restore_power("running"),
+        session.cleanup_payloads,
+    ):
+        with pytest.raises(RuntimeError, match="closed"):
+            call()
 
 
 def test_define_frees_distinct_prior_domain_reference() -> None:
@@ -316,6 +409,7 @@ def test_define_frees_distinct_prior_domain_reference() -> None:
             return replacement
 
     factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
         connect=lambda: ReplacingConn(events, prior),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
@@ -342,6 +436,7 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
 
     lease = _lease()
     factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: FaultingGuest(events),
@@ -355,4 +450,45 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
         session.close()
     assert len(raised.value.exceptions) == 2
     assert events[-2:] == ["domain.close", "connection.close"]
+    lease.release()
+
+
+@pytest.mark.parametrize("fault_at", ["factory", "drive", "launch"])
+def test_guest_open_failures_preserve_primary_and_cleanup(fault_at: str) -> None:
+    events: list[str] = []
+    lease = _lease()
+
+    class LaunchFaultGuest(Guest):
+        def add_drive_opts(self, overlay: str, *, format: str) -> None:
+            super().add_drive_opts(overlay, format=format)
+            if fault_at == "drive":
+                raise LookupError("drive primary")
+
+        def launch(self) -> None:
+            self.events.append("guest.launch")
+            if fault_at == "launch":
+                raise LookupError("launch primary")
+
+    def open_guest() -> Guest:
+        events.append("guest.open")
+        if fault_at == "factory":
+            raise LookupError("factory primary")
+        return LaunchFaultGuest(events)
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _lease: 41,
+        open_guest=open_guest,
+        stat_overlay=lambda _path: (8, 9),
+        close_descriptor=lambda _fd: events.append("artifact.close"),
+    )
+    session = factory.open(lease)
+    with pytest.raises(LookupError, match=f"{fault_at} primary"), session.guest():
+        pass
+    if fault_at != "factory":
+        assert events[-2:] == ["guest.shutdown", "guest.close"]
+    with pytest.raises(RuntimeError, match="pinned"):
+        lease.release()
+    session.close()
     lease.release()

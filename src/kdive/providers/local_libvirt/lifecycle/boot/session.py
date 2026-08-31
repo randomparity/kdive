@@ -53,66 +53,20 @@ class ClosedDomainInspection:
     overlay: OverlayIdentity
 
 
-class _LeasePin:
-    def __init__(self, lease: LocalExternalBootOperationLease) -> None:
-        self._lease: LocalExternalBootOperationLease | None = lease
+class LocalExternalBootOperationLease(Protocol):
+    """Opaque capability issued by the owner of the live System lane."""
 
-    def close(self) -> None:
-        lease, self._lease = self._lease, None
-        if lease is not None:
-            lease._unpin(self)
+    system_id: UUID
+    binding: ExternalBootActivationBinding
 
 
-class LocalExternalBootOperationLease:
-    """Nominal ownership capability held while the caller owns the System lane."""
+class LocalExternalBootOperationPin(Protocol):
+    """Retained proof that the issuing lane remains held."""
 
-    def __init__(
-        self,
-        system_id: UUID,
-        binding: ExternalBootActivationBinding,
-        authority: object,
-    ) -> None:
-        if authority is not _LEASE_AUTHORITY:
-            raise TypeError("operation leases are issued only by the provider-local lease issuer")
-        if binding.system_id != str(system_id):
-            raise ValueError("operation lease binding does not own the System")
-        self.system_id = system_id
-        self.binding = binding
-        self._released = False
-        self._pins: set[_LeasePin] = set()
-
-    @property
-    def released(self) -> bool:
-        return self._released
-
-    def pin(self) -> _LeasePin:
-        if self._released:
-            raise RuntimeError("operation lease is released")
-        pin = _LeasePin(self)
-        self._pins.add(pin)
-        return pin
-
-    def release(self) -> None:
-        if self._pins:
-            raise RuntimeError("operation lease is pinned")
-        self._released = True
-
-    def _unpin(self, pin: _LeasePin) -> None:
-        self._pins.discard(pin)
+    def close(self) -> None: ...
 
 
-_LEASE_AUTHORITY = object()
-
-
-class LocalExternalBootLeaseIssuer:
-    """Provider-local context that alone mints leases for an owned System lane."""
-
-    def __init__(self, system_id: UUID, binding: ExternalBootActivationBinding) -> None:
-        self._system_id = system_id
-        self._binding = binding
-
-    def issue(self) -> LocalExternalBootOperationLease:
-        return LocalExternalBootOperationLease(self._system_id, self._binding, _LEASE_AUTHORITY)
+type PinOperationLease = Callable[[LocalExternalBootOperationLease], LocalExternalBootOperationPin]
 
 
 class _Domain(Protocol):
@@ -136,6 +90,19 @@ class _Guest(Protocol):
     def close(self) -> None: ...
 
     def exists(self, path: str) -> int: ...
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int: ...
+    def find(self, path: str) -> list[str]: ...
+    def lstatns(self, path: str) -> dict[str, int]: ...
+    def readlink(self, path: str) -> str: ...
+    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
+    def download(self, remotefilename: str, filename: str) -> None: ...
+    def mkdir(self, path: str) -> None: ...
+    def upload(self, filename: str, remotefilename: str) -> None: ...
+    def ln_s(self, target: str, linkname: str) -> None: ...
+    def chmod(self, mode: int, path: str) -> None: ...
+    def chown(self, owner: int, group: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def rm_rf(self, path: str) -> None: ...
 
 
 class LocalExternalBootSession(Protocol):
@@ -158,6 +125,19 @@ class InactiveGuest(Protocol):
     """The session's deliberately small libguestfs capability."""
 
     def exists(self, path: str) -> int: ...
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int: ...
+    def find(self, path: str) -> list[str]: ...
+    def lstatns(self, path: str) -> dict[str, int]: ...
+    def readlink(self, path: str) -> str: ...
+    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
+    def download(self, remotefilename: str, filename: str) -> None: ...
+    def mkdir(self, path: str) -> None: ...
+    def upload(self, filename: str, remotefilename: str) -> None: ...
+    def ln_s(self, target: str, linkname: str) -> None: ...
+    def chmod(self, mode: int, path: str) -> None: ...
+    def chown(self, owner: int, group: int, path: str) -> None: ...
+    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def rm_rf(self, path: str) -> None: ...
 
 
 class _GuestContext(AbstractContextManager[InactiveGuest]):
@@ -198,9 +178,51 @@ class _GuardedGuest:
         self._guest = guest
 
     def exists(self, path: str) -> int:
+        return self._handle().exists(path)
+
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int:
+        return self._handle().is_dir(path, followsymlinks=followsymlinks)
+
+    def find(self, path: str) -> list[str]:
+        return self._handle().find(path)
+
+    def lstatns(self, path: str) -> dict[str, int]:
+        return self._handle().lstatns(path)
+
+    def readlink(self, path: str) -> str:
+        return self._handle().readlink(path)
+
+    def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
+        return self._handle().lgetxattrs(path)
+
+    def download(self, remotefilename: str, filename: str) -> None:
+        self._handle().download(remotefilename, filename)
+
+    def mkdir(self, path: str) -> None:
+        self._handle().mkdir(path)
+
+    def upload(self, filename: str, remotefilename: str) -> None:
+        self._handle().upload(filename, remotefilename)
+
+    def ln_s(self, target: str, linkname: str) -> None:
+        self._handle().ln_s(target, linkname)
+
+    def chmod(self, mode: int, path: str) -> None:
+        self._handle().chmod(mode, path)
+
+    def chown(self, owner: int, group: int, path: str) -> None:
+        self._handle().chown(owner, group, path)
+
+    def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
+        self._handle().lsetxattr(xattr, val, vallen, path)
+
+    def rm_rf(self, path: str) -> None:
+        self._handle().rm_rf(path)
+
+    def _handle(self) -> _Guest:
         if self._owner._closed:
             raise RuntimeError("guest wrapper is closed")
-        return self._guest.exists(path)
+        return self._guest
 
 
 class _ConcreteSession:
@@ -208,7 +230,7 @@ class _ConcreteSession:
         self,
         *,
         lease: LocalExternalBootOperationLease,
-        pin: _LeasePin,
+        pin: LocalExternalBootOperationPin,
         connection: _Connection,
         domain: _Domain,
         artifact_fd: int,
@@ -223,7 +245,7 @@ class _ConcreteSession:
         cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None],
     ) -> None:
         self._lease = lease
-        self._pin: _LeasePin | None = pin
+        self._pin: LocalExternalBootOperationPin | None = pin
         self._connection: _Connection | None = connection
         self._domain: _Domain | None = domain
         self._artifact_fd: int | None = artifact_fd
@@ -371,6 +393,7 @@ class LocalExternalBootSessionFactory:
     def __init__(
         self,
         *,
+        pin_lease: PinOperationLease,
         connect: Callable[[], _Connection],
         open_artifact_root: Callable[[LocalExternalBootOperationLease], int],
         open_guest: Callable[[], _Guest],
@@ -382,6 +405,7 @@ class LocalExternalBootSessionFactory:
         observe_running: Callable[[UUID], RunningKernelObservation] | None = None,
         cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None] | None = None,
     ) -> None:
+        self._pin_lease = pin_lease
         self._connect = connect
         self._open_artifact_root = open_artifact_root
         self._open_guest = open_guest
@@ -394,11 +418,7 @@ class LocalExternalBootSessionFactory:
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
 
     def open(self, lease: LocalExternalBootOperationLease) -> LocalExternalBootSession:
-        if type(lease) is not LocalExternalBootOperationLease:
-            raise TypeError("a local external-boot operation lease is required")
-        if lease.released:
-            raise RuntimeError("operation lease is released")
-        pin = lease.pin()
+        pin = self._pin_lease(lease)
         connection: _Connection | None = None
         domain: _Domain | None = None
         artifact_fd: int | None = None
