@@ -106,6 +106,7 @@ class ModuleLayout:
 
 class ModulePublicationIO(Protocol):
     def require_inactive(self) -> None: ...
+    def observe_layout(self) -> ModuleLayout: ...
     def move_live_to_old(self) -> None: ...
     def move_staging_to_live(self) -> None: ...
     def move_old_to_live(self) -> None: ...
@@ -307,12 +308,25 @@ def advance_module_publication(
 ) -> None:
     """Perform the sole ADR-0586 action allowed by a present-tree restart row."""
     io.require_inactive()
+    if phase == PublicationPhase.OLD_ASIDE and layout == ModuleLayout(None, desired, prior):
+        try:
+            io.move_staging_to_live()
+        except OSError as exc:
+            io.require_inactive()
+            observed = io.observe_layout()
+            if observed == ModuleLayout(None, desired, prior):
+                io.record_phase(PublicationPhase.ROLLBACK_READY)
+                return
+            if observed == ModuleLayout(desired, None, prior):
+                _sync_phase(io, PublicationPhase.NEW_LIVE)
+                return
+            raise ValueError("external-boot module publication conflict") from exc
+        return
     rows = {
         (PublicationPhase.MOVE_READY, ModuleLayout(prior, desired, None)): io.move_live_to_old,
         (PublicationPhase.MOVE_READY, ModuleLayout(None, desired, prior)): lambda: _sync_phase(
             io, PublicationPhase.OLD_ASIDE
         ),
-        (PublicationPhase.OLD_ASIDE, ModuleLayout(None, desired, prior)): io.move_staging_to_live,
         (PublicationPhase.OLD_ASIDE, ModuleLayout(desired, None, prior)): lambda: _sync_phase(
             io, PublicationPhase.NEW_LIVE
         ),

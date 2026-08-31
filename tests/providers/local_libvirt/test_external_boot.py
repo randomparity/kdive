@@ -80,18 +80,25 @@ _DESIRED = PresentComponentState(manifest="sha256:" + "2" * 64)
 
 
 class _PublicationIO:
-    def __init__(self, layout: ModuleLayout) -> None:
+    def __init__(self, layout: ModuleLayout, *, fail_staging_move: bool = False) -> None:
         self.layout = layout
         self.actions: list[str] = []
+        self.fail_staging_move = fail_staging_move
 
     def require_inactive(self) -> None:
         self.actions.append("inactive")
+
+    def observe_layout(self) -> ModuleLayout:
+        self.actions.append("observe")
+        return self.layout
 
     def move_live_to_old(self) -> None:
         self.actions.append("live-to-old")
 
     def move_staging_to_live(self) -> None:
         self.actions.append("staging-to-live")
+        if self.fail_staging_move:
+            raise OSError("ambiguous move result")
 
     def move_old_to_live(self) -> None:
         self.actions.append("old-to-live")
@@ -139,6 +146,40 @@ def test_unlisted_restart_layout_conflicts_without_mutation() -> None:
             desired=_DESIRED,
         )
     assert io.actions == ["inactive"]
+
+
+@pytest.mark.parametrize(
+    ("after_error", "tail"),
+    [
+        (ModuleLayout(None, _DESIRED, _PRIOR), ["inactive", "observe", "phase:rollback-ready"]),
+        (ModuleLayout(_DESIRED, None, _PRIOR), ["observe", "guest-sync", "phase:new-live"]),
+    ],
+)
+def test_staging_move_error_is_classified_from_three_names(
+    after_error: ModuleLayout, tail: list[str]
+) -> None:
+    io = _PublicationIO(after_error, fail_staging_move=True)
+    advance_module_publication(
+        io,
+        phase=PublicationPhase.OLD_ASIDE,
+        layout=ModuleLayout(None, _DESIRED, _PRIOR),
+        prior=_PRIOR,
+        desired=_DESIRED,
+    )
+    assert io.actions[-3:] == tail
+
+
+def test_staging_move_error_third_layout_conflicts_without_further_mutation() -> None:
+    io = _PublicationIO(ModuleLayout(_PRIOR, _DESIRED, _PRIOR), fail_staging_move=True)
+    with pytest.raises(ValueError, match="conflict"):
+        advance_module_publication(
+            io,
+            phase=PublicationPhase.OLD_ASIDE,
+            layout=ModuleLayout(None, _DESIRED, _PRIOR),
+            prior=_PRIOR,
+            desired=_DESIRED,
+        )
+    assert io.actions == ["inactive", "staging-to-live", "inactive", "observe"]
 
 
 @pytest.mark.parametrize(
