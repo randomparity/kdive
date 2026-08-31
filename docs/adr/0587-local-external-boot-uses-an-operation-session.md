@@ -26,8 +26,10 @@ pin-free `OperationOwnership` through `open_artifact_root(ownership) -> int`; on
 session can access the retained pin.
 A missing, foreign, or released lease rejects the operation before opening libvirt or filesystem
 resources, and the lane therefore cannot disappear between guest operations.
-Construction then opens and validates the expected KDIVE domain, exact System overlay, and an
-injected owner-bound artifact-root directory descriptor.
+Construction then opens and validates the expected KDIVE domain, acquires the exact System overlay
+as a retained no-follow regular-file descriptor, and opens an injected owner-bound artifact-root
+directory descriptor. Guest attachment uses only the stable `/proc/self/fd` reference to that
+retained overlay descriptor, never a later pathname resolution.
 
 The session owns the libvirt connection/domain and artifact-root descriptor until close. It opens
 a reopenable libguestfs guest session only after fencing and rechecking the domain inactive, and
@@ -42,8 +44,9 @@ reference to libguestfs for the duration of the transfer.
 
 Cleanup first poisons the session and every guest wrapper so no subsequent method can reach an
 underlying handle. It then attempts every owned resource in dependency-safe reverse acquisition
-order: active guest, artifact-root descriptor, domain reference, libvirt connection, then the
-operation-lease pin. A close error cannot make the poisoned handle callable again. Failure to close
+order: active guest, artifact-root descriptor, overlay descriptor, domain reference, libvirt
+connection, then the operation-lease pin. A close error cannot make the poisoned handle callable
+again. Failure to close
 one resource does not skip later cleanup; the original operation failure remains primary and any
 close error is reported after pin release.
 

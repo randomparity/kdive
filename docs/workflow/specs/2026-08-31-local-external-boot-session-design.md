@@ -32,8 +32,11 @@ artifact directory. This issue does not introduce or guess a new environment set
 itself binds only the existing local libvirt URI and overlay-root convention. It validates canonical
 System identity before opening resources and rejects domain ownership or overlay identity mismatch.
 
-`LocalExternalBootSession` owns one libvirt connection and domain, the exact overlay identity
-(device/inode plus canonical expected path), and an already-open artifact-root directory descriptor.
+`LocalExternalBootSession` owns one libvirt connection and domain, a no-follow regular-file overlay
+descriptor plus its exact device/inode identity, and an already-open artifact-root directory
+descriptor. The canonical expected path is used only to acquire and authenticate that descriptor;
+libguestfs attaches through its stable `/proc/self/fd` reference so pathname replacement cannot
+redirect the operation.
 It exposes only:
 
 - `inspect_closed()` returning immutable XML bytes, active state, ADR-0583 definition identity,
@@ -50,8 +53,9 @@ identity again, and always shuts down and closes libguestfs. The outer lease pin
 all guest operations; an attempted lease release while a guest is open fails without releasing the
 lane. Closing first atomically poisons the outer session and active guest wrapper, making every
 subsequent method fail before reaching an underlying handle. It then attempts to close the guest
-handle, artifact descriptor, domain reference, and libvirt connection in that exact dependency-safe
-reverse order, then releases the operation pin. A close fault is reported but cannot re-enable the
+handle, artifact descriptor, overlay descriptor, domain reference, and libvirt connection in that
+exact dependency-safe reverse order, then releases the operation pin. A close fault is reported but
+cannot re-enable the
 poisoned wrapper. All cleanup attempts run even when an earlier close fails.
 
 Closed inspection safe-parses the inactive XML, verifies the KDIVE System metadata and expected

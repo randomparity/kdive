@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
 from collections.abc import Callable
@@ -39,6 +40,7 @@ class _BoundOverlay:
     device: int
     inode: int
     path: str
+    descriptor: int
 
 
 @dataclass(frozen=True)
@@ -268,8 +270,9 @@ class _ConcreteSession:
         artifact_fd: int,
         overlay: _BoundOverlay,
         open_guest: OpenGuest,
-        stat_overlay: Callable[[str], tuple[int, int]],
+        fstat_overlay: Callable[[int], tuple[int, int, int]],
         close_descriptor: Callable[[int], None],
+        close_overlay_descriptor: Callable[[int], None],
         close_transfer_descriptor: Callable[[int], None],
         open_relative: Callable[[int, str, int, int], int],
         unlink_relative: Callable[[int, str], None],
@@ -285,8 +288,9 @@ class _ConcreteSession:
         self._artifact_fd: int | None = artifact_fd
         self._overlay = overlay
         self._open_guest = open_guest
-        self._stat_overlay = stat_overlay
+        self._fstat_overlay = fstat_overlay
         self._close_descriptor = close_descriptor
+        self._close_overlay_descriptor = close_overlay_descriptor
         self._close_transfer_descriptor = close_transfer_descriptor
         self._open_relative = open_relative
         self._unlink_relative = unlink_relative
@@ -379,6 +383,7 @@ class _ConcreteSession:
         self._guests.clear()
         handles = [guest._poison() for guest in guests]
         artifact_fd, self._artifact_fd = self._artifact_fd, None
+        overlay_fd = self._overlay.descriptor
         domain, self._domain = self._domain, None
         connection, self._connection = self._connection, None
         pin, self._pin = self._pin, None
@@ -388,6 +393,7 @@ class _ConcreteSession:
                 errors.extend(_attempt_guest_close(guest))
         for closer in (
             (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
+            lambda: self._close_overlay_descriptor(overlay_fd),
             domain.free if domain is not None else None,
             connection.close if connection is not None else None,
             pin.close if pin is not None else None,
@@ -404,14 +410,10 @@ class _ConcreteSession:
         if self._guests:
             raise RuntimeError("an inactive guest context is already open")
         self.require_inactive()
-        if self._stat_overlay(self._overlay.path) != (
-            self._overlay.device,
-            self._overlay.inode,
-        ):
-            raise ValueError("System overlay changed before guest open")
+        self._require_overlay_identity()
         guest = self._open_guest()
         try:
-            guest.add_drive_opts(self._overlay.path, format="qcow2")
+            guest.add_drive_opts(f"/proc/self/fd/{self._overlay.descriptor}", format="qcow2")
             guest.launch()
         except BaseException as exc:
             for close_error in _attempt_guest_close(guest):
@@ -468,11 +470,14 @@ class _ConcreteSession:
         if guest not in self._guests:
             raise RuntimeError("guest wrapper is closed")
         self.require_inactive()
-        if self._stat_overlay(self._overlay.path) != (
-            self._overlay.device,
-            self._overlay.inode,
-        ):
+        self._require_overlay_identity()
+
+    def _require_overlay_identity(self) -> None:
+        device, inode, mode = self._fstat_overlay(self._overlay.descriptor)
+        if (device, inode) != (self._overlay.device, self._overlay.inode):
             raise ValueError("System overlay changed before guest operation")
+        if not stat.S_ISREG(mode):
+            raise ValueError("System overlay descriptor is not a regular file")
 
     def _require_no_guest_context(self) -> None:
         self._require_open_domain()
@@ -493,8 +498,10 @@ class LocalExternalBootSessionFactory:
         connect: Connect,
         open_artifact_root: OpenArtifactRoot,
         open_guest: OpenGuest,
-        stat_overlay: Callable[[str], tuple[int, int]] | None = None,
+        open_overlay: Callable[[str], int] | None = None,
+        fstat_overlay: Callable[[int], tuple[int, int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
+        close_overlay_descriptor: Callable[[int], None] = os.close,
         close_transfer_descriptor: Callable[[int], None] = os.close,
         open_relative: Callable[[int, str, int, int], int] | None = None,
         unlink_relative: Callable[[int, str], None] | None = None,
@@ -506,8 +513,10 @@ class LocalExternalBootSessionFactory:
         self._connect = connect
         self._open_artifact_root = open_artifact_root
         self._open_guest = open_guest
-        self._stat_overlay = stat_overlay or _stat_identity
+        self._open_overlay = open_overlay or _open_overlay
+        self._fstat_overlay = fstat_overlay or _fstat_identity
         self._close_descriptor = close_descriptor
+        self._close_overlay_descriptor = close_overlay_descriptor
         self._close_transfer_descriptor = close_transfer_descriptor
         self._open_relative = open_relative or _open_relative
         self._unlink_relative = unlink_relative or _unlink_relative
@@ -526,6 +535,7 @@ class LocalExternalBootSessionFactory:
             raise ValueError("operation lease binding does not own the System")
         connection: _Connection | None = None
         domain: _Domain | None = None
+        overlay_fd: int | None = None
         artifact_fd: int | None = None
         try:
             connection = self._connect()
@@ -534,8 +544,11 @@ class LocalExternalBootSessionFactory:
             expected_overlay = overlay_path(system_id)
             xml = domain.XMLDesc(0)
             _parse_owned_xml(xml, system_id, expected_overlay)
-            device, inode = self._stat_overlay(expected_overlay)
-            overlay = _BoundOverlay(device, inode, expected_overlay)
+            overlay_fd = self._open_overlay(expected_overlay)
+            device, inode, mode = self._fstat_overlay(overlay_fd)
+            if not stat.S_ISREG(mode):
+                raise ValueError("System overlay descriptor is not a regular file")
+            overlay = _BoundOverlay(device, inode, expected_overlay, overlay_fd)
             artifact_fd = self._open_artifact_root(facts)
             return _ConcreteSession(
                 system_id=system_id,
@@ -546,8 +559,9 @@ class LocalExternalBootSessionFactory:
                 artifact_fd=artifact_fd,
                 overlay=overlay,
                 open_guest=self._open_guest,
-                stat_overlay=self._stat_overlay,
+                fstat_overlay=self._fstat_overlay,
                 close_descriptor=self._close_descriptor,
+                close_overlay_descriptor=self._close_overlay_descriptor,
                 close_transfer_descriptor=self._close_transfer_descriptor,
                 open_relative=self._open_relative,
                 unlink_relative=self._unlink_relative,
@@ -559,6 +573,13 @@ class LocalExternalBootSessionFactory:
             errors: list[Exception] = []
             for closer in (
                 (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
+                (
+                    lambda: (
+                        self._close_overlay_descriptor(overlay_fd)
+                        if overlay_fd is not None
+                        else None
+                    )
+                ),
                 domain.free if domain is not None else None,
                 connection.close if connection is not None else None,
                 pin.close,
@@ -580,9 +601,13 @@ def _active(domain: _Domain) -> bool:
     return bool(value)
 
 
-def _stat_identity(path: str) -> tuple[int, int]:
-    value = os.stat(path, follow_symlinks=False)
-    return value.st_dev, value.st_ino
+def _open_overlay(path: str) -> int:
+    return os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+
+
+def _fstat_identity(descriptor: int) -> tuple[int, int, int]:
+    value = os.fstat(descriptor)
+    return value.st_dev, value.st_ino, value.st_mode
 
 
 def _relative_name(name: str) -> str:

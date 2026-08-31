@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from dataclasses import FrozenInstanceError
 from uuid import UUID
 
@@ -195,7 +196,9 @@ def _factory(events: list[str], domain: Domain | None = None) -> LocalExternalBo
         pin_lease=LANE.pin,
         open_artifact_root=lambda _lease: events.append("artifact.open") or 41,
         open_guest=lambda: events.append("guest.open") or Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
 
@@ -276,7 +279,7 @@ def test_guest_fences_and_rechecks_overlay_and_can_reopen() -> None:
     with session.guest() as guest:
         assert guest.exists("/etc/os-release") == 1
     assert events.count("guest.open") == 2
-    assert events.index("domain.active") < events.index(f"guest.drive:{OVERLAY}:qcow2")
+    assert events.index("domain.active") < events.index("guest.drive:/proc/self/fd/40:qcow2")
     session.close()
 
 
@@ -289,7 +292,9 @@ def test_guest_rechecks_inactive_and_overlay_before_every_operation() -> None:
         connect=lambda: Conn(events, domain),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: stats[-1],
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (*stats[-1], stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
     session = factory.open(_lease())
@@ -315,7 +320,9 @@ def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str)
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _ownership: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         open_relative=lambda *_args: events.append("artifact.child.open") or 42,
         close_transfer_descriptor=lambda _fd: events.append("artifact.child.close"),
@@ -339,7 +346,9 @@ def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _ownership: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         open_relative=lambda root, name, flags, mode: (
             events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
@@ -373,7 +382,9 @@ def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> No
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _ownership: 41,
         open_guest=lambda: TransferFaultGuest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         open_relative=lambda *_args: 42,
         close_transfer_descriptor=close_fault,
@@ -445,18 +456,31 @@ def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
 
     lease = _lease()
     domain = FaultingDomain(events)
+
+    def fault_overlay_close(_fd: int) -> None:
+        events.append("overlay.close")
+        raise OSError("overlay close")
+
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
         connect=lambda: FaultingConn(events, domain),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=fault_overlay_close,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
     session = factory.open(lease)
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
-    assert len(raised.value.exceptions) == 2
+    assert len(raised.value.exceptions) == 3
+    assert events[-4:] == [
+        "artifact.close",
+        "overlay.close",
+        "domain.close",
+        "connection.close",
+    ]
     lease.release()
 
 
@@ -479,7 +503,9 @@ def test_overlay_substitution_fails_before_guest_open() -> None:
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: events.append("guest.open") or Guest(events),
-        stat_overlay=lambda _path: next(stats),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (*next(stats), stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
     session = factory.open(_lease())
@@ -487,6 +513,46 @@ def test_overlay_substitution_fails_before_guest_open() -> None:
         pass
     assert "guest.open" not in events
     session.close()
+
+
+@pytest.mark.parametrize("mode", [stat.S_IFLNK | 0o777, stat.S_IFDIR | 0o700])
+def test_overlay_descriptor_rejects_symlink_and_nonregular_before_guest(mode: int) -> None:
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: events.append("guest.open") or Guest(events),
+        open_overlay=lambda _path: events.append("overlay.open") or 40,
+        fstat_overlay=lambda _fd: (8, 9, mode),
+        close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
+        close_descriptor=lambda _fd: None,
+    )
+    with pytest.raises(ValueError, match="regular"):
+        factory.open(_lease())
+    assert "guest.open" not in events
+    assert events[-3:] == ["overlay.close", "domain.close", "connection.close"]
+
+
+def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda fd: events.append(f"overlay.close:{fd}"),
+        close_descriptor=lambda _fd: None,
+    )
+    session = factory.open(_lease())
+    with session.guest():
+        pass
+    assert "guest.drive:/proc/self/fd/40:qcow2" in events
+    assert f"guest.drive:{OVERLAY}:qcow2" not in events
+    session.close()
+    assert "overlay.close:40" in events
 
 
 def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> None:
@@ -510,7 +576,9 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         connect=lambda: Conn(events, domain),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         open_relative=lambda root, name, flags, mode: (
             events.append(f"openat:{root}:{name}:{flags}:{mode}") or 42
@@ -558,7 +626,9 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         readiness=lambda system_id: observed_ids.append(system_id) or ReadinessResult(True, True),
         observe_running=lambda system_id: (
@@ -610,7 +680,9 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
             or 41
         ),
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
     session = factory.open(lease)
@@ -640,7 +712,9 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=mutate_during_artifact,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
     session = factory.open(lease)
@@ -668,7 +742,9 @@ def test_artifact_callback_type_is_pin_free_and_cannot_release_lane() -> None:
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=callback,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
     session = factory.open(lease)
@@ -695,7 +771,9 @@ def test_define_frees_distinct_prior_domain_reference() -> None:
         connect=lambda: ReplacingConn(events, prior),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: Guest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
     session = factory.open(_lease())
@@ -722,7 +800,9 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _lease: 41,
         open_guest=lambda: FaultingGuest(events),
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=fault_descriptor,
     )
     session = factory.open(lease)
@@ -762,7 +842,9 @@ def test_guest_open_failures_preserve_primary_and_cleanup(fault_at: str) -> None
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _lease: 41,
         open_guest=open_guest,
-        stat_overlay=lambda _path: (8, 9),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
     session = factory.open(lease)
