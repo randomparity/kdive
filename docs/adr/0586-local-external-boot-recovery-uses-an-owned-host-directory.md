@@ -149,7 +149,11 @@ live tree is verified and records both completion phases without a move. On rest
 old-aside=prior, and durable `absence-complete` means removal pending; the sole permitted guest
 mutation is descriptor-bounded, no-follow continuation of that authenticated old-aside removal.
 Because removal may fail partway, durable completion evidence—not a now-incomplete manifest—keeps
-the deterministic old-aside owned; a symlink, wrong type, or path escape conflicts. Live absent,
+the deterministic old-aside owned; only the exact authenticated prior tree or its bounded
+partial-deletion continuation may be removed. A wrong identity, unowned entry, symlink, wrong type,
+or path escape conflicts. Under durable `absence-complete`, any present live name is conflict with
+zero mutation and the domain kept inactive, regardless of whether old-aside is present, partial, or
+absent. Live absent,
 old-aside absent, and durable `absence-complete` permits only guest sync plus `absence-cleaned`
 evidence. Boot, readiness, and lifecycle advancement remain forbidden until `absence-cleaned` is
 durable. A crash between a guest move and its evidence fsync is classified from the three names and
