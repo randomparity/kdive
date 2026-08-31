@@ -11,19 +11,34 @@ MCP contracts remain excluded. The implementation targets Python 3.14 on x86_64 
 
 ## Design
 
+`LocalLibvirtExternalBoot` replaces the fine-grained `LocalExternalBootIO` calls with
+`LocalExternalBootIO.open(authority, expected: ExpectedOperationOwnership) ->
+AbstractContextManager[LocalExternalBootOperation]`. Each public six-port method enters that
+context once and performs reopen, phase writes, observations, and mutations through the returned
+operation object; validation failure and work failure still exit the context and attempt session
+close. No hidden session is retained between calls.
+
 `RealLocalExternalBootIO` stops accepting `LocalExternalBootHost`. It accepts the narrow
-provider-local materializer, recovery/artifact roots, `RealGuestRecoveryWriter`, and
-`OpenOperationSession(authority, expected_system_id, expected_run_id)`. The opener authenticates
-the opaque authority, resolves its activation binding, obtains the corresponding lane-owned lease,
-and opens `LocalExternalBootSession`; the caller never invents or supplies a binding that its port
-does not own. Every public six-port call opens exactly one session, performs every observation
+provider-local materializer, recovery/artifact roots, `RealGuestRecoveryWriter`, an injected
+`resolve_operation_lease(authority) -> LocalExternalBootOperationLease`, and the existing
+`LocalExternalBootSessionFactory`. The resolver is the future #2140 composition seam; this adapter
+does not decode or authenticate the opaque authority. It passes the resolved live lease to
+`LocalExternalBootSessionFactory.open`, whose `pin_lease` atomically supplies the retained pin and
+complete binding. The caller never invents or supplies a binding that its port does not own. Every
+public six-port call opens exactly one session, performs every observation
 and mutation for that call through it, and closes it after durable evidence has been written. No
 session, guest wrapper, descriptor, libvirt object, or host path escapes the call.
 
-The authority-to-session callable is the only translation point. It must reject an authority that
-does not resolve to a live lane-owned `LocalExternalBootOperationLease`, or whose resolved binding
-does not match the expected System and Run, before the session factory opens libvirt or filesystem
-resources. Materialization supplies the ownership already present in `ExternalBootPlan`; later
+The injected resolver is the only authority-to-lease translation point. It must reject an authority
+that does not resolve to a live lane-owned `LocalExternalBootOperationLease`. The factory pins that
+lease through `LocalExternalBootSessionFactory.open(lease, expected)`, where immutable
+`ExpectedOperationOwnership(system_id, run_id, activation_id=None)` is compared with the atomic
+`PinnedOperationOwnership` before any libvirt or filesystem resource opens. The factory never
+rereads the caller lease. Materialization supplies System and Run from `ExternalBootPlan` and
+sets `activation_id=None`, meaning compare only System and Run; preparation and every
+recovery-point operation additionally require
+the exact activation ID. Same-System/cross-Run and same-System-and-Run/cross-activation leases reject
+before resource open. Later
 operations supply ownership from the materialization or recovery point. The adapter compares the session's binding and System
 inspection with the caller's plan, materialization, or recovery point before mutation. It does not
 decode the provider-host authority protocol or advertise support; #2140 owns those tasks.
@@ -45,19 +60,35 @@ the target XML. Complete recovery metadata is published only after the captured 
 source XML, target XML, prior power, and every owner/digest field agree with the intent.
 
 The guest-tree traversal is iterative and bounded before materialization. `InactiveGuest` adds
-`open_directory(path: str, *, limit: int) -> DirectoryCursor`, where `DirectoryCursor` is an
+`open_tree(path: str, *, limit: int) -> TreeCursor`, where `TreeCursor` is an
 `AbstractContextManager[Iterator[InactiveGuestDirectoryEntry]]` with mandatory `close()`. The session
-implementation must pass `limit + 1` to a backend cursor or fixed guest-side bounded enumeration
-operation and yield at most that many entries; it must not implement the iterator by first calling
-a list-returning `find`, `readdir`, `ls`, or glob API. Seeing entry `limit + 1` is the explicit
+implementation uses libguestfs `find0`, its streaming and cancellable `FileOut` operation, on a
+worker-owned FIFO in a private temporary directory. A producer thread calls
+`find0(path, fifo_path)` once for the entire recursive tree while the cursor incrementally parses
+NUL-delimited relative names. The adapter does not reopen discovered directories; every guest entry
+is emitted and visited exactly once. The cursor
+yields at most `limit + 1` entries; it must not first call a list-returning `find`, `readdir`, `ls`,
+or glob API. Seeing entry `limit + 1` is the explicit
 over-limit signal and stops traversal before visiting or retaining it. The adapter consumes every
 cursor in `with`; success, early termination, limit rejection, and backend failure therefore close
-the backend cursor/stream before the guest context can close. The adapter walks
-directories depth-first with a remaining global `MAX_ENTRIES` allowance, increments entry and
-regular-byte counters before retaining an item, and rejects duplicate, non-canonical, hard-linked,
-cross-release, or unsupported topology. Tests instrument the backend request limit, prove no
-list-returning enumeration is called, prove entry `MAX_ENTRIES + 1` is neither visited nor retained,
-and prove cursor close on success, caller-abandoned iteration, limit rejection, and backend error.
+the FIFO read side and call the guest handle's thread-safe `user_cancel()` before joining the
+producer and removing the FIFO/private directory. Producer `EINTR` is accepted only after deliberate
+consumer cancellation; every other error is reported. Libguestfs promises that `user_cancel()`
+stops the current transfer shortly. The cursor retains no paths until it has seen end-of-stream or
+entry `limit + 1`. On a bounded stream it validates and byte-sorts at most `limit` relative paths
+before yielding them, preserving canonical recovery identity across backend enumeration orders.
+The adapter does not claim a stronger wall-clock bound: if the
+backend violates that contract, cleanup waits with the operation pin held rather than releasing a
+lane while the guest handle is live. The adapter increments entry and regular-byte counters before
+retaining an item and rejects duplicate, non-canonical, hard-linked, cross-release, or unsupported
+topology. Tests prove no list-returning enumeration is called, prove every entry in a multilevel
+tree is emitted once, prove entry `MAX_ENTRIES + 1` is neither visited nor retained, and prove cursor
+close and `user_cancel()` on caller-abandoned iteration, limit rejection, and backend error. Two
+producers emitting the same tree in different orders must yield the same byte-sorted paths and
+recovery identity.
+Tests call the concrete adapter with an instrumented `find0` FileOut producer, not only a fake
+iterator, and prove that closing at the limit invokes `user_cancel()`, joins a cooperating blocked
+producer, and creates no unbounded regular host file.
 
 ### Activation, observation, and recovery
 
