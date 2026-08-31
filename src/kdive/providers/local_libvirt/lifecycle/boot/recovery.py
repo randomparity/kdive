@@ -399,22 +399,29 @@ class RealGuestRecoveryWriter:
         if not sink.matches(tree, release):
             sink.close()
             raise ValueError("recovery archive sink owner does not match guest tree")
-        if tree.root_kind() == "absent":
-            sink.close()
-            return AbsentModuleCapture()
-        entries = _validated_entries(tree)
-        with tempfile.TemporaryFile() as archive:
-            manifests = _write_archive(tree, entries, archive)
-            _, manifest, count, size = _manifest(manifests)
-            archive.seek(0)
-            archive_digest, archive_size = sink.publish(archive)
-        return ModuleArchiveCapture(
-            manifest=manifest,
-            entry_count=count,
-            uncompressed_bytes=size,
-            archive_sha256=archive_digest,
-            archive_bytes=archive_size,
-        )
+        try:
+            if tree.root_kind() == "absent":
+                sink.close()
+                return AbsentModuleCapture()
+            entries = _validated_entries(tree)
+            with tempfile.TemporaryFile() as archive:
+                manifests = _write_archive(tree, entries, archive)
+                _, manifest, count, size = _manifest(manifests)
+                archive.seek(0)
+                archive_digest, archive_size = sink.publish(archive)
+            return ModuleArchiveCapture(
+                manifest=manifest,
+                entry_count=count,
+                uncompressed_bytes=size,
+                archive_sha256=archive_digest,
+                archive_bytes=archive_size,
+            )
+        except BaseException as primary:
+            try:
+                sink.close()
+            except BaseException as cleanup:
+                primary.add_note(f"recovery archive sink cleanup failed: {type(cleanup).__name__}")
+            raise
 
     def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
         _match_tree(tree, release, mutable=False)
@@ -484,9 +491,7 @@ def _validated_entries(tree: AuthenticatedGuestTree) -> list[GuestTreeEntry]:
         if entry.kind == "regular":
             if entry.link_count != 1:
                 raise ValueError("hard-linked module entries are forbidden")
-            total += entry.size
-            if total > MAX_REGULAR_BYTES:
-                raise ValueError("module tree exceeds 8589934592 regular bytes")
+            total = _bounded_regular_total(total, entry.size, source="tree")
         elif entry.size != 0:
             raise ValueError("non-regular module entry has content bytes")
         if entry.kind == "symlink":
@@ -497,8 +502,7 @@ def _validated_entries(tree: AuthenticatedGuestTree) -> list[GuestTreeEntry]:
             raise ValueError("module tree has xattrs while support is false")
         _xattrs(entry.xattrs)
         result.append(entry.model_copy(update={"path": path}))
-        if len(result) > MAX_ENTRIES:
-            raise ValueError("module tree exceeds 200000 entries")
+        _bounded_entry_count(len(result), source="tree")
     return sorted(result, key=lambda item: item.path.encode())
 
 
@@ -570,9 +574,7 @@ def _validate_archive(source: BinaryIO) -> list[_ManifestEntry]:
             seen.add(path)
             kind = _member_kind(member)
             if kind == "regular":
-                total += member.size
-                if total > MAX_REGULAR_BYTES:
-                    raise ValueError("module archive exceeds 8589934592 regular bytes")
+                total = _bounded_regular_total(total, member.size, source="archive")
                 content = cast(BinaryIO, archive.extractfile(member))
                 digest, size = _hash_stream(content, member.size)
                 if size != member.size:
@@ -580,8 +582,7 @@ def _validate_archive(source: BinaryIO) -> list[_ManifestEntry]:
             else:
                 digest, size = None, 0
             entries.append(_manifest_from_member(member, path, kind, digest, size))
-            if len(entries) > MAX_ENTRIES:
-                raise ValueError("module archive exceeds 200000 entries")
+            _bounded_entry_count(len(entries), source="archive")
     _manifest(entries)
     return entries
 
@@ -854,6 +855,18 @@ def _copy_and_hash(source: BinaryIO, destination: BinaryIO, expected: int) -> tu
 
 def _regular_size(entries: list[_ManifestEntry]) -> int:
     return sum(entry.size for entry in entries if entry.kind == "regular")
+
+
+def _bounded_entry_count(count: int, *, source: Literal["tree", "archive"]) -> None:
+    if count > MAX_ENTRIES:
+        raise ValueError(f"module {source} exceeds 200000 entries")
+
+
+def _bounded_regular_total(current: int, added: int, *, source: Literal["tree", "archive"]) -> int:
+    total = current + added
+    if total > MAX_REGULAR_BYTES:
+        raise ValueError(f"module {source} exceeds 8589934592 regular bytes")
+    return total
 
 
 def _close_fd(fd: int) -> BaseException | None:
