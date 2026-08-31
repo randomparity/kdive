@@ -254,6 +254,13 @@ until a complete desired tree has durable `publication-complete` or exact desire
 `absence-cleaned`. No
 guestmount, `renameat2`, appliance helper, or new provisioning dependency is added.
 
+Restart applies phase and layout together. Durable `absence-live` permits only the exact
+live-absent/staging-absent/old-aside-prior layout; it may fsync `absence-complete` and continue the
+bounded cleanup above, with no other mutation first. Every other `absence-live` layout conflicts.
+Durable `absence-cleaned` is terminal and idempotent only when live, staging, and old-aside are all
+absent; it performs no guest mutation. Any name that reappears or is partial, unowned, unreadable, or
+malformed under `absence-cleaned` conflicts and keeps the domain inactive.
+
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
 retains the complete point identity plus explicit payload-absence facts. It fsyncs the tombstone,
@@ -364,6 +371,8 @@ verification plus durable `publication-complete` or `absence-cleaned`. Tests inj
 present old-aside removal but before publication evidence and prove only evidence fsync follows.
 Desired-absence tests cover partial old-aside deletion, every live/staging conflict,
 old-aside-absent before `absence-cleaned`, and crashes around final guest sync/evidence fsync.
+They exercise exact and mismatched three-name layouts under `absence-live`, `absence-complete`, and
+`absence-cleaned`, including terminal idempotent replay and reappearance conflicts.
 Old-aside removal is completion-evidence-gated. Tests also prove no guestmount, `renameat2`,
 appliance helper, or new host prerequisite is used.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
