@@ -16,6 +16,9 @@ restoration never accepts or derives a provider-host path inside the guest write
 The operator then selected a pure-I/O Task 2 boundary on the same date: Task 2 receives an
 authenticated guest-tree capability and owns no persistent staging namespace, phase evidence,
 publication, or restart classification. Task 3 owns those lifecycle operations.
+At the publication-adapter checkpoint, the operator selected existing libguestfs `mv` with a
+bounded live-name absence while the overlay is verified inactive; guestmount, `renameat2`, and an
+appliance helper remain excluded.
 
 The implementation supports Python 3.14 on the declared x86_64 and ppc64le targets and adds no
 dependency. It reuses libvirt, defused XML parsing, `xml.etree.ElementTree.canonicalize`, libguestfs,
@@ -219,26 +222,27 @@ Task 3 instance authenticates the deterministic staging tree against that fsynce
 Task 3 operation: it reopens and authenticates the
 recovery point and source, then resumes that owned partial or removes it before a fresh attempt; it
 never treats an unclassified or third partial as owned. On success, Task 3 independently verifies
-the complete staged manifest, writes and fsyncs phase evidence, atomically renames the staged tree
-into place, and fsyncs the containing directory before advancing the lifecycle. Concretely, Task 3
-fsyncs `exchange-ready`, then uses descriptor-relative same-filesystem
-`renameat2(..., RENAME_EXCHANGE)` between the authenticated live and staged directories; a
-present-empty directory follows the same path.
-Unsupported exchange fails before live mutation; no remove/rename fallback exists. After exchange,
-Task 3 verifies target-at-live and source-at-staging, fsyncs `exchange-complete` and the containing
-directory, and only then removes the displaced source tree. Restart before or after the syscall or
-either evidence fsync compares both complete identities: source-at-live/target-at-staging resumes
-post-exchange, target-at-live/source-at-staging resumes pre-exchange, and absent, mixed, or third
-state conflicts without mutation. This present-source path never makes the live release name absent.
+the complete staged manifest. For a present desired tree it verifies live=prior, staging=desired,
+and old-aside absent, guest-syncs, and fsyncs `move-ready`. It moves live to deterministic old-aside
+with libguestfs `mv`, guest-syncs, verifies live absent and old-aside=prior, and fsyncs `old-aside`.
+Only while the domain remains verified inactive may the live name be absent. Task 3 moves staging to
+live, guest-syncs, verifies live=desired and old-aside=prior, and fsyncs `new-live`. It removes
+old-aside only after complete desired-tree verification, then guest-syncs and fsyncs
+`publication-complete`. A present-empty desired tree follows this path.
 
-Recorded absence uses a separate Task 3 path. Task 3 fsyncs `absence-ready` with an authenticated
-empty placeholder at the deterministic staging name, exchanges it with the live target, verifies
-empty-at-live and target-at-staging, and fsyncs `absence-exchanged`. It removes the empty live
-directory, fsyncs `absence-complete` plus the parent, and only then removes the displaced target.
-Restart classifies target-at-live/empty-at-staging as pre-exchange,
-empty-at-live/target-at-staging as post-exchange, and absent-live/target-at-staging as post-removal.
-Absence therefore appears only as the intended final state. An already-absent source is verified and
-does not exchange.
+If staging-to-live fails while live is absent, Task 3 moves authenticated old-aside back to live,
+guest-syncs, verifies live=prior and staging=desired, and fsyncs `rollback-complete`. Restart compares
+complete identities at live, staging, and old-aside: prior/desired/absent is pre-move or rolled back;
+absent/desired/prior is old-aside; desired/absent/prior is new-live. Any mixed, missing, duplicated,
+unowned, unreadable, over-limit, or third layout conflicts with the domain kept inactive. A crash
+between a move and evidence fsync is classified from names and identities, not phase alone.
+
+Recorded desired absence uses only the first move. After `move-ready`, Task 3 moves live to
+old-aside, guest-syncs, verifies live absent and old-aside=prior, and fsyncs `absence-live`. It fsyncs
+`absence-complete` before removing old-aside. An already-absent live tree is verified and completes
+without a move. Boot, readiness, and lifecycle advancement are forbidden until a complete desired
+tree or exact desired absence is freshly verified and its completion evidence is durable. No
+guestmount, `renameat2`, appliance helper, or new provisioning dependency is added.
 
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
@@ -298,6 +302,14 @@ publication, and fsync. Failures reveal bounded identifiers and categories only.
 is deliberately not reimplemented here: #2140 wraps these primitives in the ADR-0584 service before
 advertisement. Until then no production composition exposes this port.
 
+The selected publication sequence temporarily removes the live release name. Task 3 holds the
+existing per-System serialized operation lane, verifies inactive immediately before each libguestfs
+move, and keeps start/readiness unavailable until completion evidence and desired identity are
+durable. A running or indeterminate domain aborts before opening the overlay or performing the next
+move. Crash recovery repeats these checks before classifying or mutating live, staging, and
+old-aside. The bounded absence is therefore observable only on an inactive overlay and is never a
+bootable or completed state.
+
 Out of scope are compromise of the trusted host/libvirtd/libguestfs appliance, privileged manual
 disk edits, authority transport/authentication, remote providers, lifecycle database truth, and
 capacity admission. Those are existing operator trust or owned issues, not claims of this design.
@@ -310,7 +322,7 @@ issue body is not necessary to define or implement #2108 and is left to campaign
 ## Verification
 
 Unit tests cover canonical XML vectors, definition preservation, opaque-ref ownership, archive
-bounds/topology, absent/present manifests, optional initrd, atomic publication faults, every
+bounds/topology, absent/present manifests, optional initrd, move/publication faults, every
 source/target/partial/mixed observation, retries at each fsync/rename/define boundary, exact XML and
 module restoration, prior-power readiness, cleanup/quarantine, and cross-System/Run/activation
 denial with before/after snapshots. A controlled fault in owner comparison and manifest comparison
@@ -318,6 +330,12 @@ must make the new tests fail. Composition tests prove the capability is not adve
 tests interleave lost responses and restarts across component writes. Focused tests, `just lint`,
 `just type`, `prek run`, and pre-push `just ci` remain required; live VM proof is deferred to the
 existing manually dispatched tier and must not be claimed locally.
+The live proof matrix runs on operator-provided x86_64 and ppc64le local-libvirt hosts: present,
+present-empty, and desired-absence publication; failure after live-to-old and before staging-to-live;
+rollback; fresh-process recovery from `old-aside` and `new-live`; and a concurrent start attempt that
+must remain refused until durable completion. Each arm proves the domain stays inactive throughout
+the live-name absence window and boots only the freshly verified desired identity afterward. Report
+each architecture arm as run, failed, or not run; emulation is not native-host proof.
 Archive-source tests additionally cover wrong-owner construction, traversal/absolute filenames,
 symlink and non-regular archive entries, foreign owner or non-private mode, over-reservation size,
 single-operation reuse rejection, rename/symlink substitution after lookup, short/error reads,
@@ -328,15 +346,13 @@ read or close error stops Task 2 writes; pre-write rejection proves zero tree mu
 tests pin `restore(tree, release, capture, source)` and use a capability fake that exposes no path,
 rename, phase, fsync-ordering, or restart operation. Task 3 crash tests prove it durably classifies
 the retained owned partial before returning and never publishes a failed staging tree. Publication
-tests require descriptor-relative same-filesystem `RENAME_EXCHANGE`; unsupported exchange changes
-nothing; crashes immediately before/after exchange and each evidence fsync classify the two expected
-name/identity arrangements; absent/mixed/third arrangements conflict; the present-source live name
-is never absent;
-and displaced-source removal occurs only after durable `exchange-complete` plus directory fsync.
-Separate tests cover present-empty exchange and absent recovery before/after placeholder exchange,
-empty-live removal, each `absence-*` evidence fsync, and displaced-target removal. They narrow the
-never-absent assertion to present-source publication and require absence only as the recorded final
-state.
+tests inject loss immediately before/after each libguestfs move, guest sync, evidence fsync, rollback
+move, and old-aside removal. They assert the exact three-name layouts and identity classification
+above, cover present-empty and desired-absence paths, and prove live-name absence occurs only while
+inactive. Boot, readiness, and lifecycle advancement remain blocked until fresh desired-state
+verification plus durable `publication-complete` or `absence-complete`. Old-aside removal is
+completion-evidence-gated. Tests also prove no guestmount, `renameat2`, appliance helper, or new host
+prerequisite is used.
 Migration tests additionally freeze inventory order and migration immutability, inspect the exact
 replacement CHECK, accept canonical binding rows, and reject missing, legacy, scalar/array,
 malformed-UUID, extra-key, cross-System, cross-Run, and cross-activation recovery points without

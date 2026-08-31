@@ -11,6 +11,9 @@ guest writer receives that capability and the closed capture descriptor, never a
 The follow-up boundary selected that day keeps Task 2 as pure validated tree I/O over a
 Task-3-provided authenticated guest-tree capability. Task 3 owns persistent staging names, durable
 phase evidence, publication, and restart classification.
+At the adapter checkpoint the operator selected existing libguestfs `mv` with bounded live-name
+absence only while inactive; guestmount, `renameat2`, appliance helpers, and new provisioning are
+excluded.
 
 Tech stack: Python 3.14, Pydantic closed values, libvirt-python, libguestfs, stdlib tar/XML/hash/fsync,
 pytest, Ruff, ty, and prek.
@@ -28,6 +31,8 @@ pytest, Ruff, ty, and prek.
   exceptions, or logs.
 - `AuthorityMutationAdapter`, authority proof construction, terminal replay, capacity orchestration,
   and advertisement remain #2140/#2118. Do not compose the new local port into production runtime.
+- Task 3 holds the per-System serialized operation lane, verifies inactive before every libguestfs
+  move or restart mutation, and refuses boot/readiness until desired-state completion is durable.
 - Verification commands: focused `just test-verbose <path>`, then `just lint`, `just type`,
   `git diff --check`, staged `prek run`; pre-push `just ci` belongs to delivery.
 
@@ -237,10 +242,11 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
 1. Add XML golden-vector tests from ADR-0583, preserved-subtree/device/QEMU argument retention,
    malformed/DTD/entity/non-NFC rejection, and optional-initrd projections.
 2. Add recovery-root tests for exact relative token parsing, owner-only modes, no-follow exclusive
-   writes, file/directory/parent fsync ordering, atomic rename, complete-point reopening, cross-field
+   writes, file/directory/parent fsync ordering, complete-point reopening, cross-field
    substitution, and quarantine. Test the mkdir-before-intent empty-partial rule separately.
 3. Before implementation, add the minimal crash tests for loss immediately before/after intent
-   fsync, stop, module publish, XML define, source restoration, tombstone publish, and tombstone
+   fsync, stop, each module move/guest-sync/evidence-fsync/rollback/removal, XML define, source
+   restoration, tombstone publish, and tombstone
    delete. Include initially-running source → inactive module/XML restoration → durable
    `source-restored` → boot/readiness → cleanup, and assert cleanup never calls guestfs or live
    composite observation. Assert fresh-instance retry outcomes and before/after snapshots. Run them
@@ -255,9 +261,18 @@ class LocalLibvirtExternalBoot(ExternalBootPorts):
    writes and fsyncs its fully bound intent, constructs the private staging-tree capability, and only
    then passes it to Task 2 install/restore. On Task 2 failure it records the observed owned partial
    phase before returning and never publishes it; a crash inside Task 2 remains restart-classifiable
-   from the pre-call intent. On success it independently verifies the
-   staged manifest, fsyncs phase evidence, performs the same-filesystem live-tree rename, and fsyncs
-   the containing directory. Activate modules then XML with durable phases. Recover modules then
+   from the pre-call intent. On success it independently verifies the staged manifest. For present
+   desired state, verify prior-at-live/desired-at-staging/old-absent, guest-sync, and fsync
+   `move-ready`; move live to deterministic old-aside; guest-sync, verify absent/desired/prior, and
+   fsync `old-aside`; move staging to live; guest-sync, verify desired/absent/prior, and fsync
+   `new-live`; then remove old-aside, guest-sync, and fsync `publication-complete`. If the second move
+   fails, move authenticated old-aside back to live, verify prior/desired/absent, and fsync
+   `rollback-complete`. Desired absence stops after live-to-old-aside, verifies exact absence,
+   fsyncs `absence-live` and `absence-complete`, then removes old-aside. Classify every restart from
+   all three names and complete identities, not phase alone. Keep the domain inactive and prohibit
+   boot/readiness/lifecycle advancement until desired state is freshly verified with durable
+   completion evidence. Recheck inactive immediately before each move; running or indeterminate
+   state aborts before opening the overlay or mutating. Activate modules then XML with durable phases. Recover modules then
    exact XML, verify their complete source composite while inactive, and fsync a `source-restored`
    phase before restoring prior power/readiness. At every entry reopen metadata
    and compare the entire point. Public observe uses durable target-defined evidence plus existing
@@ -281,9 +296,13 @@ unreadable, or cross-owner state makes zero writes; exact recovery and cleanup a
 
 **Interfaces:** consume Task 3 public methods and injected IO. Do not add runtime composition.
 
-1. Expand Task 3's biting fault tests across every lost process/response point before and after intent fsync, stop, capture publication,
-   module rename, XML define, restoration writes, tombstone publication, tombstone deletion, and
-   parent fsync. Restart a fresh instance from disk and assert exact continuation or conflict.
+1. Expand Task 3's biting fault tests across every lost process/response point before and after
+   intent fsync, stop, capture publication, live-to-old move, guest sync, each publication evidence
+   fsync, staging-to-live move, rollback, old-aside removal, XML define, restoration writes,
+   tombstone publication, tombstone deletion, and parent fsync. Restart a fresh instance from disk
+   and assert exact continuation or conflict. Cover present, present-empty, and desired-absence
+   matrices; assert the live-name absence window occurs only while verified inactive and no
+   boot/readiness/lifecycle advancement precedes durable desired-state verification.
 2. Race/replay two bindings across same System/Run with different activation IDs; substitute every
    RecoveryPoint field and U1a proof field; assert before/after filesystem/XML snapshots are equal.
 3. Model U1a windows: unresolved exact mutation-started after delete succeeds; stale/current-binding
@@ -309,3 +328,7 @@ whole-branch trial-loop, security review, simplification, and bare `just ci` und
 The manually dispatched `live_vm` tier is not available proof unless an operator supplies its host;
 report it as not run rather than skipped success. Delivery must not advertise external boot and must
 record #2140's terminal replay/finalization plus #2118's release/cleanup ordering as prerequisites.
+When hosts are supplied, run the live matrix on both x86_64 and ppc64le local-libvirt providers:
+present, present-empty, desired absence, failure in the live-name window, rollback, fresh-process
+old-aside/new-live recovery, and refused concurrent start until completion. Record each architecture
+as run, failed, or not run; an emulated arm does not count as native-host proof.

@@ -115,29 +115,35 @@ classify the deterministic staging tree. Task 3 alone decides whether retry resu
 
 Capture and restore use the ADR-0583 limits of 200,000 entries and 8 GiB uncompressed content.
 Task 2 validates the manifest and writes only through the supplied staging-tree capability. It never
-renames that tree into the live release or emits durable phase evidence. Task 3 verifies the staged
-manifest and fsyncs `exchange-ready` evidence before publication. Publication is a
-descriptor-relative Linux `renameat2(..., RENAME_EXCHANGE)` between authenticated live and staged
-directories on the same filesystem; a present-empty tree is a valid directory and follows this same
-path. If atomic exchange is
-unsupported, Task 3 fails before altering the live tree; remove-then-rename and old-aside sequences
-are forbidden. After exchange, the live name always resolves to one complete tree and the staging
-name owns the displaced source tree. Task 3 verifies both identities, fsyncs `exchange-complete`
-evidence and the containing directory, then removes the displaced tree only under that evidence.
-On restart before or after either evidence fsync, Task 3 compares the complete expected source and
-target manifests at both authenticated names: target-at-live/source-at-staging means not exchanged;
-source-at-live/target-at-staging means exchanged. Any absent, mixed, unowned, unreadable, over-limit,
-or third state is conflict and causes no further mutation.
+renames that tree into the live release or emits durable phase evidence. On 2026-08-30 the operator
+selected existing libguestfs `mv` rather than a guestmount or appliance helper. The resulting bounded
+live-name absence is allowed only while Task 3 has verified the domain inactive; boot, readiness,
+and lifecycle advancement remain forbidden until a complete desired tree or exact desired absence
+has been verified and durable publication evidence is complete.
 
-Restoring recorded absence uses a distinct Task 3 sequence. It fsyncs `absence-ready` with an
-authenticated empty placeholder at the deterministic staging name, exchanges that placeholder with
-the live target directory, verifies empty-at-live and target-at-staging, and fsyncs
-`absence-exchanged`. It then removes the empty live directory and fsyncs `absence-complete` plus the
-parent before removing the displaced target. Restart classifies target-at-live/empty-at-staging as
-pre-exchange, empty-at-live/target-at-staging as post-exchange, and absent-live/target-at-staging as
-post-removal. Thus a present-source publication never makes the live name absent; absence appears
-only as the intended final state of absent-source recovery. An already-absent source is verified and
-does not require exchange.
+For a present desired tree, Task 3 verifies live=prior, staging=desired, and old-aside absent, then
+guest-syncs and fsyncs `move-ready` evidence. It moves live to the deterministic old-aside name with
+libguestfs `mv`, guest-syncs, verifies live absent and old-aside=prior, and fsyncs `old-aside`
+evidence. This is the only permitted live-name absence window. It then moves staging to live,
+guest-syncs, verifies live=desired and old-aside=prior, and fsyncs `new-live` evidence. Only after a
+complete desired live-tree verification does it remove old-aside, guest-sync, and fsync
+`publication-complete` evidence. A present-empty desired tree follows the same path.
+
+If the staging-to-live move fails while live is absent, Task 3 rolls back by moving authenticated
+old-aside to live, guest-syncing, verifying live=prior and staging=desired, and fsyncing
+`rollback-complete`; it never boots the rollback state as the requested result. Restart compares the
+complete identities at all three deterministic names rather than trusting the last phase alone:
+live=prior/staging=desired/old absent is pre-move or rolled back; live absent/staging=desired/old=prior
+is old-aside; live=desired/staging absent/old=prior is new-live; every mixed, missing, duplicated,
+unowned, unreadable, over-limit, or third layout is conflict with the domain kept inactive.
+
+Restoring recorded absence uses the same first move without a staging-to-live move. After
+`move-ready`, Task 3 moves live to old-aside, guest-syncs, verifies live absent and old-aside=prior,
+and fsyncs `absence-live`; exact absence is then the verified desired state. It removes old-aside only
+after fsyncing `absence-complete`. An already-absent live tree is verified and records
+`absence-complete` without a move. A crash between a guest move and its evidence fsync is classified
+from the three names and complete manifests. No guestmount, `renameat2`, appliance command helper, or
+new provisioning dependency is introduced.
 
 Cleanup removes payloads only from a directory whose canonical metadata proves the exact System and
 activation owner. It then atomically replaces metadata with a canonical `cleaned` tombstone that
@@ -201,11 +207,11 @@ Teardown likewise quarantines evidence it cannot authenticate.
   caller-owned partial is durably retry-classifiable.
 - Task 2 unit tests use an in-memory authenticated-tree fake and prove it requests no overlay path,
   guest path, staging name, rename, fsync-phase, or restart-classification operation. Task 3 owns
-  integration and crash tests for staging capabilities, `RENAME_EXCHANGE`, fsync ordering, and
-  restart immediately before/after each exchange, removal, and evidence fsync. Those tests cover a
-  present-empty tree and every absent-source state, prove a present-source live name is never absent,
-  prove unsupported exchange changes nothing, and remove a displaced tree only after the matching
-  durable completion evidence.
+  integration and crash tests for the libguestfs moves, guest-sync/evidence-fsync ordering, rollback,
+  and restart immediately before/after each move, sync, evidence fsync, and removal. Those tests
+  cover present-empty and absent desired trees, bound the live-name absence to verified inactivity,
+  forbid boot/readiness until verified completion, and remove old-aside only after matching durable
+  completion evidence.
 
 ## Considered & rejected
 
