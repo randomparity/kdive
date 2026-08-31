@@ -404,6 +404,123 @@ def test_sink_streams_and_cleans_partial_on_failure(tmp_path: Path) -> None:
     assert sink._closed is True
 
 
+@pytest.mark.parametrize("existing", ["regular", "symlink"])
+def test_sink_eexist_never_removes_an_unowned_partial(tmp_path: Path, existing: str) -> None:
+    partial = tmp_path / ".modules.tar.partial"
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    if existing == "regular":
+        partial.write_bytes(b"other publisher")
+    else:
+        partial.symlink_to(outside)
+    before = partial.lstat()
+
+    with pytest.raises(FileExistsError):
+        _sink(tmp_path).publish(io.BytesIO(b"ours"))
+
+    after = partial.lstat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert outside.read_bytes() == b"outside"
+
+
+def test_sink_cleanup_rechecks_created_inode_before_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = recovery._copy_to_fd
+
+    def replace_then_fail(source: BinaryIO, fd: int, limit: int) -> tuple[str, int]:
+        del source, fd, limit
+        partial = tmp_path / ".modules.tar.partial"
+        partial.unlink()
+        partial.write_bytes(b"replacement")
+        raise OSError("injected publisher failure")
+
+    monkeypatch.setattr(recovery, "_copy_to_fd", replace_then_fail)
+    with pytest.raises(OSError, match="publisher failure"):
+        _sink(tmp_path).publish(io.BytesIO(b"ours"))
+    monkeypatch.setattr(recovery, "_copy_to_fd", original)
+    assert (tmp_path / ".modules.tar.partial").read_bytes() == b"replacement"
+
+
+def test_pax_xattrs_and_archive_digest_are_insertion_and_architecture_stable(
+    tmp_path: Path,
+) -> None:
+    values = [("z.attr", b"z"), ("á.attr", b"a"), ("a.attr", b"first")]
+    archives: list[bytes] = []
+    digests: list[str] = []
+    for index, architecture in enumerate(("x86_64", "ppc64le")):
+        del architecture
+        directory = tmp_path / str(index)
+        directory.mkdir(mode=0o700)
+        attrs = dict(values if index == 0 else reversed(values))
+        tree = FakeTree([_entry("x", b"x", xattrs=attrs)], {"x": b"x"})
+        capture = RealGuestRecoveryWriter().capture(tree, RELEASE, _sink(directory))
+        assert isinstance(capture, ModuleArchiveCapture)
+        archives.append((directory / "modules.tar").read_bytes())
+        digests.append(capture.archive_sha256)
+    assert archives[0] == archives[1]
+    assert digests[0] == digests[1]
+
+
+def _archive_with_later_member(*, mode: int = 0o644, pax: dict[str, str]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        first = tarfile.TarInfo("valid")
+        first.size = 1
+        first.pax_headers = {"KDIVE.xattrs-supported": "1"}
+        archive.addfile(first, io.BytesIO(b"v"))
+        later = tarfile.TarInfo("later")
+        later.mode = mode
+        later.size = 1
+        later.pax_headers = pax
+        archive.addfile(later, io.BytesIO(b"x"))
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        _archive_with_later_member(
+            pax={"KDIVE.xattrs-supported": "0", "KDIVE.xattr.security.x": "eA"}
+        ),
+        _archive_with_later_member(
+            pax={"KDIVE.xattrs-supported": "1", "KDIVE.xattr.security.x": "eA=="}
+        ),
+        _archive_with_later_member(pax={"KDIVE.xattrs-supported": "1", "KDIVE.unknown": "x"}),
+    ],
+    ids=["xattrs-disabled", "padded-base64", "unknown-metadata"],
+)
+def test_hostile_later_metadata_is_rejected_before_any_tree_write(
+    tmp_path: Path, archive: bytes
+) -> None:
+    target = FakeTree(mutable=True)
+    with pytest.raises(ValueError):
+        RealGuestRecoveryWriter().install(target, RELEASE, _bundle(tmp_path / "bundle", archive))
+    assert target.writes == []
+
+
+def test_archive_mode_and_owner_bounds_are_closed_before_writes() -> None:
+    member = tarfile.TarInfo("later")
+    member.pax_headers = {"KDIVE.xattrs-supported": "1"}
+    for field, value in (("mode", 0o10000), ("uid", -1), ("gid", recovery.MAX_OWNER_ID + 1)):
+        setattr(member, field, value)
+        with pytest.raises(ValueError, match="canonical range|owner id"):
+            recovery._manifest_from_member(member, "later", "regular", _digest(b""), 0)
+        setattr(member, field, 0)
+
+
+def test_recovery_source_retains_directory_and_file_descriptors_until_close(tmp_path: Path) -> None:
+    source_tree = FakeTree([_entry("x", b"x")], {"x": b"x"})
+    capture = RealGuestRecoveryWriter().capture(source_tree, RELEASE, _sink(tmp_path))
+    assert isinstance(capture, ModuleArchiveCapture)
+    before = len(list(Path("/proc/self/fd").iterdir()))
+    source = _source(tmp_path, capture)
+    retained = len(list(Path("/proc/self/fd").iterdir()))
+    assert retained >= before + 2
+    source.close()
+    assert len(list(Path("/proc/self/fd").iterdir())) == before
+
+
 def test_archive_rejects_hardlink_fifo_and_non_nfc_target_before_writes(tmp_path: Path) -> None:
     cases = [
         (tarfile.LNKTYPE, "x"),

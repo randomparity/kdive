@@ -26,6 +26,7 @@ from kdive.providers.ports.external_boot import (
 MAX_ENTRIES = 200_000
 MAX_REGULAR_BYTES = 8_589_934_592
 MAX_ARCHIVE_BYTES = MAX_REGULAR_BYTES + MAX_ENTRIES * 4096
+MAX_OWNER_ID = 2_147_483_647
 _ARCHIVE_NAME = "modules.tar"
 _DOMAIN = b"kdive-recovery-module-tree-v1\0"
 _COPY_CHUNK = 1024 * 1024
@@ -56,8 +57,8 @@ class GuestTreeEntry(_ClosedValue):
     path: str
     kind: Literal["directory", "regular", "symlink"]
     mode: Annotated[str, Field(pattern=r"^[0-7]{4}$")]
-    uid: Annotated[int, Field(ge=0)]
-    gid: Annotated[int, Field(ge=0)]
+    uid: Annotated[int, Field(ge=0, le=MAX_OWNER_ID)]
+    gid: Annotated[int, Field(ge=0, le=MAX_OWNER_ID)]
     size: Annotated[int, Field(ge=0, le=MAX_REGULAR_BYTES)]
     target: str | None
     xattrs_supported: bool
@@ -87,10 +88,10 @@ class AuthenticatedGuestTree(Protocol):
 class _ManifestEntry(_ClosedValue):
     path: str
     kind: Literal["directory", "regular", "symlink"]
-    mode: str
-    uid: int
-    gid: int
-    size: int
+    mode: Annotated[str, Field(pattern=r"^[0-7]{4}$")]
+    uid: Annotated[int, Field(ge=0, le=MAX_OWNER_ID)]
+    gid: Annotated[int, Field(ge=0, le=MAX_OWNER_ID)]
+    size: Annotated[int, Field(ge=0, le=MAX_REGULAR_BYTES)]
     sha256: str | None
     target: str | None
     xattrs_supported: bool
@@ -173,6 +174,8 @@ class RecoveryArchiveSource(_SingleUseFile):
         capture: ModuleArchiveCapture,
     ) -> None:
         _validate_directory(directory_fd)
+        self._directory_fd = os.dup(directory_fd)
+        self._directory_closed = False
         fd = os.open(
             capture.archive_filename,
             os.O_RDONLY | os.O_NOFOLLOW,
@@ -184,11 +187,32 @@ class RecoveryArchiveSource(_SingleUseFile):
                 expected_size=capture.archive_bytes,
                 expected_digest=capture.archive_sha256,
             )
+        except BaseException:
+            os.close(self._directory_fd)
+            self._directory_closed = True
+            raise
         finally:
             os.close(fd)
         self.binding = binding
         self.release = _release(release)
         self.capture = capture
+
+    def close(self) -> None:
+        primary: BaseException | None = None
+        try:
+            super().close()
+        except BaseException as exc:
+            primary = exc
+        try:
+            if not self._directory_closed:
+                os.close(self._directory_fd)
+                self._directory_closed = True
+        except BaseException as exc:
+            if primary is None:
+                raise
+            primary.add_note(f"recovery directory close failed: {type(exc).__name__}")
+        if primary is not None:
+            raise primary
 
     def matches(
         self,
@@ -234,6 +258,7 @@ class RecoveryArchiveSink:
         self._used = True
         partial = f".{_ARCHIVE_NAME}.partial"
         fd = -1
+        created: tuple[int, int] | None = None
         primary: BaseException | None = None
         try:
             fd = os.open(
@@ -242,6 +267,8 @@ class RecoveryArchiveSink:
                 0o600,
                 dir_fd=self._directory_fd,
             )
+            opened = os.fstat(fd)
+            created = (opened.st_dev, opened.st_ino)
             digest, size = _copy_to_fd(source, fd, MAX_ARCHIVE_BYTES)
             os.fsync(fd)
             os.close(fd)
@@ -262,12 +289,11 @@ class RecoveryArchiveSink:
                     os.close(fd)
                 except BaseException as exc:
                     cleanup = exc
-            try:
-                os.unlink(partial, dir_fd=self._directory_fd)
-            except FileNotFoundError:
-                pass
-            except BaseException as exc:
-                cleanup = cleanup or exc
+            if created is not None:
+                try:
+                    _unlink_if_same(self._directory_fd, partial, created)
+                except BaseException as exc:
+                    cleanup = cleanup or exc
             if cleanup is not None:
                 exc.add_note(f"recovery archive cleanup failed: {type(cleanup).__name__}")
             raise
@@ -572,10 +598,15 @@ def _tar_info(entry: GuestTreeEntry) -> tarfile.TarInfo:
     member.size = entry.size
     member.pax_headers = {
         "KDIVE.xattrs-supported": "1" if entry.xattrs_supported else "0",
-        **{
-            f"KDIVE.xattr.{name}": base64.b64encode(value).decode().rstrip("=")
-            for name, value in entry.xattrs.items()
-        },
+        **dict(
+            sorted(
+                {
+                    f"KDIVE.xattr.{name}": base64.b64encode(value).decode().rstrip("=")
+                    for name, value in entry.xattrs.items()
+                }.items(),
+                key=lambda item: item[0].removeprefix("KDIVE.xattr.").encode(),
+            )
+        ),
     }
     if entry.kind == "directory":
         member.type, member.size = tarfile.DIRTYPE, 0
@@ -591,17 +622,25 @@ def _manifest_from_member(
     digest: str | None,
     size: int,
 ) -> _ManifestEntry:
+    _validate_member_shape(member, kind)
     supported = member.pax_headers.get("KDIVE.xattrs-supported")
     if supported not in {"0", "1"}:
         raise ValueError("module archive lacks canonical xattr support metadata")
+    allowed = {"KDIVE.xattrs-supported", "path", "linkpath"}
     attrs = {
         key.removeprefix("KDIVE.xattr."): value
         for key, value in member.pax_headers.items()
         if key.startswith("KDIVE.xattr.")
     }
+    if any(key not in allowed and not key.startswith("KDIVE.xattr.") for key in member.pax_headers):
+        raise ValueError("module archive contains unknown metadata")
+    if supported == "0" and attrs:
+        raise ValueError("module archive has xattrs while support is false")
     for name, value in attrs.items():
         _text(name, "xattr name")
-        base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+        if "=" in value or base64.b64encode(decoded).decode().rstrip("=") != value:
+            raise ValueError("module archive xattr is not canonical base64")
     return _ManifestEntry(
         path=path,
         kind=kind,
@@ -655,6 +694,21 @@ def _member_kind(member: tarfile.TarInfo) -> Literal["directory", "regular", "sy
     if member.islnk() or not (member.isdir() or member.isfile() or member.issym()):
         raise ValueError("module archive contains forbidden topology")
     return "directory" if member.isdir() else "symlink" if member.issym() else "regular"
+
+
+def _validate_member_shape(
+    member: tarfile.TarInfo, kind: Literal["directory", "regular", "symlink"]
+) -> None:
+    if member.mode < 0 or member.mode > 0o7777:
+        raise ValueError("module archive mode is outside the canonical range")
+    if not 0 <= member.uid <= MAX_OWNER_ID or not 0 <= member.gid <= MAX_OWNER_ID:
+        raise ValueError("module archive owner id is outside the canonical range")
+    if kind == "regular" and (member.size < 0 or member.linkname):
+        raise ValueError("module archive regular metadata is not canonical")
+    if kind == "directory" and (member.size != 0 or member.linkname):
+        raise ValueError("module archive directory metadata is not canonical")
+    if kind == "symlink" and (member.size != 0 or not member.linkname):
+        raise ValueError("module archive symlink metadata is not canonical")
 
 
 def _match_tree(tree: AuthenticatedGuestTree, release: str, *, mutable: bool) -> None:
@@ -776,3 +830,10 @@ def _close_fd(fd: int) -> BaseException | None:
     except BaseException as exc:
         return exc
     return None
+
+
+def _unlink_if_same(directory_fd: int, name: str, expected: tuple[int, int]) -> None:
+    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if (current.st_dev, current.st_ino) != expected:
+        return
+    os.unlink(name, dir_fd=directory_fd)
