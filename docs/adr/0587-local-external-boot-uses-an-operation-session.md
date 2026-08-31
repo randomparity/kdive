@@ -36,6 +36,9 @@ for closed domain inspection, inactive fencing, artifact descriptor access, inac
 XML definition, power and readiness, running observation, and payload cleanup. Closed inspection
 returns the exact inactive definition and ADR-0583 definition/source-boot identities. The session
 does not expose paths or advertise external boot.
+Guest/host transfers name only one canonical artifact-root segment and a guest path. The session
+opens the artifact descriptor-relative with no-follow and passes only its owned `/proc/self/fd`
+reference to libguestfs for the duration of the transfer.
 
 Cleanup first poisons the session and every guest wrapper so no subsequent method can reach an
 underlying handle. It then attempts every owned resource in dependency-safe reverse acquisition

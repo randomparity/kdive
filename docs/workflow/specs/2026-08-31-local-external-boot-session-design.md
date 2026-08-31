@@ -39,7 +39,8 @@ It exposes only:
 - `inspect_closed()` returning immutable XML bytes, active state, ADR-0583 definition identity,
   source-boot identity, domain name, and overlay identity;
 - `require_inactive()` and `stop_and_require_inactive()` fencing every disk mutation;
-- descriptor-relative artifact opening and recovery-root descriptor access;
+- descriptor-relative artifact opening plus `upload_artifact(artifact_name, guest_destination)`
+  and `download_artifact(guest_source, artifact_name)` over one canonical artifact-root segment;
 - `guest()` returning a reopenable exact-overlay inactive guest-session context;
 - inactive XML definition, start/restore-power and readiness, running-kernel observation, and
   owner-bound payload cleanup primitives.

@@ -307,6 +307,88 @@ def test_guest_rechecks_inactive_and_overlay_before_every_operation() -> None:
     session.close()
 
 
+@pytest.mark.parametrize("name", ["/etc/passwd", "../escape", "a/b", ".", "..", ""])
+def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str) -> None:
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        stat_overlay=lambda _path: (8, 9),
+        close_descriptor=lambda _fd: None,
+        open_relative=lambda *_args: events.append("artifact.child.open") or 42,
+        close_transfer_descriptor=lambda _fd: events.append("artifact.child.close"),
+    )
+    session = factory.open(_lease())
+    with session.guest() as guest:
+        assert not hasattr(guest, "upload")
+        assert not hasattr(guest, "download")
+        with pytest.raises(ValueError, match="canonical relative"):
+            guest.upload_artifact(name, "/guest/destination")
+        with pytest.raises(ValueError, match="canonical relative"):
+            guest.download_artifact("/guest/source", name)
+    assert "artifact.child.open" not in events
+    session.close()
+
+
+def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        stat_overlay=lambda _path: (8, 9),
+        close_descriptor=lambda _fd: None,
+        open_relative=lambda root, name, flags, mode: (
+            events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
+        ),
+        close_transfer_descriptor=lambda fd: events.append(f"artifact.child.close:{fd}"),
+    )
+    session = factory.open(_lease())
+    with session.guest() as guest:
+        guest.upload_artifact("input.tar", "/guest/input.tar")
+        guest.download_artifact("/guest/output.tar", "output.tar")
+    assert "upload:/proc/self/fd/42:/guest/input.tar" in events
+    assert "download:/guest/output.tar:/proc/self/fd/42" in events
+    assert events.count("artifact.child.close:42") == 2
+    session.close()
+
+
+def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> None:
+    events: list[str] = []
+
+    class TransferFaultGuest(Guest):
+        def upload(self, filename: str, remotefilename: str) -> None:
+            super().upload(filename, remotefilename)
+            raise LookupError("transfer primary")
+
+    def close_fault(fd: int) -> None:
+        events.append(f"artifact.child.close:{fd}")
+        raise OSError("close secondary")
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: TransferFaultGuest(events),
+        stat_overlay=lambda _path: (8, 9),
+        close_descriptor=lambda _fd: None,
+        open_relative=lambda *_args: 42,
+        close_transfer_descriptor=close_fault,
+    )
+    session = factory.open(_lease())
+    with (
+        session.guest() as guest,
+        pytest.raises(LookupError, match="transfer primary") as raised,
+    ):
+        guest.upload_artifact("input.tar", "/guest/input.tar")
+    assert raised.value.__notes__ == ["cleanup failed: OSError('close secondary')"]
+    assert events.count("artifact.child.close:42") == 1
+    session.close()
+
+
 def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
     events: list[str] = []
     domain = Domain(events)

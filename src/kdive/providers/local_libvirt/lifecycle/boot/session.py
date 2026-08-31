@@ -156,9 +156,9 @@ class InactiveGuest(Protocol):
     def lstatns(self, path: str) -> dict[str, int]: ...
     def readlink(self, path: str) -> str: ...
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
-    def download(self, remotefilename: str, filename: str) -> None: ...
+    def download_artifact(self, guest_source: str, artifact_name: str) -> None: ...
     def mkdir(self, path: str) -> None: ...
-    def upload(self, filename: str, remotefilename: str) -> None: ...
+    def upload_artifact(self, artifact_name: str, guest_destination: str) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
@@ -221,14 +221,18 @@ class _GuardedGuest:
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
         return self._handle().lgetxattrs(path)
 
-    def download(self, remotefilename: str, filename: str) -> None:
-        self._handle().download(remotefilename, filename)
+    def download_artifact(self, guest_source: str, artifact_name: str) -> None:
+        self._owner._session._download_artifact(
+            self._owner, self._guest, guest_source, artifact_name
+        )
 
     def mkdir(self, path: str) -> None:
         self._handle().mkdir(path)
 
-    def upload(self, filename: str, remotefilename: str) -> None:
-        self._handle().upload(filename, remotefilename)
+    def upload_artifact(self, artifact_name: str, guest_destination: str) -> None:
+        self._owner._session._upload_artifact(
+            self._owner, self._guest, artifact_name, guest_destination
+        )
 
     def ln_s(self, target: str, linkname: str) -> None:
         self._handle().ln_s(target, linkname)
@@ -266,6 +270,7 @@ class _ConcreteSession:
         open_guest: OpenGuest,
         stat_overlay: Callable[[str], tuple[int, int]],
         close_descriptor: Callable[[int], None],
+        close_transfer_descriptor: Callable[[int], None],
         open_relative: Callable[[int, str, int, int], int],
         unlink_relative: Callable[[int, str], None],
         readiness: ReadinessProbe,
@@ -282,6 +287,7 @@ class _ConcreteSession:
         self._open_guest = open_guest
         self._stat_overlay = stat_overlay
         self._close_descriptor = close_descriptor
+        self._close_transfer_descriptor = close_transfer_descriptor
         self._open_relative = open_relative
         self._unlink_relative = unlink_relative
         self._readiness = readiness
@@ -417,6 +423,47 @@ class _ConcreteSession:
     def _discard_guest(self, guest: _GuestContext) -> None:
         self._guests.discard(guest)
 
+    def _upload_artifact(
+        self,
+        wrapper: _GuestContext,
+        guest: _Guest,
+        artifact_name: str,
+        guest_destination: str,
+    ) -> None:
+        self._guard_guest_operation(wrapper)
+        descriptor = self.open_artifact(_relative_name(artifact_name), os.O_RDONLY)
+        self._transfer_with_close(
+            descriptor,
+            lambda path: guest.upload(path, guest_destination),
+        )
+
+    def _download_artifact(
+        self,
+        wrapper: _GuestContext,
+        guest: _Guest,
+        guest_source: str,
+        artifact_name: str,
+    ) -> None:
+        self._guard_guest_operation(wrapper)
+        descriptor = self.open_artifact(
+            _relative_name(artifact_name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        )
+        self._transfer_with_close(
+            descriptor,
+            lambda path: guest.download(guest_source, path),
+        )
+
+    def _transfer_with_close(self, descriptor: int, transfer: Callable[[str], None]) -> None:
+        try:
+            transfer(f"/proc/self/fd/{descriptor}")
+        except BaseException as exc:
+            try:
+                self._close_transfer_descriptor(descriptor)
+            except Exception as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        self._close_transfer_descriptor(descriptor)
+
     def _guard_guest_operation(self, guest: _GuestContext) -> None:
         if guest not in self._guests:
             raise RuntimeError("guest wrapper is closed")
@@ -448,6 +495,7 @@ class LocalExternalBootSessionFactory:
         open_guest: OpenGuest,
         stat_overlay: Callable[[str], tuple[int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
+        close_transfer_descriptor: Callable[[int], None] = os.close,
         open_relative: Callable[[int, str, int, int], int] | None = None,
         unlink_relative: Callable[[int, str], None] | None = None,
         readiness: ReadinessProbe | None = None,
@@ -460,6 +508,7 @@ class LocalExternalBootSessionFactory:
         self._open_guest = open_guest
         self._stat_overlay = stat_overlay or _stat_identity
         self._close_descriptor = close_descriptor
+        self._close_transfer_descriptor = close_transfer_descriptor
         self._open_relative = open_relative or _open_relative
         self._unlink_relative = unlink_relative or _unlink_relative
         self._readiness = readiness or _unconfigured_readiness
@@ -499,6 +548,7 @@ class LocalExternalBootSessionFactory:
                 open_guest=self._open_guest,
                 stat_overlay=self._stat_overlay,
                 close_descriptor=self._close_descriptor,
+                close_transfer_descriptor=self._close_transfer_descriptor,
                 open_relative=self._open_relative,
                 unlink_relative=self._unlink_relative,
                 readiness=self._readiness,
