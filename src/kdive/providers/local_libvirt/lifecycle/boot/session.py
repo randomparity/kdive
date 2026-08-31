@@ -10,25 +10,35 @@ import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defus
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Literal, Protocol
 from uuid import UUID
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    RunningKernelObservation,
+)
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 
 @dataclass(frozen=True)
 class OverlayIdentity:
-    """Stable identity of the expected System overlay, with no public path accessor."""
+    """Stable identity of the expected System overlay."""
 
     device: int
     inode: int
-    canonical_path: str
+
+
+@dataclass(frozen=True)
+class _BoundOverlay:
+    device: int
+    inode: int
+    path: str
 
 
 @dataclass(frozen=True)
@@ -60,16 +70,16 @@ class LocalExternalBootOperationLease:
         self,
         system_id: UUID,
         binding: ExternalBootActivationBinding,
-        *,
-        events: list[str] | None = None,
+        authority: object,
     ) -> None:
+        if authority is not _LEASE_AUTHORITY:
+            raise TypeError("operation leases are issued only by the provider-local lease issuer")
         if binding.system_id != str(system_id):
             raise ValueError("operation lease binding does not own the System")
         self.system_id = system_id
         self.binding = binding
         self._released = False
         self._pins: set[_LeasePin] = set()
-        self._events = events
 
     @property
     def released(self) -> bool:
@@ -80,8 +90,6 @@ class LocalExternalBootOperationLease:
             raise RuntimeError("operation lease is released")
         pin = _LeasePin(self)
         self._pins.add(pin)
-        if self._events is not None:
-            self._events.append("pin.open")
         return pin
 
     def release(self) -> None:
@@ -91,8 +99,20 @@ class LocalExternalBootOperationLease:
 
     def _unpin(self, pin: _LeasePin) -> None:
         self._pins.discard(pin)
-        if self._events is not None:
-            self._events.append("pin.close")
+
+
+_LEASE_AUTHORITY = object()
+
+
+class LocalExternalBootLeaseIssuer:
+    """Provider-local context that alone mints leases for an owned System lane."""
+
+    def __init__(self, system_id: UUID, binding: ExternalBootActivationBinding) -> None:
+        self._system_id = system_id
+        self._binding = binding
+
+    def issue(self) -> LocalExternalBootOperationLease:
+        return LocalExternalBootOperationLease(self._system_id, self._binding, _LEASE_AUTHORITY)
 
 
 class _Domain(Protocol):
@@ -115,29 +135,42 @@ class _Guest(Protocol):
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
 
+    def exists(self, path: str) -> int: ...
+
 
 class LocalExternalBootSession(Protocol):
     def inspect_closed(self) -> ClosedDomainInspection: ...
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self) -> None: ...
-    def artifact_root_descriptor(self) -> int: ...
-    def guest(self) -> AbstractContextManager[_Guest]: ...
+    def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
+    def unlink_artifact(self, name: str) -> None: ...
+    def guest(self) -> AbstractContextManager[InactiveGuest]: ...
     def define_xml(self, xml: str) -> None: ...
     def start(self) -> None: ...
+    def readiness(self) -> ReadinessResult: ...
+    def observe_running(self) -> RunningKernelObservation: ...
+    def restore_power(self, prior: Literal["running", "inactive"]) -> None: ...
+    def cleanup_payloads(self) -> None: ...
     def close(self) -> None: ...
 
 
-class _GuestContext(AbstractContextManager[_Guest]):
+class InactiveGuest(Protocol):
+    """The session's deliberately small libguestfs capability."""
+
+    def exists(self, path: str) -> int: ...
+
+
+class _GuestContext(AbstractContextManager[InactiveGuest]):
     def __init__(self, session: _ConcreteSession) -> None:
         self._session = session
         self._guest: _Guest | None = None
         self._closed = False
 
-    def __enter__(self) -> _Guest:
+    def __enter__(self) -> InactiveGuest:
         if self._closed:
             raise RuntimeError("guest wrapper is closed")
         self._guest = self._session._open_guest_context(self)
-        return cast("_Guest", _GuardedGuest(self, self._guest))
+        return _GuardedGuest(self, self._guest)
 
     def __exit__(self, *_exc: object) -> None:
         self._close()
@@ -164,10 +197,10 @@ class _GuardedGuest:
         self._owner = owner
         self._guest = guest
 
-    def __getattr__(self, name: str) -> object:
+    def exists(self, path: str) -> int:
         if self._owner._closed:
             raise RuntimeError("guest wrapper is closed")
-        return getattr(self._guest, name)
+        return self._guest.exists(path)
 
 
 class _ConcreteSession:
@@ -179,10 +212,15 @@ class _ConcreteSession:
         connection: _Connection,
         domain: _Domain,
         artifact_fd: int,
-        overlay: OverlayIdentity,
+        overlay: _BoundOverlay,
         open_guest: Callable[[], _Guest],
         stat_overlay: Callable[[str], tuple[int, int]],
         close_descriptor: Callable[[int], None],
+        open_relative: Callable[[int, str, int, int], int],
+        unlink_relative: Callable[[int, str], None],
+        readiness: Callable[[UUID], ReadinessResult],
+        observe_running: Callable[[UUID], RunningKernelObservation],
+        cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None],
     ) -> None:
         self._lease = lease
         self._pin: _LeasePin | None = pin
@@ -193,13 +231,18 @@ class _ConcreteSession:
         self._open_guest = open_guest
         self._stat_overlay = stat_overlay
         self._close_descriptor = close_descriptor
+        self._open_relative = open_relative
+        self._unlink_relative = unlink_relative
+        self._readiness = readiness
+        self._observe_running = observe_running
+        self._cleanup_payloads = cleanup_payloads
         self._guests: set[_GuestContext] = set()
         self._closed = False
 
     def inspect_closed(self) -> ClosedDomainInspection:
         domain = self._require_open_domain()
         xml = domain.XMLDesc(0)
-        root = _parse_owned_xml(xml, self._lease.system_id, self._overlay.canonical_path)
+        root = _parse_owned_xml(xml, self._lease.system_id, self._overlay.path)
         active = _active(domain)
         return ClosedDomainInspection(
             xml=xml.encode(),
@@ -207,7 +250,7 @@ class _ConcreteSession:
             definition_identity=_preserved_identity(root),
             source_boot_identity=_boot_identity(root),
             domain_name=domain_name_for(self._lease.system_id),
-            overlay=self._overlay,
+            overlay=OverlayIdentity(self._overlay.device, self._overlay.inode),
         )
 
     def require_inactive(self) -> None:
@@ -220,10 +263,15 @@ class _ConcreteSession:
             domain.destroy()
         self.require_inactive()
 
-    def artifact_root_descriptor(self) -> int:
+    def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
         self._require_open_domain()
         assert self._artifact_fd is not None
-        return self._artifact_fd
+        return self._open_relative(self._artifact_fd, _relative_name(name), flags, mode)
+
+    def unlink_artifact(self, name: str) -> None:
+        self._require_open_domain()
+        assert self._artifact_fd is not None
+        self._unlink_relative(self._artifact_fd, _relative_name(name))
 
     def guest(self) -> _GuestContext:
         self._require_open_domain()
@@ -231,12 +279,37 @@ class _ConcreteSession:
 
     def define_xml(self, xml: str) -> None:
         self.require_inactive()
-        _parse_owned_xml(xml, self._lease.system_id, self._overlay.canonical_path)
+        _parse_owned_xml(xml, self._lease.system_id, self._overlay.path)
         assert self._connection is not None
-        self._domain = self._connection.defineXML(xml)
+        prior = self._domain
+        replacement = self._connection.defineXML(xml)
+        self._domain = replacement
+        if prior is not None and prior is not replacement:
+            prior.free()
 
     def start(self) -> None:
         self._require_open_domain().create()
+
+    def readiness(self) -> ReadinessResult:
+        self._require_open_domain()
+        return self._readiness(self._lease.system_id)
+
+    def observe_running(self) -> RunningKernelObservation:
+        self._require_open_domain()
+        return self._observe_running(self._lease.system_id)
+
+    def restore_power(self, prior: Literal["running", "inactive"]) -> None:
+        domain = self._require_open_domain()
+        active = _active(domain)
+        if prior == "running" and not active:
+            domain.create()
+        elif prior == "inactive" and active:
+            domain.destroy()
+
+    def cleanup_payloads(self) -> None:
+        self.require_inactive()
+        assert self._artifact_fd is not None
+        self._cleanup_payloads(self._artifact_fd, self._lease.binding)
 
     def close(self) -> None:
         if self._closed:
@@ -269,14 +342,14 @@ class _ConcreteSession:
 
     def _open_guest_context(self, wrapper: _GuestContext) -> _Guest:
         self.require_inactive()
-        if self._stat_overlay(self._overlay.canonical_path) != (
+        if self._stat_overlay(self._overlay.path) != (
             self._overlay.device,
             self._overlay.inode,
         ):
             raise ValueError("System overlay changed before guest open")
         guest = self._open_guest()
         try:
-            guest.add_drive_opts(self._overlay.canonical_path, format="qcow2")
+            guest.add_drive_opts(self._overlay.path, format="qcow2")
             guest.launch()
         except BaseException as exc:
             for close_error in _attempt_guest_close(guest):
@@ -303,12 +376,22 @@ class LocalExternalBootSessionFactory:
         open_guest: Callable[[], _Guest],
         stat_overlay: Callable[[str], tuple[int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
+        open_relative: Callable[[int, str, int, int], int] | None = None,
+        unlink_relative: Callable[[int, str], None] | None = None,
+        readiness: Callable[[UUID], ReadinessResult] | None = None,
+        observe_running: Callable[[UUID], RunningKernelObservation] | None = None,
+        cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None] | None = None,
     ) -> None:
         self._connect = connect
         self._open_artifact_root = open_artifact_root
         self._open_guest = open_guest
         self._stat_overlay = stat_overlay or _stat_identity
         self._close_descriptor = close_descriptor
+        self._open_relative = open_relative or _open_relative
+        self._unlink_relative = unlink_relative or _unlink_relative
+        self._readiness = readiness or _unconfigured_readiness
+        self._observe_running = observe_running or _unconfigured_observation
+        self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
 
     def open(self, lease: LocalExternalBootOperationLease) -> LocalExternalBootSession:
         if type(lease) is not LocalExternalBootOperationLease:
@@ -327,7 +410,7 @@ class LocalExternalBootSessionFactory:
             xml = domain.XMLDesc(0)
             _parse_owned_xml(xml, lease.system_id, expected_overlay)
             device, inode = self._stat_overlay(expected_overlay)
-            overlay = OverlayIdentity(device, inode, expected_overlay)
+            overlay = _BoundOverlay(device, inode, expected_overlay)
             artifact_fd = self._open_artifact_root(lease)
             return _ConcreteSession(
                 lease=lease,
@@ -339,6 +422,11 @@ class LocalExternalBootSessionFactory:
                 open_guest=self._open_guest,
                 stat_overlay=self._stat_overlay,
                 close_descriptor=self._close_descriptor,
+                open_relative=self._open_relative,
+                unlink_relative=self._unlink_relative,
+                readiness=self._readiness,
+                observe_running=self._observe_running,
+                cleanup_payloads=self._cleanup_payloads,
             )
         except BaseException as exc:
             errors: list[Exception] = []
@@ -368,6 +456,32 @@ def _active(domain: _Domain) -> bool:
 def _stat_identity(path: str) -> tuple[int, int]:
     value = os.stat(path, follow_symlinks=False)
     return value.st_dev, value.st_ino
+
+
+def _relative_name(name: str) -> str:
+    if not name or "/" in name or name in {".", ".."}:
+        raise ValueError("artifact name must be one canonical relative segment")
+    return name
+
+
+def _open_relative(root_fd: int, name: str, flags: int, mode: int) -> int:
+    return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=root_fd)
+
+
+def _unlink_relative(root_fd: int, name: str) -> None:
+    os.unlink(name, dir_fd=root_fd)
+
+
+def _unconfigured_readiness(_system_id: UUID) -> ReadinessResult:
+    raise RuntimeError("local external-boot readiness is not configured")
+
+
+def _unconfigured_observation(_system_id: UUID) -> RunningKernelObservation:
+    raise RuntimeError("local external-boot running observation is not configured")
+
+
+def _unconfigured_cleanup(_root_fd: int, _binding: ExternalBootActivationBinding) -> None:
+    raise RuntimeError("local external-boot payload cleanup is not configured")
 
 
 def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Element:
