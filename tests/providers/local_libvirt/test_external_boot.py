@@ -136,8 +136,10 @@ class _PublicationIO:
         ("old-aside", ModuleLayout(_DESIRED, None, _PRIOR), "phase:new-live"),
         ("rollback-ready", ModuleLayout(None, _DESIRED, _PRIOR), "old-to-live"),
         ("rollback-ready", ModuleLayout(_PRIOR, _DESIRED, None), "phase:rollback-complete"),
+        ("rollback-complete", ModuleLayout(_PRIOR, _DESIRED, None), "inactive"),
         ("new-live", ModuleLayout(_DESIRED, None, _PRIOR), "remove-old"),
         ("new-live", ModuleLayout(_DESIRED, None, None), "phase:publication-complete"),
+        ("publication-complete", ModuleLayout(_DESIRED, None, None), "inactive"),
     ],
 )
 def test_present_restart_table_has_one_permitted_action(

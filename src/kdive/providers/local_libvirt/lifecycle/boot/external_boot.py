@@ -1077,6 +1077,7 @@ def advance_module_publication(
         (PublicationPhase.ROLLBACK_READY, ModuleLayout(prior, desired, None)): lambda: _sync_phase(
             io, PublicationPhase.ROLLBACK_COMPLETE
         ),
+        (PublicationPhase.ROLLBACK_COMPLETE, ModuleLayout(prior, desired, None)): lambda: None,
         (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, prior)): io.remove_old,
         (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, None)): lambda: _sync_phase(
             io, PublicationPhase.PUBLICATION_COMPLETE
