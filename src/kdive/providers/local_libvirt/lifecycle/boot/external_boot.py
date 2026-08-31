@@ -398,15 +398,23 @@ class RealLocalExternalBootIO:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> LocalRecoveryMetadataV1:
-        intent = self._host.inspect_prepare(materialization, binding, authority)
-        if (
-            intent.binding != binding
-            or intent.materialization_identity != materialization.identity
-            or intent.plan_identity != materialization.plan_identity
-        ):
-            raise ValueError("pre-stop intent does not match activation")
+        reference = _recovery_ref(binding)
         with RecoveryMetadataStore(self._recovery_root) as store:
-            reference = store.publish_pre_stop(intent)
+            try:
+                complete = store.reopen(reference, binding)
+            except FileNotFoundError:
+                complete = None
+            if complete is not None:
+                _validate_preparation_owner(complete, materialization, binding)
+                return complete
+            try:
+                intent = store.reopen_pre_stop(reference, binding)
+            except FileNotFoundError:
+                intent = self._host.inspect_prepare(materialization, binding, authority)
+                _validate_preparation_owner(intent, materialization, binding)
+                store.publish_pre_stop(intent)
+            else:
+                _validate_preparation_owner(intent, materialization, binding)
         metadata = self._host.complete_prepare(intent)
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
@@ -458,6 +466,19 @@ class RealLocalExternalBootIO:
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         with RecoveryMetadataStore(self._recovery_root) as store:
             store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
+
+
+def _validate_preparation_owner(
+    value: LocalPreStopIntentV1 | LocalRecoveryMetadataV1,
+    materialization: ExternalBootMaterialization,
+    binding: ExternalBootActivationBinding,
+) -> None:
+    if (
+        value.binding != binding
+        or value.materialization_identity != materialization.identity
+        or value.plan_identity != materialization.plan_identity
+    ):
+        raise ValueError("pre-stop intent does not match activation")
 
 
 class LocalLibvirtExternalBoot:

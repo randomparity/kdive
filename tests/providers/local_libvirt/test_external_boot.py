@@ -656,6 +656,7 @@ class _RealHost:
         self.metadata = metadata
         self.root = root
         self.actions: list[str] = []
+        self.inspect_allowed = True
 
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
@@ -668,6 +669,8 @@ class _RealHost:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> LocalPreStopIntentV1:
+        if not self.inspect_allowed:
+            raise AssertionError("reinspected")
         self.actions.append("inspect")
         return _pre_stop(self.metadata)
 
@@ -730,6 +733,43 @@ def test_real_adapter_intent_fsync_fault_prevents_first_host_mutation(
             materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
         )
     assert host.actions == ["inspect"]
+
+
+def test_real_adapter_retry_reopens_pre_stop_before_reinspection(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    host = _RealHost(metadata, root)
+    host.inspect_allowed = False
+
+    assert (
+        RealLocalExternalBootIO(root, host).prepare(
+            materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
+        )
+        == metadata
+    )
+    assert host.actions == ["first-mutation"]
+
+
+def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    crossed = _pre_stop(metadata).model_copy(update={"plan_identity": "sha256:" + "e" * 64})
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(crossed)
+    host = _RealHost(metadata, root)
+
+    with pytest.raises(ValueError, match="pre-stop intent does not match"):
+        RealLocalExternalBootIO(root, host).prepare(
+            materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
+        )
+    assert host.actions == []
 
 
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
