@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    FinalizeCleanupProof,
     ModuleLayout,
     PublicationPhase,
     advance_absence_publication,
@@ -192,3 +193,20 @@ def test_recovery_reference_resolves_only_exact_binding() -> None:
 def test_recovery_reference_rejects_cross_owner_or_malformed(reference: str) -> None:
     with pytest.raises((ValueError, ValidationError), match="recovery"):
         recovery_directory_name(OpaqueProviderRef(ref=reference), _BINDING)
+
+
+def test_finalize_cleanup_proof_is_closed_and_mutation_started_only() -> None:
+    values = {
+        "point_digest": "sha256:" + "3" * 64,
+        "binding": _BINDING,
+        "operation_id": "00000000-0000-0000-0000-000000000004",
+        "attempt_id": "00000000-0000-0000-0000-000000000005",
+        "journal_sequence": 7,
+        "journal_digest": "sha256:" + "4" * 64,
+        "phase": "mutation-started",
+    }
+    assert FinalizeCleanupProof.model_validate(values).journal_sequence == 7
+    with pytest.raises(ValidationError):
+        FinalizeCleanupProof.model_validate(values | {"phase": "terminal"})
+    with pytest.raises(ValidationError):
+        FinalizeCleanupProof.model_validate(values | {"extra": "forbidden"})

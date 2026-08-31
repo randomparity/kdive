@@ -6,15 +6,18 @@ import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Annotated, Literal, Protocol
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
+from pydantic import BaseModel, ConfigDict, Field
 
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import ModuleCapture
 from kdive.providers.ports.external_boot import (
     ComponentState,
     ExternalBootActivationBinding,
     OpaqueProviderRef,
+    ProviderStateIdentity,
 )
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 
@@ -29,6 +32,64 @@ class PublicationPhase(StrEnum):
     ABSENCE_LIVE = "absence-live"
     ABSENCE_COMPLETE = "absence-complete"
     ABSENCE_CLEANED = "absence-cleaned"
+
+
+type RecoveryPhase = Literal[
+    "pre-stop-intent",
+    "move-ready",
+    "old-aside",
+    "rollback-ready",
+    "rollback-complete",
+    "new-live",
+    "publication-complete",
+    "absence-live",
+    "absence-complete",
+    "absence-cleaned",
+    "target-defined",
+    "module-restored",
+    "source-restored",
+    "recovered",
+    "cleaned",
+]
+type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+
+
+class _ClosedValue(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class LocalRecoveryMetadataV1(_ClosedValue):
+    """Closed durable local recovery record; it contains no host path authority."""
+
+    schema_: Literal["local-libvirt-recovery-v1"] = Field(
+        "local-libvirt-recovery-v1", alias="schema"
+    )
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    materialization_identity: Digest
+    release: str
+    materialized_modules: OpaqueProviderRef
+    materialized_modules_sha256: Digest
+    materialized_modules_bytes: Annotated[int, Field(ge=0)]
+    source_xml_sha256: Digest
+    source_definition: Digest
+    source_boot: Digest
+    target_boot: Digest
+    source_state: ProviderStateIdentity
+    target_state: ProviderStateIdentity
+    prior_power: Literal["running", "inactive"]
+    capture: ModuleCapture
+    phase: RecoveryPhase
+
+
+class FinalizeCleanupProof(_ClosedValue):
+    point_digest: Digest
+    binding: ExternalBootActivationBinding
+    operation_id: Annotated[str, Field(pattern=r"^[0-9a-f-]{36}$")]
+    attempt_id: Annotated[str, Field(pattern=r"^[0-9a-f-]{36}$")]
+    journal_sequence: Annotated[int, Field(ge=1)]
+    journal_digest: Digest
+    phase: Literal["mutation-started"] = "mutation-started"
 
 
 @dataclass(frozen=True, slots=True)
