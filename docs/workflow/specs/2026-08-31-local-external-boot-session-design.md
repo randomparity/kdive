@@ -35,8 +35,8 @@ System identity before opening resources and rejects domain ownership or overlay
 `LocalExternalBootSession` owns one libvirt connection and domain, a no-follow regular-file overlay
 descriptor plus its exact device/inode identity, and an already-open artifact-root directory
 descriptor. The canonical expected path is used only to acquire and authenticate that descriptor;
-libguestfs attaches through its stable `/proc/self/fd` reference so pathname replacement cannot
-redirect the operation.
+libguestfs attaches through the stable worker-process `/proc/<worker-pid>/fd/<fd>` reference so a
+backend launch or pathname replacement cannot redirect the operation.
 It exposes only:
 
 - `inspect_closed()` returning immutable XML bytes, active state, ADR-0583 definition identity,
@@ -57,6 +57,10 @@ handle, artifact descriptor, overlay descriptor, domain reference, and libvirt c
 exact dependency-safe reverse order, then releases the operation pin. A close fault is reported but
 cannot re-enable the
 poisoned wrapper. All cleanup attempts run even when an earlier close fails.
+
+Guest downloads use an exclusive descriptor-relative temporary artifact, synchronize and close it,
+then atomically replace the final descriptor-relative name. Transfer or close failure removes the
+temporary file without changing an existing final artifact.
 
 Closed inspection safe-parses the inactive XML, verifies the KDIVE System metadata and expected
 domain naming, finds exactly one writable qcow2 System disk matching the configured overlay, and

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from dataclasses import FrozenInstanceError
 from uuid import UUID
@@ -196,6 +197,7 @@ def _factory(events: list[str], domain: Domain | None = None) -> LocalExternalBo
         pin_lease=LANE.pin,
         open_artifact_root=lambda _lease: events.append("artifact.open") or 41,
         open_guest=lambda: events.append("guest.open") or Guest(events),
+        worker_pid=4242,
         open_overlay=lambda _path: 40,
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
@@ -279,7 +281,7 @@ def test_guest_fences_and_rechecks_overlay_and_can_reopen() -> None:
     with session.guest() as guest:
         assert guest.exists("/etc/os-release") == 1
     assert events.count("guest.open") == 2
-    assert events.index("domain.active") < events.index("guest.drive:/proc/self/fd/40:qcow2")
+    assert events.index("domain.active") < events.index("guest.drive:/proc/4242/fd/40:qcow2")
     session.close()
 
 
@@ -354,6 +356,11 @@ def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
             events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
         ),
         close_transfer_descriptor=lambda fd: events.append(f"artifact.child.close:{fd}"),
+        fsync_descriptor=lambda fd: events.append(f"artifact.child.fsync:{fd}"),
+        replace_relative=lambda root, source, target: events.append(
+            f"artifact.replace:{root}:{source}:{target}"
+        ),
+        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease())
     with session.guest() as guest:
@@ -362,6 +369,73 @@ def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
     assert "upload:/proc/self/fd/42:/guest/input.tar" in events
     assert "download:/guest/output.tar:/proc/self/fd/42" in events
     assert events.count("artifact.child.close:42") == 2
+    session.close()
+
+
+def test_download_publishes_atomically_after_fsync_and_close() -> None:
+    events: list[str] = []
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
+        close_descriptor=lambda _fd: None,
+        open_relative=lambda root, name, flags, mode: (
+            events.append(f"open:{root}:{name}:{flags}:{mode}") or 42
+        ),
+        close_transfer_descriptor=lambda fd: events.append(f"close:{fd}"),
+        fsync_descriptor=lambda fd: events.append(f"fsync:{fd}"),
+        replace_relative=lambda root, source, target: events.append(
+            f"replace:{root}:{source}:{target}"
+        ),
+        temporary_artifact_name=lambda name: f".{name}.tmp",
+    )
+    session = factory.open(_lease())
+    with session.guest() as guest:
+        guest.download_artifact("/guest/output.tar", "output.tar")
+    open_event = next(event for event in events if event.startswith("open:"))
+    assert f":{os.O_WRONLY | os.O_CREAT | os.O_EXCL}:" in open_event
+    assert events.index("download:/guest/output.tar:/proc/self/fd/42") < events.index("fsync:42")
+    assert events.index("fsync:42") < events.index("close:42")
+    assert events.index("close:42") < events.index("replace:41:.output.tar.tmp:output.tar")
+    session.close()
+
+
+def test_failed_download_removes_temp_and_preserves_existing_final() -> None:
+    events: list[str] = []
+
+    class PartialDownloadGuest(Guest):
+        def download(self, remotefilename: str, filename: str) -> None:
+            super().download(remotefilename, filename)
+            raise OSError("partial download")
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: PartialDownloadGuest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
+        close_descriptor=lambda _fd: None,
+        open_relative=lambda *_args: 42,
+        close_transfer_descriptor=lambda fd: events.append(f"close:{fd}"),
+        fsync_descriptor=lambda fd: events.append(f"fsync:{fd}"),
+        replace_relative=lambda root, source, target: events.append(
+            f"replace:{root}:{source}:{target}"
+        ),
+        unlink_relative=lambda root, name: events.append(f"unlink:{root}:{name}"),
+        temporary_artifact_name=lambda name: f".{name}.tmp",
+    )
+    session = factory.open(_lease())
+    with session.guest() as guest, pytest.raises(OSError, match="partial download"):
+        guest.download_artifact("/guest/output.tar", "output.tar")
+    assert "close:42" in events
+    assert "unlink:41:.output.tar.tmp" in events
+    assert not any(event.startswith("replace:") for event in events)
     session.close()
 
 
@@ -414,6 +488,12 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
         session.start()
     with pytest.raises(RuntimeError, match="guest context"):
         session.restore_power("running")
+    defines = events.count("domain.define")
+    closes = events.count("domain.close")
+    with pytest.raises(RuntimeError, match="guest context"):
+        session.define_xml(_xml())
+    assert events.count("domain.define") == defines
+    assert events.count("domain.close") == closes
     assert "domain.create" not in events
     first.__exit__(None, None, None)
     with session.guest():
@@ -541,6 +621,7 @@ def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _ownership: 41,
         open_guest=lambda: Guest(events),
+        worker_pid=4242,
         open_overlay=lambda _path: 40,
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda fd: events.append(f"overlay.close:{fd}"),
@@ -549,7 +630,8 @@ def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
     session = factory.open(_lease())
     with session.guest():
         pass
-    assert "guest.drive:/proc/self/fd/40:qcow2" in events
+    assert "guest.drive:/proc/4242/fd/40:qcow2" in events
+    assert "guest.drive:/proc/self/fd/40:qcow2" not in events
     assert f"guest.drive:{OVERLAY}:qcow2" not in events
     session.close()
     assert "overlay.close:40" in events

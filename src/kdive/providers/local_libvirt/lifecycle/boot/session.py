@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Literal, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
@@ -276,6 +276,10 @@ class _ConcreteSession:
         close_transfer_descriptor: Callable[[int], None],
         open_relative: Callable[[int, str, int, int], int],
         unlink_relative: Callable[[int, str], None],
+        replace_relative: Callable[[int, str, str], None],
+        fsync_descriptor: Callable[[int], None],
+        temporary_artifact_name: Callable[[str], str],
+        worker_pid: int,
         readiness: ReadinessProbe,
         observe_running: RunningObserver,
         cleanup_payloads: CleanupPayloads,
@@ -294,6 +298,10 @@ class _ConcreteSession:
         self._close_transfer_descriptor = close_transfer_descriptor
         self._open_relative = open_relative
         self._unlink_relative = unlink_relative
+        self._replace_relative = replace_relative
+        self._fsync_descriptor = fsync_descriptor
+        self._temporary_artifact_name = temporary_artifact_name
+        self._worker_pid = worker_pid
         self._readiness = readiness
         self._observe_running = observe_running
         self._cleanup_payloads = cleanup_payloads
@@ -339,6 +347,7 @@ class _ConcreteSession:
         return _GuestContext(self)
 
     def define_xml(self, xml: str) -> None:
+        self._require_no_guest_context()
         self.require_inactive()
         _parse_owned_xml(xml, self._system_id, self._overlay.path)
         assert self._connection is not None
@@ -413,7 +422,9 @@ class _ConcreteSession:
         self._require_overlay_identity()
         guest = self._open_guest()
         try:
-            guest.add_drive_opts(f"/proc/self/fd/{self._overlay.descriptor}", format="qcow2")
+            guest.add_drive_opts(
+                f"/proc/{self._worker_pid}/fd/{self._overlay.descriptor}", format="qcow2"
+            )
             guest.launch()
         except BaseException as exc:
             for close_error in _attempt_guest_close(guest):
@@ -447,13 +458,32 @@ class _ConcreteSession:
         artifact_name: str,
     ) -> None:
         self._guard_guest_operation(wrapper)
-        descriptor = self.open_artifact(
-            _relative_name(artifact_name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        )
-        self._transfer_with_close(
-            descriptor,
-            lambda path: guest.download(guest_source, path),
-        )
+        final_name = _relative_name(artifact_name)
+        temporary_name = _relative_name(self._temporary_artifact_name(final_name))
+        if temporary_name == final_name:
+            raise ValueError("temporary artifact name must differ from final artifact name")
+        descriptor = self.open_artifact(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            guest.download(guest_source, f"/proc/self/fd/{descriptor}")
+            self._fsync_descriptor(descriptor)
+            closing, descriptor = descriptor, None
+            self._close_transfer_descriptor(closing)
+            assert self._artifact_fd is not None
+            self._replace_relative(self._artifact_fd, temporary_name, final_name)
+        except BaseException as exc:
+            if descriptor is not None:
+                try:
+                    self._close_transfer_descriptor(descriptor)
+                except Exception as close_error:
+                    exc.add_note(f"cleanup failed: {close_error!r}")
+            assert self._artifact_fd is not None
+            try:
+                self._unlink_relative(self._artifact_fd, temporary_name)
+            except FileNotFoundError:
+                pass
+            except Exception as unlink_error:
+                exc.add_note(f"cleanup failed: {unlink_error!r}")
+            raise
 
     def _transfer_with_close(self, descriptor: int, transfer: Callable[[str], None]) -> None:
         try:
@@ -505,6 +535,10 @@ class LocalExternalBootSessionFactory:
         close_transfer_descriptor: Callable[[int], None] = os.close,
         open_relative: Callable[[int, str, int, int], int] | None = None,
         unlink_relative: Callable[[int, str], None] | None = None,
+        replace_relative: Callable[[int, str, str], None] | None = None,
+        fsync_descriptor: Callable[[int], None] = os.fsync,
+        temporary_artifact_name: Callable[[str], str] | None = None,
+        worker_pid: int | None = None,
         readiness: ReadinessProbe | None = None,
         observe_running: RunningObserver | None = None,
         cleanup_payloads: CleanupPayloads | None = None,
@@ -520,6 +554,10 @@ class LocalExternalBootSessionFactory:
         self._close_transfer_descriptor = close_transfer_descriptor
         self._open_relative = open_relative or _open_relative
         self._unlink_relative = unlink_relative or _unlink_relative
+        self._replace_relative = replace_relative or _replace_relative
+        self._fsync_descriptor = fsync_descriptor
+        self._temporary_artifact_name = temporary_artifact_name or _temporary_artifact_name
+        self._worker_pid = worker_pid if worker_pid is not None else os.getpid()
         self._readiness = readiness or _unconfigured_readiness
         self._observe_running = observe_running or _unconfigured_observation
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
@@ -565,6 +603,10 @@ class LocalExternalBootSessionFactory:
                 close_transfer_descriptor=self._close_transfer_descriptor,
                 open_relative=self._open_relative,
                 unlink_relative=self._unlink_relative,
+                replace_relative=self._replace_relative,
+                fsync_descriptor=self._fsync_descriptor,
+                temporary_artifact_name=self._temporary_artifact_name,
+                worker_pid=self._worker_pid,
                 readiness=self._readiness,
                 observe_running=self._observe_running,
                 cleanup_payloads=self._cleanup_payloads,
@@ -622,6 +664,14 @@ def _open_relative(root_fd: int, name: str, flags: int, mode: int) -> int:
 
 def _unlink_relative(root_fd: int, name: str) -> None:
     os.unlink(name, dir_fd=root_fd)
+
+
+def _replace_relative(root_fd: int, source: str, target: str) -> None:
+    os.replace(source, target, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+
+
+def _temporary_artifact_name(name: str) -> str:
+    return f".{name}.kdive-{uuid4().hex}.tmp"
 
 
 def _unconfigured_readiness(_system_id: UUID) -> ReadinessResult:

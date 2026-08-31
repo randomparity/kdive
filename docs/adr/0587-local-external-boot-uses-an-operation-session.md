@@ -28,8 +28,9 @@ A missing, foreign, or released lease rejects the operation before opening libvi
 resources, and the lane therefore cannot disappear between guest operations.
 Construction then opens and validates the expected KDIVE domain, acquires the exact System overlay
 as a retained no-follow regular-file descriptor, and opens an injected owner-bound artifact-root
-directory descriptor. Guest attachment uses only the stable `/proc/self/fd` reference to that
-retained overlay descriptor, never a later pathname resolution.
+directory descriptor. Guest attachment uses only the stable worker-process
+`/proc/<worker-pid>/fd/<fd>` reference to that retained overlay descriptor, never the libguestfs
+backend's `/proc/self` namespace or a later pathname resolution.
 
 The session owns the libvirt connection/domain and artifact-root descriptor until close. It opens
 a reopenable libguestfs guest session only after fencing and rechecking the domain inactive, and
@@ -41,6 +42,9 @@ does not expose paths or advertise external boot.
 Guest/host transfers name only one canonical artifact-root segment and a guest path. The session
 opens the artifact descriptor-relative with no-follow and passes only its owned `/proc/self/fd`
 reference to libguestfs for the duration of the transfer.
+Downloads are written to an exclusive temporary name beneath the artifact directory, synchronized
+and closed, then atomically replaced into the final name. A failed or partial download removes the
+temporary file and leaves any prior final artifact untouched.
 
 Cleanup first poisons the session and every guest wrapper so no subsequent method can reach an
 underlying handle. It then attempts every owned resource in dependency-safe reverse acquisition
