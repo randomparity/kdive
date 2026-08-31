@@ -126,7 +126,11 @@ as `RecoveryArchiveSource`.
 `RecoveryArchiveSink` and `RecoveryArchiveSource` are symmetric owner-bound capabilities constructed
 by `LocalLibvirtExternalBoot` only after it authenticates the recovery token and resolves the exact
 System/activation directory beneath the configured recovery root. The sink exclusively stages and
-fsyncs the fixed archive filename. Each source owns an already-open authenticated recovery-directory
+fsyncs the fixed archive filename. Every cooperating service mutation of that directory holds the
+same exclusive advisory lock on its authenticated directory descriptor from before partial creation
+through publication or inode-checked cleanup. The directory is service-owned and private; an
+uncooperative process running as that same service identity is outside this capability boundary.
+Each source owns an already-open authenticated recovery-directory
 descriptor for exactly one restore call and rejects reuse. Before its first read it requires the
 source owner, requested release, and validated `ModuleArchiveCapture` identity to agree. It accepts
 the relative filename only from that capture, opens it relative to the owned directory with
