@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import tarfile
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    CleanupTombstoneV1,
     FinalizeCleanupProof,
     LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
@@ -466,6 +468,32 @@ def test_target_projection_sidecar_publishes_and_reopens_exactly(tmp_path: Path)
     assert oct(sidecar.stat().st_mode & 0o777) == "0o600"
 
 
+@pytest.mark.parametrize("interrupted", [b"", b'{"schema":', None])
+def test_target_projection_sidecar_retries_interrupted_temporary_publication(
+    tmp_path: Path, interrupted: bytes | None
+) -> None:
+    root = tmp_path / "artifacts"
+    root.mkdir(mode=0o700)
+    projection = _projection()
+    directory = root
+    for name in (
+        projection.ownership.system_id,
+        projection.ownership.run_id,
+        projection.digest.removeprefix("sha256:"),
+    ):
+        directory /= name
+        directory.mkdir(mode=0o700)
+    temporary = directory / ".target-projection.next"
+    temporary.write_bytes(projection.canonical_bytes() if interrupted is None else interrupted)
+    temporary.chmod(0o600)
+
+    with TargetProjectionStore(root) as store:
+        kernel_ref = store.publish(projection)
+        assert store.reopen(kernel_ref, projection.ownership) == projection
+
+    assert not temporary.exists()
+
+
 def test_target_projection_sidecar_rejects_substitution_and_cross_owner(tmp_path: Path) -> None:
     root = tmp_path / "artifacts"
     root.mkdir(mode=0o700)
@@ -524,6 +552,72 @@ def test_pre_stop_intent_is_durable_before_complete_publication(tmp_path: Path) 
         assert store.reopen_pre_stop(reference, intent.binding) == intent
         assert store.complete_preparation(reference, intent, metadata) == metadata
         assert store.reopen(reference, intent.binding) == metadata
+
+
+@pytest.mark.parametrize("interrupted", [b"", b'{"schema":', None])
+@pytest.mark.parametrize("replacement", ["complete", "phase", "tombstone"])
+def test_recovery_metadata_store_retries_interrupted_temporary_replacement(
+    tmp_path: Path, interrupted: bytes | None, replacement: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered" if replacement == "tombstone" else "move-ready")
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        if replacement == "complete":
+            reference = store.publish_pre_stop(intent)
+            expected_model = metadata
+            temporary_name = ".intent.complete"
+        else:
+            reference = store.publish(metadata)
+            if replacement == "phase":
+                updated = metadata.model_copy(update={"phase": "publication-complete"})
+                expected_model = updated
+                temporary_name = ".intent.next"
+            else:
+                expected_model = CleanupTombstoneV1(
+                    binding=metadata.binding,
+                    point_digest=LocalLibvirtExternalBoot.point_digest(_point(metadata)),
+                )
+                temporary_name = ".tombstone.next"
+    expected_bytes = json.dumps(
+        expected_model.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    directory_name = recovery_directory_name(reference, metadata.binding)
+    directory = root / (
+        f".{directory_name}.partial" if replacement == "complete" else directory_name
+    )
+    temporary = directory / temporary_name
+    temporary.write_bytes(expected_bytes if interrupted is None else interrupted)
+    temporary.chmod(0o600)
+
+    with RecoveryMetadataStore(root) as store:
+        if replacement == "complete":
+            assert store.complete_preparation(reference, intent, metadata) == metadata
+        elif replacement == "phase":
+            assert (
+                store.record_phase(
+                    reference,
+                    metadata.binding,
+                    metadata,
+                    "publication-complete",
+                ).phase
+                == "publication-complete"
+            )
+        else:
+            point = _point(metadata)
+            tombstone = store.publish_tombstone(
+                reference,
+                metadata.binding,
+                metadata,
+                LocalLibvirtExternalBoot.point_digest(point),
+            )
+            assert tombstone.binding == metadata.binding
+
+    assert not temporary.exists()
 
 
 def test_pre_stop_substitution_conflicts_before_complete_publication(tmp_path: Path) -> None:

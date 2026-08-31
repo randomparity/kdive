@@ -204,6 +204,7 @@ class TargetProjectionV1(_ClosedValue):
 
 
 _PROJECTION_NAME = "target-projection.json"
+_PROJECTION_TEMPORARY_NAME = ".target-projection.next"
 _MAX_PROJECTION_BYTES = 16_384
 
 
@@ -244,13 +245,18 @@ class TargetProjectionStore:
                 if len(data) > _MAX_PROJECTION_BYTES:
                     raise ValueError("target projection exceeds its byte bound")
                 try:
-                    _write_exclusive(projection_fd, _PROJECTION_NAME, data)
-                    os.fsync(projection_fd)
-                except FileExistsError as exc:
-                    if _read_private_file(projection_fd, _PROJECTION_NAME) != data:
-                        raise ValueError(
-                            "target projection conflicts with existing sidecar"
-                        ) from exc
+                    existing = _read_private_file(projection_fd, _PROJECTION_NAME)
+                except FileNotFoundError:
+                    _replace_private_file(
+                        projection_fd,
+                        _PROJECTION_TEMPORARY_NAME,
+                        _PROJECTION_NAME,
+                        data,
+                    )
+                else:
+                    if existing != data:
+                        raise ValueError("target projection conflicts with existing sidecar")
+                os.fsync(projection_fd)
             finally:
                 os.close(projection_fd)
             os.fsync(run_fd)
@@ -995,6 +1001,7 @@ def _read_private_file(directory_fd: int, name: str) -> bytes:
             not stat.S_ISREG(opened.st_mode)
             or stat.S_IMODE(opened.st_mode) != 0o600
             or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
             or opened.st_size > _MAX_METADATA_BYTES
         ):
             raise ValueError("recovery evidence is not an owned private regular file")
@@ -1106,8 +1113,12 @@ class RecoveryMetadataStore:
             if self._read_pre_stop(directory_fd) != intent:
                 raise ValueError("pre-stop intent changed before completion")
             temporary = ".intent.complete"
-            _write_exclusive(directory_fd, temporary, _metadata_bytes(metadata))
-            os.rename(temporary, _INTENT_NAME, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            _replace_private_file(
+                directory_fd,
+                temporary,
+                _INTENT_NAME,
+                _metadata_bytes(metadata),
+            )
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
@@ -1139,8 +1150,12 @@ class RecoveryMetadataStore:
                 raise ValueError("recovery metadata changed before phase publication")
             updated = expected.model_copy(update={"phase": phase})
             temporary = ".intent.next"
-            _write_exclusive(directory_fd, temporary, _metadata_bytes(updated))
-            os.rename(temporary, _INTENT_NAME, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            _replace_private_file(
+                directory_fd,
+                temporary,
+                _INTENT_NAME,
+                _metadata_bytes(updated),
+            )
             os.fsync(directory_fd)
             return updated
         finally:
@@ -1164,12 +1179,11 @@ class RecoveryMetadataStore:
             if expected.phase != "recovered":
                 raise ValueError("recovery must complete before cleanup")
             temporary = ".tombstone.next"
-            _write_exclusive(directory_fd, temporary, _tombstone_bytes(tombstone))
-            os.rename(
+            _replace_private_file(
+                directory_fd,
                 temporary,
                 _TOMBSTONE_NAME,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
+                _tombstone_bytes(tombstone),
             )
             os.unlink(_INTENT_NAME, dir_fd=directory_fd)
             os.fsync(directory_fd)
@@ -1340,6 +1354,18 @@ def _write_exclusive(directory_fd: int, name: str, data: bytes) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _replace_private_file(directory_fd: int, temporary: str, final: str, data: bytes) -> None:
+    """Publish through a retryable, authenticated temporary file."""
+    try:
+        _write_exclusive(directory_fd, temporary, data)
+    except FileExistsError:
+        existing = _read_private_file(directory_fd, temporary)
+        if existing != data:
+            os.unlink(temporary, dir_fd=directory_fd)
+            _write_exclusive(directory_fd, temporary, data)
+    os.rename(temporary, final, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
 
 
 def _sync_phase(io: ModulePublicationIO, phase: PublicationPhase) -> None:
