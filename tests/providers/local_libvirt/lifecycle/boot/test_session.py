@@ -9,6 +9,7 @@ import pytest
 
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    ExpectedOperationOwnership,
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
     OpenArtifactRoot,
@@ -27,6 +28,7 @@ BINDING = ExternalBootActivationBinding(
     activation_id="33333333-3333-3333-3333-333333333333",
 )
 OVERLAY = f"/var/lib/kdive/rootfs/{SYSTEM_ID}-overlay.qcow2"
+ACTIVATION_ID = UUID(BINDING.activation_id)
 
 
 class FakeLease:
@@ -70,6 +72,46 @@ LANE = FakeLane()
 
 def _lease() -> FakeLease:
     return FakeLease()
+
+
+def _expected(*, activation_id: UUID | None = ACTIVATION_ID) -> ExpectedOperationOwnership:
+    return ExpectedOperationOwnership(
+        system_id=SYSTEM_ID,
+        run_id=UUID(BINDING.run_id),
+        activation_id=activation_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        ExpectedOperationOwnership(UUID(int=9), UUID(BINDING.run_id), UUID(BINDING.activation_id)),
+        ExpectedOperationOwnership(SYSTEM_ID, UUID(int=9), UUID(BINDING.activation_id)),
+        ExpectedOperationOwnership(SYSTEM_ID, UUID(BINDING.run_id), UUID(int=9)),
+    ],
+)
+def test_expected_ownership_rejects_substitution_before_resource_open(
+    expected: ExpectedOperationOwnership,
+) -> None:
+    events: list[str] = []
+    lease = _lease()
+
+    with pytest.raises(ValueError, match="expected ownership"):
+        _factory(events).open(lease, expected)
+
+    assert events == []
+    lease.release()
+
+
+def test_expected_ownership_without_activation_accepts_exact_system_and_run() -> None:
+    events: list[str] = []
+    session = _factory(events).open(_lease(), _expected(activation_id=None))
+    session.close()
+
+    assert "connection.open" in events
+
+    with pytest.raises(FrozenInstanceError):
+        _expected().run_id = UUID(int=9)  # ty: ignore[invalid-assignment]
 
 
 def _xml(*, overlay: str = OVERLAY, system_id: UUID = SYSTEM_ID) -> str:
@@ -215,7 +257,7 @@ def _factory(events: list[str], domain: Domain | None = None) -> LocalExternalBo
 def test_factory_pins_before_open_and_lease_cannot_release_while_session_live() -> None:
     events: list[str] = []
     lease = _lease()
-    session = _factory(events).open(lease)
+    session = _factory(events).open(lease, _expected())
     assert events[:2] == ["connection.open", f"domain.open:kdive-{SYSTEM_ID}"]
     with pytest.raises(RuntimeError, match="pinned"):
         lease.release()
@@ -227,7 +269,7 @@ def test_factory_pins_before_open_and_lease_cannot_release_while_session_live() 
 def test_missing_or_foreign_lease_opens_nothing(lease: object | None) -> None:
     events: list[str] = []
     with pytest.raises((TypeError, ValueError)):
-        _factory(events).open(lease)  # ty: ignore[invalid-argument-type]
+        _factory(events).open(lease, _expected())  # ty: ignore[invalid-argument-type]
     assert events == []
 
 
@@ -237,13 +279,13 @@ def test_released_lease_opens_nothing() -> None:
     lease.release()
     events.clear()
     with pytest.raises(RuntimeError, match="released"):
-        _factory(events).open(lease)
+        _factory(events).open(lease, _expected())
     assert events == []
 
 
 def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     events: list[str] = []
-    session = _factory(events).open(_lease())
+    session = _factory(events).open(_lease(), _expected())
     inspection = session.inspect_closed()
     assert inspection.xml == _xml().encode()
     assert inspection.domain_name == f"kdive-{SYSTEM_ID}"
@@ -262,7 +304,7 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
 
     foreign = Domain(events, _xml(system_id=UUID(int=4)))
     with pytest.raises(ValueError, match="ownership"):
-        _factory(events, foreign).open(_lease())
+        _factory(events, foreign).open(_lease(), _expected())
 
 
 @pytest.mark.parametrize(
@@ -277,12 +319,12 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
 def test_domain_rejects_noncanonical_or_readonly_overlay(xml: str, reason: str) -> None:
     events: list[str] = []
     with pytest.raises(ValueError, match=reason):
-        _factory(events, Domain(events, xml)).open(_lease())
+        _factory(events, Domain(events, xml)).open(_lease(), _expected())
 
 
 def test_guest_fences_and_rechecks_overlay_and_can_reopen() -> None:
     events: list[str] = []
-    session = _factory(events).open(_lease())
+    session = _factory(events).open(_lease(), _expected())
     with session.guest() as guest:
         assert guest.exists("/etc/os-release") == 1
     assert events.index("guest.launch") < events.index("guest.inspect")
@@ -315,7 +357,7 @@ def test_guest_rejects_zero_or_ambiguous_inspection_roots(roots: list[str]) -> N
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with pytest.raises(RuntimeError, match="exactly one operating-system root"):
         session.guest().__enter__()
     assert "guest.shutdown" in events
@@ -350,7 +392,7 @@ def test_guest_inspection_or_mount_failure_preserves_primary_and_cleans_up(fault
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with pytest.raises(LookupError, match=f"{fault_at} primary"):
         session.guest().__enter__()
     assert events[-2:] == ["guest.shutdown", "guest.close"]
@@ -371,7 +413,7 @@ def test_guest_rechecks_inactive_and_overlay_before_every_operation() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with session.guest() as guest:
         domain.active = True
         before = events.count("guest.exists:/etc/os-release")
@@ -401,7 +443,7 @@ def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str)
         open_relative=lambda *_args: events.append("artifact.child.open") or 42,
         close_transfer_descriptor=lambda _fd: events.append("artifact.child.close"),
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with session.guest() as guest:
         assert not hasattr(guest, "upload")
         assert not hasattr(guest, "download")
@@ -434,7 +476,7 @@ def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
         ),
         temporary_artifact_name=lambda name: f".{name}.tmp",
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with session.guest() as guest:
         guest.upload_artifact("input.tar", "/guest/input.tar")
         guest.download_artifact("/guest/output.tar", "output.tar")
@@ -465,7 +507,7 @@ def test_download_publishes_atomically_after_fsync_and_close() -> None:
         ),
         temporary_artifact_name=lambda name: f".{name}.tmp",
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with session.guest() as guest:
         guest.download_artifact("/guest/output.tar", "output.tar")
     open_event = next(event for event in events if event.startswith("open:"))
@@ -502,7 +544,7 @@ def test_failed_download_removes_temp_and_preserves_existing_final() -> None:
         unlink_relative=lambda root, name: events.append(f"unlink:{root}:{name}"),
         temporary_artifact_name=lambda name: f".{name}.tmp",
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with session.guest() as guest, pytest.raises(OSError, match="partial download"):
         guest.download_artifact("/guest/output.tar", "output.tar")
     assert "close:42" in events
@@ -535,7 +577,7 @@ def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> No
         open_relative=lambda *_args: 42,
         close_transfer_descriptor=close_fault,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with (
         session.guest() as guest,
         pytest.raises(LookupError, match="transfer primary") as raised,
@@ -549,7 +591,7 @@ def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> No
 def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
     events: list[str] = []
     domain = Domain(events)
-    session = _factory(events, domain).open(_lease())
+    session = _factory(events, domain).open(_lease(), _expected())
     first = session.guest()
     first.__enter__()
     guest_opens = events.count("guest.open")
@@ -576,7 +618,7 @@ def test_only_one_guest_context_and_power_start_reject_while_open() -> None:
 def test_close_poisons_wrappers_and_releases_pin_last() -> None:
     events: list[str] = []
     lease = _lease()
-    session = _factory(events).open(lease)
+    session = _factory(events).open(lease, _expected())
     retained = session.guest()
     guest = retained.__enter__()
     session.close()
@@ -623,7 +665,7 @@ def test_close_faults_do_not_skip_cleanup_or_pin_release() -> None:
         close_overlay_descriptor=fault_overlay_close,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     with pytest.raises(ExceptionGroup) as raised:
         session.close()
     assert len(raised.value.exceptions) == 3
@@ -640,7 +682,7 @@ def test_active_domain_blocks_guest_before_open() -> None:
     events: list[str] = []
     domain = Domain(events)
     domain.active = True
-    session = _factory(events, domain).open(_lease())
+    session = _factory(events, domain).open(_lease(), _expected())
     with pytest.raises(RuntimeError, match="inactive"), session.guest():
         pass
     assert "guest.open" not in events
@@ -660,7 +702,7 @@ def test_overlay_substitution_fails_before_guest_open() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with pytest.raises(ValueError, match="overlay changed"), session.guest():
         pass
     assert "guest.open" not in events
@@ -681,7 +723,7 @@ def test_overlay_descriptor_rejects_symlink_and_nonregular_before_guest(mode: in
         close_descriptor=lambda _fd: None,
     )
     with pytest.raises(ValueError, match="regular"):
-        factory.open(_lease())
+        factory.open(_lease(), _expected())
     assert "guest.open" not in events
     assert events[-3:] == ["overlay.close", "domain.close", "connection.close"]
 
@@ -699,7 +741,7 @@ def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
         close_overlay_descriptor=lambda fd: events.append(f"overlay.close:{fd}"),
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     with session.guest():
         pass
     assert "guest.drive:/proc/4242/fd/40:qcow2" in events
@@ -714,7 +756,7 @@ def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> N
     domain = Domain(events, _xml(overlay="/wrong.qcow2"))
     lease = _lease()
     with pytest.raises(ValueError, match="overlay"):
-        _factory(events, domain).open(lease)
+        _factory(events, domain).open(lease, _expected())
     assert events[-2:] == ["domain.close", "connection.close"]
     lease.release()
 
@@ -744,7 +786,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
             f"cleanup:{root}:{binding.activation_id}"
         ),
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     assert session.open_artifact("point.json", 0) == 42
     session.unlink_artifact("point.json")
     assert session.readiness() == ReadinessResult(True, True)
@@ -793,7 +835,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         ),
         cleanup_payloads=lambda _root, binding: cleaned.append(binding),
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     lease.system_id = UUID(int=9)
     lease.binding = ExternalBootActivationBinding(
         system_id=str(UUID(int=9)),
@@ -839,7 +881,7 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
     assert events.count(f"domain.open:kdive-{SYSTEM_ID}") == 1
     assert events.count(f"artifact-owner:{SYSTEM_ID}:{BINDING.activation_id}") == 1
@@ -871,7 +913,7 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     assert received[0].system_id == SYSTEM_ID
     assert received[0].binding == BINDING
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
@@ -901,7 +943,7 @@ def test_artifact_callback_type_is_pin_free_and_cannot_release_lane() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     assert received == [OperationOwnership(SYSTEM_ID, BINDING)]
     with pytest.raises(RuntimeError, match="pinned"):
         lease.release()
@@ -930,7 +972,7 @@ def test_define_frees_distinct_prior_domain_reference() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
     )
-    session = factory.open(_lease())
+    session = factory.open(_lease(), _expected())
     session.define_xml(_xml())
     assert events[-2:] == ["domain.define", "domain.close"]
     session.close()
@@ -959,7 +1001,7 @@ def test_guest_and_descriptor_close_faults_still_release_pin_last() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=fault_descriptor,
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     retained = session.guest()
     retained.__enter__()
     with pytest.raises(ExceptionGroup) as raised:
@@ -1001,7 +1043,7 @@ def test_guest_open_failures_preserve_primary_and_cleanup(fault_at: str) -> None
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    session = factory.open(lease)
+    session = factory.open(lease, _expected())
     with pytest.raises(LookupError, match=f"{fault_at} primary"), session.guest():
         pass
     if fault_at != "factory":

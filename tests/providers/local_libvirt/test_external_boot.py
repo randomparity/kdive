@@ -8,7 +8,10 @@ import json
 import os
 import stat
 import tarfile
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -32,6 +35,13 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     convert_kernel_bundle_modules,
     recovery_directory_name,
     render_target_xml,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    ClosedDomainInspection,
+    ExpectedOperationOwnership,
+    LocalExternalBootOperationLease,
+    LocalExternalBootSessionFactory,
+    OverlayIdentity,
 )
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
@@ -823,6 +833,49 @@ def _materialization() -> ExternalBootMaterialization:
     )
 
 
+def _plan() -> ExternalBootPlan:
+    zero = "sha256:" + "0" * 64
+    return ExternalBootPlan.model_validate(
+        {
+            "architecture": "x86_64",
+            "bundle": {
+                "decoded_kernel_size_bytes": 200,
+                "elf_metadata_bytes": 50,
+                "gnu_build_id_size_bytes": 20,
+                "key": "bundles/k.tar",
+                "member_count": 2,
+                "sha256": zero,
+                "uncompressed_bytes": 101,
+                "version": "v1",
+                "vmlinuz_sha256": zero,
+                "vmlinuz_size_bytes": 100,
+            },
+            "cmdline": "root=UUID=x",
+            "debug_cmdline": None,
+            "initrd": None,
+            "module_obligation": {
+                "member_count": 1,
+                "release": "6.12.0",
+                "source_manifest": zero,
+                "uncompressed_bytes": 1,
+            },
+            "ownership": {
+                "build_generation": "00000000-0000-0000-0000-000000000001",
+                "run_id": _BINDING.run_id,
+                "system_id": _BINDING.system_id,
+            },
+            "platform_arguments": ["root=UUID=x"],
+            "root": {
+                "architecture": "x86_64",
+                "arguments": ["root=UUID=x"],
+                "authority": "stage-inspection",
+                "root": "UUID=x",
+                "source": {"identity": zero, "kind": "staged-image"},
+            },
+        }
+    )
+
+
 def test_recovery_metadata_store_rejects_hostile_root_and_partial(tmp_path: Path) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o755)
@@ -965,31 +1018,61 @@ def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
 
 
 class _ExternalIO:
-    def __init__(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def __init__(
+        self,
+        metadata: LocalRecoveryMetadataV1,
+        *,
+        operation_fault: bool = False,
+        close_fault: bool = False,
+    ) -> None:
         self.metadata = metadata
         self.actions: list[str] = []
         self.tombstone = False
         self.finalized_proof: FinalizeCleanupProof | None = None
+        self.operation_fault = operation_fault
+        self.close_fault = close_fault
+        self.opened: list[ExpectedOperationOwnership] = []
+        self.close_attempts = 0
 
-    def materialize(
-        self, plan: object, authority: OpaqueProviderRef
-    ) -> ExternalBootMaterialization:
+    def open(
+        self,
+        authority: OpaqueProviderRef,
+        expected: ExpectedOperationOwnership,
+    ) -> _ExternalContext:
+        assert authority == OpaqueProviderRef(ref="authority/current")
+        self.opened.append(expected)
+        return _ExternalContext(self)
+
+    def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
         self.actions.append("materialize")
-        raise RuntimeError("not used")
+        if self.operation_fault:
+            raise LookupError("operation primary")
+        materialization = _materialization()
+        return materialization.model_copy(update={"plan_identity": plan.identity})
 
     def prepare(
-        self, materialization: object, binding: object, authority: object
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
     ) -> LocalRecoveryMetadataV1:
         self.actions.append("prepare")
-        return self.metadata
+        if self.operation_fault:
+            raise LookupError("operation primary")
+        return self.metadata.model_copy(
+            update={
+                "binding": binding,
+                "materialization_identity": materialization.identity,
+                "plan_identity": materialization.plan_identity,
+            }
+        )
 
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
         return _point(self.metadata).recovery_ref
 
-    def reopen(
-        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
-    ) -> LocalRecoveryMetadataV1:
+    def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1:
         self.actions.append("reopen")
+        if self.operation_fault:
+            raise LookupError("operation primary")
         return self.metadata
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
@@ -1033,60 +1116,247 @@ class _ExternalIO:
         self.tombstone = False
 
 
-class _RealHost:
+class _ExternalContext:
+    def __init__(self, operation: _ExternalIO) -> None:
+        self.operation = operation
+
+    def __enter__(self) -> _ExternalIO:
+        return self.operation
+
+    def __exit__(self, exc_type: object, exc: BaseException | None, traceback: object) -> None:
+        del exc_type, traceback
+        self.operation.close_attempts += 1
+        if self.operation.close_fault:
+            close_error = OSError("close secondary")
+            if exc is None:
+                raise close_error
+            exc.add_note(f"cleanup failed: {close_error!r}")
+
+
+def _exercise_port(method: str, ports: LocalLibvirtExternalBoot, io: _ExternalIO) -> None:
+    authority = OpaqueProviderRef(ref="authority/current")
+    point = _point(io.metadata)
+    if method == "materialize":
+        ports.materialize(_plan(), authority)
+    elif method == "prepare":
+        materialization = _materialization().model_copy(
+            update={"plan_identity": io.metadata.plan_identity}
+        )
+        ports.prepare(materialization, io.metadata.binding, authority)
+    elif method == "activate":
+        ports.activate(point, authority)
+    elif method == "observe":
+        io.metadata = io.metadata.model_copy(update={"phase": "target-defined"})
+        ports.observe(_point(io.metadata), authority)
+    elif method == "recover":
+        io.metadata = io.metadata.model_copy(update={"phase": "target-defined"})
+        ports.recover(_point(io.metadata), authority)
+    else:
+        io.metadata = io.metadata.model_copy(update={"phase": "recovered"})
+        ports.cleanup(_point(io.metadata), authority)
+
+
+@pytest.mark.parametrize(
+    "method", ["materialize", "prepare", "activate", "observe", "recover", "cleanup"]
+)
+def test_real_adapter_opens_and_closes_one_operation_per_public_call(method: str) -> None:
+    io = _ExternalIO(_metadata())
+
+    _exercise_port(method, LocalLibvirtExternalBoot(io), io)
+
+    assert len(io.opened) == 1
+    assert io.close_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "method", ["materialize", "prepare", "activate", "observe", "recover", "cleanup"]
+)
+def test_real_adapter_preserves_operation_error_when_close_also_fails(method: str) -> None:
+    io = _ExternalIO(_metadata(), operation_fault=True, close_fault=True)
+
+    with pytest.raises(LookupError, match="operation primary") as raised:
+        _exercise_port(method, LocalLibvirtExternalBoot(io), io)
+
+    assert raised.value.__notes__ == ["cleanup failed: OSError('close secondary')"]
+    assert len(io.opened) == 1
+    assert io.close_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "method", ["materialize", "prepare", "activate", "observe", "recover", "cleanup"]
+)
+def test_real_adapter_surfaces_close_fault_after_success(method: str) -> None:
+    io = _ExternalIO(_metadata(), close_fault=True)
+
+    with pytest.raises(OSError, match="close secondary"):
+        _exercise_port(method, LocalLibvirtExternalBoot(io), io)
+
+    assert len(io.opened) == 1
+    assert io.close_attempts == 1
+
+
+@pytest.mark.parametrize(
+    "method", ["materialize", "prepare", "activate", "observe", "recover", "cleanup"]
+)
+def test_real_adapter_closes_operation_on_coordinator_validation_failure(method: str) -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    authority = OpaqueProviderRef(ref="authority/current")
+    point = _point(io.metadata)
+
+    with pytest.raises(ValueError):
+        if method == "materialize":
+            plan = _plan()
+            original = io.materialize
+            io.materialize = lambda value: original(value).model_copy(  # ty: ignore[invalid-assignment]
+                update={"provider_kind": "foreign"}
+            )
+            ports.materialize(plan, authority)
+        elif method == "prepare":
+            materialization = _materialization().model_copy(
+                update={
+                    "ownership": _materialization().ownership.model_copy(
+                        update={"system_id": str(UUID(int=9))}
+                    )
+                }
+            )
+            ports.prepare(materialization, _BINDING, authority)
+        elif method == "activate":
+            crossed = point.model_copy(update={"plan_identity": "sha256:" + "f" * 64})
+            ports.activate(crossed, authority)
+        elif method == "observe":
+            ports.observe(point, authority)
+        elif method == "recover":
+            ports.recover(point, authority)
+        else:
+            ports.cleanup(point, authority)
+
+    assert len(io.opened) == 1
+    assert io.close_attempts == 1
+
+
+class _RealPreparation:
     def __init__(self, metadata: LocalRecoveryMetadataV1, root: Path) -> None:
         self.metadata = metadata
         self.root = root
         self.actions: list[str] = []
         self.inspect_allowed = True
+        self.work_fault = False
 
-    def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
-    ) -> ExternalBootMaterialization:
+    def materialize(self, plan: ExternalBootPlan, session: object) -> ExternalBootMaterialization:
+        del plan, session
         raise AssertionError("not used")
 
     def inspect_prepare(
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        authority: OpaqueProviderRef,
+        inspection: ClosedDomainInspection,
+        session: object,
     ) -> LocalPreStopIntentV1:
+        del materialization, binding, inspection, session
         if not self.inspect_allowed:
             raise AssertionError("reinspected")
         self.actions.append("inspect")
         return _pre_stop(self.metadata)
 
-    def complete_prepare(self, intent: LocalPreStopIntentV1) -> LocalRecoveryMetadataV1:
+    def complete_prepare(
+        self, intent: LocalPreStopIntentV1, session: object
+    ) -> LocalRecoveryMetadataV1:
+        del session
         reference = OpaqueProviderRef(
             ref=f"local-recovery-v1/{intent.binding.system_id}/{intent.binding.activation_id}"
         )
         with RecoveryMetadataStore(self.root) as store:
             assert store.reopen_pre_stop(reference, intent.binding) == intent
-        self.actions.append("first-mutation")
+        if self.work_fault:
+            raise LookupError("prepare primary")
         return self.metadata
 
-    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("activate")
 
-    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("target")
-
-    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
-        return RunningKernelObservation(
-            architecture="x86_64", release=metadata.release, gnu_build_id="01020304"
+class _RealSession:
+    def __init__(self, preparation: _RealPreparation) -> None:
+        self.preparation = preparation
+        self.close_attempts = 0
+        self.close_fault = False
+        self.inspection = ClosedDomainInspection(
+            xml=preparation.metadata.source_xml.encode(),
+            active=preparation.metadata.prior_power == "running",
+            definition_identity=preparation.metadata.source_definition,
+            source_boot_identity=preparation.metadata.source_boot,
+            domain_name=f"kdive-{preparation.metadata.binding.system_id}",
+            overlay=OverlayIdentity(1, 2),
         )
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("recover")
+    def inspect_closed(self) -> ClosedDomainInspection:
+        return self.inspection
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("source")
+    def stop_and_require_inactive(self) -> None:
+        reference = _point(self.preparation.metadata).recovery_ref
+        with RecoveryMetadataStore(self.preparation.root) as store:
+            store.reopen_pre_stop(reference, self.preparation.metadata.binding)
+        self.preparation.actions.append("first-mutation")
 
-    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("power")
+    def observe_running(self) -> RunningKernelObservation:
+        return RunningKernelObservation(
+            architecture="x86_64",
+            release=self.preparation.metadata.release,
+            gnu_build_id="01020304",
+        )
 
-    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self.actions.append("cleanup")
+    def define_xml(self, xml: str) -> None:
+        self.preparation.actions.append(f"define:{xml}")
+
+    def restore_power(self, prior: str) -> None:
+        self.preparation.actions.append(f"power:{prior}")
+
+    def cleanup_payloads(self) -> None:
+        self.preparation.actions.append("cleanup")
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        if self.close_fault:
+            raise OSError("session close")
+
+
+class _RealSessionFactory:
+    def __init__(self, session: _RealSession) -> None:
+        self.session = session
+        self.expected: list[ExpectedOperationOwnership] = []
+
+    def open(
+        self,
+        lease: LocalExternalBootOperationLease,
+        expected: ExpectedOperationOwnership,
+    ) -> _RealSession:
+        del lease
+        self.expected.append(expected)
+        return self.session
+
+
+def _real_io(
+    root: Path, preparation: _RealPreparation
+) -> tuple[RealLocalExternalBootIO, _RealSession]:
+    session = _RealSession(preparation)
+    factory = cast(LocalExternalBootSessionFactory, _RealSessionFactory(session))
+    io = RealLocalExternalBootIO(
+        root,
+        preparation,
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        factory,
+    )
+    return io, session
+
+
+def _real_prepare(
+    io: RealLocalExternalBootIO,
+    materialization: ExternalBootMaterialization,
+) -> LocalRecoveryMetadataV1:
+    expected = ExpectedOperationOwnership(
+        UUID(_BINDING.system_id), UUID(_BINDING.run_id), UUID(_BINDING.activation_id)
+    )
+    with io.open(OpaqueProviderRef(ref="authority/current"), expected) as operation:
+        return operation.prepare(materialization, _BINDING)
 
 
 def test_real_adapter_persists_intent_before_first_host_mutation(tmp_path: Path) -> None:
@@ -1094,11 +1364,12 @@ def test_real_adapter_persists_intent_before_first_host_mutation(tmp_path: Path)
     root.mkdir(mode=0o700)
     materialization = _materialization()
     metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
-    host = _RealHost(metadata, root)
-    io = RealLocalExternalBootIO(root, host)
-    prepared = io.prepare(materialization, _BINDING, OpaqueProviderRef(ref="authority/current"))
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+    prepared = _real_prepare(io, materialization)
     assert prepared == metadata
     assert host.actions == ["inspect", "first-mutation"]
+    assert session.close_attempts == 1
 
 
 def test_real_adapter_intent_fsync_fault_prevents_first_host_mutation(
@@ -1108,13 +1379,13 @@ def test_real_adapter_intent_fsync_fault_prevents_first_host_mutation(
     root.mkdir(mode=0o700)
     materialization = _materialization()
     metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
-    host = _RealHost(metadata, root)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
     monkeypatch.setattr(os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fault")))
     with pytest.raises(OSError, match="fault"):
-        RealLocalExternalBootIO(root, host).prepare(
-            materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
-        )
+        _real_prepare(io, materialization)
     assert host.actions == ["inspect"]
+    assert session.close_attempts == 1
 
 
 def test_real_adapter_retry_reopens_pre_stop_before_reinspection(tmp_path: Path) -> None:
@@ -1125,16 +1396,13 @@ def test_real_adapter_retry_reopens_pre_stop_before_reinspection(tmp_path: Path)
     intent = _pre_stop(metadata)
     with RecoveryMetadataStore(root) as store:
         store.publish_pre_stop(intent)
-    host = _RealHost(metadata, root)
+    host = _RealPreparation(metadata, root)
     host.inspect_allowed = False
+    io, session = _real_io(root, host)
 
-    assert (
-        RealLocalExternalBootIO(root, host).prepare(
-            materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
-        )
-        == metadata
-    )
+    assert _real_prepare(io, materialization) == metadata
     assert host.actions == ["first-mutation"]
+    assert session.close_attempts == 1
 
 
 def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path: Path) -> None:
@@ -1145,13 +1413,49 @@ def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path
     crossed = _pre_stop(metadata).model_copy(update={"plan_identity": "sha256:" + "e" * 64})
     with RecoveryMetadataStore(root) as store:
         store.publish_pre_stop(crossed)
-    host = _RealHost(metadata, root)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
 
     with pytest.raises(ValueError, match="pre-stop intent does not match"):
-        RealLocalExternalBootIO(root, host).prepare(
-            materialization, _BINDING, OpaqueProviderRef(ref="authority/current")
-        )
+        _real_prepare(io, materialization)
     assert host.actions == []
+    assert session.close_attempts == 1
+
+
+def test_real_adapter_rejects_wrong_domain_state_before_stop(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    io, session = _real_io(root, preparation)
+    session.inspection = replace(
+        session.inspection,
+        definition_identity="sha256:" + "f" * 64,
+    )
+
+    with pytest.raises(ValueError, match="closed domain inspection"):
+        _real_prepare(io, materialization)
+
+    assert preparation.actions == ["inspect"]
+    assert session.close_attempts == 1
+
+
+def test_real_adapter_preserves_prepare_error_when_session_close_fails(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    preparation.work_fault = True
+    io, session = _real_io(root, preparation)
+    session.close_fault = True
+
+    with pytest.raises(LookupError, match="prepare primary") as raised:
+        _real_prepare(io, materialization)
+
+    assert raised.value.__notes__ == ["cleanup failed: OSError('session close')"]
+    assert session.close_attempts == 1
 
 
 def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path) -> None:
@@ -1159,8 +1463,8 @@ def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path)
     root.mkdir(mode=0o700)
     metadata = _metadata("recovered")
     point = _point(metadata)
-    host = _RealHost(metadata, root)
-    io = RealLocalExternalBootIO(root, host)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
     ports = LocalLibvirtExternalBoot(io)
     with RecoveryMetadataStore(root) as store:
         store.publish(metadata)
@@ -1175,6 +1479,7 @@ def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path)
     with pytest.raises(ValueError, match="tombstone does not match"):
         ports.cleanup(crossed, OpaqueProviderRef(ref="authority/current"))
     assert host.actions == ["cleanup"]
+    assert session.close_attempts == 3
 
 
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:

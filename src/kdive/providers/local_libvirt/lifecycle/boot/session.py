@@ -77,6 +77,15 @@ class OperationOwnership:
 
 
 @dataclass(frozen=True)
+class ExpectedOperationOwnership:
+    """Caller-owned identity required before the session opens resources."""
+
+    system_id: UUID
+    run_id: UUID
+    activation_id: UUID | None
+
+
+@dataclass(frozen=True)
 class PinnedOperationOwnership:
     """Atomic lane result whose pin remains inside the session factory."""
 
@@ -563,15 +572,28 @@ class LocalExternalBootSessionFactory:
         self._observe_running = observe_running or _unconfigured_observation
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
 
-    def open(self, lease: LocalExternalBootOperationLease) -> LocalExternalBootSession:
+    def open(
+        self,
+        lease: LocalExternalBootOperationLease,
+        expected: ExpectedOperationOwnership,
+    ) -> LocalExternalBootSession:
         ownership = self._pin_lease(lease)
         pin = ownership._pin
         facts = ownership.ownership
         system_id = facts.system_id
         binding = facts.binding
-        if binding.system_id != str(system_id):
+        binding_matches_pin = binding.system_id == str(system_id)
+        binding_matches_expected = (
+            system_id == expected.system_id
+            and UUID(binding.run_id) == expected.run_id
+            and (
+                expected.activation_id is None
+                or UUID(binding.activation_id) == expected.activation_id
+            )
+        )
+        if not binding_matches_pin or not binding_matches_expected:
             pin.close()
-            raise ValueError("operation lease binding does not own the System")
+            raise ValueError("operation lease does not match expected ownership")
         connection: _Connection | None = None
         domain: _Domain | None = None
         overlay_fd: int | None = None
