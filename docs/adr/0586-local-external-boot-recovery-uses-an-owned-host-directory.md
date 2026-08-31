@@ -129,9 +129,18 @@ guest-syncs, verifies live=desired and old-aside=prior, and fsyncs `new-live` ev
 complete desired live-tree verification does it remove old-aside, guest-sync, and fsync
 `publication-complete` evidence. A present-empty desired tree follows the same path.
 
-If the staging-to-live move fails while live is absent, Task 3 rolls back by moving authenticated
-old-aside to live, guest-syncing, verifying live=prior and staging=desired, and fsyncing
-`rollback-complete`; it never boots the rollback state as the requested result. Restart compares the
+Every libguestfs move error is an ambiguous response until Task 3 re-verifies inactive and observes
+all three exact identities. After staging-to-live error, absent/desired/prior means the move did not
+apply: Task 3 fsyncs `rollback-ready` before moving old-aside to live. Desired/absent/prior means the
+move applied despite the error: it guest-syncs, verifies, and fsyncs `new-live`. Every other layout
+conflicts with zero further mutation. Under `rollback-ready`, absent/desired/prior retries the
+old-aside-to-live move; prior/desired/absent means that move applied and permits guest sync,
+verification, and `rollback-complete`. The rollback state is never booted as the requested result.
+
+The same observe-after-error rule applies to the other moves. A live-to-old error accepts only the
+unchanged pre-move layout (retry) or the exact old-aside layout (fsync its next evidence); a rollback
+move error accepts only its before/after layouts; an absence live-to-old error accepts only
+prior/absent/absent or absent/absent/prior. Anything else conflicts. Restart compares the
 complete identities at all three deterministic names rather than trusting the last phase alone:
 live=prior/staging=desired/old absent is pre-move or rolled back; live absent/staging=desired/old=prior
 is old-aside; live=desired/staging absent/old=prior is new-live; every mixed, missing, duplicated,
@@ -230,6 +239,10 @@ Teardown likewise quarantines evidence it cannot authenticate.
   distinguish the post-removal/evidence-pending layout, forbid boot/readiness until verified durable
   completion, retry partial absence cleanup under durable ownership, and remove old-aside only after
   matching new-live or absence-complete evidence.
+- Move fault tests include fail-before-effect and fail-after-effect for live-to-old,
+  staging-to-live, rollback-to-live, and desired-absence live-to-old. Each proves the exact
+  three-name reclassification, `rollback-ready` ordering, and zero further mutation for every other
+  layout.
 
 ## Considered & rejected
 

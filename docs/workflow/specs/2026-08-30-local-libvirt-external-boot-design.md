@@ -246,8 +246,13 @@ live, guest-syncs, verifies live=desired and old-aside=prior, and fsyncs `new-li
 old-aside only after complete desired-tree verification, then guest-syncs and fsyncs
 `publication-complete`. A present-empty desired tree follows this path.
 
-If staging-to-live fails while live is absent, Task 3 moves authenticated old-aside back to live,
-guest-syncs, verifies live=prior and staging=desired, and fsyncs `rollback-complete`. Restart compares
+Every libguestfs move error triggers an inactive recheck and fresh observation of all three names
+before another mutation. After staging-to-live error, absent/desired/prior means no effect: Task 3
+fsyncs `rollback-ready` before moving old-aside to live. Desired/absent/prior means applied despite
+the error: Task 3 guest-syncs, verifies, and fsyncs `new-live`. Every other layout conflicts with zero
+further mutation. Under `rollback-ready`, absent/desired/prior retries rollback;
+prior/desired/absent means rollback applied and permits guest sync, verification, and
+`rollback-complete`. The rollback result is never booted as requested success. Restart compares
 complete identities at live, staging, and old-aside: prior/desired/absent is pre-move or rolled back;
 absent/desired/prior is old-aside; desired/absent/prior is new-live. Any mixed, missing, duplicated,
 unowned, unreadable, over-limit, or third layout conflicts with the domain kept inactive. A crash
@@ -276,6 +281,11 @@ bounded cleanup above, with no other mutation first. Every other `absence-live` 
 Durable `absence-cleaned` is terminal and idempotent only when live, staging, and old-aside are all
 absent; it performs no guest mutation. Any name that reappears or is partial, unowned, unreadable, or
 malformed under `absence-cleaned` conflicts and keeps the domain inactive.
+
+The same fail-before/fail-after reclassification applies to live-to-old, rollback-to-live, and
+desired-absence live-to-old errors. Only the exact before layout may retry and only the exact after
+layout may guest-sync, verify, and fsync the next evidence; every other layout conflicts with zero
+further mutation.
 
 `cleanup` requires complete source state. It deletes materialized kernel/initrd/archive/XML payloads,
 verifies absence, and atomically replaces metadata with a 0600 canonical `cleaned` tombstone that
@@ -391,6 +401,9 @@ They exercise exact and mismatched three-name layouts under `absence-live`, `abs
 `absence-cleaned`, including terminal idempotent replay and reappearance conflicts.
 Old-aside removal is completion-evidence-gated. Tests also prove no guestmount, `renameat2`,
 appliance helper, or new host prerequisite is used.
+Each move fault has fail-before-effect and fail-after-effect arms. Tests assert inactive recheck,
+three-name observation, exact before/after routing, `rollback-ready` before rollback, and zero further
+mutation for all other layouts.
 Kernel-bundle-source tests cover wrong materialization binding, symlink/non-regular/foreign-owner/
 non-private/over-limit input, descriptor substitution, digest and short-read failure, single-use
 rejection, deterministic close, and path opacity. Contract tests pin
