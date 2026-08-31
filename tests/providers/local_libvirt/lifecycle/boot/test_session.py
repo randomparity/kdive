@@ -140,6 +140,13 @@ class Guest:
     def launch(self) -> None:
         self.events.append("guest.launch")
 
+    def inspect_os(self) -> list[str]:
+        self.events.append("guest.inspect")
+        return ["/dev/sda1"]
+
+    def mount(self, device: str, mountpoint: str) -> None:
+        self.events.append(f"guest.mount:{device}:{mountpoint}")
+
     def shutdown(self) -> None:
         self.events.append("guest.shutdown")
 
@@ -278,10 +285,75 @@ def test_guest_fences_and_rechecks_overlay_and_can_reopen() -> None:
     session = _factory(events).open(_lease())
     with session.guest() as guest:
         assert guest.exists("/etc/os-release") == 1
+    assert events.index("guest.launch") < events.index("guest.inspect")
+    assert events.index("guest.inspect") < events.index("guest.mount:/dev/sda1:/")
+    assert events.index("guest.mount:/dev/sda1:/") < events.index("guest.exists:/etc/os-release")
+    assert not hasattr(guest, "find")
     with session.guest() as guest:
         assert guest.exists("/etc/os-release") == 1
     assert events.count("guest.open") == 2
     assert events.index("domain.active") < events.index("guest.drive:/proc/4242/fd/40:qcow2")
+    session.close()
+
+
+@pytest.mark.parametrize("roots", [[], ["/dev/sda1", "/dev/sda2"]])
+def test_guest_rejects_zero_or_ambiguous_inspection_roots(roots: list[str]) -> None:
+    events: list[str] = []
+
+    class RootGuest(Guest):
+        def inspect_os(self) -> list[str]:
+            self.events.append("guest.inspect")
+            return roots
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: RootGuest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
+        close_descriptor=lambda _fd: None,
+    )
+    session = factory.open(_lease())
+    with pytest.raises(RuntimeError, match="exactly one operating-system root"):
+        session.guest().__enter__()
+    assert "guest.shutdown" in events
+    assert "guest.close" in events
+    assert not any(event.startswith("guest.mount:") for event in events)
+    session.close()
+
+
+@pytest.mark.parametrize("fault_at", ["inspect", "mount"])
+def test_guest_inspection_or_mount_failure_preserves_primary_and_cleans_up(fault_at: str) -> None:
+    events: list[str] = []
+
+    class MountFaultGuest(Guest):
+        def inspect_os(self) -> list[str]:
+            roots = super().inspect_os()
+            if fault_at == "inspect":
+                raise LookupError("inspect primary")
+            return roots
+
+        def mount(self, device: str, mountpoint: str) -> None:
+            super().mount(device, mountpoint)
+            if fault_at == "mount":
+                raise LookupError("mount primary")
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: MountFaultGuest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
+        close_descriptor=lambda _fd: None,
+    )
+    session = factory.open(_lease())
+    with pytest.raises(LookupError, match=f"{fault_at} primary"):
+        session.guest().__enter__()
+    assert events[-2:] == ["guest.shutdown", "guest.close"]
     session.close()
 
 

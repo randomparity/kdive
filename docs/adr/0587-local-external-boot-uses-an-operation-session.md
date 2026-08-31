@@ -34,7 +34,9 @@ backend's `/proc/self` namespace or a later pathname resolution.
 
 The session owns the libvirt connection/domain and artifact-root descriptor until close. It opens
 a reopenable libguestfs guest session only after fencing and rechecking the domain inactive, and
-binds that guest session to the already-validated overlay identity. It exposes narrow primitives
+binds that guest session to the already-validated overlay identity. After launch it requires exactly
+one inspected operating-system root and mounts that root at `/` before exposing any guest path
+operation. It exposes narrow primitives
 for closed domain inspection, inactive fencing, artifact descriptor access, inactive guest access,
 XML definition, power and readiness, running observation, and payload cleanup. Closed inspection
 returns the exact inactive definition and ADR-0583 definition/source-boot identities. The session
@@ -45,6 +47,10 @@ reference to libguestfs for the duration of the transfer.
 Downloads are written to an exclusive temporary name beneath the artifact directory, synchronized
 and closed, then atomically replaced into the final name. A failed or partial download removes the
 temporary file and leaves any prior final artifact untouched.
+The guest capability deliberately omits libguestfs `find`: that API materializes an unbounded list
+before callers can apply `MAX_ENTRIES`. The #2144 composition must introduce a traversal primitive
+that bounds work before materialization if recovery needs recursive enumeration; it must not expose
+raw `find` through this session.
 
 Cleanup first poisons the session and every guest wrapper so no subsequent method can reach an
 underlying handle. It then attempts every owned resource in dependency-safe reverse acquisition

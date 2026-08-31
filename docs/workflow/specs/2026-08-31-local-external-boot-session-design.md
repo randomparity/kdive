@@ -49,7 +49,9 @@ It exposes only:
   owner-bound payload cleanup primitives.
 
 The guest context rechecks inactivity immediately before every open, authenticates the overlay
-identity again, and always shuts down and closes libguestfs. The outer lease pin remains held across
+identity again, launches libguestfs, requires exactly one inspected operating-system root, mounts it
+at `/`, and only then exposes absolute guest-path operations. It always shuts down and closes
+libguestfs. The outer lease pin remains held across
 all guest operations; an attempted lease release while a guest is open fails without releasing the
 lane. Closing first atomically poisons the outer session and active guest wrapper, making every
 subsequent method fail before reaching an underlying handle. It then attempts to close the guest
@@ -62,6 +64,11 @@ Guest downloads use an exclusive descriptor-relative temporary artifact, synchro
 then atomically replace the final descriptor-relative name. Transfer or close failure removes the
 temporary file without changing an existing final artifact.
 
+The guest capability does not expose libguestfs `find`, because it materializes an unbounded result
+before `MAX_ENTRIES` can be enforced. This is a memory-exhaustion trust boundary: #2144 must add a
+genuinely pre-materialization-bounded traversal before composing recursive recovery, rather than
+recovering the raw `find` surface.
+
 Closed inspection safe-parses the inactive XML, verifies the KDIVE System metadata and expected
 domain naming, finds exactly one writable qcow2 System disk matching the configured overlay, and
 uses ADR-0583 canonical definition/boot identity helpers. It never returns live mutable objects or
@@ -69,7 +76,8 @@ host paths.
 
 ## Failure behavior
 
-Ownership mismatch, absent/duplicate disk identity, a running or indeterminate domain before guest
+Ownership mismatch, absent/duplicate disk identity, zero or ambiguous inspected guest roots, a
+running or indeterminate domain before guest
 mutation, descriptor substitution, and use-after-close fail before mutation. Partial construction
 poisons and attempts release of every acquired resource. If work and cleanup both fail, the work
 failure remains primary and cleanup failures are attached as notes. A close-only failure is reported
