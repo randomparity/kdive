@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
 from dataclasses import dataclass
@@ -16,8 +17,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import ModuleCapture
 from kdive.providers.ports.external_boot import (
     ComponentState,
     ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
     OpaqueProviderRef,
     ProviderStateIdentity,
+    RecoveryPoint,
+    RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 
@@ -107,6 +112,172 @@ class ModulePublicationIO(Protocol):
     def remove_old(self) -> None: ...
     def guest_sync(self) -> None: ...
     def record_phase(self, phase: PublicationPhase) -> None: ...
+
+
+class LocalExternalBootIO(Protocol):
+    """Injected privileged operations; the state machine retains ordering and validation."""
+
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization: ...
+    def prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> LocalRecoveryMetadataV1: ...
+    def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef: ...
+    def reopen(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> LocalRecoveryMetadataV1: ...
+    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
+    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def record_phase(
+        self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
+    ) -> LocalRecoveryMetadataV1: ...
+    def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None: ...
+    def finalize_tombstone(
+        self, metadata: LocalRecoveryMetadataV1, proof: FinalizeCleanupProof
+    ) -> None: ...
+
+
+class LocalLibvirtExternalBoot:
+    """Six-port local lifecycle coordinator over authenticated, injected host I/O."""
+
+    def __init__(self, io: LocalExternalBootIO) -> None:
+        self._io = io
+
+    @staticmethod
+    def point_digest(recovery: RecoveryPoint) -> str:
+        return (
+            "sha256:"
+            + hashlib.sha256(
+                b"kdive-external-boot-recovery-point-v1\0" + recovery.to_canonical_json()
+            ).hexdigest()
+        )
+
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization:
+        materialization = self._io.materialize(plan, authority)
+        if (
+            materialization.provider_kind != "local-libvirt"
+            or materialization.ownership.system_id != plan.ownership.system_id
+            or materialization.ownership.run_id != plan.ownership.run_id
+            or materialization.plan_identity != plan.identity
+            or materialization.architecture != plan.architecture
+        ):
+            raise ValueError("external-boot materialization does not match plan")
+        return materialization
+
+    def prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> RecoveryPoint:
+        if (
+            binding.system_id != materialization.ownership.system_id
+            or binding.run_id != materialization.ownership.run_id
+        ):
+            raise ValueError("external-boot binding does not match materialization")
+        metadata = self._io.prepare(materialization, binding, authority)
+        if (
+            metadata.binding != binding
+            or metadata.materialization_identity != materialization.identity
+            or metadata.plan_identity != materialization.plan_identity
+        ):
+            raise ValueError("external-boot prepared metadata does not match request")
+        point = RecoveryPoint(
+            binding=binding,
+            plan_identity=metadata.plan_identity,
+            materialization_identity=metadata.materialization_identity,
+            recovery_ref=self._io.recovery_ref(binding),
+            source_state=metadata.source_state,
+            target_state=metadata.target_state,
+        )
+        self._validate_metadata(point, metadata)
+        return point
+
+    def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        metadata = self._reopen(recovery, authority)
+        if metadata.phase not in {"pre-stop-intent", "module-restored", "target-defined"}:
+            raise ValueError("external-boot activation phase is not resumable")
+        if metadata.phase == "pre-stop-intent":
+            self._io.activate_modules(metadata)
+            metadata = self._io.record_phase(metadata, "module-restored")
+        if metadata.phase == "module-restored":
+            self._io.define_target(metadata)
+            self._io.record_phase(metadata, "target-defined")
+
+    def observe(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> RunningKernelObservation:
+        metadata = self._reopen(recovery, authority)
+        if metadata.phase != "target-defined":
+            raise ValueError("external-boot target-defined evidence is required")
+        return self._io.observe_running(metadata)
+
+    def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        metadata = self._reopen(recovery, authority)
+        if metadata.phase in {"recovered", "cleaned"}:
+            return
+        if metadata.phase not in {
+            "target-defined",
+            "module-restored",
+            "source-restored",
+        }:
+            raise ValueError("external-boot recovery phase is not resumable")
+        if metadata.phase == "target-defined":
+            self._io.recover_modules(metadata)
+            metadata = self._io.record_phase(metadata, "module-restored")
+        if metadata.phase == "module-restored":
+            self._io.define_source(metadata)
+            metadata = self._io.record_phase(metadata, "source-restored")
+        if metadata.phase == "source-restored":
+            self._io.restore_power(metadata)
+            self._io.record_phase(metadata, "recovered")
+
+    def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        metadata = self._reopen(recovery, authority)
+        if metadata.phase == "cleaned":
+            return
+        if metadata.phase != "recovered":
+            raise ValueError("external-boot recovery must complete before cleanup")
+        self._io.cleanup(metadata, self.point_digest(recovery))
+
+    def finalize_cleanup_tombstone(
+        self,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
+            raise ValueError("external-boot cleanup proof does not match recovery point")
+        metadata = self._reopen(recovery, authority)
+        self._io.finalize_tombstone(metadata, proof)
+
+    def _reopen(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> LocalRecoveryMetadataV1:
+        metadata = self._io.reopen(recovery, authority)
+        self._validate_metadata(recovery, metadata)
+        return metadata
+
+    @staticmethod
+    def _validate_metadata(recovery: RecoveryPoint, metadata: LocalRecoveryMetadataV1) -> None:
+        if (
+            metadata.binding != recovery.binding
+            or metadata.plan_identity != recovery.plan_identity
+            or metadata.materialization_identity != recovery.materialization_identity
+            or metadata.source_state != recovery.source_state
+            or metadata.target_state != recovery.target_state
+        ):
+            raise ValueError("external-boot recovery metadata does not match recovery point")
 
 
 def recovery_directory_name(

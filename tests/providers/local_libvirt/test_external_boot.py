@@ -7,17 +7,25 @@ from pydantic import ValidationError
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
+    LocalLibvirtExternalBoot,
+    LocalRecoveryMetadataV1,
     ModuleLayout,
     PublicationPhase,
+    RecoveryPhase,
     advance_absence_publication,
     advance_module_publication,
     recovery_directory_name,
     render_target_xml,
 )
 from kdive.providers.ports.external_boot import (
+    AbsentComponentState,
     ExternalBootActivationBinding,
+    ExternalBootMaterialization,
     OpaqueProviderRef,
     PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryPoint,
+    RunningKernelObservation,
 )
 
 _SOURCE_XML = """<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
@@ -210,3 +218,178 @@ def test_finalize_cleanup_proof_is_closed_and_mutation_started_only() -> None:
         FinalizeCleanupProof.model_validate(values | {"phase": "terminal"})
     with pytest.raises(ValidationError):
         FinalizeCleanupProof.model_validate(values | {"extra": "forbidden"})
+
+
+def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadataV1:
+    absent = AbsentComponentState()
+    state = ProviderStateIdentity(definition="sha256:" + "5" * 64, modules=absent)
+    return LocalRecoveryMetadataV1(
+        binding=_BINDING,
+        plan_identity="sha256:" + "6" * 64,
+        materialization_identity="sha256:" + "7" * 64,
+        release="6.12.0",
+        materialized_modules=OpaqueProviderRef(ref="artifacts/system/run/modules"),
+        materialized_modules_sha256="sha256:" + "8" * 64,
+        materialized_modules_bytes=123,
+        source_xml_sha256="sha256:" + "9" * 64,
+        source_definition="sha256:" + "a" * 64,
+        source_boot="sha256:" + "b" * 64,
+        target_boot="sha256:" + "c" * 64,
+        source_state=state,
+        target_state=state,
+        prior_power="running",
+        capture={"state": "absent"},
+        phase=phase,
+    )
+
+
+def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
+    return RecoveryPoint(
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        materialization_identity=metadata.materialization_identity,
+        recovery_ref=OpaqueProviderRef(
+            ref=f"local-recovery-v1/{_BINDING.system_id}/{_BINDING.activation_id}"
+        ),
+        source_state=metadata.source_state,
+        target_state=metadata.target_state,
+    )
+
+
+class _ExternalIO:
+    def __init__(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.metadata = metadata
+        self.actions: list[str] = []
+        self.tombstone = False
+
+    def materialize(
+        self, plan: object, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization:
+        self.actions.append("materialize")
+        raise RuntimeError("not used")
+
+    def prepare(
+        self, materialization: object, binding: object, authority: object
+    ) -> LocalRecoveryMetadataV1:
+        self.actions.append("prepare")
+        return self.metadata
+
+    def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
+        return _point(self.metadata).recovery_ref
+
+    def reopen(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> LocalRecoveryMetadataV1:
+        self.actions.append("reopen")
+        return self.metadata
+
+    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("activate-modules")
+
+    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("define-target")
+
+    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
+        self.actions.append("observe-running")
+        return RunningKernelObservation(
+            architecture="x86_64", release=metadata.release, gnu_build_id="01020304"
+        )
+
+    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("recover-modules")
+
+    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("define-source")
+
+    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
+        self.actions.append("restore-power")
+
+    def record_phase(
+        self, metadata: LocalRecoveryMetadataV1, phase: str
+    ) -> LocalRecoveryMetadataV1:
+        self.actions.append(f"phase:{phase}")
+        self.metadata = metadata.model_copy(update={"phase": phase})
+        return self.metadata
+
+    def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: str) -> None:
+        self.actions.append("cleanup")
+        self.tombstone = True
+
+    def finalize_tombstone(
+        self, metadata: LocalRecoveryMetadataV1, proof: FinalizeCleanupProof
+    ) -> None:
+        self.actions.append("finalize")
+        self.tombstone = False
+
+
+def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    point = _point(io.metadata)
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    ports.activate(point, authority)
+    assert io.actions == [
+        "reopen",
+        "activate-modules",
+        "phase:module-restored",
+        "define-target",
+        "phase:target-defined",
+    ]
+    io.actions.clear()
+    assert ports.observe(point, authority).release == "6.12.0"
+    assert io.actions == ["reopen", "observe-running"]
+
+    io.actions.clear()
+    ports.recover(point, authority)
+    assert io.actions == [
+        "reopen",
+        "recover-modules",
+        "phase:module-restored",
+        "define-source",
+        "phase:source-restored",
+        "restore-power",
+        "phase:recovered",
+    ]
+    io.actions.clear()
+    ports.cleanup(point, authority)
+    assert io.actions == ["reopen", "cleanup"]
+
+
+def test_reopen_rejects_complete_point_substitution_before_mutation() -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    point = _point(io.metadata).model_copy(update={"plan_identity": "sha256:" + "f" * 64})
+    with pytest.raises(ValueError, match="does not match"):
+        ports.activate(point, OpaqueProviderRef(ref="authority/current"))
+    assert io.actions == ["reopen"]
+
+
+def test_observe_requires_durable_target_definition() -> None:
+    io = _ExternalIO(_metadata("module-restored"))
+    with pytest.raises(ValueError, match="target-defined"):
+        LocalLibvirtExternalBoot(io).observe(
+            _point(io.metadata), OpaqueProviderRef(ref="authority/current")
+        )
+    assert io.actions == ["reopen"]
+
+
+def test_finalize_requires_exact_cleanup_proof_binding_and_point() -> None:
+    io = _ExternalIO(_metadata("recovered"))
+    ports = LocalLibvirtExternalBoot(io)
+    point = _point(io.metadata)
+    ports.cleanup(point, OpaqueProviderRef(ref="authority/current"))
+    proof = FinalizeCleanupProof(
+        point_digest=ports.point_digest(point),
+        binding=point.binding,
+        operation_id="00000000-0000-0000-0000-000000000004",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=1,
+        journal_digest="sha256:" + "d" * 64,
+    )
+    ports.finalize_cleanup_tombstone(point, proof, OpaqueProviderRef(ref="authority/current"))
+    assert io.actions[-2:] == ["reopen", "finalize"]
+
+    wrong = proof.model_copy(update={"point_digest": "sha256:" + "e" * 64})
+    with pytest.raises(ValueError, match="proof"):
+        ports.finalize_cleanup_tombstone(point, wrong, OpaqueProviderRef(ref="authority/current"))
