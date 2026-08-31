@@ -135,7 +135,11 @@ old-aside to live, guest-syncing, verifying live=prior and staging=desired, and 
 complete identities at all three deterministic names rather than trusting the last phase alone:
 live=prior/staging=desired/old absent is pre-move or rolled back; live absent/staging=desired/old=prior
 is old-aside; live=desired/staging absent/old=prior is new-live; every mixed, missing, duplicated,
-unowned, unreadable, over-limit, or third layout is conflict with the domain kept inactive.
+unowned, unreadable, over-limit, or third layout is conflict with the domain kept inactive. The
+single additional terminal layout live=desired/staging absent/old absent is post-removal with
+completion evidence pending. After re-verifying the complete desired identity, restart may only
+fsync `publication-complete`; it performs no further guest mutation. Boot and readiness remain
+forbidden until that evidence is durable.
 
 Restoring recorded absence uses the same first move without a staging-to-live move. After
 `move-ready`, Task 3 moves live to old-aside, guest-syncs, verifies live absent and old-aside=prior,
@@ -210,8 +214,8 @@ Teardown likewise quarantines evidence it cannot authenticate.
   integration and crash tests for the libguestfs moves, guest-sync/evidence-fsync ordering, rollback,
   and restart immediately before/after each move, sync, evidence fsync, and removal. Those tests
   cover present-empty and absent desired trees, bound the live-name absence to verified inactivity,
-  forbid boot/readiness until verified completion, and remove old-aside only after matching durable
-  completion evidence.
+  distinguish the post-removal/evidence-pending layout, forbid boot/readiness until verified durable
+  completion, and remove old-aside only after matching new-live evidence.
 
 ## Considered & rejected
 
