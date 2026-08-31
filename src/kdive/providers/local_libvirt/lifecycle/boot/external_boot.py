@@ -30,6 +30,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     ModuleCapture,
 )
 from kdive.providers.ports.external_boot import (
+    ActivationOwnership,
     ComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
@@ -96,6 +97,8 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     source_definition: Digest
     source_boot: Digest
     target_boot: Digest
+    target_projection_sha256: Digest
+    target_xml: str
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
     prior_power: Literal["running", "inactive"]
@@ -104,8 +107,9 @@ class LocalRecoveryMetadataV1(_ClosedValue):
 
     @model_validator(mode="after")
     def _source_xml_matches_digest(self) -> LocalRecoveryMetadataV1:
-        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
-            raise ValueError("source domain XML must be NFC")
+        xml_values = (self.source_xml, self.target_xml)
+        if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
+            raise ValueError("source and target domain XML must be NFC")
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
@@ -130,12 +134,15 @@ class LocalPreStopIntentV1(_ClosedValue):
     source_definition: Digest
     source_boot: Digest
     target_boot: Digest
+    target_projection_sha256: Digest
+    target_xml: str
     prior_power: Literal["running", "inactive"]
 
     @model_validator(mode="after")
     def _source_xml_matches_digest(self) -> LocalPreStopIntentV1:
-        if unicodedata.normalize("NFC", self.source_xml) != self.source_xml:
-            raise ValueError("source domain XML must be NFC")
+        xml_values = (self.source_xml, self.target_xml)
+        if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
+            raise ValueError("source and target domain XML must be NFC")
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
@@ -161,6 +168,156 @@ class CleanupTombstoneV1(_ClosedValue):
     binding: ExternalBootActivationBinding
     point_digest: Digest
     payload_absent: Literal[True] = True
+
+
+class TargetProjectionV1(_ClosedValue):
+    """Minimal durable inputs needed to render one target domain definition."""
+
+    schema_: Literal["local-libvirt-target-projection-v1"] = Field(
+        "local-libvirt-target-projection-v1", alias="schema"
+    )
+    ownership: ActivationOwnership
+    plan_identity: Digest
+    architecture: Literal["x86_64", "ppc64le"]
+    cmdline: Annotated[str, Field(min_length=1, max_length=4096)]
+    kernel_filename: Literal["kernel"] = "kernel"
+    modules_filename: Literal["modules"] = "modules"
+    initrd_filename: Literal["initrd"] | None
+
+    @model_validator(mode="after")
+    def _canonical_text(self) -> TargetProjectionV1:
+        if unicodedata.normalize("NFC", self.cmdline) != self.cmdline:
+            raise ValueError("target projection cmdline must be NFC")
+        return self
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json", by_alias=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
+_PROJECTION_NAME = "target-projection.json"
+_MAX_PROJECTION_BYTES = 16_384
+
+
+class TargetProjectionStore:
+    """Owner-relative durable target projection and deterministic artifact references."""
+
+    def __init__(self, root: Path) -> None:
+        self._root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _require_private_owned_directory(self._root_fd, "artifact root")
+        except BaseException:
+            os.close(self._root_fd)
+            raise
+
+    def close(self) -> None:
+        if self._root_fd >= 0:
+            os.close(self._root_fd)
+            self._root_fd = -1
+
+    def __enter__(self) -> TargetProjectionStore:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def publish(self, projection: TargetProjectionV1) -> OpaqueProviderRef:
+        """Exclusively publish and exactly reopen one canonical projection."""
+        owner_fd = _open_or_create_private_child(self._root_fd, projection.ownership.system_id)
+        try:
+            run_fd = _open_or_create_private_child(owner_fd, projection.ownership.run_id)
+        finally:
+            os.close(owner_fd)
+        try:
+            digest_name = projection.digest.removeprefix("sha256:")
+            projection_fd = _open_or_create_private_child(run_fd, digest_name)
+            try:
+                data = projection.canonical_bytes()
+                if len(data) > _MAX_PROJECTION_BYTES:
+                    raise ValueError("target projection exceeds its byte bound")
+                try:
+                    _write_exclusive(projection_fd, _PROJECTION_NAME, data)
+                    os.fsync(projection_fd)
+                except FileExistsError as exc:
+                    if _read_private_file(projection_fd, _PROJECTION_NAME) != data:
+                        raise ValueError(
+                            "target projection conflicts with existing sidecar"
+                        ) from exc
+            finally:
+                os.close(projection_fd)
+            os.fsync(run_fd)
+        finally:
+            os.close(run_fd)
+        reopened = self.reopen(_projection_ref(projection, "kernel"), projection.ownership)
+        if reopened != projection:
+            raise ValueError("target projection failed exact reopen")
+        return _projection_ref(projection, "kernel")
+
+    def reopen(
+        self, artifact: OpaqueProviderRef, ownership: ActivationOwnership
+    ) -> TargetProjectionV1:
+        parts = _artifact_ref_parts(artifact, ownership)
+        system_fd = _open_private_directory(self._root_fd, parts[1])
+        try:
+            run_fd = _open_private_directory(system_fd, parts[2])
+        finally:
+            os.close(system_fd)
+        try:
+            projection_fd = _open_private_directory(run_fd, parts[3])
+        finally:
+            os.close(run_fd)
+        try:
+            data = _read_private_file(projection_fd, _PROJECTION_NAME)
+        finally:
+            os.close(projection_fd)
+        projection = TargetProjectionV1.model_validate_json(data)
+        digest_matches = projection.digest.removeprefix("sha256:") == parts[3]
+        if projection.canonical_bytes() != data or not digest_matches:
+            raise ValueError("target projection is not canonical or digest-bound")
+        if projection.ownership != ownership:
+            raise ValueError("target projection owner does not match artifact reference")
+        return projection
+
+
+def _projection_ref(projection: TargetProjectionV1, filename: str) -> OpaqueProviderRef:
+    return OpaqueProviderRef(
+        ref=(
+            f"local-artifact-v1/{projection.ownership.system_id}/"
+            f"{projection.ownership.run_id}/{projection.digest.removeprefix('sha256:')}/{filename}"
+        )
+    )
+
+
+def _artifact_ref_parts(artifact: OpaqueProviderRef, ownership: ActivationOwnership) -> list[str]:
+    parts = artifact.ref.split("/")
+    if (
+        len(parts) != 5
+        or parts[0] != "local-artifact-v1"
+        or parts[1] != ownership.system_id
+        or parts[2] != ownership.run_id
+        or len(parts[3]) != 64
+        or any(character not in "0123456789abcdef" for character in parts[3])
+        or parts[4] not in {"kernel", "modules", "initrd"}
+    ):
+        raise ValueError("local artifact reference is malformed or cross-owner")
+    return parts
+
+
+def _open_or_create_private_child(parent_fd: int, name: str) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except FileExistsError:
+        pass
+    return _open_private_directory(parent_fd, name)
 
 
 @dataclass(frozen=True, slots=True)

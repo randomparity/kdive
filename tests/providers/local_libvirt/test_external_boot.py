@@ -22,6 +22,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RealLocalExternalBootIO,
     RecoveryMetadataStore,
     RecoveryPhase,
+    TargetProjectionStore,
+    TargetProjectionV1,
     advance_absence_publication,
     advance_module_publication,
     convert_kernel_bundle_modules,
@@ -427,12 +429,65 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         source_definition="sha256:" + "a" * 64,
         source_boot="sha256:" + "b" * 64,
         target_boot="sha256:" + "c" * 64,
+        target_projection_sha256="sha256:" + "d" * 64,
+        target_xml=_SOURCE_XML.replace("/old", "/new"),
         source_state=state,
         target_state=state,
         prior_power="running",
         capture={"state": "absent"},
         phase=phase,
     )
+
+
+def _projection() -> TargetProjectionV1:
+    return TargetProjectionV1(
+        ownership={"system_id": _BINDING.system_id, "run_id": _BINDING.run_id},
+        plan_identity="sha256:" + "6" * 64,
+        architecture="x86_64",
+        cmdline="root=/dev/vda1 console=ttyS0",
+        initrd_filename=None,
+    )
+
+
+def test_target_projection_sidecar_publishes_and_reopens_exactly(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    root.mkdir(mode=0o700)
+    projection = _projection()
+    with TargetProjectionStore(root) as store:
+        kernel_ref = store.publish(projection)
+        assert store.reopen(kernel_ref, projection.ownership) == projection
+    sidecar = (
+        root
+        / projection.ownership.system_id
+        / projection.ownership.run_id
+        / projection.digest.removeprefix("sha256:")
+        / "target-projection.json"
+    )
+    assert oct(sidecar.stat().st_mode & 0o777) == "0o600"
+
+
+def test_target_projection_sidecar_rejects_substitution_and_cross_owner(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    root.mkdir(mode=0o700)
+    projection = _projection()
+    with TargetProjectionStore(root) as store:
+        kernel_ref = store.publish(projection)
+    sidecar = (
+        root
+        / projection.ownership.system_id
+        / projection.ownership.run_id
+        / projection.digest.removeprefix("sha256:")
+        / "target-projection.json"
+    )
+    replacement = projection.model_copy(update={"cmdline": "root=/dev/vda2"})
+    sidecar.write_bytes(replacement.canonical_bytes())
+    with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="digest-bound"):
+        store.reopen(kernel_ref, projection.ownership)
+    crossed = projection.ownership.model_copy(
+        update={"run_id": "00000000-0000-0000-0000-000000000009"}
+    )
+    with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="cross-owner"):
+        store.reopen(kernel_ref, crossed)
 
 
 def _pre_stop(metadata: LocalRecoveryMetadataV1) -> LocalPreStopIntentV1:
