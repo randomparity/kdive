@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import libvirt
@@ -35,6 +36,16 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    CleanupPayloads,
+    Connect,
+    LocalExternalBootSessionFactory,
+    OpenArtifactRoot,
+    OpenGuest,
+    PinOperationLease,
+    ReadinessProbe,
+    RunningObserver,
+)
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
     LocalLibvirtCaptureQuiescence,
 )
@@ -158,6 +169,28 @@ def build_rootfs_build_plane(*, workspace: Path | None = None) -> LocalLibvirtRo
     operator flag), so an image can be built under a user-writable path.
     """
     return LocalLibvirtRootfsBuildPlane.from_env(workspace=workspace)
+
+
+def build_external_boot_session_factory(
+    *,
+    pin_lease: PinOperationLease,
+    open_artifact_root: OpenArtifactRoot,
+    open_guest: OpenGuest,
+    readiness: ReadinessProbe,
+    observe_running: RunningObserver,
+    cleanup_payloads: CleanupPayloads,
+) -> LocalExternalBootSessionFactory:
+    """Build the internal operation-session factory without opening host resources."""
+    uri = config.require(LIBVIRT_URI)
+    return LocalExternalBootSessionFactory(
+        pin_lease=pin_lease,
+        connect=cast(Connect, lambda: libvirt.open(uri)),
+        open_artifact_root=open_artifact_root,
+        open_guest=open_guest,
+        readiness=readiness,
+        observe_running=observe_running,
+        cleanup_payloads=cleanup_payloads,
+    )
 
 
 def _rebind_for_resource(

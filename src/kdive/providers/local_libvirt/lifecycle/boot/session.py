@@ -100,6 +100,9 @@ class _Connection(Protocol):
     def close(self) -> object: ...
 
 
+type Connect = Callable[[], _Connection]
+
+
 class _Guest(Protocol):
     def add_drive_opts(self, overlay: str, *, format: str) -> None: ...
     def launch(self) -> None: ...
@@ -120,6 +123,12 @@ class _Guest(Protocol):
     def chown(self, owner: int, group: int, path: str) -> None: ...
     def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
+
+
+type OpenGuest = Callable[[], _Guest]
+type ReadinessProbe = Callable[[UUID], ReadinessResult]
+type RunningObserver = Callable[[UUID], RunningKernelObservation]
+type CleanupPayloads = Callable[[int, ExternalBootActivationBinding], None]
 
 
 class LocalExternalBootSession(Protocol):
@@ -254,14 +263,14 @@ class _ConcreteSession:
         domain: _Domain,
         artifact_fd: int,
         overlay: _BoundOverlay,
-        open_guest: Callable[[], _Guest],
+        open_guest: OpenGuest,
         stat_overlay: Callable[[str], tuple[int, int]],
         close_descriptor: Callable[[int], None],
         open_relative: Callable[[int, str, int, int], int],
         unlink_relative: Callable[[int, str], None],
-        readiness: Callable[[UUID], ReadinessResult],
-        observe_running: Callable[[UUID], RunningKernelObservation],
-        cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None],
+        readiness: ReadinessProbe,
+        observe_running: RunningObserver,
+        cleanup_payloads: CleanupPayloads,
     ) -> None:
         self._system_id = system_id
         self._binding = binding
@@ -434,16 +443,16 @@ class LocalExternalBootSessionFactory:
         self,
         *,
         pin_lease: PinOperationLease,
-        connect: Callable[[], _Connection],
+        connect: Connect,
         open_artifact_root: OpenArtifactRoot,
-        open_guest: Callable[[], _Guest],
+        open_guest: OpenGuest,
         stat_overlay: Callable[[str], tuple[int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
         open_relative: Callable[[int, str, int, int], int] | None = None,
         unlink_relative: Callable[[int, str], None] | None = None,
-        readiness: Callable[[UUID], ReadinessResult] | None = None,
-        observe_running: Callable[[UUID], RunningKernelObservation] | None = None,
-        cleanup_payloads: Callable[[int, ExternalBootActivationBinding], None] | None = None,
+        readiness: ReadinessProbe | None = None,
+        observe_running: RunningObserver | None = None,
+        cleanup_payloads: CleanupPayloads | None = None,
     ) -> None:
         self._pin_lease = pin_lease
         self._connect = connect
