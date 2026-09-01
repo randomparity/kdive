@@ -1494,6 +1494,7 @@ class _RealSession:
         self.preparation = preparation
         self.close_attempts = 0
         self.close_fault = False
+        self.guest_fault = False
         self.inspection = ClosedDomainInspection(
             xml=preparation.metadata.source_xml.encode(),
             active=preparation.metadata.prior_power == "running",
@@ -1515,6 +1516,8 @@ class _RealSession:
 
     @contextmanager
     def guest(self) -> Iterator[_GuestTreeHandle]:
+        if self.guest_fault:
+            raise LookupError("guest open primary")
         yield self.guest_handle
 
     def observe_running(self) -> RunningKernelObservation:
@@ -1596,6 +1599,44 @@ class _RecordingRecoveryWriter:
         raise AssertionError("not used")
 
 
+def _track_recovery_sink_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[RecoveryArchiveSink], list[int]]:
+    sinks: list[RecoveryArchiveSink] = []
+    close_calls: list[int] = []
+    original_open = RecoveryMetadataStore.recovery_archive_sink
+    original_close = RecoveryArchiveSink.close
+
+    def open_sink(
+        store: RecoveryMetadataStore,
+        reference: OpaqueProviderRef,
+        intent: LocalPreStopIntentV1,
+    ) -> RecoveryArchiveSink:
+        sink = original_open(store, reference, intent)
+        sinks.append(sink)
+        return sink
+
+    def close_sink(sink: RecoveryArchiveSink) -> None:
+        close_calls.append(cast(int, vars(sink)["_directory_fd"]))
+        original_close(sink)
+
+    monkeypatch.setattr(RecoveryMetadataStore, "recovery_archive_sink", open_sink)
+    monkeypatch.setattr(RecoveryArchiveSink, "close", close_sink)
+    return sinks, close_calls
+
+
+def _sink_descriptor(sink: RecoveryArchiveSink) -> int:
+    return cast(int, vars(sink)["_directory_fd"])
+
+
+def _descriptor_is_closed(descriptor: int) -> bool:
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return True
+    return False
+
+
 def test_real_adapter_captures_recovery_through_session_owned_capabilities(
     tmp_path: Path,
 ) -> None:
@@ -1626,6 +1667,54 @@ def test_real_adapter_captures_recovery_through_session_owned_capabilities(
         definition=template.target_boot,
         modules=PresentComponentState(manifest=materialization.installed_module_tree),
     )
+
+
+def test_real_adapter_closes_recovery_sink_when_guest_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    io, session = _real_io(root, preparation)
+    session.guest_fault = True
+    sinks, close_calls = _track_recovery_sink_close(monkeypatch)
+
+    with pytest.raises(LookupError, match="guest open primary"):
+        _real_prepare(io, materialization)
+
+    assert len(sinks) == 1
+    descriptor = _sink_descriptor(sinks[0])
+    closed_before_test_cleanup = _descriptor_is_closed(descriptor)
+    calls_before_test_cleanup = list(close_calls)
+    if not closed_before_test_cleanup:
+        sinks[0].close()
+    assert closed_before_test_cleanup
+    assert calls_before_test_cleanup == [descriptor]
+
+
+def test_real_adapter_transfers_recovery_sink_once_before_capture_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    preparation.work_fault = True
+    io, _session = _real_io(root, preparation)
+    sinks, close_calls = _track_recovery_sink_close(monkeypatch)
+
+    with pytest.raises(LookupError, match="prepare primary"):
+        _real_prepare(io, materialization)
+
+    assert len(sinks) == 1
+    descriptor = _sink_descriptor(sinks[0])
+    assert _descriptor_is_closed(descriptor)
+    assert close_calls == [descriptor]
 
 
 def _real_io(

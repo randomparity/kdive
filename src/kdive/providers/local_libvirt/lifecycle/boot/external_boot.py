@@ -817,16 +817,30 @@ class _RealLocalExternalBootOperation:
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
         self._session.stop_and_require_inactive()
         with RecoveryMetadataStore(self._recovery_root) as store:
-            sink = store.recovery_archive_sink(reference, intent)
-        with self._session.guest() as guest:
-            tree = LibguestfsAuthenticatedGuestTree(
-                guest,
-                binding=binding,
-                release=intent.release,
-                root=f"/lib/modules/{intent.release}",
-                mutable=False,
-            )
-            capture = self._recovery_writer.capture(tree, intent.release, sink)
+            owned_sink = store.recovery_archive_sink(reference, intent)
+        primary: BaseException | None = None
+        try:
+            with self._session.guest() as guest:
+                tree = LibguestfsAuthenticatedGuestTree(
+                    guest,
+                    binding=binding,
+                    release=intent.release,
+                    root=f"/lib/modules/{intent.release}",
+                    mutable=False,
+                )
+                capture_sink, owned_sink = owned_sink, None
+                capture = self._recovery_writer.capture(tree, intent.release, capture_sink)
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            if owned_sink is not None:
+                try:
+                    owned_sink.close()
+                except BaseException as cleanup:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"recovery archive sink cleanup failed: {cleanup!r}")
         metadata = _complete_preparation_metadata(intent, materialization, capture)
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)

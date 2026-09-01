@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import io
 import os
+import queue
 import stat
 import threading
 from dataclasses import FrozenInstanceError
@@ -29,6 +30,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     OperationOwnership,
     PinnedOperationOwnership,
     PinOperationLease,
+    _Find0TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -406,6 +408,47 @@ def test_find0_tree_limit_plus_one_rejects_without_retaining_the_extra_entry() -
     session.close()
 
 
+def test_find0_tree_rejects_oversized_complete_entry_before_retention() -> None:
+    read_fd, write_fd = os.pipe()
+    cursor = object.__new__(_Find0TreeCursor)
+    cursor._read_fd = read_fd
+    cursor._limit = 1
+    entries: list[str] = []
+    try:
+        os.write(write_fd, b"a" * 4097 + b"\0")
+        with pytest.raises(ValueError, match="path-byte"):
+            cursor._read_available(entries, bytearray())
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert entries == []
+
+
+def test_find0_tree_preserves_complete_entry_validation_when_cleanup_fails() -> None:
+    events: list[str] = []
+
+    class CleanupFaultGuest(Find0Guest):
+        def user_cancel(self) -> None:
+            super().user_cancel()
+            raise OSError("cancel secondary")
+
+    producer = CleanupFaultGuest(events, [b"a" * 4097])
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(ValueError, match="path-byte") as raised,
+        guest.open_tree("/lib/modules/6.12.0", limit=1) as entries,
+    ):
+        list(entries)
+
+    assert raised.value.__notes__ == [
+        "guest-tree cursor cleanup failed: OSError('cancel secondary')"
+    ]
+    session.close()
+
+
 def test_find0_tree_early_close_cancels_and_joins_blocked_producer() -> None:
     events: list[str] = []
     producer = Find0Guest(events, [], wait_before_write=True)
@@ -422,6 +465,91 @@ def test_find0_tree_early_close_cancels_and_joins_blocked_producer() -> None:
     assert producer.output_path is not None
     assert not producer.output_path.parent.exists()
     session.close()
+
+
+def test_session_close_abandons_cursor_before_find0_and_releases_pin_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    outcomes: queue.Queue[str] = queue.Queue()
+    producer_at_gate = threading.Event()
+    release_producer = threading.Event()
+
+    class BeforeOpenGuest(Find0Guest):
+        def find0(self, directory: str, files: str) -> None:
+            outcomes.put("find0")
+            super().find0(directory, files)
+
+    class TrackingPin(FakePin):
+        def close(self) -> None:
+            events.append("pin.close")
+            super().close()
+
+    def pin_lease(lease: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert isinstance(lease, FakeLease)
+        return PinnedOperationOwnership(
+            OperationOwnership(lease.system_id, lease.binding), TrackingPin(lease)
+        )
+
+    original_produce = _Find0TreeCursor._produce
+
+    def gated_produce(cursor: _Find0TreeCursor) -> None:
+        producer_at_gate.set()
+        assert release_producer.wait(timeout=5), "producer release was not signaled"
+        original_produce(cursor)
+
+    monkeypatch.setattr(_Find0TreeCursor, "_produce", gated_produce)
+    producer = BeforeOpenGuest(events, [])
+    lease = _lease()
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin_lease,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: producer,
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
+        close_descriptor=lambda _fd: events.append("artifact.close"),
+    )
+    session = factory.open(lease, _expected())
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    assert isinstance(cursor, _Find0TreeCursor)
+    cursor.__enter__()
+    assert producer_at_gate.wait(timeout=5)
+    assert cursor._fifo is not None
+    fifo = cursor._fifo
+    close_error: list[BaseException] = []
+
+    def close_session() -> None:
+        try:
+            session.close()
+        except BaseException as exc:
+            close_error.append(exc)
+        finally:
+            outcomes.put("closed")
+
+    closer = threading.Thread(target=close_session)
+    closer.start()
+    assert producer.cancel_requested.wait(timeout=5)
+    assert lease.pins == 1
+    release_producer.set()
+    first_outcome = outcomes.get(timeout=5)
+    rescue_fd = -1
+    if first_outcome == "find0":
+        rescue_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        assert outcomes.get(timeout=5) == "closed"
+    closer.join()
+    if rescue_fd >= 0:
+        os.close(rescue_fd)
+
+    assert first_outcome == "closed"
+    assert producer.find0_calls == 0
+    assert close_error == []
+    assert lease.pins == 0
+    assert not Path(fifo).parent.exists()
+    assert events[-1] == "pin.close"
 
 
 def test_guest_context_closes_caller_abandoned_find0_cursor() -> None:

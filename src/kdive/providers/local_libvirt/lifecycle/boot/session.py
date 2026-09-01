@@ -355,6 +355,8 @@ class _Find0TreeCursor(TreeCursor):
         self._done_read_fd = -1
         self._done_write_fd = -1
         self._selector: selectors.BaseSelector | None = None
+        self._producer_lifecycle = threading.Lock()
+        self._abandon_requested = False
         self._entered = False
         self._resources_closed = False
         self._closed = False
@@ -426,8 +428,17 @@ class _Find0TreeCursor(TreeCursor):
 
     def _produce(self) -> None:
         try:
-            assert self._fifo is not None
-            self._guest.find0(self._path, self._fifo)
+            with self._producer_lifecycle:
+                if self._abandon_requested:
+                    return
+                assert self._fifo is not None
+                fifo = self._fifo
+            self._guest.find0(self._path, fifo)
+        except FileNotFoundError as exc:
+            with self._producer_lifecycle:
+                abandoned = self._abandon_requested and self._fifo is None
+            if not abandoned:
+                self._producer_errors.append(exc)
         except Exception as exc:
             self._producer_errors.append(exc)
         finally:
@@ -439,20 +450,20 @@ class _Find0TreeCursor(TreeCursor):
                 self._done_write_fd = -1
 
     def _load_entries(self) -> list[InactiveGuestDirectoryEntry]:
-        raw_entries: list[bytes] = []
+        paths: list[str] = []
         pending = bytearray()
         try:
-            self._read_until_done(raw_entries, pending)
-            self._teardown(deliberate=False)
+            self._read_until_done(paths, pending)
             if pending:
                 raise ValueError("libguestfs find0 ended with a truncated entry")
-            paths = [_guest_tree_relative_bytes(value) for value in raw_entries]
             if len(set(paths)) != len(paths):
                 raise ValueError("guest tree contains duplicate paths")
-            return [
+            entries = [
                 InactiveGuestDirectoryEntry(path)
                 for path in sorted(paths, key=lambda value: value.encode())
             ]
+            self._teardown(deliberate=False)
+            return entries
         except BaseException as primary:
             self._closed = True
             self._owner._discard_cursor(self)
@@ -463,7 +474,7 @@ class _Find0TreeCursor(TreeCursor):
                     primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
             raise
 
-    def _read_until_done(self, entries: list[bytes], pending: bytearray) -> None:
+    def _read_until_done(self, entries: list[str], pending: bytearray) -> None:
         assert self._selector is not None
         producer_done = False
         while not producer_done:
@@ -479,7 +490,7 @@ class _Find0TreeCursor(TreeCursor):
         while self._read_available(entries, pending):
             pass
 
-    def _read_available(self, entries: list[bytes], pending: bytearray) -> bool:
+    def _read_available(self, entries: list[str], pending: bytearray) -> bool:
         try:
             chunk = os.read(self._read_fd, _TREE_READ_CHUNK)
         except BlockingIOError:
@@ -492,7 +503,7 @@ class _Find0TreeCursor(TreeCursor):
             del pending[: delimiter + 1]
             if len(entries) >= self._limit:
                 raise ValueError("guest tree exceeds the entry-count bound")
-            entries.append(value)
+            entries.append(_guest_tree_relative_bytes(value))
         if len(pending) > _MAX_TREE_PATH_BYTES:
             raise ValueError("guest-tree entry exceeds the path-byte bound")
         return True
@@ -502,6 +513,9 @@ class _Find0TreeCursor(TreeCursor):
             return
         self._resources_closed = True
         cleanup_errors: list[Exception] = []
+        with self._producer_lifecycle:
+            self._abandon_requested = True
+            cleanup_errors.extend(self._remove_fifo())
         if self._selector is not None:
             try:
                 self._selector.close()
@@ -543,6 +557,18 @@ class _Find0TreeCursor(TreeCursor):
             raise ExceptionGroup("failed to close guest-tree cursor", errors)
 
     def _remove_output(self) -> list[Exception]:
+        errors = self._remove_fifo()
+        if self._directory is not None:
+            try:
+                os.rmdir(self._directory)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+            self._directory = None
+        return errors
+
+    def _remove_fifo(self) -> list[Exception]:
         errors: list[Exception] = []
         if self._fifo is not None:
             try:
@@ -552,14 +578,6 @@ class _Find0TreeCursor(TreeCursor):
             except Exception as exc:
                 errors.append(exc)
             self._fifo = None
-        if self._directory is not None:
-            try:
-                os.rmdir(self._directory)
-            except FileNotFoundError:
-                pass
-            except Exception as exc:
-                errors.append(exc)
-            self._directory = None
         return errors
 
     def _cleanup_unstarted(self) -> None:
