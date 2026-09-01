@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -26,12 +27,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
     LocalExternalBootOperationLease,
-    LocalExternalBootSession,
     LocalExternalBootSessionFactory,
     OpenArtifactRoot,
     OperationOwnership,
     PinnedOperationOwnership,
     PinOperationLease,
+    _ConcreteSession,
     _Find0TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
@@ -364,7 +365,7 @@ def _stream_session(
     lease: FakeLease | None = None,
     *,
     pin_lease: PinOperationLease = LANE.pin,
-) -> tuple[LocalExternalBootSession, FakeLease]:
+) -> tuple[_ConcreteSession, FakeLease]:
     selected_lease = lease or _lease()
     factory = LocalExternalBootSessionFactory(
         pin_lease=pin_lease,
@@ -376,7 +377,8 @@ def _stream_session(
         close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
-    return factory.open(selected_lease, _expected()), selected_lease
+    session = cast(_ConcreteSession, factory.open(selected_lease, _expected()))
+    return session, selected_lease
 
 
 def _recording_pin_lease(
@@ -408,13 +410,13 @@ def _recording_pin_lease(
 
 def _start_call(
     call: Callable[[], None],
-) -> tuple[threading.Thread, threading.Event, threading.Event, list[BaseException]]:
-    started = threading.Event()
+    *,
+    name: str,
+) -> tuple[threading.Thread, threading.Event, list[BaseException]]:
     finished = threading.Event()
     errors: list[BaseException] = []
 
     def run() -> None:
-        started.set()
         try:
             call()
         except BaseException as exc:
@@ -422,9 +424,38 @@ def _start_call(
         finally:
             finished.set()
 
-    thread = threading.Thread(target=run)
+    thread = threading.Thread(target=run, name=name)
     thread.start()
-    return thread, started, finished, errors
+    return thread, finished, errors
+
+
+class LifecycleLockProbe:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._attempts: dict[str, threading.Event] = {}
+
+    def expect_attempt(self, thread_name: str) -> threading.Event:
+        attempt = threading.Event()
+        assert thread_name not in self._attempts
+        self._attempts[thread_name] = attempt
+        return attempt
+
+    def __enter__(self) -> bool:
+        attempt = self._attempts.get(threading.current_thread().name)
+        if attempt is None:
+            return self._lock.acquire()
+        acquired = self._lock.acquire(blocking=False)
+        attempt.set()
+        return acquired or self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+
+
+def _instrument_lifecycle_lock(session: _ConcreteSession) -> LifecycleLockProbe:
+    lifecycle_lock = LifecycleLockProbe()
+    session.__dict__["_lifecycle_lock"] = lifecycle_lock
+    return lifecycle_lock
 
 
 def test_find0_tree_streams_one_multilevel_walk_and_byte_sorts_after_completion() -> None:
@@ -1464,14 +1495,18 @@ def test_cursor_close_racing_session_close_keeps_producer_owned_until_join() -> 
     cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
     cursor.__enter__()
     assert producer.producer_started.wait(timeout=5)
-    cursor_closer, _, cursor_close_finished, cursor_errors = _start_call(cursor.close)
-    assert producer.cancel_requested.wait(timeout=5)
-    session_closer, session_close_started, session_close_finished, session_errors = _start_call(
-        session.close
+    lifecycle_lock = _instrument_lifecycle_lock(session)
+    session_close_attempted = lifecycle_lock.expect_attempt("session-close")
+    cursor_closer, cursor_close_finished, cursor_errors = _start_call(
+        cursor.close, name="cursor-close"
     )
-    assert session_close_started.wait(timeout=5)
+    assert producer.cancel_requested.wait(timeout=5)
+    session_closer, session_close_finished, session_errors = _start_call(
+        session.close, name="session-close"
+    )
     try:
-        assert not session_close_finished.wait(timeout=0.1)
+        assert session_close_attempted.wait(timeout=5)
+        assert not session_close_finished.is_set()
         assert not cursor_close_finished.is_set()
         assert lease.pins == 1
         assert not producer.producer_finished.is_set()
@@ -1516,18 +1551,20 @@ def test_guest_close_racing_session_close_keeps_producer_owned_until_join() -> N
     cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
     cursor.__enter__()
     assert producer.producer_started.wait(timeout=5)
+    lifecycle_lock = _instrument_lifecycle_lock(session)
+    session_close_attempted = lifecycle_lock.expect_attempt("session-close")
 
     def close_guest() -> None:
         guest_context.__exit__(None, None, None)
 
-    guest_closer, _, guest_close_finished, guest_errors = _start_call(close_guest)
+    guest_closer, guest_close_finished, guest_errors = _start_call(close_guest, name="guest-close")
     assert producer.cancel_requested.wait(timeout=5)
-    session_closer, session_close_started, session_close_finished, session_errors = _start_call(
-        session.close
+    session_closer, session_close_finished, session_errors = _start_call(
+        session.close, name="session-close"
     )
-    assert session_close_started.wait(timeout=5)
     try:
-        assert not session_close_finished.wait(timeout=0.1)
+        assert session_close_attempted.wait(timeout=5)
+        assert not session_close_finished.is_set()
         assert not guest_close_finished.is_set()
         assert lease.pins == 1
         assert not producer.producer_finished.is_set()
@@ -1580,16 +1617,25 @@ def test_repeated_cursor_close_waits_for_faulting_teardown_owner() -> None:
     cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
     cursor.__enter__()
     assert producer.producer_started.wait(timeout=5)
-    first_closer, _, first_finished, first_errors = _start_call(cursor.close)
+    lifecycle_lock = _instrument_lifecycle_lock(session)
+    second_close_attempted = lifecycle_lock.expect_attempt("second-cursor-close")
+    session_close_attempted = lifecycle_lock.expect_attempt("session-close")
+    first_closer, first_finished, first_errors = _start_call(
+        cursor.close, name="first-cursor-close"
+    )
     assert producer.cancel_requested.wait(timeout=5)
-    second_closer, second_started, second_finished, second_errors = _start_call(cursor.close)
-    session_closer, session_started, session_finished, session_errors = _start_call(session.close)
-    assert second_started.wait(timeout=5)
-    assert session_started.wait(timeout=5)
+    second_closer, second_finished, second_errors = _start_call(
+        cursor.close, name="second-cursor-close"
+    )
+    session_closer, session_finished, session_errors = _start_call(
+        session.close, name="session-close"
+    )
     try:
+        assert second_close_attempted.wait(timeout=5)
+        assert session_close_attempted.wait(timeout=5)
         assert not first_finished.is_set()
-        assert not second_finished.wait(timeout=0.1)
-        assert not session_finished.wait(timeout=0.1)
+        assert not second_finished.is_set()
+        assert not session_finished.is_set()
         assert lease.pins == 1
         assert not producer.producer_finished.is_set()
         assert events.count("guest.close") == 0
