@@ -353,10 +353,12 @@ class _Find0TreeCursor(TreeCursor):
         self._read_fd = -1
         self._anchor_fd = -1
         self._revocation_fd = -1
+        self._revocation_anchor_fd = -1
         self._done_read_fd = -1
         self._done_write_fd = -1
         self._selector: selectors.BaseSelector | None = None
         self._producer_lifecycle = threading.Lock()
+        self._producer_phase: Literal["pending", "dispatched", "finished"] = "pending"
         self._abandon_requested = False
         self._entered = False
         self._resources_closed = False
@@ -370,10 +372,11 @@ class _Find0TreeCursor(TreeCursor):
         self._entered = True
         try:
             self._start()
-        except BaseException:
+        except BaseException as primary:
             self._owner._discard_cursor(self)
             self._closed = True
-            self._cleanup_unstarted()
+            for cleanup in self._cleanup_unstarted():
+                primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
             raise
         return self
 
@@ -408,14 +411,14 @@ class _Find0TreeCursor(TreeCursor):
 
     def _start(self) -> None:
         directory = tempfile.mkdtemp(prefix="kdive-find0-")
+        self._directory = directory
         os.chmod(directory, 0o700)
         fifo = os.path.join(directory, "entries")
+        self._fifo = fifo
         os.mkfifo(fifo, 0o600)
-        self._directory, self._fifo = directory, fifo
         self._read_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
         self._anchor_fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
-        self._revocation_fd, revocation_write_fd = os.pipe()
-        os.close(revocation_write_fd)
+        self._revocation_fd, self._revocation_anchor_fd = os.pipe()
         self._done_read_fd, self._done_write_fd = os.pipe()
         selector = selectors.DefaultSelector()
         selector.register(self._read_fd, selectors.EVENT_READ, "fifo")
@@ -436,6 +439,7 @@ class _Find0TreeCursor(TreeCursor):
                     return
                 assert self._read_fd >= 0
                 destination = f"/proc/self/fd/{self._read_fd}"
+                self._producer_phase = "dispatched"
             self._guest.find0(self._path, destination)
         except FileNotFoundError as exc:
             with self._producer_lifecycle:
@@ -450,6 +454,8 @@ class _Find0TreeCursor(TreeCursor):
         except Exception as exc:
             self._producer_errors.append(exc)
         finally:
+            with self._producer_lifecycle:
+                self._producer_phase = "finished"
             if self._done_write_fd >= 0:
                 with suppress(OSError):
                     os.write(self._done_write_fd, b"\0")
@@ -521,14 +527,16 @@ class _Find0TreeCursor(TreeCursor):
             return
         self._resources_closed = True
         cleanup_errors: list[Exception] = []
+        redirected = False
         with self._producer_lifecycle:
             self._abandon_requested = True
             cleanup_errors.extend(self._remove_fifo())
-            if self._thread is not None and self._thread.is_alive():
+            if self._producer_phase == "dispatched":
                 try:
                     # Keep FileOut's process-global fd number reserved while redirecting
                     # late opens to a kernel-bounded pipe until cancellation completes.
                     os.dup2(self._revocation_fd, self._read_fd, inheritable=False)
+                    redirected = True
                 except OSError as exc:
                     cleanup_errors.append(exc)
         if self._selector is not None:
@@ -549,11 +557,14 @@ class _Find0TreeCursor(TreeCursor):
             self._guest.user_cancel()
         except Exception as exc:
             cleanup_errors.append(exc)
+        if redirected:
+            cleanup_errors.extend(self._drain_late_transfer())
         if self._thread is not None:
             self._thread.join()
         for attribute in (
             "_read_fd",
             "_revocation_fd",
+            "_revocation_anchor_fd",
             "_done_read_fd",
             "_done_write_fd",
         ):
@@ -580,6 +591,42 @@ class _Find0TreeCursor(TreeCursor):
         if cleanup_errors:
             raise ExceptionGroup("failed to close guest-tree cursor", cleanup_errors)
 
+    def _drain_late_transfer(self) -> list[Exception]:
+        errors: list[Exception] = []
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(self._revocation_fd, selectors.EVENT_READ, "output")
+            selector.register(self._done_read_fd, selectors.EVENT_READ, "done")
+            producer_done = False
+            cancel_delivered_after_output = False
+            while not producer_done:
+                for key, _events in selector.select():
+                    if key.data == "done":
+                        with suppress(OSError):
+                            os.read(self._done_read_fd, 1)
+                        producer_done = True
+                        continue
+                    try:
+                        chunk = os.read(self._revocation_fd, _TREE_READ_CHUNK)
+                    except OSError as exc:
+                        errors.append(exc)
+                        producer_done = True
+                        continue
+                    if chunk and not cancel_delivered_after_output:
+                        try:
+                            self._guest.user_cancel()
+                        except Exception as exc:
+                            errors.append(exc)
+                        cancel_delivered_after_output = True
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            try:
+                selector.close()
+            except Exception as exc:
+                errors.append(exc)
+        return errors
+
     def _remove_output(self) -> list[Exception]:
         errors = self._remove_fifo()
         if self._directory is not None:
@@ -604,23 +651,31 @@ class _Find0TreeCursor(TreeCursor):
             self._fifo = None
         return errors
 
-    def _cleanup_unstarted(self) -> None:
+    def _cleanup_unstarted(self) -> list[Exception]:
+        errors: list[Exception] = []
         for attribute in (
             "_read_fd",
             "_anchor_fd",
             "_revocation_fd",
+            "_revocation_anchor_fd",
             "_done_read_fd",
             "_done_write_fd",
         ):
             descriptor = getattr(self, attribute)
             if descriptor >= 0:
-                with suppress(OSError):
+                try:
                     os.close(descriptor)
+                except OSError as exc:
+                    errors.append(exc)
                 setattr(self, attribute, -1)
         if self._selector is not None:
-            self._selector.close()
+            try:
+                self._selector.close()
+            except Exception as exc:
+                errors.append(exc)
             self._selector = None
-        self._remove_output()
+        errors.extend(self._remove_output())
+        return errors
 
 
 def _guest_tree_root(path: str) -> str:

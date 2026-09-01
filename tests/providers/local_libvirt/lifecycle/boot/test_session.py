@@ -728,6 +728,208 @@ def test_session_close_reserves_fileout_fd_until_producer_exit_under_reuse_press
             fifo.parent.rmdir()
 
 
+def test_session_close_recancels_find0_after_late_transfer_becomes_active() -> None:
+    events: list[str] = []
+    at_dispatch_boundary = threading.Event()
+    release_transfer = threading.Event()
+    transfer_active = threading.Event()
+    idle_cancel = threading.Event()
+    active_cancel = threading.Event()
+    close_finished = threading.Event()
+    output_directory: list[Path] = []
+    pin_observations: list[tuple[bool, bool]] = []
+
+    class LateTransferGuest(Find0Guest):
+        destination_mode: int | None = None
+
+        def __init__(self) -> None:
+            super().__init__(events, [])
+
+        def find0(self, directory: str, files: str) -> None:
+            self.find0_calls += 1
+            self.events.append(f"guest.find0:{directory}")
+            at_dispatch_boundary.set()
+            try:
+                assert release_transfer.wait(timeout=5), "transfer release was not signaled"
+                with open(files, "wb", buffering=0) as output:
+                    self.destination_mode = os.fstat(output.fileno()).st_mode
+                    transfer_active.set()
+                    output.write(b"x" * (2 * 65_536))
+                if active_cancel.is_set():
+                    raise RuntimeError("find0: transfer was cancelled")
+            finally:
+                self.producer_finished.set()
+
+        def user_cancel(self) -> None:
+            Guest.user_cancel(self)
+            if transfer_active.is_set():
+                active_cancel.set()
+            else:
+                idle_cancel.set()
+
+    class TrackingPin(FakePin):
+        def close(self) -> None:
+            pin_observations.append(
+                (producer.producer_finished.is_set(), output_directory[0].exists())
+            )
+            events.append("pin.close")
+            super().close()
+
+    def pin_lease(lease: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert isinstance(lease, FakeLease)
+        return PinnedOperationOwnership(
+            OperationOwnership(lease.system_id, lease.binding), TrackingPin(lease)
+        )
+
+    producer = LateTransferGuest()
+    lease = _lease()
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin_lease,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: producer,
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
+        close_descriptor=lambda _fd: events.append("artifact.close"),
+    )
+    session = factory.open(lease, _expected())
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    assert isinstance(cursor, _Find0TreeCursor)
+    cursor.__enter__()
+    assert at_dispatch_boundary.wait(timeout=5)
+    assert cursor._fifo is not None
+    output_directory.append(Path(cursor._fifo).parent)
+    close_error: list[BaseException] = []
+
+    def close_session() -> None:
+        try:
+            session.close()
+        except BaseException as exc:
+            close_error.append(exc)
+        finally:
+            close_finished.set()
+
+    closer = threading.Thread(target=close_session)
+    closer.start()
+    rescue: threading.Thread | None = None
+    try:
+        assert idle_cancel.wait(timeout=5)
+        assert not active_cancel.is_set()
+        assert lease.pins == 1
+        release_transfer.set()
+        assert transfer_active.wait(timeout=5)
+        assert close_finished.wait(timeout=5)
+        closer.join()
+    finally:
+        release_transfer.set()
+        if not close_finished.is_set():
+
+            def drain_revocation_pipe() -> None:
+                while not producer.producer_finished.is_set():
+                    try:
+                        if not os.read(cursor._revocation_fd, 65_536):
+                            return
+                    except OSError:
+                        return
+
+            rescue = threading.Thread(target=drain_revocation_pipe)
+            rescue.start()
+        closer.join(timeout=5)
+        if rescue is not None:
+            rescue.join(timeout=5)
+
+    assert close_error == []
+    assert active_cancel.is_set()
+    assert producer.find0_calls == 1
+    assert producer.destination_mode is not None
+    assert stat.S_ISFIFO(producer.destination_mode)
+    assert not output_directory[0].exists()
+    assert pin_observations == [(True, False)]
+    assert lease.pins == 0
+    assert events[-1] == "pin.close"
+
+
+@pytest.mark.parametrize("fault_at", ["chmod", "mkfifo"])
+def test_find0_tree_setup_fault_removes_owned_directory(
+    fault_at: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    session, _lease_value = _stream_session(events, producer)
+    directory = tmp_path / "owned-find0"
+
+    def make_directory(*, prefix: str) -> str:
+        assert prefix == "kdive-find0-"
+        directory.mkdir()
+        return str(directory)
+
+    def fail_chmod(_path: str, _mode: int) -> None:
+        raise PermissionError("chmod setup")
+
+    def fail_mkfifo(_path: str, _mode: int) -> None:
+        raise OSError("mkfifo setup")
+
+    monkeypatch.setattr("tempfile.mkdtemp", make_directory)
+    if fault_at == "chmod":
+        monkeypatch.setattr(os, "chmod", fail_chmod)
+    else:
+        monkeypatch.setattr(os, "mkfifo", fail_mkfifo)
+
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+        with pytest.raises(OSError, match=f"{fault_at} setup"):
+            cursor.__enter__()
+
+    assert not directory.exists()
+    session.close()
+
+
+def test_find0_tree_setup_fault_preserves_primary_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    session, _lease_value = _stream_session(events, producer)
+    directory = tmp_path / "owned-find0"
+    original_rmdir = os.rmdir
+
+    def make_directory(*, prefix: str) -> str:
+        assert prefix == "kdive-find0-"
+        directory.mkdir()
+        return str(directory)
+
+    def fail_mkfifo(_path: str, _mode: int) -> None:
+        raise OSError("mkfifo setup")
+
+    def fail_rmdir(path: str) -> None:
+        if Path(path) == directory:
+            raise OSError("rmdir cleanup")
+        original_rmdir(path)
+
+    monkeypatch.setattr("tempfile.mkdtemp", make_directory)
+    monkeypatch.setattr(os, "mkfifo", fail_mkfifo)
+    monkeypatch.setattr(os, "rmdir", fail_rmdir)
+    try:
+        with session.guest() as guest:
+            cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+            with pytest.raises(OSError, match="mkfifo setup") as raised:
+                cursor.__enter__()
+
+        assert raised.value.__notes__ == [
+            "guest-tree cursor cleanup failed: OSError('rmdir cleanup')"
+        ]
+        session.close()
+    finally:
+        if directory.exists():
+            original_rmdir(directory)
+
+
 def test_guest_context_closes_caller_abandoned_find0_cursor() -> None:
     events: list[str] = []
     producer = Find0Guest(events, [], wait_before_write=True)
