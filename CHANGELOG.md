@@ -1735,6 +1735,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain find0 teardown monitors
 - Serialize find0 teardown ownership
 - Use errno for find0 cancellation
+- Honor libvirt QMP correlation
 
 ### Security
 
