@@ -1043,11 +1043,12 @@ class _RealLocalExternalBootOperation:
             return store.cleanup_complete(recovery.recovery_ref, recovery)
 
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None:
-        self._session.cleanup_payloads()
         with RecoveryMetadataStore(self._recovery_root) as store:
-            store.publish_tombstone(
-                _recovery_ref(metadata.binding), metadata.binding, metadata, point_digest
-            )
+            reference = _recovery_ref(metadata.binding)
+            if store.reopen(reference, metadata.binding) != metadata:
+                raise ValueError("recovery metadata changed before cleanup")
+            self._session.cleanup_payloads()
+            store.publish_tombstone(reference, metadata.binding, metadata, point_digest)
 
     def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
         ownership = ActivationOwnership(

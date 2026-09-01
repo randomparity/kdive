@@ -2806,6 +2806,140 @@ def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path)
     assert session.close_attempts == 3
 
 
+def test_real_adapter_rechecks_exact_metadata_before_cleanup_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+    ports = LocalLibvirtExternalBoot(io)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    original_reopen = ports._reopen
+
+    def substitute_after_reopen(
+        operation: external_boot_module.LocalExternalBootOperation,
+        recovery: RecoveryPoint,
+    ) -> LocalRecoveryMetadataV1:
+        reopened = original_reopen(operation, recovery)
+        with RecoveryMetadataStore(root) as store:
+            store.record_phase(recovery.recovery_ref, recovery.binding, reopened, "cleaned")
+        return reopened
+
+    monkeypatch.setattr(ports, "_reopen", substitute_after_reopen)
+
+    with pytest.raises(ValueError, match="changed before cleanup"):
+        ports.cleanup(point, OpaqueProviderRef(ref="authority/current"))
+
+    assert host.actions == []
+    assert session.close_attempts == 1
+
+
+def test_real_adapter_cleanup_close_failure_retains_published_tombstone(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+    session.close_fault = True
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    with pytest.raises(OSError, match="session close"):
+        LocalLibvirtExternalBoot(io).cleanup(
+            point,
+            OpaqueProviderRef(ref="authority/current"),
+        )
+
+    assert host.actions == ["cleanup"]
+    with RecoveryMetadataStore(root) as store:
+        assert store.cleanup_complete(point.recovery_ref, point)
+
+
+@pytest.mark.parametrize("authority", ["authority/stale", "authority/foreign"])
+def test_real_adapter_cleanup_complete_still_validates_authority(
+    tmp_path: Path,
+    authority: str,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    session = _RealSession(host)
+    resolutions: list[str] = []
+
+    def resolve(reference: OpaqueProviderRef) -> LocalExternalBootOperationLease:
+        resolutions.append(reference.ref)
+        if reference.ref != "authority/current":
+            raise ValueError("operation authority is stale or foreign")
+        return cast(LocalExternalBootOperationLease, object())
+
+    io = RealLocalExternalBootIO(
+        root,
+        host,
+        _RecordingRecoveryWriter(host),
+        resolve,
+        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+    )
+    ports = LocalLibvirtExternalBoot(io)
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, ports.point_digest(point))
+
+    with pytest.raises(ValueError, match="stale or foreign"):
+        ports.cleanup(point, OpaqueProviderRef(ref=authority))
+
+    assert resolutions == [authority]
+    assert host.actions == []
+    assert session.close_attempts == 0
+
+
+def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    session = _RealSession(host)
+
+    def reject_session(_authority: OpaqueProviderRef) -> LocalExternalBootOperationLease:
+        raise AssertionError("finalization must not resolve or open an operation session")
+
+    io = RealLocalExternalBootIO(
+        root,
+        host,
+        _RecordingRecoveryWriter(host),
+        reject_session,
+        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+    )
+    ports = LocalLibvirtExternalBoot(io)
+    proof = FinalizeCleanupProof(
+        point_digest=ports.point_digest(point),
+        binding=point.binding,
+        operation_id="00000000-0000-0000-0000-000000000004",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=7,
+        journal_digest="sha256:" + "4" * 64,
+    )
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_tombstone(reference, metadata.binding, metadata, proof.point_digest)
+
+    authority = OpaqueProviderRef(ref="authority/authenticated-by-2140")
+    ports.finalize_cleanup_tombstone(point, proof, authority)
+    ports.finalize_cleanup_tombstone(point, proof, authority)
+
+    assert session.close_attempts == 0
+    assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
+
+
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
     io = _ExternalIO(_metadata())
     ports = LocalLibvirtExternalBoot(io)
