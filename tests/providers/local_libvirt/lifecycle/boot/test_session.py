@@ -313,9 +313,12 @@ class Find0Guest(Guest):
     def find0(self, directory: str, files: str) -> None:
         self.find0_calls += 1
         self.events.append(f"guest.find0:{directory}")
-        self.output_path = Path(files)
+        try:
+            self.output_path = Path(os.readlink(files))
+        except OSError:
+            self.output_path = Path(files)
         self.output_was_fifo = stat.S_ISFIFO(os.stat(files).st_mode)
-        self.output_parent_mode = stat.S_IMODE(os.stat(Path(files).parent).st_mode)
+        self.output_parent_mode = stat.S_IMODE(os.stat(self.output_path.parent).st_mode)
         try:
             with open(files, "wb", buffering=0) as output:
                 self.producer_started.set()
@@ -596,6 +599,110 @@ def test_session_close_abandons_cursor_before_find0_and_releases_pin_last(
     assert events[-1] == "pin.close"
 
 
+def test_session_close_revokes_fileout_before_destination_open_and_releases_pin_last() -> None:
+    events: list[str] = []
+    producer_called = threading.Event()
+    release_destination_open = threading.Event()
+    close_finished = threading.Event()
+    pin_saw_output: list[bool] = []
+
+    class BeforeDestinationOpenGuest(Find0Guest):
+        destination_mode: int | None = None
+        destination_open_error: BaseException | None = None
+
+        def __init__(self) -> None:
+            super().__init__(events, [], cooperate_with_cancel=False)
+
+        def find0(self, directory: str, files: str) -> None:
+            self.find0_calls += 1
+            self.events.append(f"guest.find0:{directory}")
+            self.output_path = Path(files)
+            producer_called.set()
+            try:
+                assert release_destination_open.wait(timeout=5), (
+                    "destination-open release was not signaled"
+                )
+                with open(files, "wb", buffering=0) as output:
+                    self.destination_mode = os.fstat(output.fileno()).st_mode
+            except BaseException as exc:
+                self.destination_open_error = exc
+                raise
+            finally:
+                self.producer_finished.set()
+
+    output_directory: list[Path] = []
+
+    class TrackingPin(FakePin):
+        def close(self) -> None:
+            pin_saw_output.append(output_directory[0].exists())
+            events.append("pin.close")
+            super().close()
+
+    def pin_lease(lease: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert isinstance(lease, FakeLease)
+        return PinnedOperationOwnership(
+            OperationOwnership(lease.system_id, lease.binding), TrackingPin(lease)
+        )
+
+    producer = BeforeDestinationOpenGuest()
+    lease = _lease()
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin_lease,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: producer,
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
+        close_descriptor=lambda _fd: events.append("artifact.close"),
+    )
+    session = factory.open(lease, _expected())
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    assert isinstance(cursor, _Find0TreeCursor)
+    cursor.__enter__()
+    assert producer_called.wait(timeout=5)
+    assert cursor._fifo is not None
+    fifo = Path(cursor._fifo)
+    output_directory.append(fifo.parent)
+    assert stat.S_ISFIFO(fifo.stat().st_mode)
+    close_error: list[BaseException] = []
+
+    def close_session() -> None:
+        try:
+            session.close()
+        except BaseException as exc:
+            close_error.append(exc)
+        finally:
+            close_finished.set()
+
+    closer = threading.Thread(target=close_session)
+    closer.start()
+    try:
+        assert producer.cancel_requested.wait(timeout=5)
+        assert not close_finished.is_set()
+        assert lease.pins == 1
+        assert not fifo.exists()
+        release_destination_open.set()
+        assert close_finished.wait(timeout=5)
+        closer.join()
+
+        assert close_error == []
+        assert isinstance(producer.destination_open_error, FileNotFoundError)
+        assert producer.destination_mode is None
+        assert not fifo.parent.exists()
+        assert pin_saw_output == [False]
+        assert events[-1] == "pin.close"
+    finally:
+        release_destination_open.set()
+        closer.join(timeout=5)
+        if fifo.exists():
+            fifo.unlink()
+        if fifo.parent.exists():
+            fifo.parent.rmdir()
+
+
 def test_guest_context_closes_caller_abandoned_find0_cursor() -> None:
     events: list[str] = []
     producer = Find0Guest(events, [], wait_before_write=True)
@@ -628,6 +735,34 @@ def test_find0_tree_backend_error_is_reported_after_cleanup() -> None:
     assert producer.cancel_requested.is_set()
     assert producer.output_path is not None
     assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_find0_tree_preserves_backend_error_when_cleanup_fails() -> None:
+    events: list[str] = []
+
+    class CleanupFaultGuest(Find0Guest):
+        def user_cancel(self) -> None:
+            super().user_cancel()
+            raise OSError("cancel secondary")
+
+    producer = CleanupFaultGuest(
+        events,
+        [b"a"],
+        producer_fault=LookupError("find0 backend"),
+    )
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(LookupError, match="find0 backend") as raised,
+        guest.open_tree("/lib/modules/6.12.0", limit=2) as entries,
+    ):
+        list(entries)
+
+    assert raised.value.__notes__ == [
+        "guest-tree cursor cleanup failed: OSError('cancel secondary')"
+    ]
     session.close()
 
 

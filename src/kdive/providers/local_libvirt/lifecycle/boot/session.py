@@ -431,9 +431,9 @@ class _Find0TreeCursor(TreeCursor):
             with self._producer_lifecycle:
                 if self._abandon_requested:
                     return
-                assert self._fifo is not None
-                fifo = self._fifo
-            self._guest.find0(self._path, fifo)
+                assert self._read_fd >= 0
+                destination = f"/proc/self/fd/{self._read_fd}"
+            self._guest.find0(self._path, destination)
         except FileNotFoundError as exc:
             with self._producer_lifecycle:
                 abandoned = self._abandon_requested and self._fifo is None
@@ -555,11 +555,15 @@ class _Find0TreeCursor(TreeCursor):
             if not (deliberate and isinstance(error, OSError) and error.errno == errno.EINTR)
         ]
         cleanup_errors.extend(self._remove_output())
-        errors = [*producer_errors, *cleanup_errors]
-        if len(errors) == 1:
-            raise errors[0]
-        if errors:
-            raise ExceptionGroup("failed to close guest-tree cursor", errors)
+        if producer_errors:
+            primary = producer_errors[0]
+            for error in [*producer_errors[1:], *cleanup_errors]:
+                primary.add_note(f"guest-tree cursor cleanup failed: {error!r}")
+            raise primary
+        if len(cleanup_errors) == 1:
+            raise cleanup_errors[0]
+        if cleanup_errors:
+            raise ExceptionGroup("failed to close guest-tree cursor", cleanup_errors)
 
     def _remove_output(self) -> list[Exception]:
         errors = self._remove_fifo()
