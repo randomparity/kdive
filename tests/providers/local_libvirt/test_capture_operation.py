@@ -192,12 +192,13 @@ def _ordered_monitor(present: bool = False, *, members: list[object] | None = No
     def monitor(domain: object, raw: str, flags: int) -> str:
         del domain, flags
         command = json.loads(raw)
+        assert "id" not in command
         if command["execute"] == "object-del":
             raise libvirt.libvirtError("DeviceNotFound")
         returned_members = (
             [{"name": "kdive-dump-job", "type": "child<filter-dump>"}] if present else members or []
         )
-        return json.dumps({"return": returned_members, "id": command["id"]})
+        return json.dumps({"return": returned_members, "id": "libvirt-15"})
 
     return monitor
 
@@ -272,10 +273,11 @@ def test_local_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
     def monitor(domain: object, raw: str, flags: int) -> str:
         del domain, flags
         command = json.loads(raw)
+        assert "id" not in command
         if command["execute"] == "object-del":
             raise libvirt.libvirtError("DeviceNotFound")
         with monitor_lock:
-            return json.dumps({"return": [], "id": command["id"]})
+            return json.dumps({"return": [], "id": "libvirt-16"})
 
     mutation = threading.Thread(target=prior_mutation)
     mutation.start()

@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import libvirt
 
@@ -25,7 +25,7 @@ type Connect = Callable[[], _ProbeConnection]
 type Monitor = Callable[[object, str, int], str]
 
 
-def _ordered_reply(raw: str, expected_id: str) -> object:
+def _ordered_reply(raw: str) -> object:
     try:
         response = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -33,7 +33,11 @@ def _ordered_reply(raw: str, expected_id: str) -> object:
             "local QMP quiescence response was malformed",
             category=ErrorCategory.CONTROL_FAILURE,
         ) from error
-    if not isinstance(response, dict) or response.get("id") != expected_id:
+    if (
+        not isinstance(response, dict)
+        or not isinstance(response.get("id"), str)
+        or not response["id"]
+    ):
         raise CategorizedError(
             "local QMP transport did not correlate the ordered response",
             category=ErrorCategory.CONTROL_FAILURE,
@@ -91,8 +95,7 @@ class LocalLibvirtCaptureQuiescence:
         )
 
     def _detach(self, domain: object, qom_id: str) -> None:
-        command_id = f"kdive-detach-{uuid4()}"
-        command = {"execute": "object-del", "arguments": {"id": qom_id}, "id": command_id}
+        command = {"execute": "object-del", "arguments": {"id": qom_id}}
         try:
             raw = self._monitor(domain, json.dumps(command), 0)
         except libvirt.libvirtError as error:
@@ -103,14 +106,12 @@ class LocalLibvirtCaptureQuiescence:
                 "local capture detach failed during quiescence",
                 category=ErrorCategory.CONTROL_FAILURE,
             ) from error
-        _ordered_reply(raw, command_id)
+        _ordered_reply(raw)
 
     def _query_absence(self, domain: object, qom_id: str) -> None:
-        command_id = f"kdive-query-{uuid4()}"
         command = {
             "execute": "qom-list",
             "arguments": {"path": "/objects"},
-            "id": command_id,
         }
         try:
             raw = self._monitor(domain, json.dumps(command), 0)
@@ -119,7 +120,7 @@ class LocalLibvirtCaptureQuiescence:
                 "local capture QOM query failed during quiescence",
                 category=ErrorCategory.CONTROL_FAILURE,
             ) from error
-        members = _ordered_reply(raw, command_id)
+        members = _ordered_reply(raw)
         if not isinstance(members, list):
             raise CategorizedError(
                 "local capture QOM query returned an inconclusive shape",
