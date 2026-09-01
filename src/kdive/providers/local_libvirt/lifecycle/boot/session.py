@@ -352,6 +352,7 @@ class _Find0TreeCursor(TreeCursor):
         self._fifo: str | None = None
         self._read_fd = -1
         self._anchor_fd = -1
+        self._revocation_fd = -1
         self._done_read_fd = -1
         self._done_write_fd = -1
         self._selector: selectors.BaseSelector | None = None
@@ -413,6 +414,8 @@ class _Find0TreeCursor(TreeCursor):
         self._directory, self._fifo = directory, fifo
         self._read_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
         self._anchor_fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        self._revocation_fd, revocation_write_fd = os.pipe()
+        os.close(revocation_write_fd)
         self._done_read_fd, self._done_write_fd = os.pipe()
         selector = selectors.DefaultSelector()
         selector.register(self._read_fd, selectors.EVENT_READ, "fifo")
@@ -521,13 +524,20 @@ class _Find0TreeCursor(TreeCursor):
         with self._producer_lifecycle:
             self._abandon_requested = True
             cleanup_errors.extend(self._remove_fifo())
+            if self._thread is not None and self._thread.is_alive():
+                try:
+                    # Keep FileOut's process-global fd number reserved while redirecting
+                    # late opens to a kernel-bounded pipe until cancellation completes.
+                    os.dup2(self._revocation_fd, self._read_fd, inheritable=False)
+                except OSError as exc:
+                    cleanup_errors.append(exc)
         if self._selector is not None:
             try:
                 self._selector.close()
             except Exception as exc:
                 cleanup_errors.append(exc)
             self._selector = None
-        for attribute in ("_read_fd", "_anchor_fd"):
+        for attribute in ("_anchor_fd",):
             descriptor = getattr(self, attribute)
             if descriptor >= 0:
                 try:
@@ -541,7 +551,12 @@ class _Find0TreeCursor(TreeCursor):
             cleanup_errors.append(exc)
         if self._thread is not None:
             self._thread.join()
-        for attribute in ("_done_read_fd", "_done_write_fd"):
+        for attribute in (
+            "_read_fd",
+            "_revocation_fd",
+            "_done_read_fd",
+            "_done_write_fd",
+        ):
             descriptor = getattr(self, attribute)
             if descriptor >= 0:
                 try:
@@ -590,7 +605,13 @@ class _Find0TreeCursor(TreeCursor):
         return errors
 
     def _cleanup_unstarted(self) -> None:
-        for attribute in ("_read_fd", "_anchor_fd", "_done_read_fd", "_done_write_fd"):
+        for attribute in (
+            "_read_fd",
+            "_anchor_fd",
+            "_revocation_fd",
+            "_done_read_fd",
+            "_done_write_fd",
+        ):
             descriptor = getattr(self, attribute)
             if descriptor >= 0:
                 with suppress(OSError):

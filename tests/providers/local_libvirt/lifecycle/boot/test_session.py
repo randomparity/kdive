@@ -599,12 +599,17 @@ def test_session_close_abandons_cursor_before_find0_and_releases_pin_last(
     assert events[-1] == "pin.close"
 
 
-def test_session_close_revokes_fileout_before_destination_open_and_releases_pin_last() -> None:
+def test_session_close_reserves_fileout_fd_until_producer_exit_under_reuse_pressure(
+    tmp_path: Path,
+) -> None:
     events: list[str] = []
     producer_called = threading.Event()
     release_destination_open = threading.Event()
     close_finished = threading.Event()
-    pin_saw_output: list[bool] = []
+    pin_observations: list[tuple[bool, bool]] = []
+    unrelated = tmp_path / "unrelated"
+    original_content = b"must remain unchanged"
+    unrelated.write_bytes(original_content)
 
     class BeforeDestinationOpenGuest(Find0Guest):
         destination_mode: int | None = None
@@ -624,6 +629,7 @@ def test_session_close_revokes_fileout_before_destination_open_and_releases_pin_
                 )
                 with open(files, "wb", buffering=0) as output:
                     self.destination_mode = os.fstat(output.fileno()).st_mode
+                    output.write(b"stale FileOut write")
             except BaseException as exc:
                 self.destination_open_error = exc
                 raise
@@ -634,7 +640,9 @@ def test_session_close_revokes_fileout_before_destination_open_and_releases_pin_
 
     class TrackingPin(FakePin):
         def close(self) -> None:
-            pin_saw_output.append(output_directory[0].exists())
+            pin_observations.append(
+                (producer.producer_finished.is_set(), output_directory[0].exists())
+            )
             events.append("pin.close")
             super().close()
 
@@ -665,9 +673,12 @@ def test_session_close_revokes_fileout_before_destination_open_and_releases_pin_
     assert producer_called.wait(timeout=5)
     assert cursor._fifo is not None
     fifo = Path(cursor._fifo)
+    fileout_fd = cursor._read_fd
+    revocation_fd = cursor._revocation_fd
     output_directory.append(fifo.parent)
     assert stat.S_ISFIFO(fifo.stat().st_mode)
     close_error: list[BaseException] = []
+    pressure_fds: list[int] = []
 
     def close_session() -> None:
         try:
@@ -684,19 +695,33 @@ def test_session_close_revokes_fileout_before_destination_open_and_releases_pin_
         assert not close_finished.is_set()
         assert lease.pins == 1
         assert not fifo.exists()
+        while not pressure_fds or pressure_fds[-1] <= fileout_fd:
+            pressure_fds.append(os.open(unrelated, os.O_RDWR))
         release_destination_open.set()
         assert close_finished.wait(timeout=5)
         closer.join()
 
         assert close_error == []
-        assert isinstance(producer.destination_open_error, FileNotFoundError)
-        assert producer.destination_mode is None
+        assert unrelated.read_bytes() == original_content
+        assert fileout_fd not in pressure_fds
+        assert revocation_fd not in pressure_fds
+        with pytest.raises(OSError):
+            os.fstat(fileout_fd)
+        with pytest.raises(OSError):
+            os.fstat(revocation_fd)
+        assert producer.destination_open_error is None
+        assert producer.destination_mode is not None
+        assert stat.S_ISFIFO(producer.destination_mode)
+        assert producer.cancel_requested.is_set()
         assert not fifo.parent.exists()
-        assert pin_saw_output == [False]
+        assert pin_observations == [(True, False)]
+        assert lease.pins == 0
         assert events[-1] == "pin.close"
     finally:
         release_destination_open.set()
         closer.join(timeout=5)
+        for descriptor in pressure_fds:
+            os.close(descriptor)
         if fifo.exists():
             fifo.unlink()
         if fifo.parent.exists():
