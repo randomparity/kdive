@@ -207,10 +207,11 @@ class _GuestContext(AbstractContextManager[InactiveGuest]):
         self._closed = False
 
     def __enter__(self) -> InactiveGuest:
-        if self._closed:
-            raise RuntimeError("guest wrapper is closed")
-        self._guest = self._session._open_guest_context(self)
-        return _GuardedGuest(self, self._guest)
+        with self._session._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("guest wrapper is closed")
+            self._guest = self._session._open_guest_context(self)
+            return _GuardedGuest(self, self._guest)
 
     def __exit__(self, _kind: object, primary: object, _traceback: object) -> None:
         try:
@@ -222,44 +223,41 @@ class _GuestContext(AbstractContextManager[InactiveGuest]):
             raise
 
     def _close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        cursors = list(self._cursors)
-        self._cursors.clear()
-        guest, self._guest = self._guest, None
-        self._session._discard_guest(self)
-        errors: list[Exception] = []
-        for cursor in cursors:
-            try:
-                cursor.close()
-            except Exception as exc:
-                errors.append(exc)
-        if guest is not None:
-            errors.extend(_attempt_guest_close(guest))
-        if errors:
-            raise ExceptionGroup("failed to close libguestfs handle", errors)
+        with self._session._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            cursors = list(self._cursors)
+            errors: list[Exception] = []
+            for cursor in cursors:
+                try:
+                    cursor.close()
+                except Exception as exc:
+                    errors.append(exc)
+            guest, self._guest = self._guest, None
+            if guest is not None:
+                errors.extend(_attempt_guest_close(guest))
+            self._cursors.clear()
+            self._session._discard_guest(self)
+            if errors:
+                raise ExceptionGroup("failed to close libguestfs handle", errors)
 
-    def _poison(self) -> tuple[_Guest | None, list[Exception]]:
-        self._closed = True
-        cursors = list(self._cursors)
-        self._cursors.clear()
-        errors: list[Exception] = []
-        for cursor in cursors:
-            try:
-                cursor.close()
-            except Exception as exc:
-                errors.append(exc)
-        guest, self._guest = self._guest, None
-        return guest, errors
+    def _poison(self) -> list[Exception]:
+        try:
+            self._close()
+        except ExceptionGroup as errors:
+            return list(errors.exceptions)
+        return []
 
     def _register_cursor(self, cursor: _Find0TreeCursor) -> None:
-        if self._closed:
-            raise RuntimeError("guest wrapper is closed")
-        self._cursors.add(cursor)
+        with self._session._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("guest wrapper is closed")
+            self._cursors.add(cursor)
 
     def _discard_cursor(self, cursor: _Find0TreeCursor) -> None:
-        self._cursors.discard(cursor)
+        with self._session._lifecycle_lock:
+            self._cursors.discard(cursor)
 
 
 class _GuardedGuest:
@@ -366,20 +364,21 @@ class _Find0TreeCursor(TreeCursor):
         self._closed = False
 
     def __enter__(self) -> Iterator[InactiveGuestDirectoryEntry]:
-        if self._closed or self._entered:
-            raise RuntimeError("guest-tree cursor is closed or already entered")
-        self._owner._session._guard_guest_operation(self._owner)
-        self._owner._register_cursor(self)
-        self._entered = True
-        try:
-            self._start()
-        except BaseException as primary:
-            self._owner._discard_cursor(self)
-            self._closed = True
-            for cleanup in self._cleanup_unstarted():
-                primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
-            raise
-        return self
+        with self._owner._session._lifecycle_lock:
+            if self._closed or self._entered:
+                raise RuntimeError("guest-tree cursor is closed or already entered")
+            self._owner._session._guard_guest_operation(self._owner)
+            self._owner._register_cursor(self)
+            self._entered = True
+            try:
+                self._start()
+            except BaseException as primary:
+                self._owner._discard_cursor(self)
+                self._closed = True
+                for cleanup in self._cleanup_unstarted():
+                    primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
+                raise
+            return self
 
     def __exit__(self, _kind: object, primary: object, _traceback: object) -> None:
         try:
@@ -403,12 +402,15 @@ class _Find0TreeCursor(TreeCursor):
         return next(self._entries)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._owner._discard_cursor(self)
-        if not self._resources_closed:
-            self._teardown(deliberate=True)
+        with self._owner._session._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                if not self._resources_closed:
+                    self._teardown(deliberate=True)
+            finally:
+                self._owner._discard_cursor(self)
 
     def _start(self) -> None:
         directory = tempfile.mkdtemp(prefix="kdive-find0-")
@@ -476,16 +478,20 @@ class _Find0TreeCursor(TreeCursor):
                 InactiveGuestDirectoryEntry(path)
                 for path in sorted(paths, key=lambda value: value.encode())
             ]
-            self._teardown(deliberate=False)
+            with self._owner._session._lifecycle_lock:
+                self._teardown(deliberate=False)
             return entries
         except BaseException as primary:
-            self._closed = True
-            self._owner._discard_cursor(self)
-            if not self._resources_closed:
+            with self._owner._session._lifecycle_lock:
+                self._closed = True
                 try:
-                    self._teardown(deliberate=True)
-                except BaseException as cleanup:
-                    primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
+                    if not self._resources_closed:
+                        try:
+                            self._teardown(deliberate=True)
+                        except BaseException as cleanup:
+                            primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
+                finally:
+                    self._owner._discard_cursor(self)
             raise
 
     def _read_until_done(self, entries: list[str], pending: bytearray) -> None:
@@ -755,6 +761,8 @@ class _ConcreteSession:
         self._readiness = readiness
         self._observe_running = observe_running
         self._cleanup_payloads = cleanup_payloads
+        # Nested session/guest/cursor closes keep ownership until producer joins complete.
+        self._lifecycle_lock = threading.RLock()
         self._guests: set[_GuestContext] = set()
         self._closed = False
 
@@ -835,61 +843,61 @@ class _ConcreteSession:
         self._cleanup_payloads(self._artifact_fd, self._binding)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        guests = list(self._guests)
-        self._guests.clear()
-        poisoned = [guest._poison() for guest in guests]
-        artifact_fd, self._artifact_fd = self._artifact_fd, None
-        overlay_fd = self._overlay.descriptor
-        domain, self._domain = self._domain, None
-        connection, self._connection = self._connection, None
-        pin, self._pin = self._pin, None
-        errors: list[Exception] = []
-        for guest, cursor_errors in poisoned:
-            errors.extend(cursor_errors)
-            if guest is not None:
-                errors.extend(_attempt_guest_close(guest))
-        for closer in (
-            (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
-            lambda: self._close_overlay_descriptor(overlay_fd),
-            domain.free if domain is not None else None,
-            connection.close if connection is not None else None,
-            pin.close if pin is not None else None,
-        ):
-            if closer is not None:
-                try:
-                    closer()
-                except Exception as exc:  # cleanup must attempt every owned resource
-                    errors.append(exc)
-        if errors:
-            raise ExceptionGroup("failed to close local external-boot session", errors)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            guests = list(self._guests)
+            errors = [error for guest in guests for error in guest._poison()]
+            self._guests.clear()
+            artifact_fd, self._artifact_fd = self._artifact_fd, None
+            overlay_fd = self._overlay.descriptor
+            domain, self._domain = self._domain, None
+            connection, self._connection = self._connection, None
+            pin, self._pin = self._pin, None
+            for closer in (
+                (lambda: self._close_descriptor(artifact_fd)) if artifact_fd is not None else None,
+                lambda: self._close_overlay_descriptor(overlay_fd),
+                domain.free if domain is not None else None,
+                connection.close if connection is not None else None,
+                pin.close if pin is not None else None,
+            ):
+                if closer is not None:
+                    try:
+                        closer()
+                    except Exception as exc:  # cleanup must attempt every owned resource
+                        errors.append(exc)
+            if errors:
+                raise ExceptionGroup("failed to close local external-boot session", errors)
 
     def _open_guest_context(self, wrapper: _GuestContext) -> _Guest:
-        if self._guests:
-            raise RuntimeError("an inactive guest context is already open")
-        self.require_inactive()
-        self._require_overlay_identity()
-        guest = self._open_guest()
-        try:
-            guest.add_drive_opts(
-                f"/proc/{self._worker_pid}/fd/{self._overlay.descriptor}", format="qcow2"
-            )
-            guest.launch()
-            roots = guest.inspect_os()
-            if len(roots) != 1:
-                raise RuntimeError("guest inspection must find exactly one operating-system root")
-            guest.mount(roots[0], "/")
-        except BaseException as exc:
-            for close_error in _attempt_guest_close(guest):
-                exc.add_note(f"cleanup failed: {close_error!r}")
-            raise
-        self._guests.add(wrapper)
-        return guest
+        with self._lifecycle_lock:
+            if self._guests:
+                raise RuntimeError("an inactive guest context is already open")
+            self.require_inactive()
+            self._require_overlay_identity()
+            guest = self._open_guest()
+            try:
+                guest.add_drive_opts(
+                    f"/proc/{self._worker_pid}/fd/{self._overlay.descriptor}", format="qcow2"
+                )
+                guest.launch()
+                roots = guest.inspect_os()
+                if len(roots) != 1:
+                    raise RuntimeError(
+                        "guest inspection must find exactly one operating-system root"
+                    )
+                guest.mount(roots[0], "/")
+            except BaseException as exc:
+                for close_error in _attempt_guest_close(guest):
+                    exc.add_note(f"cleanup failed: {close_error!r}")
+                raise
+            self._guests.add(wrapper)
+            return guest
 
     def _discard_guest(self, guest: _GuestContext) -> None:
-        self._guests.discard(guest)
+        with self._lifecycle_lock:
+            self._guests.discard(guest)
 
     def _upload_artifact(
         self,

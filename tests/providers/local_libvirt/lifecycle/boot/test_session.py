@@ -7,6 +7,7 @@ import queue
 import selectors
 import stat
 import threading
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from uuid import UUID
@@ -358,11 +359,15 @@ class Find0Guest(Guest):
 
 
 def _stream_session(
-    events: list[str], guest: Find0Guest, lease: FakeLease | None = None
+    events: list[str],
+    guest: Find0Guest,
+    lease: FakeLease | None = None,
+    *,
+    pin_lease: PinOperationLease = LANE.pin,
 ) -> tuple[LocalExternalBootSession, FakeLease]:
     selected_lease = lease or _lease()
     factory = LocalExternalBootSessionFactory(
-        pin_lease=LANE.pin,
+        pin_lease=pin_lease,
         connect=lambda: Conn(events, Domain(events)),
         open_artifact_root=lambda _ownership: 41,
         open_guest=lambda: guest,
@@ -372,6 +377,54 @@ def _stream_session(
         close_descriptor=lambda _fd: events.append("artifact.close"),
     )
     return factory.open(selected_lease, _expected()), selected_lease
+
+
+def _recording_pin_lease(
+    events: list[str], producer: Find0Guest, lease: FakeLease
+) -> tuple[PinOperationLease, list[tuple[bool, int, bool]]]:
+    observations: list[tuple[bool, int, bool]] = []
+
+    class RecordingPin(FakePin):
+        def close(self) -> None:
+            assert producer.output_path is not None
+            observations.append(
+                (
+                    producer.producer_finished.is_set(),
+                    events.count("guest.close"),
+                    producer.output_path.parent.exists(),
+                )
+            )
+            events.append("pin.close")
+            super().close()
+
+    def pin_lease(candidate: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert candidate is lease
+        return PinnedOperationOwnership(
+            OperationOwnership(candidate.system_id, candidate.binding), RecordingPin(lease)
+        )
+
+    return pin_lease, observations
+
+
+def _start_call(
+    call: Callable[[], None],
+) -> tuple[threading.Thread, threading.Event, threading.Event, list[BaseException]]:
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        started.set()
+        try:
+            call()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, started, finished, errors
 
 
 def test_find0_tree_streams_one_multilevel_walk_and_byte_sorts_after_completion() -> None:
@@ -1393,6 +1446,171 @@ def test_session_close_retains_pin_until_noncooperating_find0_producer_exits() -
     assert close_error == []
     assert lease.pins == 0
     assert not producer.output_path.parent.exists()
+
+
+def test_cursor_close_racing_session_close_keeps_producer_owned_until_join() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        wait_before_write=True,
+        cooperate_with_cancel=False,
+    )
+    lease = _lease()
+    pin_lease, pin_observations = _recording_pin_lease(events, producer, lease)
+    session, _lease_value = _stream_session(events, producer, lease, pin_lease=pin_lease)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+    cursor.__enter__()
+    assert producer.producer_started.wait(timeout=5)
+    cursor_closer, _, cursor_close_finished, cursor_errors = _start_call(cursor.close)
+    assert producer.cancel_requested.wait(timeout=5)
+    session_closer, session_close_started, session_close_finished, session_errors = _start_call(
+        session.close
+    )
+    assert session_close_started.wait(timeout=5)
+    try:
+        assert not session_close_finished.wait(timeout=0.1)
+        assert not cursor_close_finished.is_set()
+        assert lease.pins == 1
+        assert not producer.producer_finished.is_set()
+        assert events.count("guest.close") == 0
+        assert producer.output_path is not None
+        assert producer.output_path.parent.exists()
+    finally:
+        producer.release_producer.set()
+        cursor_closer.join(timeout=5)
+        session_closer.join(timeout=5)
+
+    assert cursor_errors == []
+    assert session_errors == []
+    assert cursor_close_finished.is_set()
+    assert session_close_finished.is_set()
+    assert events.count("guest.cancel") == 1
+    assert events.count("guest.shutdown") == 1
+    assert events.count("guest.close") == 1
+    assert events.count("artifact.close") == 1
+    assert events.count("overlay.close") == 1
+    assert events.count("domain.close") == 1
+    assert events.count("connection.close") == 1
+    assert events.count("pin.close") == 1
+    assert pin_observations == [(True, 1, False)]
+    assert lease.pins == 0
+    assert events[-1] == "pin.close"
+
+
+def test_guest_close_racing_session_close_keeps_producer_owned_until_join() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        wait_before_write=True,
+        cooperate_with_cancel=False,
+    )
+    lease = _lease()
+    pin_lease, pin_observations = _recording_pin_lease(events, producer, lease)
+    session, _lease_value = _stream_session(events, producer, lease, pin_lease=pin_lease)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+    cursor.__enter__()
+    assert producer.producer_started.wait(timeout=5)
+
+    def close_guest() -> None:
+        guest_context.__exit__(None, None, None)
+
+    guest_closer, _, guest_close_finished, guest_errors = _start_call(close_guest)
+    assert producer.cancel_requested.wait(timeout=5)
+    session_closer, session_close_started, session_close_finished, session_errors = _start_call(
+        session.close
+    )
+    assert session_close_started.wait(timeout=5)
+    try:
+        assert not session_close_finished.wait(timeout=0.1)
+        assert not guest_close_finished.is_set()
+        assert lease.pins == 1
+        assert not producer.producer_finished.is_set()
+        assert events.count("guest.close") == 0
+        assert producer.output_path is not None
+        assert producer.output_path.parent.exists()
+    finally:
+        producer.release_producer.set()
+        guest_closer.join(timeout=5)
+        session_closer.join(timeout=5)
+
+    assert guest_errors == []
+    assert session_errors == []
+    assert guest_close_finished.is_set()
+    assert session_close_finished.is_set()
+    assert events.count("guest.cancel") == 1
+    assert events.count("guest.shutdown") == 1
+    assert events.count("guest.close") == 1
+    assert events.count("artifact.close") == 1
+    assert events.count("overlay.close") == 1
+    assert events.count("domain.close") == 1
+    assert events.count("connection.close") == 1
+    assert events.count("pin.close") == 1
+    assert pin_observations == [(True, 1, False)]
+    assert lease.pins == 0
+    assert events[-1] == "pin.close"
+
+
+def test_repeated_cursor_close_waits_for_faulting_teardown_owner() -> None:
+    events: list[str] = []
+
+    class CancelFaultGuest(Find0Guest):
+        cancel_calls = 0
+
+        def user_cancel(self) -> None:
+            self.cancel_calls += 1
+            super().user_cancel()
+            raise OSError("cancel fault")
+
+    producer = CancelFaultGuest(
+        events,
+        [],
+        wait_before_write=True,
+        cooperate_with_cancel=False,
+    )
+    lease = _lease()
+    session, _lease_value = _stream_session(events, producer, lease)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+    cursor.__enter__()
+    assert producer.producer_started.wait(timeout=5)
+    first_closer, _, first_finished, first_errors = _start_call(cursor.close)
+    assert producer.cancel_requested.wait(timeout=5)
+    second_closer, second_started, second_finished, second_errors = _start_call(cursor.close)
+    session_closer, session_started, session_finished, session_errors = _start_call(session.close)
+    assert second_started.wait(timeout=5)
+    assert session_started.wait(timeout=5)
+    try:
+        assert not first_finished.is_set()
+        assert not second_finished.wait(timeout=0.1)
+        assert not session_finished.wait(timeout=0.1)
+        assert lease.pins == 1
+        assert not producer.producer_finished.is_set()
+        assert events.count("guest.close") == 0
+    finally:
+        producer.release_producer.set()
+        first_closer.join(timeout=5)
+        second_closer.join(timeout=5)
+        session_closer.join(timeout=5)
+
+    assert len(first_errors) == 1
+    assert isinstance(first_errors[0], OSError)
+    assert str(first_errors[0]) == "cancel fault"
+    assert second_errors == []
+    assert session_errors == []
+    assert first_finished.is_set()
+    assert second_finished.is_set()
+    assert session_finished.is_set()
+    assert producer.cancel_calls == 1
+    assert events.count("guest.shutdown") == 1
+    assert events.count("guest.close") == 1
+    assert lease.pins == 0
 
 
 def test_guest_regular_stream_transfer_exposes_no_host_path_and_closes_on_success() -> None:
