@@ -12,30 +12,49 @@ import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, BinaryIO, Literal, Protocol, cast
+from uuid import UUID
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     MAX_ARCHIVE_BYTES,
     MAX_ENTRIES,
     MAX_REGULAR_BYTES,
+    AbsentModuleCapture,
+    GuestRecoveryWriter,
     GuestTreeEntry,
+    KernelBundleSource,
+    ModuleArchiveCapture,
     ModuleCapture,
+    RecoveryArchiveSink,
+    RecoveryArchiveSource,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    ClosedDomainInspection,
+    ExpectedOperationOwnership,
+    LocalExternalBootOperationLease,
+    LocalExternalBootSession,
+    LocalExternalBootSessionFactory,
+    TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
+    AbsentComponentState,
     ActivationOwnership,
     ComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    KernelRelease,
     OpaqueProviderRef,
+    PresentComponentState,
     ProviderStateIdentity,
     RecoveryPoint,
     RunningKernelObservation,
@@ -88,7 +107,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     binding: ExternalBootActivationBinding
     plan_identity: Digest
     materialization_identity: Digest
-    release: str
+    release: KernelRelease
     materialized_modules: OpaqueProviderRef
     materialized_modules_sha256: Digest
     materialized_modules_bytes: Annotated[int, Field(ge=0)]
@@ -99,6 +118,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     target_boot: Digest
     target_projection_sha256: Digest
     target_xml: str
+    expected_running: RunningKernelObservation
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
     prior_power: Literal["running", "inactive"]
@@ -113,6 +133,8 @@ class LocalRecoveryMetadataV1(_ClosedValue):
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
+        if self.expected_running.release != self.release:
+            raise ValueError("expected running release does not match recovery release")
         return self
 
 
@@ -125,7 +147,7 @@ class LocalPreStopIntentV1(_ClosedValue):
     binding: ExternalBootActivationBinding
     plan_identity: Digest
     materialization_identity: Digest
-    release: str
+    release: KernelRelease
     materialized_modules: OpaqueProviderRef
     materialized_modules_sha256: Digest
     materialized_modules_bytes: Annotated[int, Field(ge=0)]
@@ -136,6 +158,7 @@ class LocalPreStopIntentV1(_ClosedValue):
     target_boot: Digest
     target_projection_sha256: Digest
     target_xml: str
+    expected_running: RunningKernelObservation
     prior_power: Literal["running", "inactive"]
 
     @model_validator(mode="after")
@@ -146,6 +169,8 @@ class LocalPreStopIntentV1(_ClosedValue):
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
+        if self.expected_running.release != self.release:
+            raise ValueError("expected running release does not match recovery release")
         return self
 
 
@@ -506,18 +531,20 @@ class ModulePublicationIO(Protocol):
 class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs binding)
     def exists(self, path: str) -> int: ...
     def is_dir(self, path: str, *, followsymlinks: bool) -> int: ...
-    def find(self, path: str) -> list[str]: ...
+    def open_tree(self, path: str, *, limit: int) -> TreeCursor: ...
     def lstatns(self, path: str) -> dict[str, int]: ...
     def readlink(self, path: str) -> str: ...
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
-    def download(self, remotefilename: str, filename: str) -> None: ...
+    def open_regular(self, path: str, *, size: int) -> AbstractContextManager[BinaryIO]: ...
+    def create_regular(self, content: BinaryIO, path: str, *, size: int) -> None: ...
     def mkdir(self, path: str) -> None: ...
-    def upload(self, filename: str, remotefilename: str) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
     def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
+    def sync(self) -> None: ...
 
 
 class LibguestfsAuthenticatedGuestTree:
@@ -556,9 +583,16 @@ class LibguestfsAuthenticatedGuestTree:
     def entries(self) -> Iterator[GuestTreeEntry]:
         if self.root_kind() != "directory":
             return
-        for relative in sorted(self._guest.find(self._root), key=lambda item: item.encode()):
-            path = _guest_relative(relative)
-            yield self._entry(path)
+        seen: set[str] = set()
+        with self._guest.open_tree(self._root, limit=MAX_ENTRIES) as cursor:
+            for index, entry in enumerate(cursor, start=1):
+                if index > MAX_ENTRIES:
+                    raise ValueError("guest tree exceeds the entry-count bound")
+                path = _guest_relative(entry.path)
+                if path in seen:
+                    raise ValueError("guest tree contains duplicate paths")
+                seen.add(path)
+                yield self._entry(path)
 
     @contextmanager
     def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]:
@@ -566,10 +600,8 @@ class LibguestfsAuthenticatedGuestTree:
         opened = self._guest.lstatns(remote)
         if opened["st_size"] != size or not stat.S_ISREG(opened["st_mode"]):
             raise ValueError("guest regular file changed before content read")
-        with tempfile.TemporaryFile("w+b") as local:
-            self._guest.download(remote, f"/proc/self/fd/{local.fileno()}")
-            local.seek(0)
-            yield local
+        with self._guest.open_regular(remote, size=size) as content:
+            yield content
 
     def create_directory(self, entry: GuestTreeEntry) -> None:
         self._require_mutable()
@@ -579,16 +611,7 @@ class LibguestfsAuthenticatedGuestTree:
 
     def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None:
         self._require_mutable()
-        with tempfile.NamedTemporaryFile("w+b") as local:
-            remaining = entry.size
-            while remaining:
-                chunk = content.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    raise ValueError("guest regular content ended before declared size")
-                local.write(chunk)
-                remaining -= len(chunk)
-            local.flush()
-            self._guest.upload(local.name, self._remote(entry.path))
+        self._guest.create_regular(content, self._remote(entry.path), size=entry.size)
         self._apply_metadata(self._remote(entry.path), entry)
 
     def create_symlink(self, entry: GuestTreeEntry) -> None:
@@ -659,22 +682,17 @@ def _xattr_bytes(value: str | bytes) -> bytes:
     return value if isinstance(value, bytes) else value.encode()
 
 
-class LocalExternalBootIO(Protocol):
-    """Injected privileged operations; the state machine retains ordering and validation."""
+class LocalExternalBootOperation(Protocol):
+    """One authenticated operation's privileged and durable capabilities."""
 
-    def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
-    ) -> ExternalBootMaterialization: ...
+    def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization: ...
     def prepare(
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        authority: OpaqueProviderRef,
     ) -> LocalRecoveryMetadataV1: ...
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef: ...
-    def reopen(
-        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
-    ) -> LocalRecoveryMetadataV1: ...
+    def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1: ...
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
@@ -686,48 +704,104 @@ class LocalExternalBootIO(Protocol):
     ) -> LocalRecoveryMetadataV1: ...
     def cleanup_complete(self, recovery: RecoveryPoint) -> bool: ...
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None: ...
+
+
+class LocalExternalBootIO(Protocol):
+    """Opens one authenticated capability for each public coordinator call."""
+
+    def open(
+        self,
+        authority: OpaqueProviderRef,
+        expected: ExpectedOperationOwnership,
+    ) -> AbstractContextManager[LocalExternalBootOperation]: ...
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
 
 
-class LocalExternalBootHost(Protocol):
-    """Injected libvirt, libguestfs, artifact, and readiness operations."""
+class LocalExternalBootMaterializer(Protocol):
+    """Builds immutable local artifacts without owning guest recovery I/O."""
 
     def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+        self, plan: ExternalBootPlan, session: LocalExternalBootSession
     ) -> ExternalBootMaterialization: ...
     def inspect_prepare(
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        authority: OpaqueProviderRef,
+        inspection: ClosedDomainInspection,
+        session: LocalExternalBootSession,
     ) -> LocalPreStopIntentV1: ...
-    def complete_prepare(self, intent: LocalPreStopIntentV1) -> LocalRecoveryMetadataV1: ...
-    def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+
+
+type ResolveOperationLease = Callable[[OpaqueProviderRef], LocalExternalBootOperationLease]
 
 
 class RealLocalExternalBootIO:
     """Concrete durable adapter that orders host mutations behind recovery evidence."""
 
-    def __init__(self, recovery_root: Path, host: LocalExternalBootHost) -> None:
+    def __init__(
+        self,
+        recovery_root: Path,
+        materializer: LocalExternalBootMaterializer,
+        recovery_writer: GuestRecoveryWriter,
+        resolve_operation_lease: ResolveOperationLease,
+        session_factory: LocalExternalBootSessionFactory,
+    ) -> None:
         self._recovery_root = recovery_root
-        self._host = host
+        self._materializer = materializer
+        self._recovery_writer = recovery_writer
+        self._resolve_operation_lease = resolve_operation_lease
+        self._session_factory = session_factory
 
-    def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
-    ) -> ExternalBootMaterialization:
-        return self._host.materialize(plan, authority)
+    @contextmanager
+    def open(
+        self,
+        authority: OpaqueProviderRef,
+        expected: ExpectedOperationOwnership,
+    ) -> Iterator[LocalExternalBootOperation]:
+        lease = self._resolve_operation_lease(authority)
+        session = self._session_factory.open(lease, expected)
+        operation = _RealLocalExternalBootOperation(
+            self._recovery_root,
+            self._materializer,
+            self._recovery_writer,
+            session,
+        )
+        try:
+            yield operation
+        except BaseException as primary:
+            try:
+                session.close()
+            except BaseException as close_error:
+                primary.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        else:
+            session.close()
+
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
+
+
+class _RealLocalExternalBootOperation:
+    def __init__(
+        self,
+        recovery_root: Path,
+        materializer: LocalExternalBootMaterializer,
+        recovery_writer: GuestRecoveryWriter,
+        session: LocalExternalBootSession,
+    ) -> None:
+        self._recovery_root = recovery_root
+        self._materializer = materializer
+        self._recovery_writer = recovery_writer
+        self._session = session
+
+    def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
+        return self._materializer.materialize(plan, self._session)
 
     def prepare(
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        authority: OpaqueProviderRef,
     ) -> LocalRecoveryMetadataV1:
         reference = _recovery_ref(binding)
         with RecoveryMetadataStore(self._recovery_root) as store:
@@ -741,12 +815,43 @@ class RealLocalExternalBootIO:
             try:
                 intent = store.reopen_pre_stop(reference, binding)
             except FileNotFoundError:
-                intent = self._host.inspect_prepare(materialization, binding, authority)
+                inspection = self._session.inspect_closed()
+                intent = self._materializer.inspect_prepare(
+                    materialization, binding, inspection, self._session
+                )
                 _validate_preparation_owner(intent, materialization, binding)
+                _validate_preparation_inspection(intent, inspection, retry=False)
                 store.publish_pre_stop(intent)
             else:
                 _validate_preparation_owner(intent, materialization, binding)
-        metadata = self._host.complete_prepare(intent)
+                _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
+        self._session.stop_and_require_inactive()
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            owned_sink = store.recovery_archive_sink(reference, intent)
+        primary: BaseException | None = None
+        try:
+            with self._session.guest() as guest:
+                tree = LibguestfsAuthenticatedGuestTree(
+                    guest,
+                    binding=binding,
+                    release=intent.release,
+                    root=f"/lib/modules/{intent.release}",
+                    mutable=False,
+                )
+                capture_sink, owned_sink = owned_sink, None
+                capture = self._recovery_writer.capture(tree, intent.release, capture_sink)
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            if owned_sink is not None:
+                try:
+                    owned_sink.close()
+                except BaseException as cleanup:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"recovery archive sink cleanup failed: {cleanup!r}")
+        metadata = _complete_preparation_metadata(intent, materialization, capture)
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
 
@@ -754,30 +859,176 @@ class RealLocalExternalBootIO:
     def recovery_ref(binding: ExternalBootActivationBinding) -> OpaqueProviderRef:
         return _recovery_ref(binding)
 
-    def reopen(
-        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
-    ) -> LocalRecoveryMetadataV1:
-        del authority
+    def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.reopen(recovery.recovery_ref, recovery.binding)
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._host.activate_modules(metadata)
+        if self._host_state(metadata) != ("source", False):
+            raise ValueError("external-boot module activation requires inactive source XML/power")
+        desired = _present_component(metadata.target_state.modules, "target module state")
+        prior = _layout_component(metadata.source_state.modules)
+        with self._session.guest() as opened_guest:
+            guest = cast(_GuestfsTreeHandle, opened_guest)
+            publication = _SessionModulePublicationIO(
+                guest,
+                metadata,
+                self._recovery_root,
+                self._recovery_writer,
+                self._session,
+            )
+            if metadata.phase == "pre-stop-intent":
+                before = ModuleLayout(prior, None, None)
+                staged = ModuleLayout(prior, desired, None)
+                layout = publication.observe_layout()
+                if layout == before:
+                    source = self._kernel_bundle_source(metadata)
+                    try:
+                        publication.create_staging()
+                        manifest = self._recovery_writer.install(
+                            publication.staging_tree(),
+                            metadata.release,
+                            source,
+                        )
+                    finally:
+                        source.close()
+                    if manifest != desired.manifest or publication.observe_layout() != staged:
+                        raise ValueError(
+                            "external-boot staged target modules do not match metadata"
+                        )
+                elif layout != staged:
+                    raise ValueError("external-boot target staging layout conflicts with metadata")
+                publication.guest_sync()
+                publication.record_phase(
+                    PublicationPhase.MOVE_READY if prior is not None else PublicationPhase.OLD_ASIDE
+                )
+            self._finish_present_publication(publication, prior=prior, desired=desired)
+            completed = publication.metadata
+        self.record_phase(completed, "module-restored")
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._host.define_target(metadata)
+        while metadata.phase == "module-restored":
+            xml, active = self._host_state(metadata)
+            if xml == "source" and not active:
+                self._session.define_xml(metadata.target_xml)
+                continue
+            if xml == "target" and not active and metadata.prior_power == "inactive":
+                self.record_phase(metadata, "target-defined")
+                return
+            if xml == "target" and not active and metadata.prior_power == "running":
+                self._session.start()
+                continue
+            if xml == "target" and active and metadata.prior_power == "running":
+                self._require_readiness()
+                if self._host_state(metadata) != ("target", True):
+                    raise ValueError("external-boot target changed during readiness")
+                self.record_phase(metadata, "target-defined")
+                return
+            raise ValueError(
+                "external-boot target XML/power state conflicts with recovery metadata"
+            )
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
-        return self._host.observe_running(metadata)
+        if self._host_state(metadata) != ("target", True):
+            raise ValueError("external-boot observation requires exact running target XML/power")
+        observed = self._session.observe_running()
+        if observed != metadata.expected_running:
+            raise ValueError("external-boot running kernel does not match recovery metadata")
+        return observed
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._host.recover_modules(metadata)
+        self._stop_for_recovery(metadata)
+        target = _present_component(metadata.target_state.modules, "target module state")
+        desired = _layout_component(metadata.source_state.modules)
+        with self._session.guest() as opened_guest:
+            guest = cast(_GuestfsTreeHandle, opened_guest)
+            publication = _SessionModulePublicationIO(
+                guest,
+                metadata,
+                self._recovery_root,
+                self._recovery_writer,
+                self._session,
+            )
+            if metadata.phase in {"target-defined", "module-restored"}:
+                terminal = ModuleLayout(desired, None, None)
+                layout = publication.observe_layout()
+                if metadata.phase == "module-restored" and layout == terminal:
+                    return
+                if isinstance(metadata.capture, AbsentModuleCapture):
+                    if layout != ModuleLayout(target, None, None):
+                        raise ValueError(
+                            "external-boot absence recovery layout conflicts with metadata"
+                        )
+                    publication.guest_sync()
+                    publication.record_phase(PublicationPhase.MOVE_READY)
+                else:
+                    staged = ModuleLayout(target, desired, None)
+                    if layout == ModuleLayout(target, None, None):
+                        source = self._recovery_archive_source(metadata)
+                        try:
+                            publication.create_staging()
+                            manifest = self._recovery_writer.restore(
+                                publication.staging_tree(),
+                                metadata.release,
+                                metadata.capture,
+                                source,
+                            )
+                        finally:
+                            source.close()
+                        expected = _present_component(
+                            metadata.source_state.modules, "source module state"
+                        )
+                        if manifest != expected.manifest:
+                            raise ValueError(
+                                "external-boot staged recovery modules do not match metadata"
+                            )
+                    elif layout != staged:
+                        raise ValueError(
+                            "external-boot module recovery staging conflicts with metadata"
+                        )
+                    if publication.observe_layout() != staged:
+                        raise ValueError(
+                            "external-boot staged recovery modules changed before publication"
+                        )
+                    publication.guest_sync()
+                    publication.record_phase(PublicationPhase.MOVE_READY)
+            if isinstance(metadata.capture, AbsentModuleCapture):
+                self._finish_absence_publication(publication, prior=target)
+            else:
+                assert desired is not None
+                self._finish_present_publication(publication, prior=target, desired=desired)
+            completed = publication.metadata
+        self.record_phase(completed, "module-restored")
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._host.define_source(metadata)
+        while metadata.phase == "module-restored":
+            xml, active = self._host_state(metadata)
+            if xml == "target" and not active:
+                self._session.define_xml(metadata.source_xml)
+                continue
+            if xml == "source" and not active:
+                self.record_phase(metadata, "source-restored")
+                return
+            raise ValueError(
+                "external-boot source XML/power state conflicts with recovery metadata"
+            )
 
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._host.restore_power(metadata)
+        while metadata.phase == "source-restored":
+            xml, active = self._host_state(metadata)
+            if xml == "source" and not active and metadata.prior_power == "inactive":
+                self.record_phase(metadata, "recovered")
+                return
+            if xml == "source" and not active and metadata.prior_power == "running":
+                self._session.start()
+                continue
+            if xml == "source" and active and metadata.prior_power == "running":
+                self._require_readiness()
+                if self._host_state(metadata) != ("source", True):
+                    raise ValueError("external-boot source changed during readiness")
+                self.record_phase(metadata, "recovered")
+                return
+            raise ValueError("external-boot restored power state conflicts with recovery metadata")
 
     def record_phase(
         self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
@@ -792,15 +1043,209 @@ class RealLocalExternalBootIO:
             return store.cleanup_complete(recovery.recovery_ref, recovery)
 
     def cleanup(self, metadata: LocalRecoveryMetadataV1, point_digest: Digest) -> None:
-        self._host.cleanup_payloads(metadata)
         with RecoveryMetadataStore(self._recovery_root) as store:
-            store.publish_tombstone(
-                _recovery_ref(metadata.binding), metadata.binding, metadata, point_digest
+            reference = _recovery_ref(metadata.binding)
+            if store.reopen(reference, metadata.binding) != metadata:
+                raise ValueError("recovery metadata changed before cleanup")
+            self._session.cleanup_payloads()
+            store.publish_tombstone(reference, metadata.binding, metadata, point_digest)
+
+    def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
+        ownership = ActivationOwnership(
+            system_id=metadata.binding.system_id,
+            run_id=metadata.binding.run_id,
+        )
+        parts = _artifact_ref_parts(metadata.materialized_modules, ownership)
+        descriptor = self._session.open_artifact(parts[4], os.O_RDONLY)
+        try:
+            return KernelBundleSource(
+                descriptor,
+                binding=metadata.binding,
+                release=metadata.release,
+                size=metadata.materialized_modules_bytes,
+                digest=metadata.materialized_modules_sha256,
+            )
+        finally:
+            os.close(descriptor)
+
+    def _recovery_archive_source(
+        self,
+        metadata: LocalRecoveryMetadataV1,
+    ) -> RecoveryArchiveSource:
+        if not isinstance(metadata.capture, ModuleArchiveCapture):
+            raise ValueError("absent module capture has no recovery archive")
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.recovery_archive_source(
+                _recovery_ref(metadata.binding),
+                metadata,
             )
 
-    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
+    @staticmethod
+    def _finish_present_publication(
+        publication: _SessionModulePublicationIO,
+        *,
+        prior: ComponentState | None,
+        desired: PresentComponentState,
+    ) -> None:
+        while publication.metadata.phase != PublicationPhase.PUBLICATION_COMPLETE:
+            phase = PublicationPhase(publication.metadata.phase)
+            advance_module_publication(
+                publication,
+                phase=phase,
+                layout=publication.observe_layout(),
+                prior=prior,
+                desired=desired,
+            )
+        if publication.observe_layout() != ModuleLayout(desired, None, None):
+            raise ValueError("external-boot completed module publication layout conflicts")
+
+    @staticmethod
+    def _finish_absence_publication(
+        publication: _SessionModulePublicationIO,
+        *,
+        prior: PresentComponentState,
+    ) -> None:
+        while publication.metadata.phase != PublicationPhase.ABSENCE_CLEANED:
+            phase = PublicationPhase(publication.metadata.phase)
+            advance_absence_publication(
+                publication,
+                phase=phase,
+                layout=publication.observe_layout(),
+                prior=prior,
+            )
+        if publication.observe_layout() != ModuleLayout(None, None, None):
+            raise ValueError("external-boot completed module absence layout conflicts")
+
+    def _host_state(
+        self, metadata: LocalRecoveryMetadataV1
+    ) -> tuple[Literal["source", "target"], bool]:
+        inspection = self._session.inspect_closed()
+        if inspection.xml == metadata.source_xml.encode():
+            return "source", inspection.active
+        if inspection.xml == metadata.target_xml.encode():
+            return "target", inspection.active
+        raise ValueError("external-boot observed domain XML does not match recovery metadata")
+
+    def _stop_for_recovery(self, metadata: LocalRecoveryMetadataV1) -> None:
+        xml, active = self._host_state(metadata)
+        if metadata.phase == "target-defined" and xml != "target":
+            raise ValueError("external-boot recovery expected the target domain XML")
+        if active and xml != "target":
+            raise ValueError("external-boot refuses to stop an unexpected running domain")
+        if not active:
+            self._session.require_inactive()
+            return
+        try:
+            self._session.stop_and_require_inactive()
+        except Exception as primary:
+            try:
+                after = self._host_state(metadata)
+            except Exception as observation_error:
+                primary.add_note(f"post-stop host-state observation failed: {observation_error!r}")
+                raise primary from None
+            if after == (xml, False):
+                self._session.require_inactive()
+                return
+            raise
+        if self._host_state(metadata) != (xml, False):
+            raise ValueError("external-boot stop did not preserve exact XML and inactivity")
+
+    def _require_readiness(self) -> None:
+        if self._session.readiness() != ReadinessResult(True, True, None):
+            raise ValueError("external-boot readiness did not answer with exact success")
+
+
+class _SessionModulePublicationIO:
+    """Session-owned adapter for one exact three-name module publication."""
+
+    def __init__(
+        self,
+        guest: _GuestfsTreeHandle,
+        metadata: LocalRecoveryMetadataV1,
+        recovery_root: Path,
+        writer: GuestRecoveryWriter,
+        session: LocalExternalBootSession,
+    ) -> None:
+        self._guest = guest
+        self.metadata = metadata
+        self._recovery_root = recovery_root
+        self._writer = writer
+        self._session = session
+        base = f"/lib/modules/.kdive-{metadata.binding.activation_id}"
+        self._live = f"/lib/modules/{metadata.release}"
+        self._staging = f"{base}-staging"
+        self._old = f"{base}-old"
+
+    def require_inactive(self) -> None:
+        self._session.require_inactive()
+
+    def observe_layout(self) -> ModuleLayout:
+        return ModuleLayout(
+            self._observe(self._live),
+            self._observe(self._staging),
+            self._observe(self._old),
+        )
+
+    def create_staging(self) -> None:
+        self._guest.mkdir(self._staging)
+
+    def staging_tree(self) -> LibguestfsAuthenticatedGuestTree:
+        return LibguestfsAuthenticatedGuestTree(
+            self._guest,
+            binding=self.metadata.binding,
+            release=self.metadata.release,
+            root=self._staging,
+            mutable=True,
+        )
+
+    def move_live_to_old(self) -> None:
+        self._guest.mv(self._live, self._old)
+
+    def move_staging_to_live(self) -> None:
+        self._guest.mv(self._staging, self._live)
+
+    def move_old_to_live(self) -> None:
+        self._guest.mv(self._old, self._live)
+
+    def remove_old(self) -> None:
+        self._guest.rm_rf(self._old)
+
+    def guest_sync(self) -> None:
+        self._guest.sync()
+
+    def record_phase(self, phase: PublicationPhase) -> None:
         with RecoveryMetadataStore(self._recovery_root) as store:
-            store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
+            self.metadata = store.record_phase(
+                _recovery_ref(self.metadata.binding),
+                self.metadata.binding,
+                self.metadata,
+                cast(RecoveryPhase, phase.value),
+            )
+
+    def _observe(self, root: str) -> ComponentState | None:
+        tree = LibguestfsAuthenticatedGuestTree(
+            self._guest,
+            binding=self.metadata.binding,
+            release=self.metadata.release,
+            root=root,
+            mutable=False,
+        )
+        kind = tree.root_kind()
+        if kind == "absent":
+            return None
+        if kind != "directory":
+            raise ValueError("external-boot module publication name is not a directory")
+        return self._writer.observe(tree, self.metadata.release)
+
+
+def _layout_component(state: ComponentState) -> PresentComponentState | None:
+    return state if isinstance(state, PresentComponentState) else None
+
+
+def _present_component(state: ComponentState, label: str) -> PresentComponentState:
+    if not isinstance(state, PresentComponentState):
+        raise ValueError(f"external-boot {label} must be present")
+    return state
 
 
 def _validate_preparation_owner(
@@ -812,8 +1257,52 @@ def _validate_preparation_owner(
         value.binding != binding
         or value.materialization_identity != materialization.identity
         or value.plan_identity != materialization.plan_identity
+        or value.expected_running != materialization.kernel_observation
     ):
         raise ValueError("pre-stop intent does not match activation")
+
+
+def _complete_preparation_metadata(
+    intent: LocalPreStopIntentV1,
+    materialization: ExternalBootMaterialization,
+    capture: ModuleCapture,
+) -> LocalRecoveryMetadataV1:
+    source_modules: ComponentState
+    if isinstance(capture, AbsentModuleCapture):
+        source_modules = AbsentComponentState()
+    else:
+        source_modules = PresentComponentState(manifest=capture.manifest)
+    return LocalRecoveryMetadataV1.model_validate(
+        intent.model_dump(exclude={"schema_"}, by_alias=True)
+        | {
+            "source_state": ProviderStateIdentity(
+                definition=intent.source_boot,
+                modules=source_modules,
+            ),
+            "target_state": ProviderStateIdentity(
+                definition=intent.target_boot,
+                modules=PresentComponentState(manifest=materialization.installed_module_tree),
+            ),
+            "capture": capture,
+            "phase": "pre-stop-intent",
+        }
+    )
+
+
+def _validate_preparation_inspection(
+    intent: LocalPreStopIntentV1,
+    inspection: ClosedDomainInspection,
+    *,
+    retry: bool,
+) -> None:
+    expected_prior = "running" if inspection.active else "inactive"
+    if (
+        intent.source_xml.encode() != inspection.xml
+        or intent.source_definition != inspection.definition_identity
+        or intent.source_boot != inspection.source_boot_identity
+        or (not retry and intent.prior_power != expected_prior)
+    ):
+        raise ValueError("closed domain inspection does not match pre-stop intent")
 
 
 class LocalLibvirtExternalBoot:
@@ -834,16 +1323,20 @@ class LocalLibvirtExternalBoot:
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
     ) -> ExternalBootMaterialization:
-        materialization = self._io.materialize(plan, authority)
-        if (
-            materialization.provider_kind != "local-libvirt"
-            or materialization.ownership.system_id != plan.ownership.system_id
-            or materialization.ownership.run_id != plan.ownership.run_id
-            or materialization.plan_identity != plan.identity
-            or materialization.architecture != plan.architecture
-        ):
-            raise ValueError("external-boot materialization does not match plan")
-        return materialization
+        expected = ExpectedOperationOwnership(
+            UUID(plan.ownership.system_id), UUID(plan.ownership.run_id), None
+        )
+        with self._io.open(authority, expected) as operation:
+            materialization = operation.materialize(plan)
+            if (
+                materialization.provider_kind != "local-libvirt"
+                or materialization.ownership.system_id != plan.ownership.system_id
+                or materialization.ownership.run_id != plan.ownership.run_id
+                or materialization.plan_identity != plan.identity
+                or materialization.architecture != plan.architecture
+            ):
+                raise ValueError("external-boot materialization does not match plan")
+            return materialization
 
     def prepare(
         self,
@@ -851,77 +1344,103 @@ class LocalLibvirtExternalBoot:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> RecoveryPoint:
-        if (
-            binding.system_id != materialization.ownership.system_id
-            or binding.run_id != materialization.ownership.run_id
-        ):
-            raise ValueError("external-boot binding does not match materialization")
-        metadata = self._io.prepare(materialization, binding, authority)
-        if (
-            metadata.binding != binding
-            or metadata.materialization_identity != materialization.identity
-            or metadata.plan_identity != materialization.plan_identity
-        ):
-            raise ValueError("external-boot prepared metadata does not match request")
-        point = RecoveryPoint(
-            binding=binding,
-            plan_identity=metadata.plan_identity,
-            materialization_identity=metadata.materialization_identity,
-            recovery_ref=self._io.recovery_ref(binding),
-            source_state=metadata.source_state,
-            target_state=metadata.target_state,
-        )
-        self._validate_metadata(point, metadata)
-        return point
+        expected = _expected_binding(binding)
+        with self._io.open(authority, expected) as operation:
+            if (
+                binding.system_id != materialization.ownership.system_id
+                or binding.run_id != materialization.ownership.run_id
+            ):
+                raise ValueError("external-boot binding does not match materialization")
+            metadata = operation.prepare(materialization, binding)
+            if (
+                metadata.binding != binding
+                or metadata.materialization_identity != materialization.identity
+                or metadata.plan_identity != materialization.plan_identity
+            ):
+                raise ValueError("external-boot prepared metadata does not match request")
+            point = RecoveryPoint(
+                binding=binding,
+                plan_identity=metadata.plan_identity,
+                materialization_identity=metadata.materialization_identity,
+                recovery_ref=operation.recovery_ref(binding),
+                source_state=metadata.source_state,
+                target_state=metadata.target_state,
+            )
+            self._validate_metadata(point, metadata)
+            return point
 
     def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        metadata = self._reopen(recovery, authority)
-        if metadata.phase not in {"pre-stop-intent", "module-restored", "target-defined"}:
-            raise ValueError("external-boot activation phase is not resumable")
-        if metadata.phase == "pre-stop-intent":
-            self._io.activate_modules(metadata)
-            metadata = self._io.record_phase(metadata, "module-restored")
-        if metadata.phase == "module-restored":
-            self._io.define_target(metadata)
-            self._io.record_phase(metadata, "target-defined")
+        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+            metadata = self._reopen(operation, recovery)
+            resumable = {
+                "pre-stop-intent",
+                "move-ready",
+                "old-aside",
+                "rollback-ready",
+                "rollback-complete",
+                "new-live",
+                "publication-complete",
+                "module-restored",
+                "target-defined",
+            }
+            if metadata.phase not in resumable:
+                raise ValueError("external-boot activation phase is not resumable")
+            if metadata.phase == "target-defined":
+                return
+            if metadata.phase != "module-restored":
+                operation.activate_modules(metadata)
+                metadata = self._reopen(operation, recovery)
+            if metadata.phase == "module-restored":
+                operation.define_target(metadata)
 
     def observe(
         self, recovery: RecoveryPoint, authority: OpaqueProviderRef
     ) -> RunningKernelObservation:
-        metadata = self._reopen(recovery, authority)
-        if metadata.phase != "target-defined":
-            raise ValueError("external-boot target-defined evidence is required")
-        return self._io.observe_running(metadata)
+        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+            metadata = self._reopen(operation, recovery)
+            if metadata.phase != "target-defined":
+                raise ValueError("external-boot target-defined evidence is required")
+            return operation.observe_running(metadata)
 
     def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        metadata = self._reopen(recovery, authority)
-        if metadata.phase in {"recovered", "cleaned"}:
-            return
-        if metadata.phase not in {
-            "target-defined",
-            "module-restored",
-            "source-restored",
-        }:
-            raise ValueError("external-boot recovery phase is not resumable")
-        if metadata.phase == "target-defined":
-            self._io.recover_modules(metadata)
-            metadata = self._io.record_phase(metadata, "module-restored")
-        if metadata.phase == "module-restored":
-            self._io.define_source(metadata)
-            metadata = self._io.record_phase(metadata, "source-restored")
-        if metadata.phase == "source-restored":
-            self._io.restore_power(metadata)
-            self._io.record_phase(metadata, "recovered")
+        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+            metadata = self._reopen(operation, recovery)
+            if metadata.phase in {"recovered", "cleaned"}:
+                return
+            if metadata.phase not in {
+                "target-defined",
+                "move-ready",
+                "old-aside",
+                "rollback-ready",
+                "rollback-complete",
+                "new-live",
+                "publication-complete",
+                "absence-live",
+                "absence-complete",
+                "absence-cleaned",
+                "module-restored",
+                "source-restored",
+            }:
+                raise ValueError("external-boot recovery phase is not resumable")
+            if metadata.phase not in {"source-restored"}:
+                operation.recover_modules(metadata)
+                metadata = self._reopen(operation, recovery)
+            if metadata.phase == "module-restored":
+                operation.define_source(metadata)
+                metadata = self._reopen(operation, recovery)
+            if metadata.phase == "source-restored":
+                operation.restore_power(metadata)
 
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        if self._io.cleanup_complete(recovery):
-            return
-        metadata = self._reopen(recovery, authority)
-        if metadata.phase == "cleaned":
-            return
-        if metadata.phase != "recovered":
-            raise ValueError("external-boot recovery must complete before cleanup")
-        self._io.cleanup(metadata, self.point_digest(recovery))
+        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+            if operation.cleanup_complete(recovery):
+                return
+            metadata = self._reopen(operation, recovery)
+            if metadata.phase == "cleaned":
+                return
+            if metadata.phase != "recovered":
+                raise ValueError("external-boot recovery must complete before cleanup")
+            operation.cleanup(metadata, self.point_digest(recovery))
 
     def finalize_cleanup_tombstone(
         self,
@@ -938,9 +1457,9 @@ class LocalLibvirtExternalBoot:
         self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(
-        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+        self, operation: LocalExternalBootOperation, recovery: RecoveryPoint
     ) -> LocalRecoveryMetadataV1:
-        metadata = self._io.reopen(recovery, authority)
+        metadata = operation.reopen(recovery)
         self._validate_metadata(recovery, metadata)
         return metadata
 
@@ -954,6 +1473,12 @@ class LocalLibvirtExternalBoot:
             or metadata.target_state != recovery.target_state
         ):
             raise ValueError("external-boot recovery metadata does not match recovery point")
+
+
+def _expected_binding(binding: ExternalBootActivationBinding) -> ExpectedOperationOwnership:
+    return ExpectedOperationOwnership(
+        UUID(binding.system_id), UUID(binding.run_id), UUID(binding.activation_id)
+    )
 
 
 def recovery_directory_name(
@@ -1100,6 +1625,51 @@ class RecoveryMetadataStore:
         directory_fd = _open_private_directory(self._root_fd, f".{final_name}.partial")
         try:
             return self._read_pre_stop(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def recovery_archive_sink(
+        self,
+        reference: OpaqueProviderRef,
+        intent: LocalPreStopIntentV1,
+    ) -> RecoveryArchiveSink:
+        """Open an owner-bound archive sink beneath an exact partial intent."""
+        self._require_open()
+        final_name = recovery_directory_name(reference, intent.binding)
+        directory_fd = _open_private_directory(self._root_fd, f".{final_name}.partial")
+        try:
+            if self._read_pre_stop(directory_fd) != intent:
+                raise ValueError("pre-stop intent changed before recovery capture")
+            return RecoveryArchiveSink(
+                directory_fd,
+                binding=intent.binding,
+                release=intent.release,
+            )
+        finally:
+            os.close(directory_fd)
+
+    def recovery_archive_source(
+        self,
+        reference: OpaqueProviderRef,
+        metadata: LocalRecoveryMetadataV1,
+    ) -> RecoveryArchiveSource:
+        """Open an owner-bound archive source beneath exact complete metadata."""
+        self._require_open()
+        if not isinstance(metadata.capture, ModuleArchiveCapture):
+            raise ValueError("absent module capture has no recovery archive")
+        directory_fd = _open_private_directory(
+            self._root_fd,
+            recovery_directory_name(reference, metadata.binding),
+        )
+        try:
+            if self._read(directory_fd) != metadata:
+                raise ValueError("recovery metadata changed before archive reopen")
+            return RecoveryArchiveSource(
+                directory_fd,
+                binding=metadata.binding,
+                release=metadata.release,
+                capture=metadata.capture,
+            )
         finally:
             os.close(directory_fd)
 
@@ -1335,6 +1905,9 @@ def _metadata_extends_intent(
         "source_definition",
         "source_boot",
         "target_boot",
+        "target_projection_sha256",
+        "target_xml",
+        "expected_running",
         "prior_power",
     )
     return all(getattr(metadata, field) == getattr(intent, field) for field in shared)
@@ -1438,12 +2011,34 @@ def _move_with_reclassification(
         raise ValueError("external-boot module publication conflict") from exc
 
 
+def _remove_with_reclassification(
+    io: ModulePublicationIO,
+    *,
+    before: ModuleLayout,
+    after: ModuleLayout,
+    after_phase: PublicationPhase,
+) -> None:
+    """Retry a no-effect removal or record its exact after-effect layout."""
+    try:
+        io.remove_old()
+    except OSError as exc:
+        io.require_inactive()
+        observed = io.observe_layout()
+        if observed == before:
+            io.remove_old()
+            return
+        if observed == after:
+            _sync_phase(io, after_phase)
+            return
+        raise ValueError("external-boot module removal conflict") from exc
+
+
 def advance_module_publication(
     io: ModulePublicationIO,
     *,
     phase: PublicationPhase,
     layout: ModuleLayout,
-    prior: ComponentState,
+    prior: ComponentState | None,
     desired: ComponentState,
 ) -> None:
     """Perform the sole ADR-0586 action allowed by a present-tree restart row."""
@@ -1455,6 +2050,9 @@ def advance_module_publication(
             io.require_inactive()
             observed = io.observe_layout()
             if observed == ModuleLayout(None, desired, prior):
+                if prior is None:
+                    io.move_staging_to_live()
+                    return
                 io.record_phase(PublicationPhase.ROLLBACK_READY)
                 return
             if observed == ModuleLayout(desired, None, prior):
@@ -1490,8 +2088,18 @@ def advance_module_publication(
         (PublicationPhase.ROLLBACK_READY, ModuleLayout(prior, desired, None)): lambda: _sync_phase(
             io, PublicationPhase.ROLLBACK_COMPLETE
         ),
-        (PublicationPhase.ROLLBACK_COMPLETE, ModuleLayout(prior, desired, None)): lambda: None,
-        (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, prior)): io.remove_old,
+        (
+            PublicationPhase.ROLLBACK_COMPLETE,
+            ModuleLayout(prior, desired, None),
+        ): lambda: io.record_phase(PublicationPhase.MOVE_READY),
+        (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, prior)): lambda: (
+            _remove_with_reclassification(
+                io,
+                before=ModuleLayout(desired, None, prior),
+                after=ModuleLayout(desired, None, None),
+                after_phase=PublicationPhase.PUBLICATION_COMPLETE,
+            )
+        ),
         (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, None)): lambda: _sync_phase(
             io, PublicationPhase.PUBLICATION_COMPLETE
         ),
@@ -1532,7 +2140,14 @@ def advance_absence_publication(
         (PublicationPhase.ABSENCE_LIVE, ModuleLayout(None, None, prior)): lambda: io.record_phase(
             PublicationPhase.ABSENCE_COMPLETE
         ),
-        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, prior)): io.remove_old,
+        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, prior)): lambda: (
+            _remove_with_reclassification(
+                io,
+                before=ModuleLayout(None, None, prior),
+                after=ModuleLayout(None, None, None),
+                after_phase=PublicationPhase.ABSENCE_CLEANED,
+            )
+        ),
         (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, None)): lambda: _sync_phase(
             io, PublicationPhase.ABSENCE_CLEANED
         ),
