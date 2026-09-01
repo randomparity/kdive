@@ -286,6 +286,9 @@ class Guest:
     def user_cancel(self) -> None:
         self.events.append("guest.cancel")
 
+    def last_errno(self) -> int:
+        return 0
+
 
 class Find0Guest(Guest):
     def __init__(
@@ -295,6 +298,7 @@ class Find0Guest(Guest):
         *,
         producer_fault: BaseException | None = None,
         cancellation_fault: BaseException | None = None,
+        last_errno_value: int = 0,
         wait_before_write: bool = False,
         cooperate_with_cancel: bool = True,
     ) -> None:
@@ -302,6 +306,7 @@ class Find0Guest(Guest):
         self.entries = entries
         self.producer_fault = producer_fault
         self.cancellation_fault = cancellation_fault
+        self.last_errno_value = last_errno_value
         self.wait_before_write = wait_before_write
         self.cooperate_with_cancel = cooperate_with_cancel
         self.producer_started = threading.Event()
@@ -312,8 +317,11 @@ class Find0Guest(Guest):
         self.output_was_fifo = False
         self.output_parent_mode: int | None = None
         self.find0_calls = 0
+        self.producer_thread: threading.Thread | None = None
+        self.last_errno_threads: list[threading.Thread] = []
 
     def find0(self, directory: str, files: str) -> None:
+        self.producer_thread = threading.current_thread()
         self.find0_calls += 1
         self.events.append(f"guest.find0:{directory}")
         try:
@@ -339,6 +347,10 @@ class Find0Guest(Guest):
                 raise self.producer_fault
         finally:
             self.producer_finished.set()
+
+    def last_errno(self) -> int:
+        self.last_errno_threads.append(threading.current_thread())
+        return self.last_errno_value
 
     def user_cancel(self) -> None:
         super().user_cancel()
@@ -564,7 +576,8 @@ def test_find0_tree_normalizes_python_binding_cancellation_on_early_close() -> N
     producer = Find0Guest(
         events,
         [],
-        cancellation_fault=RuntimeError("find0: transfer was cancelled"),
+        cancellation_fault=RuntimeError("find0: operation cancelled by user"),
+        last_errno_value=errno.EINTR,
         wait_before_write=True,
     )
     session, _lease_value = _stream_session(events, producer)
@@ -577,6 +590,50 @@ def test_find0_tree_normalizes_python_binding_cancellation_on_early_close() -> N
 
     assert producer.cancel_requested.is_set()
     assert producer.producer_finished.is_set()
+    assert producer.last_errno_threads == [producer.producer_thread]
+    session.close()
+
+
+def test_find0_tree_does_not_normalize_cancellation_message_with_zero_errno() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        cancellation_fault=RuntimeError("find0: operation cancelled by user"),
+        wait_before_write=True,
+    )
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+        cursor.__enter__()
+        assert producer.producer_started.wait(timeout=5)
+        with pytest.raises(RuntimeError, match="operation cancelled by user"):
+            cursor.close()
+
+    assert producer.last_errno_threads == [producer.producer_thread]
+    session.close()
+
+
+def test_find0_tree_does_not_normalize_cancellation_message_with_other_errno() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        cancellation_fault=RuntimeError("find0: operation cancelled by user"),
+        last_errno_value=errno.EIO,
+        wait_before_write=True,
+    )
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+        cursor.__enter__()
+        assert producer.producer_started.wait(timeout=5)
+        with pytest.raises(RuntimeError, match="operation cancelled by user"):
+            cursor.close()
+
+    assert producer.last_errno_threads == [producer.producer_thread]
     session.close()
 
 
@@ -596,6 +653,7 @@ def test_find0_tree_does_not_normalize_unrelated_python_binding_runtime_error() 
     ):
         list(entries)
 
+    assert producer.last_errno_threads == [producer.producer_thread]
     session.close()
 
 
@@ -1165,7 +1223,7 @@ def test_session_close_recancels_find0_after_late_transfer_becomes_active() -> N
         destination_mode: int | None = None
 
         def __init__(self) -> None:
-            super().__init__(events, [])
+            super().__init__(events, [], last_errno_value=errno.EINTR)
 
         def find0(self, directory: str, files: str) -> None:
             self.find0_calls += 1
@@ -1178,7 +1236,7 @@ def test_session_close_recancels_find0_after_late_transfer_becomes_active() -> N
                     transfer_active.set()
                     output.write(b"x" * (2 * 65_536))
                 if active_cancel.is_set():
-                    raise RuntimeError("find0: transfer was cancelled")
+                    raise RuntimeError("find0: operation cancelled by user")
             finally:
                 self.producer_finished.set()
 
