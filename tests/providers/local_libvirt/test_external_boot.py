@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import json
 import os
 import stat
@@ -274,6 +275,71 @@ def test_publication_phase_evidence_follows_guest_sync() -> None:
     )
 
     assert io.actions == ["inactive", "guest-sync", "phase:new-live"]
+
+
+@pytest.mark.parametrize("prior", [_PRIOR, None])
+def test_every_unlisted_present_phase_layout_pair_conflicts_without_mutation(
+    prior: PresentComponentState | None,
+) -> None:
+    foreign = PresentComponentState(manifest="sha256:" + "f" * 64)
+    values = {None, _DESIRED, foreign, prior}
+    accepted = {
+        (PublicationPhase.MOVE_READY, ModuleLayout(prior, _DESIRED, None)),
+        (PublicationPhase.MOVE_READY, ModuleLayout(None, _DESIRED, prior)),
+        (PublicationPhase.OLD_ASIDE, ModuleLayout(None, _DESIRED, prior)),
+        (PublicationPhase.OLD_ASIDE, ModuleLayout(_DESIRED, None, prior)),
+        (PublicationPhase.ROLLBACK_READY, ModuleLayout(None, _DESIRED, prior)),
+        (PublicationPhase.ROLLBACK_READY, ModuleLayout(prior, _DESIRED, None)),
+        (PublicationPhase.ROLLBACK_COMPLETE, ModuleLayout(prior, _DESIRED, None)),
+        (PublicationPhase.NEW_LIVE, ModuleLayout(_DESIRED, None, prior)),
+        (PublicationPhase.NEW_LIVE, ModuleLayout(_DESIRED, None, None)),
+        (PublicationPhase.PUBLICATION_COMPLETE, ModuleLayout(_DESIRED, None, None)),
+    }
+
+    combinations = itertools.product(PublicationPhase, itertools.product(values, repeat=3))
+    for phase, components in combinations:
+        layout = ModuleLayout(*components)
+        if (phase, layout) in accepted:
+            continue
+        publication = _PublicationIO(layout)
+        with pytest.raises(ValueError, match="conflict"):
+            advance_module_publication(
+                publication,
+                phase=phase,
+                layout=layout,
+                prior=prior,
+                desired=_DESIRED,
+            )
+        assert publication.actions == ["inactive"]
+
+
+def test_every_unlisted_absence_phase_layout_pair_conflicts_without_mutation() -> None:
+    foreign = PresentComponentState(manifest="sha256:" + "f" * 64)
+    values = {None, _PRIOR, foreign}
+    accepted = {
+        (PublicationPhase.MOVE_READY, ModuleLayout(_PRIOR, None, None)),
+        (PublicationPhase.MOVE_READY, ModuleLayout(None, None, _PRIOR)),
+        (PublicationPhase.MOVE_READY, ModuleLayout(None, None, None)),
+        (PublicationPhase.ABSENCE_LIVE, ModuleLayout(None, None, _PRIOR)),
+        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, _PRIOR)),
+        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, None)),
+        (PublicationPhase.ABSENCE_CLEANED, ModuleLayout(None, None, None)),
+    }
+
+    combinations = itertools.product(PublicationPhase, itertools.product(values, repeat=3))
+    for phase, components in combinations:
+        layout = ModuleLayout(*components)
+        if (phase, layout) in accepted:
+            continue
+        publication = _PublicationIO(layout)
+        with pytest.raises(ValueError, match="conflict"):
+            advance_absence_publication(
+                publication,
+                phase=phase,
+                layout=layout,
+                prior=_PRIOR,
+            )
+        assert publication.actions == ["inactive"]
 
 
 @pytest.mark.parametrize(
@@ -2418,6 +2484,7 @@ def test_absence_recovery_restarts_exactly_around_every_mutation_and_evidence_wr
     "fault",
     [
         "move:" + _OLD_NAME + "->6.12.0#1",
+        "sync#3",
         "phase:rollback-complete#1",
         "phase:move-ready#2",
     ],
@@ -2452,6 +2519,33 @@ def test_fresh_activation_resumes_every_rollback_boundary(
     assert any(action.startswith("phase:rollback-complete") for action in harness.faults.actions)
     assert harness.session.active
     assert len(harness.sessions) >= 3
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+def test_fresh_activation_resumes_around_rollback_ready_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    effect: str,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures["move:" + _STAGING_NAME + "->6.12.0#1"] = "os-before"
+    harness.faults.failures["phase:rollback-ready#1"] = effect
+
+    _retry_until_phase(harness.activate, harness.root, harness.metadata, "target-defined")
+
+    rollback_moves = [
+        action
+        for action in harness.faults.actions
+        if action.startswith("move:" + _OLD_NAME + "->6.12.0")
+    ]
+    assert rollback_moves == ([] if effect == "before" else ["move:" + _OLD_NAME + "->6.12.0#1"])
+    assert harness.session.active
+    assert len(harness.sessions) >= 2
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
