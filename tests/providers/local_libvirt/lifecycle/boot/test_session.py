@@ -4,6 +4,7 @@ import errno
 import io
 import os
 import queue
+import selectors
 import stat
 import threading
 from dataclasses import FrozenInstanceError
@@ -514,6 +515,62 @@ def test_find0_tree_does_not_normalize_unrelated_python_binding_runtime_error() 
     session.close()
 
 
+def test_find0_tree_reports_file_not_found_after_deliberate_cancellation() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        wait_before_write=True,
+        cancellation_fault=FileNotFoundError("backend path disappeared"),
+    )
+    pin_observations: list[tuple[bool, bool]] = []
+
+    class TrackingPin(FakePin):
+        def close(self) -> None:
+            assert producer.output_path is not None
+            pin_observations.append(
+                (producer.producer_finished.is_set(), producer.output_path.parent.exists())
+            )
+            events.append("pin.close")
+            super().close()
+
+    def pin_lease(lease: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert isinstance(lease, FakeLease)
+        return PinnedOperationOwnership(
+            OperationOwnership(lease.system_id, lease.binding), TrackingPin(lease)
+        )
+
+    lease = _lease()
+    session = LocalExternalBootSessionFactory(
+        pin_lease=pin_lease,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: producer,
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
+        close_descriptor=lambda _fd: events.append("artifact.close"),
+    ).open(lease, _expected())
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    cursor.__enter__()
+    assert producer.producer_started.wait(timeout=5)
+
+    with pytest.raises(FileNotFoundError, match="backend path disappeared"):
+        cursor.close()
+
+    assert producer.producer_finished.is_set()
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    assert lease.pins == 1
+    guest_context.__exit__(None, None, None)
+    session.close()
+    assert pin_observations == [(True, False)]
+    assert lease.pins == 0
+    assert events[-1] == "pin.close"
+
+
 def test_session_close_abandons_cursor_before_find0_and_releases_pin_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -597,6 +654,287 @@ def test_session_close_abandons_cursor_before_find0_and_releases_pin_last(
     assert lease.pins == 0
     assert not Path(fifo).parent.exists()
     assert events[-1] == "pin.close"
+
+
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_find0_tree_selector_allocation_fault_fails_setup_closed(
+    fail_at: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    session, _lease_value = _stream_session(events, producer)
+    real_default_selector = selectors.DefaultSelector
+    allocation_count = 0
+
+    class TrackingSelector:
+        def __init__(self) -> None:
+            self.delegate = real_default_selector()
+            self.closed = False
+
+        def register(
+            self, fileobj: int, events: int, data: object | None = None
+        ) -> selectors.SelectorKey:
+            return self.delegate.register(fileobj, events, data)
+
+        def close(self) -> None:
+            self.delegate.close()
+            self.closed = True
+
+    constructed: list[TrackingSelector] = []
+
+    def allocate_selector() -> selectors.BaseSelector:
+        nonlocal allocation_count
+        allocation_count += 1
+        if allocation_count == fail_at:
+            raise OSError(f"selector allocation {fail_at}")
+        selector = TrackingSelector()
+        constructed.append(selector)
+        return selector  # ty: ignore[invalid-return-type]
+
+    monkeypatch.setattr(selectors, "DefaultSelector", allocate_selector)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    try:
+        with pytest.raises(OSError, match=f"selector allocation {fail_at}"):
+            cursor.__enter__()
+    finally:
+        monkeypatch.setattr(selectors, "DefaultSelector", real_default_selector)
+        if isinstance(cursor, _Find0TreeCursor) and cursor._entered and not cursor._closed:
+            cursor.close()
+        guest_context.__exit__(None, None, None)
+        session.close()
+
+    assert producer.find0_calls == 0
+    assert all(selector.closed for selector in constructed)
+    assert isinstance(cursor, _Find0TreeCursor)
+    assert cursor._directory is None
+    assert cursor._fifo is None
+    assert all(
+        getattr(cursor, attribute) == -1
+        for attribute in (
+            "_read_fd",
+            "_anchor_fd",
+            "_revocation_fd",
+            "_revocation_anchor_fd",
+            "_done_read_fd",
+            "_done_write_fd",
+        )
+    )
+
+
+@pytest.mark.parametrize("fail_at", [1, 2, 3, 4])
+def test_find0_tree_selector_registration_fault_fails_setup_closed(
+    fail_at: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    session, _lease_value = _stream_session(events, producer)
+    real_default_selector = selectors.DefaultSelector
+    registration_count = 0
+
+    class FaultingSelector:
+        def __init__(self) -> None:
+            self.delegate = real_default_selector()
+            self.closed = False
+            constructed.append(self)
+
+        def register(
+            self, fileobj: int, events: int, data: object | None = None
+        ) -> selectors.SelectorKey:
+            nonlocal registration_count
+            registration_count += 1
+            if registration_count == fail_at:
+                raise OSError(f"selector registration {fail_at}")
+            return self.delegate.register(fileobj, events, data)
+
+        def close(self) -> None:
+            self.delegate.close()
+            self.closed = True
+
+    constructed: list[FaultingSelector] = []
+
+    monkeypatch.setattr(selectors, "DefaultSelector", FaultingSelector)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    try:
+        with pytest.raises(OSError, match=f"selector registration {fail_at}"):
+            cursor.__enter__()
+    finally:
+        monkeypatch.setattr(selectors, "DefaultSelector", real_default_selector)
+        if isinstance(cursor, _Find0TreeCursor) and cursor._entered and not cursor._closed:
+            cursor.close()
+        guest_context.__exit__(None, None, None)
+        session.close()
+
+    assert producer.find0_calls == 0
+    assert all(selector.closed for selector in constructed)
+    assert isinstance(cursor, _Find0TreeCursor)
+    assert cursor._directory is None
+    assert cursor._fifo is None
+    assert all(
+        getattr(cursor, attribute) == -1
+        for attribute in (
+            "_read_fd",
+            "_anchor_fd",
+            "_revocation_fd",
+            "_revocation_anchor_fd",
+            "_done_read_fd",
+            "_done_write_fd",
+        )
+    )
+
+
+def test_find0_tree_selector_registration_preserves_primary_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [])
+    session, _lease_value = _stream_session(events, producer)
+    real_default_selector = selectors.DefaultSelector
+    registration_count = 0
+
+    class CloseFaultSelector:
+        def __init__(self) -> None:
+            self.delegate = real_default_selector()
+
+        def register(
+            self, fileobj: int, events: int, data: object | None = None
+        ) -> selectors.SelectorKey:
+            nonlocal registration_count
+            registration_count += 1
+            if registration_count == 2:
+                raise OSError("selector registration")
+            return self.delegate.register(fileobj, events, data)
+
+        def close(self) -> None:
+            self.delegate.close()
+            raise OSError("selector close")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", CloseFaultSelector)
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+        with pytest.raises(OSError, match="selector registration") as raised:
+            cursor.__enter__()
+
+    assert raised.value.__notes__ == ["guest-tree cursor cleanup failed: OSError('selector close')"]
+    assert producer.find0_calls == 0
+    session.close()
+
+
+def test_session_close_does_not_allocate_selector_before_producer_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        wait_before_write=True,
+        cooperate_with_cancel=False,
+    )
+    lease = _lease()
+    session, _lease_value = _stream_session(events, producer, lease)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    cursor.__enter__()
+    assert isinstance(cursor, _Find0TreeCursor)
+    assert producer.producer_started.wait(timeout=5)
+    allocation_attempts = 0
+
+    def fail_selector_allocation() -> selectors.BaseSelector:
+        nonlocal allocation_attempts
+        allocation_attempts += 1
+        raise OSError("teardown selector allocation")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", fail_selector_allocation)
+    close_finished = threading.Event()
+    close_error: list[BaseException] = []
+
+    def close_session() -> None:
+        try:
+            session.close()
+        except BaseException as exc:
+            close_error.append(exc)
+        finally:
+            close_finished.set()
+
+    closer = threading.Thread(target=close_session)
+    closer.start()
+    try:
+        assert producer.cancel_requested.wait(timeout=5)
+        assert not close_finished.is_set()
+        assert lease.pins == 1
+    finally:
+        producer.release_producer.set()
+        closer.join(timeout=5)
+        if cursor._thread is not None:
+            cursor._thread.join(timeout=5)
+        cleanup_errors = cursor._cleanup_unstarted()
+
+    assert cleanup_errors == []
+    assert close_finished.is_set()
+    assert close_error == []
+    assert allocation_attempts == 0
+    assert producer.producer_finished.is_set()
+    assert lease.pins == 0
+
+
+def test_session_close_retains_pin_when_late_selector_select_fails() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        wait_before_write=True,
+        cooperate_with_cancel=False,
+    )
+    lease = _lease()
+    session, _lease_value = _stream_session(events, producer, lease)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=1)
+    cursor.__enter__()
+    assert isinstance(cursor, _Find0TreeCursor)
+    assert producer.producer_started.wait(timeout=5)
+
+    class SelectFaultSelector:
+        def select(self) -> object:
+            raise OSError("late selector select")
+
+        def close(self) -> None:
+            return
+
+    cursor._late_selector = SelectFaultSelector()  # ty: ignore[invalid-assignment]
+    close_finished = threading.Event()
+    close_error: list[BaseException] = []
+
+    def close_session() -> None:
+        try:
+            session.close()
+        except BaseException as exc:
+            close_error.append(exc)
+        finally:
+            close_finished.set()
+
+    closer = threading.Thread(target=close_session)
+    closer.start()
+    try:
+        assert producer.cancel_requested.wait(timeout=5)
+        assert not close_finished.is_set()
+        assert lease.pins == 1
+    finally:
+        producer.release_producer.set()
+        closer.join(timeout=5)
+
+    assert close_finished.is_set()
+    assert producer.producer_finished.is_set()
+    assert lease.pins == 0
+    assert len(close_error) == 1
+    assert isinstance(close_error[0], ExceptionGroup)
+    assert any(str(error) == "late selector select" for error in close_error[0].exceptions)
 
 
 def test_session_close_reserves_fileout_fd_until_producer_exit_under_reuse_pressure(

@@ -357,6 +357,7 @@ class _Find0TreeCursor(TreeCursor):
         self._done_read_fd = -1
         self._done_write_fd = -1
         self._selector: selectors.BaseSelector | None = None
+        self._late_selector: selectors.BaseSelector | None = None
         self._producer_lifecycle = threading.Lock()
         self._producer_phase: Literal["pending", "dispatched", "finished"] = "pending"
         self._abandon_requested = False
@@ -421,9 +422,13 @@ class _Find0TreeCursor(TreeCursor):
         self._revocation_fd, self._revocation_anchor_fd = os.pipe()
         self._done_read_fd, self._done_write_fd = os.pipe()
         selector = selectors.DefaultSelector()
+        self._selector = selector
         selector.register(self._read_fd, selectors.EVENT_READ, "fifo")
         selector.register(self._done_read_fd, selectors.EVENT_READ, "done")
-        self._selector = selector
+        late_selector = selectors.DefaultSelector()
+        self._late_selector = late_selector
+        late_selector.register(self._revocation_fd, selectors.EVENT_READ, "output")
+        late_selector.register(self._done_read_fd, selectors.EVENT_READ, "done")
         thread = threading.Thread(
             target=self._produce,
             name="kdive-libguestfs-find0",
@@ -441,11 +446,6 @@ class _Find0TreeCursor(TreeCursor):
                 destination = f"/proc/self/fd/{self._read_fd}"
                 self._producer_phase = "dispatched"
             self._guest.find0(self._path, destination)
-        except FileNotFoundError as exc:
-            with self._producer_lifecycle:
-                abandoned = self._abandon_requested and self._fifo is None
-            if not abandoned:
-                self._producer_errors.append(exc)
         except RuntimeError as exc:
             if str(exc) == "find0: transfer was cancelled":
                 self._producer_errors.append(InterruptedError(errno.EINTR, str(exc)))
@@ -561,6 +561,12 @@ class _Find0TreeCursor(TreeCursor):
             cleanup_errors.extend(self._drain_late_transfer())
         if self._thread is not None:
             self._thread.join()
+        if self._late_selector is not None:
+            try:
+                self._late_selector.close()
+            except Exception as exc:
+                cleanup_errors.append(exc)
+            self._late_selector = None
         for attribute in (
             "_read_fd",
             "_revocation_fd",
@@ -593,10 +599,10 @@ class _Find0TreeCursor(TreeCursor):
 
     def _drain_late_transfer(self) -> list[Exception]:
         errors: list[Exception] = []
-        selector = selectors.DefaultSelector()
+        selector = self._late_selector
+        if selector is None:
+            return [RuntimeError("late-transfer selector is not available")]
         try:
-            selector.register(self._revocation_fd, selectors.EVENT_READ, "output")
-            selector.register(self._done_read_fd, selectors.EVENT_READ, "done")
             producer_done = False
             cancel_delivered_after_output = False
             while not producer_done:
@@ -620,11 +626,6 @@ class _Find0TreeCursor(TreeCursor):
                         cancel_delivered_after_output = True
         except Exception as exc:
             errors.append(exc)
-        finally:
-            try:
-                selector.close()
-            except Exception as exc:
-                errors.append(exc)
         return errors
 
     def _remove_output(self) -> list[Exception]:
@@ -668,12 +669,14 @@ class _Find0TreeCursor(TreeCursor):
                 except OSError as exc:
                     errors.append(exc)
                 setattr(self, attribute, -1)
-        if self._selector is not None:
-            try:
-                self._selector.close()
-            except Exception as exc:
-                errors.append(exc)
-            self._selector = None
+        for attribute in ("_selector", "_late_selector"):
+            selector = getattr(self, attribute)
+            if selector is not None:
+                try:
+                    selector.close()
+                except Exception as exc:
+                    errors.append(exc)
+                setattr(self, attribute, None)
         errors.extend(self._remove_output())
         return errors
 
