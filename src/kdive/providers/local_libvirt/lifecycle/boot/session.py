@@ -439,6 +439,11 @@ class _Find0TreeCursor(TreeCursor):
                 abandoned = self._abandon_requested and self._fifo is None
             if not abandoned:
                 self._producer_errors.append(exc)
+        except RuntimeError as exc:
+            if str(exc) == "find0: transfer was cancelled":
+                self._producer_errors.append(InterruptedError(errno.EINTR, str(exc)))
+            else:
+                self._producer_errors.append(exc)
         except Exception as exc:
             self._producer_errors.append(exc)
         finally:

@@ -291,12 +291,14 @@ class Find0Guest(Guest):
         entries: list[bytes],
         *,
         producer_fault: BaseException | None = None,
+        cancellation_fault: BaseException | None = None,
         wait_before_write: bool = False,
         cooperate_with_cancel: bool = True,
     ) -> None:
         super().__init__(events)
         self.entries = entries
         self.producer_fault = producer_fault
+        self.cancellation_fault = cancellation_fault
         self.wait_before_write = wait_before_write
         self.cooperate_with_cancel = cooperate_with_cancel
         self.producer_started = threading.Event()
@@ -322,7 +324,9 @@ class Find0Guest(Guest):
                         "producer release was not signaled"
                     )
                     if self.cancel_requested.is_set():
-                        raise OSError(errno.EINTR, "find0 deliberately canceled")
+                        raise self.cancellation_fault or OSError(
+                            errno.EINTR, "find0 deliberately canceled"
+                        )
                 for entry in self.entries:
                     output.write(entry + b"\0")
             if self.producer_fault is not None:
@@ -464,6 +468,46 @@ def test_find0_tree_early_close_cancels_and_joins_blocked_producer() -> None:
     assert producer.producer_finished.is_set()
     assert producer.output_path is not None
     assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_find0_tree_normalizes_python_binding_cancellation_on_early_close() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        cancellation_fault=RuntimeError("find0: transfer was cancelled"),
+        wait_before_write=True,
+    )
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+        cursor.__enter__()
+        assert producer.producer_started.wait(timeout=5)
+        cursor.close()
+
+    assert producer.cancel_requested.is_set()
+    assert producer.producer_finished.is_set()
+    session.close()
+
+
+def test_find0_tree_does_not_normalize_unrelated_python_binding_runtime_error() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [b"a"],
+        producer_fault=RuntimeError("find0: appliance disconnected"),
+    )
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(RuntimeError, match="find0: appliance disconnected"),
+        guest.open_tree("/lib/modules/6.12.0", limit=2) as entries,
+    ):
+        list(entries)
+
     session.close()
 
 
