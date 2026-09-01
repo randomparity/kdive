@@ -188,6 +188,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist target boot projection
 - Add external boot operation session
 - Build external boot sessions lazily
+- Scope external boot adapter sessions
+- Compose bounded guest recovery
+- Wire exact boot recovery
+- Wire external boot cleanup
 
 ### Changed
 
@@ -1063,6 +1067,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Define recovery archive locking
 - Clarify cleanup proof boundary
 - Design external boot session
+- Design external boot adapter
+- Harden adapter design
+- Plan external boot adapter
+- Clarify adapter session scope
 
 ### Fixed
 
@@ -1718,6 +1726,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain exact overlay descriptor
 - Harden guest descriptor operations
 - Mount inspected guest root
+- Preserve external boot ownership checks
+- Close bounded recovery gaps
+- Normalize find0 cancellation
+- Harden find0 handoff
+- Reserve find0 fd through teardown
+- Harden find0 cursor lifecycle
+- Retain find0 teardown monitors
+- Serialize find0 teardown ownership
+- Use errno for find0 cancellation
 
 ### Security
 
