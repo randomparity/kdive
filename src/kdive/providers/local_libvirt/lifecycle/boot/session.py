@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import selectors
 import stat
+import tempfile
+import threading
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import BinaryIO, Literal, Protocol
 from uuid import UUID, uuid4
 
 from defusedxml.common import DefusedXmlException
@@ -121,6 +125,8 @@ class _Guest(Protocol):
     def mount(self, device: str, mountpoint: str) -> None: ...
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
+    def find0(self, directory: str, files: str) -> None: ...
+    def user_cancel(self) -> None: ...
 
     def exists(self, path: str) -> int: ...
     def is_dir(self, path: str, *, followsymlinks: bool) -> int: ...
@@ -141,6 +147,19 @@ type OpenGuest = Callable[[], _Guest]
 type ReadinessProbe = Callable[[UUID], ReadinessResult]
 type RunningObserver = Callable[[UUID], RunningKernelObservation]
 type CleanupPayloads = Callable[[int, ExternalBootActivationBinding], None]
+
+
+@dataclass(frozen=True, slots=True)
+class InactiveGuestDirectoryEntry:
+    """One validated relative name from a bounded recursive guest walk."""
+
+    path: str
+
+
+class TreeCursor(AbstractContextManager[Iterator[InactiveGuestDirectoryEntry]], Protocol):
+    """Cancellable, operation-owned cursor over one recursive guest tree."""
+
+    def close(self) -> None: ...
 
 
 class LocalExternalBootSession(Protocol):
@@ -167,6 +186,9 @@ class InactiveGuest(Protocol):
     def lstatns(self, path: str) -> dict[str, int]: ...
     def readlink(self, path: str) -> str: ...
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
+    def open_tree(self, path: str, *, limit: int) -> TreeCursor: ...
+    def open_regular(self, path: str, *, size: int) -> AbstractContextManager[BinaryIO]: ...
+    def create_regular(self, content: BinaryIO, path: str, *, size: int) -> None: ...
     def download_artifact(self, guest_source: str, artifact_name: str) -> None: ...
     def mkdir(self, path: str) -> None: ...
     def upload_artifact(self, artifact_name: str, guest_destination: str) -> None: ...
@@ -181,6 +203,7 @@ class _GuestContext(AbstractContextManager[InactiveGuest]):
     def __init__(self, session: _ConcreteSession) -> None:
         self._session = session
         self._guest: _Guest | None = None
+        self._cursors: set[_Find0TreeCursor] = set()
         self._closed = False
 
     def __enter__(self) -> InactiveGuest:
@@ -189,24 +212,54 @@ class _GuestContext(AbstractContextManager[InactiveGuest]):
         self._guest = self._session._open_guest_context(self)
         return _GuardedGuest(self, self._guest)
 
-    def __exit__(self, *_exc: object) -> None:
-        self._close()
+    def __exit__(self, _kind: object, primary: object, _traceback: object) -> None:
+        try:
+            self._close()
+        except BaseException as close_error:
+            if isinstance(primary, BaseException):
+                primary.add_note(f"cleanup failed: {close_error!r}")
+                return
+            raise
 
     def _close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        cursors = list(self._cursors)
+        self._cursors.clear()
         guest, self._guest = self._guest, None
         self._session._discard_guest(self)
+        errors: list[Exception] = []
+        for cursor in cursors:
+            try:
+                cursor.close()
+            except Exception as exc:
+                errors.append(exc)
         if guest is not None:
-            errors = _attempt_guest_close(guest)
-            if errors:
-                raise ExceptionGroup("failed to close libguestfs handle", errors)
+            errors.extend(_attempt_guest_close(guest))
+        if errors:
+            raise ExceptionGroup("failed to close libguestfs handle", errors)
 
-    def _poison(self) -> _Guest | None:
+    def _poison(self) -> tuple[_Guest | None, list[Exception]]:
         self._closed = True
+        cursors = list(self._cursors)
+        self._cursors.clear()
+        errors: list[Exception] = []
+        for cursor in cursors:
+            try:
+                cursor.close()
+            except Exception as exc:
+                errors.append(exc)
         guest, self._guest = self._guest, None
-        return guest
+        return guest, errors
+
+    def _register_cursor(self, cursor: _Find0TreeCursor) -> None:
+        if self._closed:
+            raise RuntimeError("guest wrapper is closed")
+        self._cursors.add(cursor)
+
+    def _discard_cursor(self, cursor: _Find0TreeCursor) -> None:
+        self._cursors.discard(cursor)
 
 
 class _GuardedGuest:
@@ -228,6 +281,22 @@ class _GuardedGuest:
 
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
         return self._handle().lgetxattrs(path)
+
+    def open_tree(self, path: str, *, limit: int) -> TreeCursor:
+        self._handle()
+        return _Find0TreeCursor(self._owner, self._guest, path, limit)
+
+    def open_regular(self, path: str, *, size: int) -> AbstractContextManager[BinaryIO]:
+        return self._owner._session._open_guest_regular(self._owner, self._guest, path, size)
+
+    def create_regular(self, content: BinaryIO, path: str, *, size: int) -> None:
+        self._owner._session._create_guest_regular(
+            self._owner,
+            self._guest,
+            content,
+            path,
+            size,
+        )
 
     def download_artifact(self, guest_source: str, artifact_name: str) -> None:
         self._owner._session._download_artifact(
@@ -262,6 +331,275 @@ class _GuardedGuest:
             raise RuntimeError("guest wrapper is closed")
         self._owner._session._guard_guest_operation(self._owner)
         return self._guest
+
+
+_TREE_READ_CHUNK = 64 * 1024
+_MAX_TREE_PATH_BYTES = 4096
+
+
+class _Find0TreeCursor(TreeCursor):
+    def __init__(self, owner: _GuestContext, guest: _Guest, path: str, limit: int) -> None:
+        if limit < 0:
+            raise ValueError("guest-tree entry limit must be nonnegative")
+        self._owner = owner
+        self._guest = guest
+        self._path = _guest_tree_root(path)
+        self._limit = limit
+        self._entries: Iterator[InactiveGuestDirectoryEntry] | None = None
+        self._thread: threading.Thread | None = None
+        self._producer_errors: list[Exception] = []
+        self._directory: str | None = None
+        self._fifo: str | None = None
+        self._read_fd = -1
+        self._anchor_fd = -1
+        self._done_read_fd = -1
+        self._done_write_fd = -1
+        self._selector: selectors.BaseSelector | None = None
+        self._entered = False
+        self._resources_closed = False
+        self._closed = False
+
+    def __enter__(self) -> Iterator[InactiveGuestDirectoryEntry]:
+        if self._closed or self._entered:
+            raise RuntimeError("guest-tree cursor is closed or already entered")
+        self._owner._session._guard_guest_operation(self._owner)
+        self._owner._register_cursor(self)
+        self._entered = True
+        try:
+            self._start()
+        except BaseException:
+            self._owner._discard_cursor(self)
+            self._closed = True
+            self._cleanup_unstarted()
+            raise
+        return self
+
+    def __exit__(self, _kind: object, primary: object, _traceback: object) -> None:
+        try:
+            self.close()
+        except BaseException as close_error:
+            if isinstance(primary, BaseException):
+                primary.add_note(f"guest-tree cursor cleanup failed: {close_error!r}")
+                return
+            raise
+
+    def __iter__(self) -> _Find0TreeCursor:
+        return self
+
+    def __next__(self) -> InactiveGuestDirectoryEntry:
+        if self._closed:
+            raise StopIteration
+        if not self._entered:
+            raise RuntimeError("guest-tree cursor must be entered before iteration")
+        if self._entries is None:
+            self._entries = iter(self._load_entries())
+        return next(self._entries)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._owner._discard_cursor(self)
+        if not self._resources_closed:
+            self._teardown(deliberate=True)
+
+    def _start(self) -> None:
+        directory = tempfile.mkdtemp(prefix="kdive-find0-")
+        os.chmod(directory, 0o700)
+        fifo = os.path.join(directory, "entries")
+        os.mkfifo(fifo, 0o600)
+        self._directory, self._fifo = directory, fifo
+        self._read_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        self._anchor_fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        self._done_read_fd, self._done_write_fd = os.pipe()
+        selector = selectors.DefaultSelector()
+        selector.register(self._read_fd, selectors.EVENT_READ, "fifo")
+        selector.register(self._done_read_fd, selectors.EVENT_READ, "done")
+        self._selector = selector
+        thread = threading.Thread(
+            target=self._produce,
+            name="kdive-libguestfs-find0",
+            daemon=True,
+        )
+        self._thread = thread
+        thread.start()
+
+    def _produce(self) -> None:
+        try:
+            assert self._fifo is not None
+            self._guest.find0(self._path, self._fifo)
+        except Exception as exc:
+            self._producer_errors.append(exc)
+        finally:
+            if self._done_write_fd >= 0:
+                with suppress(OSError):
+                    os.write(self._done_write_fd, b"\0")
+                with suppress(OSError):
+                    os.close(self._done_write_fd)
+                self._done_write_fd = -1
+
+    def _load_entries(self) -> list[InactiveGuestDirectoryEntry]:
+        raw_entries: list[bytes] = []
+        pending = bytearray()
+        try:
+            self._read_until_done(raw_entries, pending)
+            self._teardown(deliberate=False)
+            if pending:
+                raise ValueError("libguestfs find0 ended with a truncated entry")
+            paths = [_guest_tree_relative_bytes(value) for value in raw_entries]
+            if len(set(paths)) != len(paths):
+                raise ValueError("guest tree contains duplicate paths")
+            return [
+                InactiveGuestDirectoryEntry(path)
+                for path in sorted(paths, key=lambda value: value.encode())
+            ]
+        except BaseException as primary:
+            self._closed = True
+            self._owner._discard_cursor(self)
+            if not self._resources_closed:
+                try:
+                    self._teardown(deliberate=True)
+                except BaseException as cleanup:
+                    primary.add_note(f"guest-tree cursor cleanup failed: {cleanup!r}")
+            raise
+
+    def _read_until_done(self, entries: list[bytes], pending: bytearray) -> None:
+        assert self._selector is not None
+        producer_done = False
+        while not producer_done:
+            for key, _events in self._selector.select():
+                if key.data == "fifo":
+                    self._read_available(entries, pending)
+                else:
+                    os.read(self._done_read_fd, 1)
+                    producer_done = True
+                    if self._anchor_fd >= 0:
+                        os.close(self._anchor_fd)
+                        self._anchor_fd = -1
+        while self._read_available(entries, pending):
+            pass
+
+    def _read_available(self, entries: list[bytes], pending: bytearray) -> bool:
+        try:
+            chunk = os.read(self._read_fd, _TREE_READ_CHUNK)
+        except BlockingIOError:
+            return False
+        if not chunk:
+            return False
+        pending.extend(chunk)
+        while (delimiter := pending.find(0)) >= 0:
+            value = bytes(pending[:delimiter])
+            del pending[: delimiter + 1]
+            if len(entries) >= self._limit:
+                raise ValueError("guest tree exceeds the entry-count bound")
+            entries.append(value)
+        if len(pending) > _MAX_TREE_PATH_BYTES:
+            raise ValueError("guest-tree entry exceeds the path-byte bound")
+        return True
+
+    def _teardown(self, *, deliberate: bool) -> None:
+        if self._resources_closed:
+            return
+        self._resources_closed = True
+        cleanup_errors: list[Exception] = []
+        if self._selector is not None:
+            try:
+                self._selector.close()
+            except Exception as exc:
+                cleanup_errors.append(exc)
+            self._selector = None
+        for attribute in ("_read_fd", "_anchor_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+                setattr(self, attribute, -1)
+        try:
+            self._guest.user_cancel()
+        except Exception as exc:
+            cleanup_errors.append(exc)
+        if self._thread is not None:
+            self._thread.join()
+        for attribute in ("_done_read_fd", "_done_write_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    cleanup_errors.append(exc)
+                setattr(self, attribute, -1)
+        producer_errors = [
+            error
+            for error in self._producer_errors
+            if not (deliberate and isinstance(error, OSError) and error.errno == errno.EINTR)
+        ]
+        cleanup_errors.extend(self._remove_output())
+        errors = [*producer_errors, *cleanup_errors]
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup("failed to close guest-tree cursor", errors)
+
+    def _remove_output(self) -> list[Exception]:
+        errors: list[Exception] = []
+        if self._fifo is not None:
+            try:
+                os.unlink(self._fifo)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+            self._fifo = None
+        if self._directory is not None:
+            try:
+                os.rmdir(self._directory)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+            self._directory = None
+        return errors
+
+    def _cleanup_unstarted(self) -> None:
+        for attribute in ("_read_fd", "_anchor_fd", "_done_read_fd", "_done_write_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                with suppress(OSError):
+                    os.close(descriptor)
+                setattr(self, attribute, -1)
+        if self._selector is not None:
+            self._selector.close()
+            self._selector = None
+        self._remove_output()
+
+
+def _guest_tree_root(path: str) -> str:
+    if (
+        not path.startswith("/")
+        or path == "/"
+        or unicodedata.normalize("NFC", path) != path
+        or any(part in {"", ".", ".."} for part in path.removeprefix("/").split("/"))
+    ):
+        raise ValueError("guest-tree root is not a canonical absolute path")
+    return path
+
+
+def _guest_tree_relative_bytes(value: bytes) -> str:
+    if not value or len(value) > _MAX_TREE_PATH_BYTES:
+        raise ValueError("guest-tree entry exceeds the path-byte bound")
+    try:
+        path = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("guest-tree entry is not UTF-8") from exc
+    if (
+        path.startswith("/")
+        or unicodedata.normalize("NFC", path) != path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        raise ValueError("guest-tree entry path is not a canonical relative path")
+    return path
 
 
 class _ConcreteSession:
@@ -396,14 +734,15 @@ class _ConcreteSession:
         self._closed = True
         guests = list(self._guests)
         self._guests.clear()
-        handles = [guest._poison() for guest in guests]
+        poisoned = [guest._poison() for guest in guests]
         artifact_fd, self._artifact_fd = self._artifact_fd, None
         overlay_fd = self._overlay.descriptor
         domain, self._domain = self._domain, None
         connection, self._connection = self._connection, None
         pin, self._pin = self._pin, None
         errors: list[Exception] = []
-        for guest in handles:
+        for guest, cursor_errors in poisoned:
+            errors.extend(cursor_errors)
             if guest is not None:
                 errors.extend(_attempt_guest_close(guest))
         for closer in (
@@ -494,6 +833,47 @@ class _ConcreteSession:
             except Exception as unlink_error:
                 exc.add_note(f"cleanup failed: {unlink_error!r}")
             raise
+
+    @contextmanager
+    def _open_guest_regular(
+        self,
+        wrapper: _GuestContext,
+        guest: _Guest,
+        guest_source: str,
+        expected_size: int,
+    ) -> Iterator[BinaryIO]:
+        self._guard_guest_operation(wrapper)
+        if expected_size < 0:
+            raise ValueError("guest regular size must be nonnegative")
+        with tempfile.TemporaryFile("w+b") as local:
+            guest.download(guest_source, f"/proc/self/fd/{local.fileno()}")
+            if os.fstat(local.fileno()).st_size != expected_size:
+                raise ValueError("guest regular content changed during download")
+            local.seek(0)
+            yield local
+
+    def _create_guest_regular(
+        self,
+        wrapper: _GuestContext,
+        guest: _Guest,
+        content: BinaryIO,
+        guest_destination: str,
+        expected_size: int,
+    ) -> None:
+        self._guard_guest_operation(wrapper)
+        if expected_size < 0:
+            raise ValueError("guest regular size must be nonnegative")
+        with tempfile.TemporaryFile("w+b") as local:
+            remaining = expected_size
+            while remaining:
+                chunk = content.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("guest regular content ended before declared size")
+                local.write(chunk)
+                remaining -= len(chunk)
+            local.flush()
+            local.seek(0)
+            guest.upload(f"/proc/self/fd/{local.fileno()}", guest_destination)
 
     def _transfer_with_close(self, descriptor: int, transfer: Callable[[str], None]) -> None:
         try:

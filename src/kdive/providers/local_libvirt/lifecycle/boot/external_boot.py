@@ -27,8 +27,14 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     MAX_ARCHIVE_BYTES,
     MAX_ENTRIES,
     MAX_REGULAR_BYTES,
+    AbsentModuleCapture,
+    GuestRecoveryWriter,
     GuestTreeEntry,
+    KernelBundleSource,
+    ModuleArchiveCapture,
     ModuleCapture,
+    RecoveryArchiveSink,
+    RecoveryArchiveSource,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
@@ -36,14 +42,17 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     LocalExternalBootSession,
     LocalExternalBootSessionFactory,
+    TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
+    AbsentComponentState,
     ActivationOwnership,
     ComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
     OpaqueProviderRef,
+    PresentComponentState,
     ProviderStateIdentity,
     RecoveryPoint,
     RunningKernelObservation,
@@ -514,13 +523,13 @@ class ModulePublicationIO(Protocol):
 class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs binding)
     def exists(self, path: str) -> int: ...
     def is_dir(self, path: str, *, followsymlinks: bool) -> int: ...
-    def find(self, path: str) -> list[str]: ...
+    def open_tree(self, path: str, *, limit: int) -> TreeCursor: ...
     def lstatns(self, path: str) -> dict[str, int]: ...
     def readlink(self, path: str) -> str: ...
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]: ...
-    def download(self, remotefilename: str, filename: str) -> None: ...
+    def open_regular(self, path: str, *, size: int) -> AbstractContextManager[BinaryIO]: ...
+    def create_regular(self, content: BinaryIO, path: str, *, size: int) -> None: ...
     def mkdir(self, path: str) -> None: ...
-    def upload(self, filename: str, remotefilename: str) -> None: ...
     def ln_s(self, target: str, linkname: str) -> None: ...
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
@@ -564,9 +573,16 @@ class LibguestfsAuthenticatedGuestTree:
     def entries(self) -> Iterator[GuestTreeEntry]:
         if self.root_kind() != "directory":
             return
-        for relative in sorted(self._guest.find(self._root), key=lambda item: item.encode()):
-            path = _guest_relative(relative)
-            yield self._entry(path)
+        seen: set[str] = set()
+        with self._guest.open_tree(self._root, limit=MAX_ENTRIES) as cursor:
+            for index, entry in enumerate(cursor, start=1):
+                if index > MAX_ENTRIES:
+                    raise ValueError("guest tree exceeds the entry-count bound")
+                path = _guest_relative(entry.path)
+                if path in seen:
+                    raise ValueError("guest tree contains duplicate paths")
+                seen.add(path)
+                yield self._entry(path)
 
     @contextmanager
     def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]:
@@ -574,10 +590,8 @@ class LibguestfsAuthenticatedGuestTree:
         opened = self._guest.lstatns(remote)
         if opened["st_size"] != size or not stat.S_ISREG(opened["st_mode"]):
             raise ValueError("guest regular file changed before content read")
-        with tempfile.TemporaryFile("w+b") as local:
-            self._guest.download(remote, f"/proc/self/fd/{local.fileno()}")
-            local.seek(0)
-            yield local
+        with self._guest.open_regular(remote, size=size) as content:
+            yield content
 
     def create_directory(self, entry: GuestTreeEntry) -> None:
         self._require_mutable()
@@ -587,16 +601,7 @@ class LibguestfsAuthenticatedGuestTree:
 
     def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None:
         self._require_mutable()
-        with tempfile.NamedTemporaryFile("w+b") as local:
-            remaining = entry.size
-            while remaining:
-                chunk = content.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    raise ValueError("guest regular content ended before declared size")
-                local.write(chunk)
-                remaining -= len(chunk)
-            local.flush()
-            self._guest.upload(local.name, self._remote(entry.path))
+        self._guest.create_regular(content, self._remote(entry.path), size=entry.size)
         self._apply_metadata(self._remote(entry.path), entry)
 
     def create_symlink(self, entry: GuestTreeEntry) -> None:
@@ -702,8 +707,8 @@ class LocalExternalBootIO(Protocol):
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
 
 
-class LocalExternalBootPreparation(Protocol):
-    """Builds preparation values using only an authenticated session capability."""
+class LocalExternalBootMaterializer(Protocol):
+    """Builds immutable local artifacts without owning guest recovery I/O."""
 
     def materialize(
         self, plan: ExternalBootPlan, session: LocalExternalBootSession
@@ -715,9 +720,6 @@ class LocalExternalBootPreparation(Protocol):
         inspection: ClosedDomainInspection,
         session: LocalExternalBootSession,
     ) -> LocalPreStopIntentV1: ...
-    def complete_prepare(
-        self, intent: LocalPreStopIntentV1, session: LocalExternalBootSession
-    ) -> LocalRecoveryMetadataV1: ...
 
 
 type ResolveOperationLease = Callable[[OpaqueProviderRef], LocalExternalBootOperationLease]
@@ -729,12 +731,14 @@ class RealLocalExternalBootIO:
     def __init__(
         self,
         recovery_root: Path,
-        preparation: LocalExternalBootPreparation,
+        materializer: LocalExternalBootMaterializer,
+        recovery_writer: GuestRecoveryWriter,
         resolve_operation_lease: ResolveOperationLease,
         session_factory: LocalExternalBootSessionFactory,
     ) -> None:
         self._recovery_root = recovery_root
-        self._preparation = preparation
+        self._materializer = materializer
+        self._recovery_writer = recovery_writer
         self._resolve_operation_lease = resolve_operation_lease
         self._session_factory = session_factory
 
@@ -746,7 +750,12 @@ class RealLocalExternalBootIO:
     ) -> Iterator[LocalExternalBootOperation]:
         lease = self._resolve_operation_lease(authority)
         session = self._session_factory.open(lease, expected)
-        operation = _RealLocalExternalBootOperation(self._recovery_root, self._preparation, session)
+        operation = _RealLocalExternalBootOperation(
+            self._recovery_root,
+            self._materializer,
+            self._recovery_writer,
+            session,
+        )
         try:
             yield operation
         except BaseException as primary:
@@ -767,15 +776,17 @@ class _RealLocalExternalBootOperation:
     def __init__(
         self,
         recovery_root: Path,
-        preparation: LocalExternalBootPreparation,
+        materializer: LocalExternalBootMaterializer,
+        recovery_writer: GuestRecoveryWriter,
         session: LocalExternalBootSession,
     ) -> None:
         self._recovery_root = recovery_root
-        self._preparation = preparation
+        self._materializer = materializer
+        self._recovery_writer = recovery_writer
         self._session = session
 
     def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
-        return self._preparation.materialize(plan, self._session)
+        return self._materializer.materialize(plan, self._session)
 
     def prepare(
         self,
@@ -795,7 +806,7 @@ class _RealLocalExternalBootOperation:
                 intent = store.reopen_pre_stop(reference, binding)
             except FileNotFoundError:
                 inspection = self._session.inspect_closed()
-                intent = self._preparation.inspect_prepare(
+                intent = self._materializer.inspect_prepare(
                     materialization, binding, inspection, self._session
                 )
                 _validate_preparation_owner(intent, materialization, binding)
@@ -805,7 +816,18 @@ class _RealLocalExternalBootOperation:
                 _validate_preparation_owner(intent, materialization, binding)
                 _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
         self._session.stop_and_require_inactive()
-        metadata = self._preparation.complete_prepare(intent, self._session)
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            sink = store.recovery_archive_sink(reference, intent)
+        with self._session.guest() as guest:
+            tree = LibguestfsAuthenticatedGuestTree(
+                guest,
+                binding=binding,
+                release=intent.release,
+                root=f"/lib/modules/{intent.release}",
+                mutable=False,
+            )
+            capture = self._recovery_writer.capture(tree, intent.release, sink)
+        metadata = _complete_preparation_metadata(intent, materialization, capture)
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.complete_preparation(reference, intent, metadata)
 
@@ -854,6 +876,36 @@ class _RealLocalExternalBootOperation:
                 _recovery_ref(metadata.binding), metadata.binding, metadata, point_digest
             )
 
+    def _kernel_bundle_source(self, metadata: LocalRecoveryMetadataV1) -> KernelBundleSource:
+        ownership = ActivationOwnership(
+            system_id=metadata.binding.system_id,
+            run_id=metadata.binding.run_id,
+        )
+        parts = _artifact_ref_parts(metadata.materialized_modules, ownership)
+        descriptor = self._session.open_artifact(parts[4], os.O_RDONLY)
+        try:
+            return KernelBundleSource(
+                descriptor,
+                binding=metadata.binding,
+                release=metadata.release,
+                size=metadata.materialized_modules_bytes,
+                digest=metadata.materialized_modules_sha256,
+            )
+        finally:
+            os.close(descriptor)
+
+    def _recovery_archive_source(
+        self,
+        metadata: LocalRecoveryMetadataV1,
+    ) -> RecoveryArchiveSource:
+        if not isinstance(metadata.capture, ModuleArchiveCapture):
+            raise ValueError("absent module capture has no recovery archive")
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.recovery_archive_source(
+                _recovery_ref(metadata.binding),
+                metadata,
+            )
+
 
 def _validate_preparation_owner(
     value: LocalPreStopIntentV1 | LocalRecoveryMetadataV1,
@@ -866,6 +918,33 @@ def _validate_preparation_owner(
         or value.plan_identity != materialization.plan_identity
     ):
         raise ValueError("pre-stop intent does not match activation")
+
+
+def _complete_preparation_metadata(
+    intent: LocalPreStopIntentV1,
+    materialization: ExternalBootMaterialization,
+    capture: ModuleCapture,
+) -> LocalRecoveryMetadataV1:
+    source_modules: ComponentState
+    if isinstance(capture, AbsentModuleCapture):
+        source_modules = AbsentComponentState()
+    else:
+        source_modules = PresentComponentState(manifest=capture.manifest)
+    return LocalRecoveryMetadataV1.model_validate(
+        intent.model_dump(exclude={"schema_"}, by_alias=True)
+        | {
+            "source_state": ProviderStateIdentity(
+                definition=intent.source_boot,
+                modules=source_modules,
+            ),
+            "target_state": ProviderStateIdentity(
+                definition=intent.target_boot,
+                modules=PresentComponentState(manifest=materialization.installed_module_tree),
+            ),
+            "capture": capture,
+            "phase": "pre-stop-intent",
+        }
+    )
 
 
 def _validate_preparation_inspection(
@@ -1184,6 +1263,51 @@ class RecoveryMetadataStore:
         directory_fd = _open_private_directory(self._root_fd, f".{final_name}.partial")
         try:
             return self._read_pre_stop(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def recovery_archive_sink(
+        self,
+        reference: OpaqueProviderRef,
+        intent: LocalPreStopIntentV1,
+    ) -> RecoveryArchiveSink:
+        """Open an owner-bound archive sink beneath an exact partial intent."""
+        self._require_open()
+        final_name = recovery_directory_name(reference, intent.binding)
+        directory_fd = _open_private_directory(self._root_fd, f".{final_name}.partial")
+        try:
+            if self._read_pre_stop(directory_fd) != intent:
+                raise ValueError("pre-stop intent changed before recovery capture")
+            return RecoveryArchiveSink(
+                directory_fd,
+                binding=intent.binding,
+                release=intent.release,
+            )
+        finally:
+            os.close(directory_fd)
+
+    def recovery_archive_source(
+        self,
+        reference: OpaqueProviderRef,
+        metadata: LocalRecoveryMetadataV1,
+    ) -> RecoveryArchiveSource:
+        """Open an owner-bound archive source beneath exact complete metadata."""
+        self._require_open()
+        if not isinstance(metadata.capture, ModuleArchiveCapture):
+            raise ValueError("absent module capture has no recovery archive")
+        directory_fd = _open_private_directory(
+            self._root_fd,
+            recovery_directory_name(reference, metadata.binding),
+        )
+        try:
+            if self._read(directory_fd) != metadata:
+                raise ValueError("recovery metadata changed before archive reopen")
+            return RecoveryArchiveSource(
+                directory_fd,
+                binding=metadata.binding,
+                release=metadata.release,
+                capture=metadata.capture,
+            )
         finally:
             os.close(directory_fd)
 

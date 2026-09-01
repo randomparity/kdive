@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import errno
+import io
 import os
 import stat
+import threading
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LibguestfsAuthenticatedGuestTree,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    ModuleArchiveCapture,
+    RealGuestRecoveryWriter,
+    RecoveryArchiveSink,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
     LocalExternalBootOperationLease,
+    LocalExternalBootSession,
     LocalExternalBootSessionFactory,
     OpenArtifactRoot,
     OperationOwnership,
@@ -228,9 +241,6 @@ class Guest:
     def is_dir(self, path: str, *, followsymlinks: bool) -> int:
         return int(bool(path) and not followsymlinks)
 
-    def find(self, path: str) -> list[str]:
-        return [path]
-
     def lstatns(self, path: str) -> dict[str, int]:
         return {"st_mode": len(path)}
 
@@ -263,6 +273,355 @@ class Guest:
 
     def rm_rf(self, path: str) -> None:
         self.events.append(f"rm:{path}")
+
+    def find0(self, directory: str, files: str) -> None:
+        del directory, files
+        raise AssertionError("test must provide an instrumented find0 producer")
+
+    def user_cancel(self) -> None:
+        self.events.append("guest.cancel")
+
+
+class Find0Guest(Guest):
+    def __init__(
+        self,
+        events: list[str],
+        entries: list[bytes],
+        *,
+        producer_fault: BaseException | None = None,
+        wait_before_write: bool = False,
+        cooperate_with_cancel: bool = True,
+    ) -> None:
+        super().__init__(events)
+        self.entries = entries
+        self.producer_fault = producer_fault
+        self.wait_before_write = wait_before_write
+        self.cooperate_with_cancel = cooperate_with_cancel
+        self.producer_started = threading.Event()
+        self.producer_finished = threading.Event()
+        self.cancel_requested = threading.Event()
+        self.release_producer = threading.Event()
+        self.output_path: Path | None = None
+        self.output_was_fifo = False
+        self.output_parent_mode: int | None = None
+        self.find0_calls = 0
+
+    def find0(self, directory: str, files: str) -> None:
+        self.find0_calls += 1
+        self.events.append(f"guest.find0:{directory}")
+        self.output_path = Path(files)
+        self.output_was_fifo = stat.S_ISFIFO(os.stat(files).st_mode)
+        self.output_parent_mode = stat.S_IMODE(os.stat(Path(files).parent).st_mode)
+        try:
+            with open(files, "wb", buffering=0) as output:
+                self.producer_started.set()
+                if self.wait_before_write:
+                    assert self.release_producer.wait(timeout=5), (
+                        "producer release was not signaled"
+                    )
+                    if self.cancel_requested.is_set():
+                        raise OSError(errno.EINTR, "find0 deliberately canceled")
+                for entry in self.entries:
+                    output.write(entry + b"\0")
+            if self.producer_fault is not None:
+                raise self.producer_fault
+        finally:
+            self.producer_finished.set()
+
+    def user_cancel(self) -> None:
+        super().user_cancel()
+        self.cancel_requested.set()
+        if self.cooperate_with_cancel:
+            self.release_producer.set()
+
+    def find(self, _path: str) -> list[str]:
+        raise AssertionError("list-returning find must not be called")
+
+    def readdir(self, _path: str) -> list[str]:
+        raise AssertionError("readdir must not be called")
+
+    def ls(self, _path: str) -> list[str]:
+        raise AssertionError("ls must not be called")
+
+    def glob_expand(self, _pattern: str) -> list[str]:
+        raise AssertionError("globbing must not be called")
+
+
+def _stream_session(
+    events: list[str], guest: Find0Guest, lease: FakeLease | None = None
+) -> tuple[LocalExternalBootSession, FakeLease]:
+    selected_lease = lease or _lease()
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: guest,
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: events.append("overlay.close"),
+        close_descriptor=lambda _fd: events.append("artifact.close"),
+    )
+    return factory.open(selected_lease, _expected()), selected_lease
+
+
+def test_find0_tree_streams_one_multilevel_walk_and_byte_sorts_after_completion() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [b"z.ko", b"kernel", b"kernel/a.ko", b"a.ko"])
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest, guest.open_tree("/lib/modules/6.12.0", limit=4) as entries:
+        assert [entry.path for entry in entries] == [
+            "a.ko",
+            "kernel",
+            "kernel/a.ko",
+            "z.ko",
+        ]
+
+    assert producer.find0_calls == 1
+    assert producer.output_was_fifo
+    assert producer.output_parent_mode == 0o700
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    assert producer.cancel_requested.is_set()
+    assert producer.producer_finished.is_set()
+    session.close()
+
+
+def test_find0_tree_limit_plus_one_rejects_without_retaining_the_extra_entry() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [b"a", b"b", b"not-visited"])
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(ValueError, match="entry-count"),
+        guest.open_tree("/lib/modules/6.12.0", limit=2) as entries,
+    ):
+        list(entries)
+
+    assert producer.find0_calls == 1
+    assert producer.cancel_requested.is_set()
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_find0_tree_early_close_cancels_and_joins_blocked_producer() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [], wait_before_write=True)
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+        cursor.__enter__()
+        assert producer.producer_started.wait(timeout=5)
+        cursor.close()
+
+    assert producer.cancel_requested.is_set()
+    assert producer.producer_finished.is_set()
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_guest_context_closes_caller_abandoned_find0_cursor() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [], wait_before_write=True)
+    session, _lease_value = _stream_session(events, producer)
+
+    with session.guest() as guest:
+        cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+        cursor.__enter__()
+        assert producer.producer_started.wait(timeout=5)
+
+    assert producer.cancel_requested.is_set()
+    assert producer.producer_finished.is_set()
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_find0_tree_backend_error_is_reported_after_cleanup() -> None:
+    events: list[str] = []
+    producer = Find0Guest(events, [b"a"], producer_fault=LookupError("find0 backend"))
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(LookupError, match="find0 backend"),
+        guest.open_tree("/lib/modules/6.12.0", limit=2) as entries,
+    ):
+        list(entries)
+
+    assert producer.cancel_requested.is_set()
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_find0_tree_reports_backend_eintr_without_deliberate_early_close() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [b"a"],
+        producer_fault=OSError(errno.EINTR, "unexpected find0 interruption"),
+    )
+    session, _lease_value = _stream_session(events, producer)
+
+    with (
+        session.guest() as guest,
+        pytest.raises(InterruptedError, match="unexpected find0 interruption"),
+        guest.open_tree("/lib/modules/6.12.0", limit=2) as entries,
+    ):
+        list(entries)
+
+    assert producer.cancel_requested.is_set()
+    assert producer.output_path is not None
+    assert not producer.output_path.parent.exists()
+    session.close()
+
+
+def test_session_close_retains_pin_until_noncooperating_find0_producer_exits() -> None:
+    events: list[str] = []
+    producer = Find0Guest(
+        events,
+        [],
+        wait_before_write=True,
+        cooperate_with_cancel=False,
+    )
+    lease = _lease()
+    session, _lease_value = _stream_session(events, producer, lease)
+    guest_context = session.guest()
+    guest = guest_context.__enter__()
+    cursor = guest.open_tree("/lib/modules/6.12.0", limit=2)
+    cursor.__enter__()
+    assert producer.producer_started.wait(timeout=5)
+    close_finished = threading.Event()
+    close_error: list[BaseException] = []
+
+    def close_session() -> None:
+        try:
+            session.close()
+        except BaseException as exc:
+            close_error.append(exc)
+        finally:
+            close_finished.set()
+
+    closer = threading.Thread(target=close_session)
+    closer.start()
+    assert producer.cancel_requested.wait(timeout=5)
+    assert not close_finished.is_set()
+    assert lease.pins == 1
+    assert producer.output_path is not None
+    assert producer.output_path.parent.exists()
+
+    producer.release_producer.set()
+    assert close_finished.wait(timeout=5)
+    closer.join()
+    assert close_error == []
+    assert lease.pins == 0
+    assert not producer.output_path.parent.exists()
+
+
+def test_guest_regular_stream_transfer_exposes_no_host_path_and_closes_on_success() -> None:
+    events: list[str] = []
+
+    class StreamGuest(Guest):
+        def download(self, remotefilename: str, filename: str) -> None:
+            self.events.append(f"guest.download:{remotefilename}")
+            with open(filename, "wb") as destination:
+                destination.write(b"elf")
+
+        def upload(self, filename: str, remotefilename: str) -> None:
+            with open(filename, "rb") as source:
+                self.events.append(f"guest.upload:{remotefilename}:{source.read()!r}")
+
+    stream_guest = StreamGuest(events)
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events)),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: stream_guest,
+        open_overlay=lambda _path: 40,
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=lambda _fd: None,
+        close_descriptor=lambda _fd: None,
+    )
+    session = factory.open(_lease(), _expected())
+
+    with session.guest() as guest:
+        with guest.open_regular("/lib/modules/6.12.0/a.ko", size=3) as content:
+            assert content.read() == b"elf"
+        guest.create_regular(io.BytesIO(b"new"), "/lib/modules/staging/a.ko", size=3)
+
+    assert "guest.download:/lib/modules/6.12.0/a.ko" in events
+    assert "guest.upload:/lib/modules/staging/a.ko:b'new'" in events
+    assert not any("/tmp/" in event for event in events)
+    session.close()
+
+
+def test_guest_regular_stream_short_input_rejects_before_guest_write() -> None:
+    events: list[str] = []
+    session = _factory(events).open(_lease(), _expected())
+
+    with session.guest() as guest, pytest.raises(ValueError, match="ended before"):
+        guest.create_regular(io.BytesIO(b"x"), "/lib/modules/staging/a.ko", size=2)
+
+    assert not any(event.startswith("upload:") for event in events)
+    session.close()
+
+
+def test_concrete_find0_orders_produce_identical_recovery_identity(tmp_path: Path) -> None:
+    class RecoveryGuest(Find0Guest):
+        def lstatns(self, path: str) -> dict[str, int]:
+            directory = path.endswith("/kernel")
+            return {
+                "st_mode": (stat.S_IFDIR | 0o755) if directory else (stat.S_IFREG | 0o600),
+                "st_uid": 0,
+                "st_gid": 0,
+                "st_size": 0 if directory else 3,
+                "st_nlink": 1,
+            }
+
+        def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
+            del path
+            return []
+
+        def download(self, remotefilename: str, filename: str) -> None:
+            del remotefilename
+            with open(filename, "wb") as destination:
+                destination.write(b"elf")
+
+    captures: list[ModuleArchiveCapture] = []
+    for name, order in (
+        ("first", [b"z.ko", b"kernel", b"kernel/a.ko"]),
+        ("second", [b"kernel/a.ko", b"z.ko", b"kernel"]),
+    ):
+        events: list[str] = []
+        producer = RecoveryGuest(events, order)
+        session, _lease_value = _stream_session(events, producer)
+        archive = tmp_path / name
+        archive.mkdir(mode=0o700)
+        descriptor = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            sink = RecoveryArchiveSink(descriptor, binding=BINDING, release="6.12.0")
+        finally:
+            os.close(descriptor)
+        with session.guest() as guest:
+            tree = LibguestfsAuthenticatedGuestTree(
+                guest,
+                binding=BINDING,
+                release="6.12.0",
+                root="/lib/modules/6.12.0",
+                mutable=False,
+            )
+            capture = RealGuestRecoveryWriter().capture(tree, "6.12.0", sink)
+        assert isinstance(capture, ModuleArchiveCapture)
+        captures.append(capture)
+        session.close()
+
+    assert captures[0].manifest == captures[1].manifest
+    assert captures[0].archive_sha256 == captures[1].archive_sha256
 
 
 def _factory(

@@ -8,14 +8,17 @@ import json
 import os
 import stat
 import tarfile
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
+from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     CleanupTombstoneV1,
     FinalizeCleanupProof,
@@ -36,15 +39,26 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     recovery_directory_name,
     render_target_xml,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    AbsentModuleCapture,
+    AuthenticatedGuestTree,
+    KernelBundleSource,
+    ModuleArchiveCapture,
+    RealGuestRecoveryWriter,
+    RecoveryArchiveSink,
+    RecoveryArchiveSource,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ClosedDomainInspection,
     ExpectedOperationOwnership,
+    InactiveGuestDirectoryEntry,
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
     OverlayIdentity,
 )
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
+    ComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
@@ -428,7 +442,11 @@ def test_finalize_cleanup_proof_is_closed_and_mutation_started_only() -> None:
 
 def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadataV1:
     absent = AbsentComponentState()
-    state = ProviderStateIdentity(definition="sha256:" + "5" * 64, modules=absent)
+    source_state = ProviderStateIdentity(definition="sha256:" + "b" * 64, modules=absent)
+    target_state = ProviderStateIdentity(
+        definition="sha256:" + "c" * 64,
+        modules=PresentComponentState(manifest="sha256:" + "3" * 64),
+    )
     return LocalRecoveryMetadataV1(
         binding=_BINDING,
         plan_identity="sha256:" + "6" * 64,
@@ -444,8 +462,8 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         target_boot="sha256:" + "c" * 64,
         target_projection_sha256="sha256:" + "d" * 64,
         target_xml=_SOURCE_XML.replace("/old", "/new"),
-        source_state=state,
-        target_state=state,
+        source_state=source_state,
+        target_state=target_state,
         prior_power="running",
         capture={"state": "absent"},
         phase=phase,
@@ -563,6 +581,33 @@ def test_pre_stop_intent_is_durable_before_complete_publication(tmp_path: Path) 
         assert store.reopen_pre_stop(reference, intent.binding) == intent
         assert store.complete_preparation(reference, intent, metadata) == metadata
         assert store.reopen(reference, intent.binding) == metadata
+
+
+def test_recovery_store_constructs_sink_and_source_from_exact_owned_evidence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    template = _metadata()
+    intent = _pre_stop(template)
+    payload = b"bounded recovery archive"
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish_pre_stop(intent)
+        sink = store.recovery_archive_sink(reference, intent)
+        archive_sha256, archive_bytes = sink.publish(io.BytesIO(payload))
+        capture = ModuleArchiveCapture(
+            manifest="sha256:" + "4" * 64,
+            entry_count=0,
+            uncompressed_bytes=0,
+            archive_sha256=archive_sha256,
+            archive_bytes=archive_bytes,
+        )
+        metadata = template.model_copy(update={"capture": capture})
+        completed = store.complete_preparation(reference, intent, metadata)
+        source = store.recovery_archive_source(reference, completed)
+
+    with source.stream() as stream:
+        assert stream.read() == payload
 
 
 @pytest.mark.parametrize("interrupted", [b"", b'{"schema":', None])
@@ -926,21 +971,60 @@ def test_cleanup_tombstone_finalization_is_exact_and_absent_retry_is_idempotent(
             store.finalize_tombstone(reference, point, wrong)
 
 
+class _TreeCursor(AbstractContextManager[Iterator[InactiveGuestDirectoryEntry]]):
+    def __init__(self, owner: _GuestTreeHandle, entries: list[str]) -> None:
+        self._owner = owner
+        self._entries = entries
+        self._closed = False
+
+    def __enter__(self) -> Iterator[InactiveGuestDirectoryEntry]:
+        return iter(InactiveGuestDirectoryEntry(path) for path in self._entries)
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._owner.cursor_closes += 1
+
+
 class _GuestTreeHandle:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        entries: list[str] | None = None,
+        *,
+        present: bool = True,
+        directory: bool = True,
+        stats: dict[str, dict[str, int]] | None = None,
+    ) -> None:
         self.calls: list[tuple[object, ...]] = []
+        self.tree_entries = ["module.ko"] if entries is None else entries
+        self.present = present
+        self.directory = directory
+        self.stats = stats or {}
+        self.cursor_closes = 0
+        self.tree_limits: list[int] = []
+        self.lstat_paths: list[str] = []
 
     def exists(self, path: str) -> int:
-        return 1
+        return int(self.present)
 
     def is_dir(self, path: str, *, followsymlinks: bool) -> int:
-        return int(path.endswith("-staging"))
+        del path
+        return int(self.directory and not followsymlinks)
 
-    def find(self, path: str) -> list[str]:
-        return ["module.ko"]
+    def open_tree(self, path: str, *, limit: int) -> _TreeCursor:
+        self.calls.append(("open-tree", path, limit))
+        self.tree_limits.append(limit)
+        return _TreeCursor(self, self.tree_entries)
 
     def lstatns(self, path: str) -> dict[str, int]:
-        return {"st_mode": 0o100600, "st_uid": 1, "st_gid": 2, "st_size": 3, "st_nlink": 1}
+        self.lstat_paths.append(path)
+        return self.stats.get(
+            path,
+            {"st_mode": 0o100600, "st_uid": 1, "st_gid": 2, "st_size": 3, "st_nlink": 1},
+        )
 
     def readlink(self, path: str) -> str:
         raise AssertionError("not a symlink")
@@ -948,7 +1032,17 @@ class _GuestTreeHandle:
     def lgetxattrs(self, path: str) -> list[dict[str, str | bytes]]:
         return []
 
+    @contextmanager
+    def open_regular(self, path: str, *, size: int) -> Iterator[BinaryIO]:
+        del size
+        self.calls.append(("open-regular", path))
+        yield io.BytesIO(b"elf")
+
+    def create_regular(self, content: BinaryIO, path: str, *, size: int) -> None:
+        self.calls.append(("create-regular", path, content.read(size)))
+
     def download(self, remotefilename: str, filename: str) -> None:
+        self.calls.append(("download", remotefilename))
         with open(filename, "wb") as output:
             output.write(b"elf")
 
@@ -989,6 +1083,8 @@ def test_libguestfs_tree_is_bound_private_and_no_follow() -> None:
         tree.remove_all()
     with pytest.raises(ValueError, match="canonical relative"):
         tree.open_regular("../escape", 0).__enter__()
+    assert guest.tree_limits == [external_boot_module.MAX_ENTRIES]
+    assert guest.cursor_closes == 1
 
 
 def test_libguestfs_tree_rejects_cross_activation_root_before_guest_call() -> None:
@@ -1002,6 +1098,138 @@ def test_libguestfs_tree_rejects_cross_activation_root_before_guest_call() -> No
             mutable=True,
         )
     assert guest.calls == []
+
+
+def _capture_guest_tree(
+    tmp_path: Path,
+    guest: _GuestTreeHandle,
+    *,
+    directory_name: str,
+) -> AbsentModuleCapture | ModuleArchiveCapture:
+    archive = tmp_path / directory_name
+    archive.mkdir(mode=0o700)
+    descriptor = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        sink = RecoveryArchiveSink(
+            descriptor,
+            binding=_BINDING,
+            release="6.12.0",
+        )
+    finally:
+        os.close(descriptor)
+    tree = LibguestfsAuthenticatedGuestTree(
+        guest,
+        binding=_BINDING,
+        release="6.12.0",
+        root="/lib/modules/6.12.0",
+        mutable=False,
+    )
+    return RealGuestRecoveryWriter().capture(tree, "6.12.0", sink)
+
+
+def test_libguestfs_tree_capture_distinguishes_present_empty_and_absent(
+    tmp_path: Path,
+) -> None:
+    present = _capture_guest_tree(
+        tmp_path,
+        _GuestTreeHandle(["module.ko"]),
+        directory_name="present",
+    )
+    empty_guest = _GuestTreeHandle([])
+    empty = _capture_guest_tree(tmp_path, empty_guest, directory_name="empty")
+    absent_guest = _GuestTreeHandle([], present=False)
+    absent = _capture_guest_tree(tmp_path, absent_guest, directory_name="absent")
+
+    assert isinstance(present, ModuleArchiveCapture) and present.entry_count == 1
+    assert isinstance(empty, ModuleArchiveCapture) and empty.entry_count == 0
+    assert isinstance(absent, AbsentModuleCapture)
+    assert empty_guest.cursor_closes == 1
+    assert absent_guest.tree_limits == []
+
+
+def test_libguestfs_tree_order_produces_identical_recovery_identity(tmp_path: Path) -> None:
+    root = "/lib/modules/6.12.0"
+    stats = {
+        f"{root}/kernel": {
+            "st_mode": stat.S_IFDIR | 0o755,
+            "st_uid": 0,
+            "st_gid": 0,
+            "st_size": 0,
+            "st_nlink": 1,
+        }
+    }
+    first = _capture_guest_tree(
+        tmp_path,
+        _GuestTreeHandle(["z.ko", "kernel", "kernel/a.ko"], stats=stats),
+        directory_name="first",
+    )
+    second = _capture_guest_tree(
+        tmp_path,
+        _GuestTreeHandle(["kernel/a.ko", "z.ko", "kernel"], stats=stats),
+        directory_name="second",
+    )
+
+    assert isinstance(first, ModuleArchiveCapture)
+    assert isinstance(second, ModuleArchiveCapture)
+    assert first.manifest == second.manifest
+
+
+@pytest.mark.parametrize(
+    ("entries", "reason"),
+    [
+        (["same", "same"], "duplicate"),
+        (["../escape"], "canonical relative"),
+        (["bad//name"], "canonical relative"),
+    ],
+)
+def test_libguestfs_tree_rejects_duplicate_or_hostile_names_before_second_visit(
+    tmp_path: Path,
+    entries: list[str],
+    reason: str,
+) -> None:
+    guest = _GuestTreeHandle(entries)
+
+    with pytest.raises(ValueError, match=reason):
+        _capture_guest_tree(tmp_path, guest, directory_name=reason.replace(" ", "-"))
+
+    expected_visits = 1 if reason == "duplicate" else 0
+    assert len(guest.lstat_paths) == expected_visits
+    assert guest.cursor_closes == 1
+
+
+def test_libguestfs_tree_rejects_hard_link_before_content_read(tmp_path: Path) -> None:
+    root = "/lib/modules/6.12.0"
+    guest = _GuestTreeHandle(
+        ["module.ko"],
+        stats={
+            f"{root}/module.ko": {
+                "st_mode": stat.S_IFREG | 0o600,
+                "st_uid": 1,
+                "st_gid": 2,
+                "st_size": 3,
+                "st_nlink": 2,
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        _capture_guest_tree(tmp_path, guest, directory_name="hard-link")
+
+    assert not any(call[0] == "download" for call in guest.calls)
+
+
+def test_libguestfs_tree_rejects_limit_signal_before_visiting_extra_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(external_boot_module, "MAX_ENTRIES", 2)
+    guest = _GuestTreeHandle(["a", "b", "not-visited"])
+
+    with pytest.raises(ValueError, match="entry-count"):
+        _capture_guest_tree(tmp_path, guest, directory_name="over-limit")
+
+    assert guest.tree_limits == [2]
+    assert guest.lstat_paths == ["/lib/modules/6.12.0/a", "/lib/modules/6.12.0/b"]
+    assert guest.cursor_closes == 1
 
 
 def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
@@ -1242,7 +1470,6 @@ class _RealPreparation:
         self.actions: list[str] = []
         self.inspect_allowed = True
         self.work_fault = False
-        self.complete_override: LocalRecoveryMetadataV1 | None = None
 
     def materialize(self, plan: ExternalBootPlan, session: object) -> ExternalBootMaterialization:
         del plan, session
@@ -1261,19 +1488,6 @@ class _RealPreparation:
         self.actions.append("inspect")
         return _pre_stop(self.metadata)
 
-    def complete_prepare(
-        self, intent: LocalPreStopIntentV1, session: object
-    ) -> LocalRecoveryMetadataV1:
-        del session
-        reference = OpaqueProviderRef(
-            ref=f"local-recovery-v1/{intent.binding.system_id}/{intent.binding.activation_id}"
-        )
-        with RecoveryMetadataStore(self.root) as store:
-            assert store.reopen_pre_stop(reference, intent.binding) == intent
-        if self.work_fault:
-            raise LookupError("prepare primary")
-        return self.complete_override or self.metadata
-
 
 class _RealSession:
     def __init__(self, preparation: _RealPreparation) -> None:
@@ -1288,6 +1502,7 @@ class _RealSession:
             domain_name=f"kdive-{preparation.metadata.binding.system_id}",
             overlay=OverlayIdentity(1, 2),
         )
+        self.guest_handle = _GuestTreeHandle([], present=False)
 
     def inspect_closed(self) -> ClosedDomainInspection:
         return self.inspection
@@ -1297,6 +1512,10 @@ class _RealSession:
         with RecoveryMetadataStore(self.preparation.root) as store:
             store.reopen_pre_stop(reference, self.preparation.metadata.binding)
         self.preparation.actions.append("first-mutation")
+
+    @contextmanager
+    def guest(self) -> Iterator[_GuestTreeHandle]:
+        yield self.guest_handle
 
     def observe_running(self) -> RunningKernelObservation:
         return RunningKernelObservation(
@@ -1335,6 +1554,80 @@ class _RealSessionFactory:
         return self.session
 
 
+class _RecordingRecoveryWriter:
+    def __init__(self, preparation: _RealPreparation | None = None) -> None:
+        self._preparation = preparation
+        self.captures: list[tuple[ExternalBootActivationBinding, str, bool]] = []
+
+    def capture(
+        self,
+        tree: object,
+        release: str,
+        sink: RecoveryArchiveSink,
+    ) -> AbsentModuleCapture:
+        assert isinstance(tree, LibguestfsAuthenticatedGuestTree)
+        self.captures.append((tree.binding, release, tree.mutable))
+        sink.close()
+        if self._preparation is not None and self._preparation.work_fault:
+            raise LookupError("prepare primary")
+        return AbsentModuleCapture()
+
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
+        del tree, release
+        raise AssertionError("not used")
+
+    def install(
+        self,
+        tree: AuthenticatedGuestTree,
+        release: str,
+        source: KernelBundleSource,
+    ) -> str:
+        del tree, release, source
+        raise AssertionError("not used")
+
+    def restore(
+        self,
+        tree: AuthenticatedGuestTree,
+        release: str,
+        capture: AbsentModuleCapture | ModuleArchiveCapture,
+        source: RecoveryArchiveSource,
+    ) -> str:
+        del tree, release, capture, source
+        raise AssertionError("not used")
+
+
+def test_real_adapter_captures_recovery_through_session_owned_capabilities(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    template = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(template, root)
+    session = _RealSession(preparation)
+    writer = _RecordingRecoveryWriter()
+    io = RealLocalExternalBootIO(
+        root,
+        preparation,
+        writer,
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+    )
+
+    prepared = _real_prepare(io, materialization)
+
+    assert writer.captures == [(_BINDING, "6.12.0", False)]
+    assert prepared.capture == AbsentModuleCapture()
+    assert prepared.source_state == ProviderStateIdentity(
+        definition=template.source_boot,
+        modules=AbsentComponentState(),
+    )
+    assert prepared.target_state == ProviderStateIdentity(
+        definition=template.target_boot,
+        modules=PresentComponentState(manifest=materialization.installed_module_tree),
+    )
+
+
 def _real_io(
     root: Path, preparation: _RealPreparation
 ) -> tuple[RealLocalExternalBootIO, _RealSession]:
@@ -1343,6 +1636,7 @@ def _real_io(
     io = RealLocalExternalBootIO(
         root,
         preparation,
+        _RecordingRecoveryWriter(preparation),
         lambda _authority: cast(LocalExternalBootOperationLease, object()),
         factory,
     )
@@ -1432,6 +1726,7 @@ def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path
 )
 def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_definition(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     field: str,
     substitution: str,
 ) -> None:
@@ -1440,15 +1735,34 @@ def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_
     materialization = _materialization()
     metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
     preparation = _RealPreparation(metadata, root)
-    preparation.complete_override = metadata.model_copy(update={field: substitution})
     io, session = _real_io(root, preparation)
+    original_stop = session.stop_and_require_inactive
+    substituted = _pre_stop(metadata).model_copy(update={field: substitution})
 
-    with pytest.raises(ValueError, match="does not extend pre-stop intent"):
+    def substitute_after_stop() -> None:
+        original_stop()
+        intent = (
+            root
+            / f".{metadata.binding.system_id}.{metadata.binding.activation_id}.partial"
+            / "intent.json"
+        )
+        intent.write_bytes(
+            json.dumps(
+                substituted.model_dump(mode="json", by_alias=True),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        )
+
+    monkeypatch.setattr(session, "stop_and_require_inactive", substitute_after_stop)
+
+    with pytest.raises(ValueError, match="changed before recovery capture"):
         _real_prepare(io, materialization)
 
     point = _point(metadata)
     with RecoveryMetadataStore(root) as store:
-        assert store.reopen_pre_stop(point.recovery_ref, metadata.binding) == _pre_stop(metadata)
+        assert store.reopen_pre_stop(point.recovery_ref, metadata.binding) == substituted
         with pytest.raises(FileNotFoundError):
             store.reopen(point.recovery_ref, metadata.binding)
     assert not any(action.startswith("define:") for action in preparation.actions)
