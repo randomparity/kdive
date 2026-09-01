@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import json
 import os
 import stat
 import tarfile
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -259,6 +260,86 @@ def test_unlisted_restart_layout_conflicts_without_mutation() -> None:
             desired=_DESIRED,
         )
     assert io.actions == ["inactive"]
+
+
+def test_publication_phase_evidence_follows_guest_sync() -> None:
+    layout = ModuleLayout(_DESIRED, None, _PRIOR)
+    io = _PublicationIO(layout)
+
+    advance_module_publication(
+        io,
+        phase=PublicationPhase.OLD_ASIDE,
+        layout=layout,
+        prior=_PRIOR,
+        desired=_DESIRED,
+    )
+
+    assert io.actions == ["inactive", "guest-sync", "phase:new-live"]
+
+
+@pytest.mark.parametrize("prior", [_PRIOR, None])
+def test_every_unlisted_present_phase_layout_pair_conflicts_without_mutation(
+    prior: PresentComponentState | None,
+) -> None:
+    foreign = PresentComponentState(manifest="sha256:" + "f" * 64)
+    values = {None, _DESIRED, foreign, prior}
+    accepted = {
+        (PublicationPhase.MOVE_READY, ModuleLayout(prior, _DESIRED, None)),
+        (PublicationPhase.MOVE_READY, ModuleLayout(None, _DESIRED, prior)),
+        (PublicationPhase.OLD_ASIDE, ModuleLayout(None, _DESIRED, prior)),
+        (PublicationPhase.OLD_ASIDE, ModuleLayout(_DESIRED, None, prior)),
+        (PublicationPhase.ROLLBACK_READY, ModuleLayout(None, _DESIRED, prior)),
+        (PublicationPhase.ROLLBACK_READY, ModuleLayout(prior, _DESIRED, None)),
+        (PublicationPhase.ROLLBACK_COMPLETE, ModuleLayout(prior, _DESIRED, None)),
+        (PublicationPhase.NEW_LIVE, ModuleLayout(_DESIRED, None, prior)),
+        (PublicationPhase.NEW_LIVE, ModuleLayout(_DESIRED, None, None)),
+        (PublicationPhase.PUBLICATION_COMPLETE, ModuleLayout(_DESIRED, None, None)),
+    }
+
+    combinations = itertools.product(PublicationPhase, itertools.product(values, repeat=3))
+    for phase, components in combinations:
+        layout = ModuleLayout(*components)
+        if (phase, layout) in accepted:
+            continue
+        publication = _PublicationIO(layout)
+        with pytest.raises(ValueError, match="conflict"):
+            advance_module_publication(
+                publication,
+                phase=phase,
+                layout=layout,
+                prior=prior,
+                desired=_DESIRED,
+            )
+        assert publication.actions == ["inactive"]
+
+
+def test_every_unlisted_absence_phase_layout_pair_conflicts_without_mutation() -> None:
+    foreign = PresentComponentState(manifest="sha256:" + "f" * 64)
+    values = {None, _PRIOR, foreign}
+    accepted = {
+        (PublicationPhase.MOVE_READY, ModuleLayout(_PRIOR, None, None)),
+        (PublicationPhase.MOVE_READY, ModuleLayout(None, None, _PRIOR)),
+        (PublicationPhase.MOVE_READY, ModuleLayout(None, None, None)),
+        (PublicationPhase.ABSENCE_LIVE, ModuleLayout(None, None, _PRIOR)),
+        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, _PRIOR)),
+        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, None)),
+        (PublicationPhase.ABSENCE_CLEANED, ModuleLayout(None, None, None)),
+    }
+
+    combinations = itertools.product(PublicationPhase, itertools.product(values, repeat=3))
+    for phase, components in combinations:
+        layout = ModuleLayout(*components)
+        if (phase, layout) in accepted:
+            continue
+        publication = _PublicationIO(layout)
+        with pytest.raises(ValueError, match="conflict"):
+            advance_absence_publication(
+                publication,
+                phase=phase,
+                layout=layout,
+                prior=_PRIOR,
+            )
+        assert publication.actions == ["inactive"]
 
 
 @pytest.mark.parametrize(
@@ -1606,6 +1687,10 @@ class _RealSession:
             raise OSError("session close")
 
 
+class _ProcessLost(BaseException):
+    pass
+
+
 class _RestartFaults:
     def __init__(self) -> None:
         self.actions: list[str] = []
@@ -1618,11 +1703,15 @@ class _RestartFaults:
         action = f"{name}#{occurrence}"
         self.actions.append(action)
         failure = self.failures.pop(action, None)
-        if failure == "before":
+        if failure == "os-before":
             raise OSError(f"{action} failed before effect")
+        if failure == "before":
+            raise _ProcessLost(f"{action} failed before effect")
         result = effect() if effect is not None else None
-        if failure == "after":
+        if failure == "os-after":
             raise OSError(f"{action} failed after effect")
+        if failure == "after":
+            raise _ProcessLost(f"{action} failed after effect")
         return result
 
 
@@ -1697,7 +1786,10 @@ class _RestartWriter:
     ) -> str:
         del release
         source.close()
-        self._guest.states[self._root(tree)] = self._install_state
+        self._guest.faults.run(
+            "install",
+            lambda: self._guest.states.__setitem__(self._root(tree), self._install_state),
+        )
         return self._install_state.manifest
 
     def restore(
@@ -1709,9 +1801,13 @@ class _RestartWriter:
     ) -> str:
         del release, capture
         source.close()
-        assert self._restore_state is not None
-        self._guest.states[self._root(tree)] = self._restore_state
-        return self._restore_state.manifest
+        restore_state = self._restore_state
+        assert restore_state is not None
+        self._guest.faults.run(
+            "restore",
+            lambda: self._guest.states.__setitem__(self._root(tree), restore_state),
+        )
+        return restore_state.manifest
 
 
 class _RestartSession(_RealSession):
@@ -1771,6 +1867,9 @@ class _RestartSession(_RealSession):
 
     def observe_running(self) -> RunningKernelObservation:
         return self.running_observation
+
+    def cleanup_payloads(self) -> None:
+        self.faults.run("cleanup-payloads", lambda: _RealSession.cleanup_payloads(self))
 
 
 def _restart_fixture(
@@ -1865,6 +1964,245 @@ def _restart_fixture(
     return LocalLibvirtExternalBoot(io), metadata, session, guest, root
 
 
+class _FreshRestartHarness:
+    def __init__(
+        self,
+        ports: LocalLibvirtExternalBoot,
+        metadata: LocalRecoveryMetadataV1,
+        session: _RestartSession,
+        guest: _RestartGuest,
+        root: Path,
+    ) -> None:
+        self._ports = ports
+        self.metadata = metadata
+        self.sessions = [session]
+        self.guest = guest
+        self.root = root
+        self._invocations = 0
+
+    @classmethod
+    def create(
+        cls,
+        tmp_path: Path,
+        *,
+        phase: RecoveryPhase,
+        source_present: bool,
+        prior_power: str = "running",
+        xml: str = _SOURCE_XML,
+        active: bool = False,
+    ) -> _FreshRestartHarness:
+        return cls(
+            *_restart_fixture(
+                tmp_path,
+                phase=phase,
+                source_present=source_present,
+                prior_power=prior_power,
+                xml=xml,
+                active=active,
+            )
+        )
+
+    @property
+    def faults(self) -> _RestartFaults:
+        return self.guest.faults
+
+    @property
+    def point(self) -> RecoveryPoint:
+        return _point(self.metadata)
+
+    def activate(self, point: RecoveryPoint | None = None) -> None:
+        ports = self._fresh_ports()
+        ports.activate(point or self.point, OpaqueProviderRef(ref="authority/current"))
+
+    def recover(self) -> None:
+        ports = self._fresh_ports()
+        ports.recover(self.point, OpaqueProviderRef(ref="authority/current"))
+
+    def cleanup(self) -> None:
+        ports = self._fresh_ports()
+        ports.cleanup(self.point, OpaqueProviderRef(ref="authority/current"))
+
+    def finalize(self, proof: FinalizeCleanupProof) -> None:
+        ports = self._fresh_ports()
+        ports.finalize_cleanup_tombstone(
+            self.point,
+            proof,
+            OpaqueProviderRef(ref="authority/authenticated-by-2140"),
+        )
+
+    @property
+    def session(self) -> _RestartSession:
+        return self.sessions[-1]
+
+    def discard_process(self) -> None:
+        self._invocations = max(self._invocations, 1)
+
+    def _fresh_ports(self) -> LocalLibvirtExternalBoot:
+        if self._invocations == 0:
+            self._invocations += 1
+            return self._ports
+        previous = self.sessions[-1]
+        session = _RestartSession(previous.preparation, self.guest, previous.artifact)
+        session.xml = previous.xml
+        session.active = previous.active
+        session.readiness_result = previous.readiness_result
+        session.running_observation = previous.running_observation
+        writer = _RestartWriter(
+            self.guest,
+            install_state=cast(PresentComponentState, self.metadata.target_state.modules),
+            restore_state=(
+                self.metadata.source_state.modules
+                if isinstance(self.metadata.source_state.modules, PresentComponentState)
+                else None
+            ),
+        )
+        io = RealLocalExternalBootIO(
+            self.root,
+            previous.preparation,
+            writer,
+            lambda _authority: cast(LocalExternalBootOperationLease, object()),
+            cast(LocalExternalBootSessionFactory, _RealSessionFactory(session)),
+        )
+        self.sessions.append(session)
+        self._invocations += 1
+        return LocalLibvirtExternalBoot(io)
+
+
+def test_crash_retry_recreates_real_adapter_from_durable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures["phase:move-ready#1"] = "after"
+
+    with pytest.raises(_ProcessLost, match="phase:move-ready#1 failed after effect"):
+        harness.activate()
+    harness.activate()
+
+    assert len(harness.sessions) == 2
+    assert harness.sessions[0] is not harness.sessions[1]
+    with RecoveryMetadataStore(harness.root) as store:
+        assert store.reopen(harness.point.recovery_ref, harness.metadata.binding).phase == (
+            "target-defined"
+        )
+
+
+def _recovery_root_snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "crossed",
+    [
+        lambda point: point.model_copy(update={"plan_identity": "sha256:" + "f" * 64}),
+        lambda point: point.model_copy(
+            update={
+                "binding": point.binding.model_copy(
+                    update={"system_id": "00000000-0000-0000-0000-000000000099"}
+                )
+            }
+        ),
+        lambda point: point.model_copy(
+            update={
+                "binding": point.binding.model_copy(
+                    update={"run_id": "00000000-0000-0000-0000-000000000099"}
+                )
+            }
+        ),
+        lambda point: point.model_copy(
+            update={
+                "binding": point.binding.model_copy(
+                    update={"activation_id": "00000000-0000-0000-0000-000000000099"}
+                )
+            }
+        ),
+    ],
+)
+def test_fresh_adapter_rejects_crossed_point_before_mutation(
+    tmp_path: Path,
+    crossed: Callable[[RecoveryPoint], RecoveryPoint],
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    harness.discard_process()
+    before_root = _recovery_root_snapshot(harness.root)
+    before_guest = dict(harness.guest.states)
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        harness.activate(crossed(harness.point))
+
+    assert _recovery_root_snapshot(harness.root) == before_root
+    assert harness.guest.states == before_guest
+    assert harness.faults.actions == []
+
+
+@pytest.mark.parametrize("substituted_name", ["live", "staging", "old"])
+def test_fresh_adapter_rejects_substituted_three_name_layout_without_mutation(
+    tmp_path: Path,
+    substituted_name: str,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="move-ready",
+        source_present=True,
+    )
+    harness.discard_process()
+    live = f"/lib/modules/{harness.metadata.release}"
+    names = {
+        "live": live,
+        "staging": f"/lib/modules/{_STAGING_NAME}",
+        "old": f"/lib/modules/{_OLD_NAME}",
+    }
+    harness.guest.states[names[substituted_name]] = PresentComponentState(
+        manifest="sha256:" + "f" * 64
+    )
+    before_root = _recovery_root_snapshot(harness.root)
+    before_guest = dict(harness.guest.states)
+
+    with pytest.raises(ValueError, match="conflict"):
+        harness.activate()
+
+    assert _recovery_root_snapshot(harness.root) == before_root
+    assert harness.guest.states == before_guest
+    assert harness.faults.actions == []
+
+
+def test_fresh_adapter_rejects_malformed_durable_evidence_before_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    harness.discard_process()
+    evidence = harness.root / recovery_directory_name(
+        harness.point.recovery_ref, harness.metadata.binding
+    )
+    (evidence / "intent.json").write_bytes(b"{")
+    before_root = _recovery_root_snapshot(harness.root)
+    before_guest = dict(harness.guest.states)
+
+    with pytest.raises(ValueError):
+        harness.activate()
+
+    assert _recovery_root_snapshot(harness.root) == before_root
+    assert harness.guest.states == before_guest
+    assert harness.faults.actions == []
+
+
 @pytest.mark.parametrize("source_present", [True, False])
 def test_real_activation_publishes_exact_target_and_restores_prior_power(
     tmp_path: Path,
@@ -1939,10 +2277,16 @@ def _retry_until_phase(
     phase: RecoveryPhase,
 ) -> None:
     for _attempt in range(4):
-        with suppress(OSError):
+        process_lost = False
+        try:
             operation()
+        except _ProcessLost:
+            process_lost = True
         with RecoveryMetadataStore(root) as store:
-            if store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == phase:
+            if (
+                store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == phase
+                and not process_lost
+            ):
                 return
     raise AssertionError(f"external boot did not reach {phase}")
 
@@ -1963,12 +2307,13 @@ _PRESENT_PUBLICATION_FAULTS = [
     "sync#4",
     "phase:publication-complete#1",
 ]
+_PRESENT_ACTIVATION_FAULTS = ["install#1"] + _PRESENT_PUBLICATION_FAULTS
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
 @pytest.mark.parametrize(
     "fault",
-    _PRESENT_PUBLICATION_FAULTS
+    _PRESENT_ACTIVATION_FAULTS
     + [
         "phase:module-restored#1",
         "define#1",
@@ -1983,29 +2328,28 @@ def test_activation_restarts_exactly_around_every_publication_and_host_effect(
     fault: str,
     effect: str,
 ) -> None:
-    ports, metadata, session, guest, root = _restart_fixture(
+    harness = _FreshRestartHarness.create(
         tmp_path,
         phase="pre-stop-intent",
         source_present=True,
     )
-    _record_phase_faults(monkeypatch, guest.faults)
-    guest.faults.failures[fault] = effect
-    operation = lambda: ports.activate(  # noqa: E731 - concise retry closure for the table
-        _point(metadata), OpaqueProviderRef(ref="authority/current")
-    )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures[fault] = effect
 
-    _retry_until_phase(operation, root, metadata, "target-defined")
+    _retry_until_phase(harness.activate, harness.root, harness.metadata, "target-defined")
 
-    live = f"/lib/modules/{metadata.release}"
-    assert guest.states == {live: metadata.target_state.modules}
-    assert session.xml == metadata.target_xml
-    assert session.active
+    live = f"/lib/modules/{harness.metadata.release}"
+    assert harness.guest.states == {live: harness.metadata.target_state.modules}
+    assert harness.session.xml == harness.metadata.target_xml
+    assert harness.session.active
+    assert len(harness.sessions) >= 2
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
 @pytest.mark.parametrize(
     "fault",
     [
+        "install#1",
         "sync#1",
         "phase:old-aside#1",
         "move:" + _STAGING_NAME + "->6.12.0#1",
@@ -2026,29 +2370,27 @@ def test_absent_source_activation_restarts_around_every_effect(
     fault: str,
     effect: str,
 ) -> None:
-    ports, metadata, session, guest, root = _restart_fixture(
+    harness = _FreshRestartHarness.create(
         tmp_path,
         phase="pre-stop-intent",
         source_present=False,
     )
-    _record_phase_faults(monkeypatch, guest.faults)
-    guest.faults.failures[fault] = effect
-    operation = lambda: ports.activate(  # noqa: E731 - concise retry closure for the table
-        _point(metadata), OpaqueProviderRef(ref="authority/current")
-    )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures[fault] = effect
 
-    _retry_until_phase(operation, root, metadata, "target-defined")
+    _retry_until_phase(harness.activate, harness.root, harness.metadata, "target-defined")
 
-    live = f"/lib/modules/{metadata.release}"
-    assert guest.states == {live: metadata.target_state.modules}
-    assert session.xml == metadata.target_xml
-    assert session.active
+    live = f"/lib/modules/{harness.metadata.release}"
+    assert harness.guest.states == {live: harness.metadata.target_state.modules}
+    assert harness.session.xml == harness.metadata.target_xml
+    assert harness.session.active
+    assert len(harness.sessions) >= 2
 
 
 @pytest.mark.parametrize("effect", ["before", "after"])
 @pytest.mark.parametrize(
     "fault",
-    ["stop#1"]
+    ["stop#1", "restore#1"]
     + _PRESENT_PUBLICATION_FAULTS
     + [
         "phase:module-restored#1",
@@ -2066,25 +2408,23 @@ def test_present_recovery_restarts_exactly_around_every_mutation_and_evidence_wr
     effect: str,
 ) -> None:
     metadata_template = _metadata("target-defined")
-    ports, metadata, session, guest, root = _restart_fixture(
+    harness = _FreshRestartHarness.create(
         tmp_path,
         phase="target-defined",
         source_present=True,
         xml=metadata_template.target_xml,
         active=True,
     )
-    _record_phase_faults(monkeypatch, guest.faults)
-    guest.faults.failures[fault] = effect
-    operation = lambda: ports.recover(  # noqa: E731 - concise retry closure for the table
-        _point(metadata), OpaqueProviderRef(ref="authority/current")
-    )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures[fault] = effect
 
-    _retry_until_phase(operation, root, metadata, "recovered")
+    _retry_until_phase(harness.recover, harness.root, harness.metadata, "recovered")
 
-    live = f"/lib/modules/{metadata.release}"
-    assert guest.states == {live: metadata.source_state.modules}
-    assert session.xml == metadata.source_xml
-    assert session.active
+    live = f"/lib/modules/{harness.metadata.release}"
+    assert harness.guest.states == {live: harness.metadata.source_state.modules}
+    assert harness.session.xml == harness.metadata.source_xml
+    assert harness.session.active
+    assert len(harness.sessions) >= 2
 
 
 _ABSENCE_PUBLICATION_FAULTS = [
@@ -2121,24 +2461,179 @@ def test_absence_recovery_restarts_exactly_around_every_mutation_and_evidence_wr
     effect: str,
 ) -> None:
     metadata_template = _metadata("target-defined")
-    ports, metadata, session, guest, root = _restart_fixture(
+    harness = _FreshRestartHarness.create(
         tmp_path,
         phase="target-defined",
         source_present=False,
         xml=metadata_template.target_xml,
         active=True,
     )
-    _record_phase_faults(monkeypatch, guest.faults)
-    guest.faults.failures[fault] = effect
-    operation = lambda: ports.recover(  # noqa: E731 - concise retry closure for the table
-        _point(metadata), OpaqueProviderRef(ref="authority/current")
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures[fault] = effect
+
+    _retry_until_phase(harness.recover, harness.root, harness.metadata, "recovered")
+
+    assert harness.guest.states == {}
+    assert harness.session.xml == harness.metadata.source_xml
+    assert harness.session.active
+    assert len(harness.sessions) >= 2
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "move:" + _OLD_NAME + "->6.12.0#1",
+        "sync#3",
+        "phase:rollback-complete#1",
+        "phase:move-ready#2",
+    ],
+)
+def test_fresh_activation_resumes_every_rollback_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    effect: str,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
     )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures["move:" + _STAGING_NAME + "->6.12.0#1"] = "os-before"
+    harness.faults.failures["phase:rollback-ready#1"] = "after"
 
-    _retry_until_phase(operation, root, metadata, "recovered")
+    with pytest.raises(_ProcessLost, match="rollback-ready"):
+        harness.activate()
+    harness.faults.failures[fault] = effect
+    _retry_until_phase(harness.activate, harness.root, harness.metadata, "target-defined")
 
-    assert guest.states == {}
-    assert session.xml == metadata.source_xml
-    assert session.active
+    rollback_ready = harness.faults.actions.index("phase:rollback-ready#1")
+    rollback_move = next(
+        index
+        for index, action in enumerate(harness.faults.actions)
+        if action.startswith("move:" + _OLD_NAME + "->6.12.0")
+    )
+    assert rollback_ready < rollback_move
+    assert any(action.startswith("phase:rollback-complete") for action in harness.faults.actions)
+    assert harness.session.active
+    assert len(harness.sessions) >= 3
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+def test_fresh_activation_resumes_around_rollback_ready_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    effect: str,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    _record_phase_faults(monkeypatch, harness.faults)
+    harness.faults.failures["move:" + _STAGING_NAME + "->6.12.0#1"] = "os-before"
+    harness.faults.failures["phase:rollback-ready#1"] = effect
+
+    _retry_until_phase(harness.activate, harness.root, harness.metadata, "target-defined")
+
+    rollback_moves = [
+        action
+        for action in harness.faults.actions
+        if action.startswith("move:" + _OLD_NAME + "->6.12.0")
+    ]
+    assert rollback_moves == ([] if effect == "before" else ["move:" + _OLD_NAME + "->6.12.0#1"])
+    assert harness.session.active
+    assert len(harness.sessions) >= 2
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize("boundary", ["cleanup-payloads", "publish-tombstone"])
+def test_fresh_cleanup_resumes_every_payload_and_tombstone_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    effect: str,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="recovered",
+        source_present=False,
+    )
+    harness.faults.failures[f"{boundary}#1"] = effect
+    if boundary == "publish-tombstone":
+        original = RecoveryMetadataStore.publish_tombstone
+
+        def publish(
+            store: RecoveryMetadataStore,
+            reference: OpaqueProviderRef,
+            binding: ExternalBootActivationBinding,
+            expected: LocalRecoveryMetadataV1,
+            point_digest: str,
+        ) -> CleanupTombstoneV1:
+            result = harness.faults.run(
+                "publish-tombstone",
+                lambda: original(store, reference, binding, expected, point_digest),
+            )
+            assert isinstance(result, CleanupTombstoneV1)
+            return result
+
+        monkeypatch.setattr(RecoveryMetadataStore, "publish_tombstone", publish)
+
+    with pytest.raises(_ProcessLost, match=boundary):
+        harness.cleanup()
+    harness.cleanup()
+
+    with RecoveryMetadataStore(harness.root) as store:
+        assert store.cleanup_complete(harness.point.recovery_ref, harness.point)
+    assert len(harness.sessions) == 2
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+def test_fresh_finalization_resumes_around_tombstone_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    effect: str,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="recovered",
+        source_present=False,
+    )
+    harness.cleanup()
+    proof = FinalizeCleanupProof(
+        point_digest=LocalLibvirtExternalBoot.point_digest(harness.point),
+        binding=harness.point.binding,
+        operation_id="00000000-0000-0000-0000-000000000004",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=7,
+        journal_digest="sha256:" + "4" * 64,
+    )
+    original = RecoveryMetadataStore.finalize_tombstone
+
+    def finalize(
+        store: RecoveryMetadataStore,
+        reference: OpaqueProviderRef,
+        recovery: RecoveryPoint,
+        candidate: FinalizeCleanupProof,
+    ) -> None:
+        harness.faults.run(
+            "delete-tombstone",
+            lambda: original(store, reference, recovery, candidate),
+        )
+
+    monkeypatch.setattr(RecoveryMetadataStore, "finalize_tombstone", finalize)
+    harness.faults.failures["delete-tombstone#1"] = effect
+
+    with pytest.raises(_ProcessLost, match="delete-tombstone"):
+        harness.finalize(proof)
+    harness.finalize(proof)
+
+    directory = harness.root / recovery_directory_name(
+        harness.point.recovery_ref, harness.point.binding
+    )
+    assert not directory.exists()
 
 
 @pytest.mark.parametrize(
@@ -2617,6 +3112,84 @@ def test_real_adapter_persists_intent_before_first_host_mutation(tmp_path: Path)
     assert session.close_attempts == 1
 
 
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize("boundary", ["intent", "stop", "capture", "complete"])
+def test_fresh_adapter_resumes_every_preparation_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    effect: str,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    preparation = _RealPreparation(metadata, root)
+    faults = _RestartFaults()
+    faults.failures[f"{boundary}#1"] = effect
+    first_io, first_session = _real_io(root, preparation)
+
+    if boundary == "intent":
+        original = RecoveryMetadataStore.publish_pre_stop
+
+        def publish_intent(
+            store: RecoveryMetadataStore,
+            intent: LocalPreStopIntentV1,
+        ) -> OpaqueProviderRef:
+            result = faults.run("intent", lambda: original(store, intent))
+            assert isinstance(result, OpaqueProviderRef)
+            return result
+
+        monkeypatch.setattr(RecoveryMetadataStore, "publish_pre_stop", publish_intent)
+    elif boundary == "stop":
+        original_stop = first_session.stop_and_require_inactive
+        monkeypatch.setattr(
+            first_session,
+            "stop_and_require_inactive",
+            lambda: faults.run("stop", original_stop),
+        )
+    elif boundary == "capture":
+        original_capture = _RecordingRecoveryWriter.capture
+
+        def capture(
+            writer: _RecordingRecoveryWriter,
+            tree: object,
+            release: str,
+            sink: RecoveryArchiveSink,
+        ) -> AbsentModuleCapture:
+            result = faults.run("capture", lambda: original_capture(writer, tree, release, sink))
+            assert isinstance(result, AbsentModuleCapture)
+            return result
+
+        monkeypatch.setattr(_RecordingRecoveryWriter, "capture", capture)
+    else:
+        original_complete = RecoveryMetadataStore.complete_preparation
+
+        def complete(
+            store: RecoveryMetadataStore,
+            reference: OpaqueProviderRef,
+            intent: LocalPreStopIntentV1,
+            completed: LocalRecoveryMetadataV1,
+        ) -> LocalRecoveryMetadataV1:
+            result = faults.run(
+                "complete",
+                lambda: original_complete(store, reference, intent, completed),
+            )
+            assert isinstance(result, LocalRecoveryMetadataV1)
+            return result
+
+        monkeypatch.setattr(RecoveryMetadataStore, "complete_preparation", complete)
+
+    with pytest.raises(_ProcessLost, match=boundary):
+        _real_prepare(first_io, materialization)
+    second_io, second_session = _real_io(root, preparation)
+
+    assert _real_prepare(second_io, materialization) == metadata
+    assert first_session is not second_session
+    assert first_session.close_attempts == 1
+    assert second_session.close_attempts == 1
+
+
 def test_real_adapter_intent_fsync_fault_prevents_first_host_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2663,6 +3236,45 @@ def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path
 
     with pytest.raises(ValueError, match="pre-stop intent does not match"):
         _real_prepare(io, materialization)
+    assert host.actions == []
+    assert session.close_attempts == 1
+
+
+def test_real_adapter_retry_rejects_cross_binding_pre_stop_before_host_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    intent = _pre_stop(metadata)
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    crossed = intent.model_copy(
+        update={
+            "binding": intent.binding.model_copy(
+                update={"activation_id": "00000000-0000-0000-0000-000000000099"}
+            )
+        }
+    )
+    original_reopen = RecoveryMetadataStore.reopen_pre_stop
+
+    def reopen_crossed(
+        store: RecoveryMetadataStore,
+        reference: OpaqueProviderRef,
+        binding: ExternalBootActivationBinding,
+    ) -> LocalPreStopIntentV1:
+        original_reopen(store, reference, binding)
+        return crossed
+
+    monkeypatch.setattr(RecoveryMetadataStore, "reopen_pre_stop", reopen_crossed)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+
+    with pytest.raises(ValueError, match="pre-stop intent does not match"):
+        _real_prepare(io, materialization)
+
     assert host.actions == []
     assert session.close_attempts == 1
 

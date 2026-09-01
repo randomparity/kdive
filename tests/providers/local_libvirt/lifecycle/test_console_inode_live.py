@@ -4,10 +4,10 @@
 bootable qcow2. The proof boots a throwaway domain whose serial ``<log>`` points at a file the
 worker prepared through ``storage._prepare_console_log`` with ``console_append=True`` — the
 production shape (ADR-0576) — and asserts the daemon did **not** replace the inode: after the
-boot the file is still the worker's inode, worker-owned, mode ``0664``, and holds the boot's
-bytes. The group write bit is the operator-owned session daemon's append authority through
-the shared group. A second boot over the same log seeds a stale marker first and asserts it is
-gone, proving the per-start truncate yields a byte-exact current-boot window on a real host.
+boot the file is still the worker's inode, worker-owned, and mode ``0664``. The group write bit
+is the operator-owned session daemon's append authority through the shared group. A second boot
+over the same log seeds a stale marker first and asserts it is gone, proving worker-side per-start
+truncation without depending on the guest's serial-output configuration.
 Skips cleanly without the env or libvirt.
 """
 
@@ -31,7 +31,7 @@ _STALE_MARKER = b"STALE-PRIOR-BOOT-MARKER\n"
 def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
     tmp_path: Any,
 ) -> None:  # pragma: no cover - live_vm
-    contract = require_live_vm_throwaway("qemu:///system")
+    contract = require_live_vm_throwaway("qemu:///session", session_required=True)
     console = tmp_path / "console" / "throwaway.log"
     storage_module._prepare_console_log(console)
     inode_before = console.stat().st_ino
@@ -45,7 +45,6 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
         console_log=console,
         console_append=True,
         wait_for="active",
-        settle_s=1.0,
     ):
         st = console.stat()
         # The daemon appended to the worker-created inode instead of recreating it root:0600
@@ -53,7 +52,6 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
         assert st.st_ino == inode_before
         assert st.st_uid == os.geteuid()
         assert st.st_mode & 0o777 == 0o664
-        assert st.st_size > 0  # this boot's bytes are readable by the worker
 
     # A second start over the same log: seed prior-boot bytes, prepare (truncate), boot, and
     # confirm the new window holds none of them.
@@ -71,9 +69,7 @@ def test_live_vm_console_inode_survives_boots_and_truncates_per_start(
         console_log=console,
         console_append=True,
         wait_for="active",
-        settle_s=1.0,
     ):
         st = console.stat()
         assert st.st_ino == inode_before
         assert _STALE_MARKER not in console.read_bytes()
-        assert st.st_size > 0

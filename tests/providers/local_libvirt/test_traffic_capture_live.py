@@ -23,7 +23,6 @@ from __future__ import annotations
 import contextlib
 import json
 import multiprocessing
-import os
 import socket
 import tempfile
 import threading
@@ -56,35 +55,29 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
-def _submit_fifo_filter(
+def _submit_blocked_nbd_add(
     uri: str,
     domain_name: str,
     qom_id: str,
-    fifo_path: str,
-    entered: _Event,
+    socket_path: str,
+    submitted: _Event,
 ) -> None:
-    """Submit the real blocking QMP mutation from a killable client process."""
+    """Submit a QMP block-node mutation that waits for an NBD handshake."""
     import libvirt  # noqa: PLC0415
     import libvirt_qemu  # noqa: PLC0415
-
-    from kdive.providers.local_libvirt.lifecycle.xml import (  # noqa: PLC0415
-        SYSTEM_SSH_NETDEV_ID,
-    )
 
     connection = libvirt.open(uri)
     try:
         domain = connection.lookupByName(domain_name)
         command = {
-            "execute": "object-add",
+            "execute": "blockdev-add",
             "arguments": {
-                "qom-type": "filter-dump",
-                "id": qom_id,
-                "netdev": SYSTEM_SSH_NETDEV_ID,
-                "file": fifo_path,
-                "maxlen": 128,
+                "driver": "nbd",
+                "node-name": qom_id,
+                "server": {"type": "unix", "path": socket_path},
             },
         }
-        entered.set()
+        submitted.set()
         libvirt_qemu.qemuMonitorCommand(domain, json.dumps(command), 0)
     finally:
         connection.close()
@@ -149,8 +142,8 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
 
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
-def test_local_capture_operation_waits_for_fresh_monitor_ordering() -> None:  # pragma: no cover
-    """A fresh absence query cannot pass an accepted FIFO-blocked QMP mutation."""
+def test_local_capture_waits_for_accepted_monitor_mutation() -> None:  # pragma: no cover
+    """A fresh absence query cannot pass an accepted NBD-handshake-blocked QMP mutation."""
     contract = require_live_vm_throwaway("qemu:///session", session_required=True)
     try:
         import libvirt  # noqa: PLC0415  # operator-provided
@@ -168,13 +161,16 @@ def test_local_capture_operation_waits_for_fresh_monitor_ordering() -> None:  # 
     name = f"kdive-order-live-{uuid.uuid4().hex[:12]}"
     qom_id = f"kdive-delay-{uuid.uuid4().hex[:12]}"
     resource_id = uuid.uuid4()
-    fifo_dir = Path(tempfile.mkdtemp(prefix="kdive-capture-order-live-"))
-    fifo_path = fifo_dir / "capture.fifo"
-    os.mkfifo(fifo_path, mode=0o600)
+    capture_dir = Path(tempfile.mkdtemp(prefix="kdive-order-live-", dir="/tmp"))
+    socket_path = capture_dir / "nbd.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    listener.settimeout(5)
     process_context = multiprocessing.get_context("spawn")
-    entered = process_context.Event()
+    submitted = process_context.Event()
     client: _Process | None = None
-    reader_fd = -1
+    peer: socket.socket | None = None
     try:
         with boot_throwaway_domain(
             contract.rootfs,
@@ -187,13 +183,19 @@ def test_local_capture_operation_waits_for_fresh_monitor_ordering() -> None:  # 
             settle_s=2.0,
         ):
             client = process_context.Process(
-                target=_submit_fifo_filter,
-                args=(contract.libvirt_uri, name, qom_id, str(fifo_path), entered),
+                target=_submit_blocked_nbd_add,
+                args=(
+                    contract.libvirt_uri,
+                    name,
+                    qom_id,
+                    str(socket_path),
+                    submitted,
+                ),
             )
             client.start()
-            assert entered.wait(timeout=5), "monitor submitter did not enter qemuMonitorCommand"
-            time.sleep(0.1)
-            assert client.is_alive(), "FIFO mutation returned before a reader existed"
+            assert submitted.wait(timeout=5), "monitor mutation was not submitted"
+            peer, _address = listener.accept()
+            assert client.is_alive(), "accepted mutation returned before NBD handshake"
 
             probe = LocalLibvirtCaptureQuiescence(
                 resource_id=resource_id,
@@ -217,16 +219,18 @@ def test_local_capture_operation_waits_for_fresh_monitor_ordering() -> None:  # 
             client.terminate()
             client.join(timeout=5)
             assert not client.is_alive()
-            reader_fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+            peer.close()
+            peer = None
             observer.join(timeout=5)
-            assert finished.is_set(), "fresh monitor query did not cross the released FIFO command"
+            assert finished.is_set(), "fresh query did not cross the released NBD mutation"
             assert failures == []
     finally:
         if client is not None and client.is_alive():
             client.terminate()
             client.join(timeout=5)
-        if reader_fd >= 0:
-            os.close(reader_fd)
-        fifo_path.unlink(missing_ok=True)
+        if peer is not None:
+            peer.close()
+        listener.close()
+        socket_path.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
-            fifo_dir.rmdir()
+            capture_dir.rmdir()
