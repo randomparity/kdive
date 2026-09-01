@@ -194,7 +194,12 @@ def _ordered_monitor(present: bool = False, *, members: list[object] | None = No
         command = json.loads(raw)
         assert "id" not in command
         if command["execute"] == "object-del":
-            raise libvirt.libvirtError("DeviceNotFound")
+            return json.dumps(
+                {
+                    "error": {"class": "GenericError", "desc": "object is not found"},
+                    "id": "libvirt-14",
+                }
+            )
         returned_members = (
             [{"name": "kdive-dump-job", "type": "child<filter-dump>"}] if present else members or []
         )

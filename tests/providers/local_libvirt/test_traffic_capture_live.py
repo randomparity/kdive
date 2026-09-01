@@ -25,6 +25,7 @@ import json
 import multiprocessing
 import socket
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -54,39 +55,30 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
-def _submit_capture_filter(
+def _submit_blocked_nbd_add(
     uri: str,
     domain_name: str,
     qom_id: str,
-    dest_path: str,
-    accepted: _Event,
-    release: _Event,
+    socket_path: str,
+    submitted: _Event,
 ) -> None:
-    """Submit a checked QMP mutation, then keep the killable client alive."""
+    """Submit a QMP block-node mutation that waits for an NBD handshake."""
     import libvirt  # noqa: PLC0415
     import libvirt_qemu  # noqa: PLC0415
-
-    from kdive.providers.local_libvirt.lifecycle.xml import (  # noqa: PLC0415
-        SYSTEM_SSH_NETDEV_ID,
-    )
 
     connection = libvirt.open(uri)
     try:
         domain = connection.lookupByName(domain_name)
         command = {
-            "execute": "object-add",
+            "execute": "blockdev-add",
             "arguments": {
-                "qom-type": "filter-dump",
-                "id": qom_id,
-                "netdev": SYSTEM_SSH_NETDEV_ID,
-                "file": dest_path,
-                "maxlen": 128,
+                "driver": "nbd",
+                "node-name": qom_id,
+                "server": {"type": "unix", "path": socket_path},
             },
         }
-        response = json.loads(libvirt_qemu.qemuMonitorCommand(domain, json.dumps(command), 0))
-        assert "return" in response, response
-        accepted.set()
-        release.wait(timeout=30)
+        submitted.set()
+        libvirt_qemu.qemuMonitorCommand(domain, json.dumps(command), 0)
     finally:
         connection.close()
 
@@ -150,8 +142,8 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
 
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
-def test_local_capture_reconciles_after_accepted_client_dies() -> None:  # pragma: no cover
-    """A fresh connection detaches an accepted mutation after its client dies."""
+def test_local_capture_waits_for_accepted_monitor_mutation() -> None:  # pragma: no cover
+    """A fresh absence query cannot pass an accepted NBD-handshake-blocked QMP mutation."""
     contract = require_live_vm_throwaway("qemu:///session", session_required=True)
     try:
         import libvirt  # noqa: PLC0415  # operator-provided
@@ -170,11 +162,15 @@ def test_local_capture_reconciles_after_accepted_client_dies() -> None:  # pragm
     qom_id = f"kdive-delay-{uuid.uuid4().hex[:12]}"
     resource_id = uuid.uuid4()
     capture_dir = Path(tempfile.mkdtemp(prefix="kdive-order-live-", dir="/tmp"))
-    dest_path = capture_dir / "capture.pcap"
+    socket_path = capture_dir / "nbd.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    listener.settimeout(5)
     process_context = multiprocessing.get_context("spawn")
-    accepted = process_context.Event()
-    release = process_context.Event()
+    submitted = process_context.Event()
     client: _Process | None = None
+    peer: socket.socket | None = None
     try:
         with boot_throwaway_domain(
             contract.rootfs,
@@ -187,35 +183,54 @@ def test_local_capture_reconciles_after_accepted_client_dies() -> None:  # pragm
             settle_s=2.0,
         ):
             client = process_context.Process(
-                target=_submit_capture_filter,
+                target=_submit_blocked_nbd_add,
                 args=(
                     contract.libvirt_uri,
                     name,
                     qom_id,
-                    str(dest_path),
-                    accepted,
-                    release,
+                    str(socket_path),
+                    submitted,
                 ),
             )
             client.start()
-            assert accepted.wait(timeout=5), "monitor mutation was not accepted"
-            assert client.is_alive(), "accepted mutation client exited before termination"
-            client.terminate()
-            client.join(timeout=5)
-            assert not client.is_alive()
+            assert submitted.wait(timeout=5), "monitor mutation was not submitted"
+            peer, _address = listener.accept()
+            assert client.is_alive(), "accepted mutation returned before NBD handshake"
 
             probe = LocalLibvirtCaptureQuiescence(
                 resource_id=resource_id,
                 connect=lambda: libvirt.open(contract.libvirt_uri),
                 monitor=libvirt_qemu.qemuMonitorCommand,
             )
-            evidence = probe.prove_absent(resource_id, name, qom_id)
-            assert evidence.result == "absent"
-            assert evidence.ordering == "fresh-qmp-connection"
+            finished = threading.Event()
+            failures: list[BaseException] = []
+
+            def observe() -> None:
+                try:
+                    probe.prove_absent(resource_id, name, qom_id)
+                except BaseException as error:
+                    failures.append(error)
+                finally:
+                    finished.set()
+
+            observer = threading.Thread(target=observe)
+            observer.start()
+            assert not finished.wait(timeout=0.2), "fresh monitor query acknowledged too early"
+            client.terminate()
+            client.join(timeout=5)
+            assert not client.is_alive()
+            peer.close()
+            peer = None
+            observer.join(timeout=5)
+            assert finished.is_set(), "fresh query did not cross the released NBD mutation"
+            assert failures == []
     finally:
         if client is not None and client.is_alive():
             client.terminate()
             client.join(timeout=5)
-        dest_path.unlink(missing_ok=True)
+        if peer is not None:
+            peer.close()
+        listener.close()
+        socket_path.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             capture_dir.rmdir()

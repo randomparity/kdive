@@ -25,7 +25,7 @@ type Connect = Callable[[], _ProbeConnection]
 type Monitor = Callable[[object, str, int], str]
 
 
-def _ordered_reply(raw: str) -> object:
+def _ordered_reply(raw: str, *, allow_not_found: bool = False) -> object:
     try:
         response = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -42,6 +42,13 @@ def _ordered_reply(raw: str) -> object:
             "local QMP transport did not correlate the ordered response",
             category=ErrorCategory.CONTROL_FAILURE,
         )
+    error = response.get("error")
+    if allow_not_found and isinstance(error, dict):
+        description = error.get("desc")
+        if error.get("class") == "DeviceNotFound" or (
+            isinstance(description, str) and "not found" in description.lower()
+        ):
+            return None
     if "return" not in response:
         raise CategorizedError(
             "local QMP quiescence response was inconclusive",
@@ -106,7 +113,7 @@ class LocalLibvirtCaptureQuiescence:
                 "local capture detach failed during quiescence",
                 category=ErrorCategory.CONTROL_FAILURE,
             ) from error
-        _ordered_reply(raw)
+        _ordered_reply(raw, allow_not_found=True)
 
     def _query_absence(self, domain: object, qom_id: str) -> None:
         command = {
