@@ -8,8 +8,8 @@ import json
 import os
 import stat
 import tarfile
-from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -39,6 +39,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     recovery_directory_name,
     render_target_xml,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     AbsentModuleCapture,
     AuthenticatedGuestTree,
@@ -232,7 +233,7 @@ class _PublicationIO:
         ("old-aside", ModuleLayout(_DESIRED, None, _PRIOR), "phase:new-live"),
         ("rollback-ready", ModuleLayout(None, _DESIRED, _PRIOR), "old-to-live"),
         ("rollback-ready", ModuleLayout(_PRIOR, _DESIRED, None), "phase:rollback-complete"),
-        ("rollback-complete", ModuleLayout(_PRIOR, _DESIRED, None), "inactive"),
+        ("rollback-complete", ModuleLayout(_PRIOR, _DESIRED, None), "phase:move-ready"),
         ("new-live", ModuleLayout(_DESIRED, None, _PRIOR), "remove-old"),
         ("new-live", ModuleLayout(_DESIRED, None, None), "phase:publication-complete"),
         ("publication-complete", ModuleLayout(_DESIRED, None, None), "inactive"),
@@ -292,6 +293,37 @@ def test_staging_move_error_third_layout_conflicts_without_further_mutation() ->
             desired=_DESIRED,
         )
     assert io.actions == ["inactive", "staging-to-live", "inactive", "observe"]
+
+
+def test_staging_move_error_retries_when_recorded_source_was_absent() -> None:
+    layout = ModuleLayout(None, _DESIRED, None)
+    io = _PublicationIO(layout)
+    calls = 0
+
+    def fail_once() -> None:
+        nonlocal calls
+        calls += 1
+        io.actions.append("staging-to-live")
+        if calls == 1:
+            raise OSError("ambiguous move result")
+
+    io.move_staging_to_live = fail_once  # ty: ignore[invalid-assignment]
+
+    advance_module_publication(
+        io,
+        phase=PublicationPhase.OLD_ASIDE,
+        layout=layout,
+        prior=None,
+        desired=_DESIRED,
+    )
+
+    assert io.actions == [
+        "inactive",
+        "staging-to-live",
+        "inactive",
+        "observe",
+        "staging-to-live",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -447,6 +479,7 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         definition="sha256:" + "c" * 64,
         modules=PresentComponentState(manifest="sha256:" + "3" * 64),
     )
+
     return LocalRecoveryMetadataV1(
         binding=_BINDING,
         plan_identity="sha256:" + "6" * 64,
@@ -462,12 +495,32 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         target_boot="sha256:" + "c" * 64,
         target_projection_sha256="sha256:" + "d" * 64,
         target_xml=_SOURCE_XML.replace("/old", "/new"),
+        expected_running=RunningKernelObservation(
+            architecture="x86_64",
+            release="6.12.0",
+            gnu_build_id="01020304",
+        ),
         source_state=source_state,
         target_state=target_state,
         prior_power="running",
         capture={"state": "absent"},
         phase=phase,
     )
+
+
+@pytest.mark.parametrize("release", ["../escape", "bad/release", ".", ""])
+def test_recovery_metadata_rejects_noncanonical_release(release: str) -> None:
+    values = _metadata().model_dump(mode="json", by_alias=True)
+    values["release"] = release
+    with pytest.raises(ValidationError):
+        LocalRecoveryMetadataV1.model_validate(values)
+
+
+def test_recovery_metadata_binds_expected_observation_release() -> None:
+    values = _metadata().model_dump(mode="json", by_alias=True)
+    values["expected_running"]["release"] = "6.12.1"
+    with pytest.raises(ValidationError, match="expected running release"):
+        LocalRecoveryMetadataV1.model_validate(values)
 
 
 def _projection() -> TargetProjectionV1:
@@ -1064,8 +1117,14 @@ class _GuestTreeHandle:
     def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None:
         self.calls.append(("xattr", xattr, val, path))
 
+    def mv(self, source: str, destination: str) -> None:
+        self.calls.append(("move", source, destination))
+
     def rm_rf(self, path: str) -> None:
         self.calls.append(("remove", path))
+
+    def sync(self) -> None:
+        self.calls.append(("sync",))
 
 
 def test_libguestfs_tree_is_bound_private_and_no_follow() -> None:
@@ -1305,9 +1364,11 @@ class _ExternalIO:
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("activate-modules")
+        self.record_phase(metadata, "module-restored")
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("define-target")
+        self.record_phase(metadata, "target-defined")
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         self.actions.append("observe-running")
@@ -1317,12 +1378,15 @@ class _ExternalIO:
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("recover-modules")
+        self.record_phase(metadata, "module-restored")
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("define-source")
+        self.record_phase(metadata, "source-restored")
 
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("restore-power")
+        self.record_phase(metadata, "recovered")
 
     def record_phase(
         self, metadata: LocalRecoveryMetadataV1, phase: str
@@ -1540,6 +1604,803 @@ class _RealSession:
         self.close_attempts += 1
         if self.close_fault:
             raise OSError("session close")
+
+
+class _RestartFaults:
+    def __init__(self) -> None:
+        self.actions: list[str] = []
+        self.failures: dict[str, str] = {}
+        self.counts: dict[str, int] = {}
+
+    def run(self, name: str, effect: Callable[[], object] | None = None) -> object | None:
+        occurrence = self.counts.get(name, 0) + 1
+        self.counts[name] = occurrence
+        action = f"{name}#{occurrence}"
+        self.actions.append(action)
+        failure = self.failures.pop(action, None)
+        if failure == "before":
+            raise OSError(f"{action} failed before effect")
+        result = effect() if effect is not None else None
+        if failure == "after":
+            raise OSError(f"{action} failed after effect")
+        return result
+
+
+class _RestartGuest(_GuestTreeHandle):
+    def __init__(
+        self,
+        faults: _RestartFaults,
+        states: dict[str, PresentComponentState],
+    ) -> None:
+        super().__init__([])
+        self.faults = faults
+        self.states = states
+
+    def exists(self, path: str) -> int:
+        return int(path in self.states)
+
+    def is_dir(self, path: str, *, followsymlinks: bool) -> int:
+        del followsymlinks
+        return int(path in self.states)
+
+    def mkdir(self, path: str) -> None:
+        self.faults.run("mkdir")
+
+    def mv(self, source: str, destination: str) -> None:
+        def effect() -> None:
+            self.states[destination] = self.states.pop(source)
+
+        self.faults.run(f"move:{Path(source).name}->{Path(destination).name}", effect)
+
+    def rm_rf(self, path: str) -> None:
+        self.faults.run(f"remove:{Path(path).name}", lambda: self.states.pop(path, None))
+
+    def sync(self) -> None:
+        self.faults.run("sync")
+
+
+class _RestartWriter:
+    def __init__(
+        self,
+        guest: _RestartGuest,
+        *,
+        install_state: PresentComponentState,
+        restore_state: PresentComponentState | None,
+    ) -> None:
+        self._guest = guest
+        self._install_state = install_state
+        self._restore_state = restore_state
+
+    def capture(
+        self,
+        tree: AuthenticatedGuestTree,
+        release: str,
+        sink: RecoveryArchiveSink,
+    ) -> AbsentModuleCapture:
+        del tree, release
+        sink.close()
+        raise AssertionError("not used")
+
+    @staticmethod
+    def _root(tree: AuthenticatedGuestTree) -> str:
+        return cast(str, vars(tree)["_root"])
+
+    def observe(self, tree: AuthenticatedGuestTree, release: str) -> ComponentState:
+        del release
+        return self._guest.states[self._root(tree)]
+
+    def install(
+        self,
+        tree: AuthenticatedGuestTree,
+        release: str,
+        source: KernelBundleSource,
+    ) -> str:
+        del release
+        source.close()
+        self._guest.states[self._root(tree)] = self._install_state
+        return self._install_state.manifest
+
+    def restore(
+        self,
+        tree: AuthenticatedGuestTree,
+        release: str,
+        capture: AbsentModuleCapture | ModuleArchiveCapture,
+        source: RecoveryArchiveSource,
+    ) -> str:
+        del release, capture
+        source.close()
+        assert self._restore_state is not None
+        self._guest.states[self._root(tree)] = self._restore_state
+        return self._restore_state.manifest
+
+
+class _RestartSession(_RealSession):
+    def __init__(
+        self,
+        preparation: _RealPreparation,
+        guest: _RestartGuest,
+        artifact: Path,
+    ) -> None:
+        super().__init__(preparation)
+        self.guest_handle = guest
+        self.faults = guest.faults
+        self.xml = preparation.metadata.source_xml
+        self.active = False
+        self.artifact = artifact
+        self.readiness_result = ReadinessResult(True, True, None)
+        self.running_observation = RunningKernelObservation(
+            architecture="x86_64",
+            release=preparation.metadata.release,
+            gnu_build_id="01020304",
+        )
+
+    def inspect_closed(self) -> ClosedDomainInspection:
+        return replace(
+            self.inspection,
+            xml=self.xml.encode(),
+            active=self.active,
+        )
+
+    def require_inactive(self) -> None:
+        if self.active:
+            raise RuntimeError("domain must be inactive")
+
+    def stop_and_require_inactive(self) -> None:
+        self.faults.run("stop", lambda: setattr(self, "active", False))
+        self.require_inactive()
+
+    def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
+        del name, mode
+        return os.open(self.artifact, flags)
+
+    @contextmanager
+    def guest(self) -> Iterator[_RestartGuest]:
+        self.require_inactive()
+        yield cast(_RestartGuest, self.guest_handle)
+
+    def define_xml(self, xml: str) -> None:
+        self.require_inactive()
+        self.faults.run("define", lambda: setattr(self, "xml", xml))
+
+    def start(self) -> None:
+        self.faults.run("start", lambda: setattr(self, "active", True))
+
+    def readiness(self) -> ReadinessResult:
+        self.faults.run("readiness")
+        return self.readiness_result
+
+    def observe_running(self) -> RunningKernelObservation:
+        return self.running_observation
+
+
+def _restart_fixture(
+    tmp_path: Path,
+    *,
+    phase: RecoveryPhase,
+    source_present: bool,
+    prior_power: str = "running",
+    xml: str = _SOURCE_XML,
+    active: bool = False,
+) -> tuple[
+    LocalLibvirtExternalBoot,
+    LocalRecoveryMetadataV1,
+    _RestartSession,
+    _RestartGuest,
+    Path,
+]:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    artifact = tmp_path / "modules"
+    artifact.write_bytes(b"bundle")
+    artifact.chmod(0o600)
+    target = PresentComponentState(manifest="sha256:" + "3" * 64)
+    source = PresentComponentState(manifest="sha256:" + "4" * 64)
+    capture: AbsentModuleCapture | ModuleArchiveCapture
+    if source_present:
+        archive = b"recovery"
+        capture = ModuleArchiveCapture(
+            manifest=source.manifest,
+            entry_count=0,
+            uncompressed_bytes=0,
+            archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            archive_bytes=len(archive),
+        )
+        source_modules: ComponentState = source
+    else:
+        archive = b""
+        capture = AbsentModuleCapture()
+        source_modules = AbsentComponentState()
+    metadata = _metadata(phase).model_copy(
+        update={
+            "capture": capture,
+            "materialized_modules": OpaqueProviderRef(
+                ref=(f"local-artifact-v1/{_BINDING.system_id}/{_BINDING.run_id}/{'a' * 64}/modules")
+            ),
+            "materialized_modules_sha256": (
+                "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+            ),
+            "materialized_modules_bytes": artifact.stat().st_size,
+            "prior_power": prior_power,
+            "source_state": ProviderStateIdentity(
+                definition=_metadata().source_state.definition,
+                modules=source_modules,
+            ),
+            "target_state": ProviderStateIdentity(
+                definition=_metadata().target_state.definition,
+                modules=target,
+            ),
+        }
+    )
+    live = f"/lib/modules/{metadata.release}"
+    target_live = phase in {"module-restored", "target-defined"}
+    states = {live: target if target_live else source}
+    if not source_present and not target_live:
+        states = {}
+    faults = _RestartFaults()
+    guest = _RestartGuest(faults, states)
+    preparation = _RealPreparation(metadata, root)
+    session = _RestartSession(preparation, guest, artifact)
+    session.xml = xml
+    session.active = active
+    writer = _RestartWriter(
+        guest,
+        install_state=target,
+        restore_state=source if source_present else None,
+    )
+    factory = cast(LocalExternalBootSessionFactory, _RealSessionFactory(session))
+    io = RealLocalExternalBootIO(
+        root,
+        preparation,
+        writer,
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        factory,
+    )
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+    if source_present:
+        directory = root / recovery_directory_name(reference, metadata.binding)
+        recovery_archive = directory / "modules.tar"
+        recovery_archive.write_bytes(archive)
+        recovery_archive.chmod(0o600)
+    return LocalLibvirtExternalBoot(io), metadata, session, guest, root
+
+
+@pytest.mark.parametrize("source_present", [True, False])
+def test_real_activation_publishes_exact_target_and_restores_prior_power(
+    tmp_path: Path,
+    source_present: bool,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=source_present,
+    )
+
+    ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.target_state.modules}
+    assert session.xml == metadata.target_xml
+    assert session.active
+    with RecoveryMetadataStore(root) as store:
+        reopened = store.reopen(_point(metadata).recovery_ref, metadata.binding)
+        assert reopened.phase == "target-defined"
+
+
+@pytest.mark.parametrize("source_present", [True, False])
+def test_recovery_from_activation_module_phase_restores_exact_source_before_power(
+    tmp_path: Path,
+    source_present: bool,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="module-restored",
+        source_present=source_present,
+    )
+
+    ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    live = f"/lib/modules/{metadata.release}"
+    expected = {live: metadata.source_state.modules} if source_present else {}
+    assert guest.states == expected
+    assert session.xml == metadata.source_xml
+    assert session.active
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == "recovered"
+
+
+def _record_phase_faults(
+    monkeypatch: pytest.MonkeyPatch,
+    faults: _RestartFaults,
+) -> None:
+    original = RecoveryMetadataStore.record_phase
+
+    def record(
+        store: RecoveryMetadataStore,
+        reference: OpaqueProviderRef,
+        binding: ExternalBootActivationBinding,
+        expected: LocalRecoveryMetadataV1,
+        phase: RecoveryPhase,
+    ) -> LocalRecoveryMetadataV1:
+        result = faults.run(
+            f"phase:{phase}",
+            lambda: original(store, reference, binding, expected, phase),
+        )
+        assert isinstance(result, LocalRecoveryMetadataV1)
+        return result
+
+    monkeypatch.setattr(RecoveryMetadataStore, "record_phase", record)
+
+
+def _retry_until_phase(
+    operation: Callable[[], None],
+    root: Path,
+    metadata: LocalRecoveryMetadataV1,
+    phase: RecoveryPhase,
+) -> None:
+    for _attempt in range(4):
+        with suppress(OSError):
+            operation()
+        with RecoveryMetadataStore(root) as store:
+            if store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == phase:
+                return
+    raise AssertionError(f"external boot did not reach {phase}")
+
+
+_OLD_NAME = f".kdive-{_BINDING.activation_id}-old"
+_STAGING_NAME = f".kdive-{_BINDING.activation_id}-staging"
+
+_PRESENT_PUBLICATION_FAULTS = [
+    "sync#1",
+    "phase:move-ready#1",
+    "move:6.12.0->" + _OLD_NAME + "#1",
+    "sync#2",
+    "phase:old-aside#1",
+    "move:" + _STAGING_NAME + "->6.12.0#1",
+    "sync#3",
+    "phase:new-live#1",
+    "remove:" + _OLD_NAME + "#1",
+    "sync#4",
+    "phase:publication-complete#1",
+]
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize(
+    "fault",
+    _PRESENT_PUBLICATION_FAULTS
+    + [
+        "phase:module-restored#1",
+        "define#1",
+        "start#1",
+        "readiness#1",
+        "phase:target-defined#1",
+    ],
+)
+def test_activation_restarts_exactly_around_every_publication_and_host_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    effect: str,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    _record_phase_faults(monkeypatch, guest.faults)
+    guest.faults.failures[fault] = effect
+    operation = lambda: ports.activate(  # noqa: E731 - concise retry closure for the table
+        _point(metadata), OpaqueProviderRef(ref="authority/current")
+    )
+
+    _retry_until_phase(operation, root, metadata, "target-defined")
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.target_state.modules}
+    assert session.xml == metadata.target_xml
+    assert session.active
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "sync#1",
+        "phase:old-aside#1",
+        "move:" + _STAGING_NAME + "->6.12.0#1",
+        "sync#2",
+        "phase:new-live#1",
+        "sync#3",
+        "phase:publication-complete#1",
+        "phase:module-restored#1",
+        "define#1",
+        "start#1",
+        "readiness#1",
+        "phase:target-defined#1",
+    ],
+)
+def test_absent_source_activation_restarts_around_every_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    effect: str,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=False,
+    )
+    _record_phase_faults(monkeypatch, guest.faults)
+    guest.faults.failures[fault] = effect
+    operation = lambda: ports.activate(  # noqa: E731 - concise retry closure for the table
+        _point(metadata), OpaqueProviderRef(ref="authority/current")
+    )
+
+    _retry_until_phase(operation, root, metadata, "target-defined")
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.target_state.modules}
+    assert session.xml == metadata.target_xml
+    assert session.active
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize(
+    "fault",
+    ["stop#1"]
+    + _PRESENT_PUBLICATION_FAULTS
+    + [
+        "phase:module-restored#1",
+        "define#1",
+        "phase:source-restored#1",
+        "start#1",
+        "readiness#1",
+        "phase:recovered#1",
+    ],
+)
+def test_present_recovery_restarts_exactly_around_every_mutation_and_evidence_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    effect: str,
+) -> None:
+    metadata_template = _metadata("target-defined")
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=True,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    _record_phase_faults(monkeypatch, guest.faults)
+    guest.faults.failures[fault] = effect
+    operation = lambda: ports.recover(  # noqa: E731 - concise retry closure for the table
+        _point(metadata), OpaqueProviderRef(ref="authority/current")
+    )
+
+    _retry_until_phase(operation, root, metadata, "recovered")
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.source_state.modules}
+    assert session.xml == metadata.source_xml
+    assert session.active
+
+
+_ABSENCE_PUBLICATION_FAULTS = [
+    "sync#1",
+    "phase:move-ready#1",
+    "move:6.12.0->" + _OLD_NAME + "#1",
+    "sync#2",
+    "phase:absence-live#1",
+    "phase:absence-complete#1",
+    "remove:" + _OLD_NAME + "#1",
+    "sync#3",
+    "phase:absence-cleaned#1",
+]
+
+
+@pytest.mark.parametrize("effect", ["before", "after"])
+@pytest.mark.parametrize(
+    "fault",
+    ["stop#1"]
+    + _ABSENCE_PUBLICATION_FAULTS
+    + [
+        "phase:module-restored#1",
+        "define#1",
+        "phase:source-restored#1",
+        "start#1",
+        "readiness#1",
+        "phase:recovered#1",
+    ],
+)
+def test_absence_recovery_restarts_exactly_around_every_mutation_and_evidence_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    effect: str,
+) -> None:
+    metadata_template = _metadata("target-defined")
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    _record_phase_faults(monkeypatch, guest.faults)
+    guest.faults.failures[fault] = effect
+    operation = lambda: ports.recover(  # noqa: E731 - concise retry closure for the table
+        _point(metadata), OpaqueProviderRef(ref="authority/current")
+    )
+
+    _retry_until_phase(operation, root, metadata, "recovered")
+
+    assert guest.states == {}
+    assert session.xml == metadata.source_xml
+    assert session.active
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        ReadinessResult(False, False, None),
+        ReadinessResult(True, False, None),
+        ReadinessResult(True, True, "probe failed"),
+    ],
+)
+def test_activation_advances_only_for_exact_readiness_success(
+    tmp_path: Path,
+    result: ReadinessResult,
+) -> None:
+    metadata_template = _metadata("module-restored")
+    ports, metadata, session, _guest, root = _restart_fixture(
+        tmp_path,
+        phase="module-restored",
+        source_present=False,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    session.readiness_result = result
+
+    with pytest.raises(ValueError, match="readiness"):
+        ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "module-restored"
+        )
+    session.readiness_result = ReadinessResult(True, True, None)
+    ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+    assert session.faults.counts["readiness"] == 2
+
+
+def test_inactive_prior_power_activation_and_recovery_never_start_or_probe(
+    tmp_path: Path,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=False,
+        prior_power="inactive",
+    )
+
+    ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+    assert not session.active
+    assert "start" not in session.faults.counts
+    assert "readiness" not in session.faults.counts
+
+    ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+    assert not session.active
+    assert guest.states == {}
+    assert "start" not in session.faults.counts
+    assert "readiness" not in session.faults.counts
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == "recovered"
+
+
+@pytest.mark.parametrize(
+    ("xml", "active", "prior_power"),
+    [
+        (_SOURCE_XML, True, "running"),
+        (_SOURCE_XML, True, "inactive"),
+        (_SOURCE_XML.replace("/old", "/new"), True, "inactive"),
+        ("<domain><name>substituted</name></domain>", False, "running"),
+        ("<domain><name>substituted</name></domain>", True, "running"),
+    ],
+)
+def test_activation_rejects_every_unlisted_xml_power_combination_before_mutation(
+    tmp_path: Path,
+    xml: str,
+    active: bool,
+    prior_power: str,
+) -> None:
+    ports, metadata, session, _guest, root = _restart_fixture(
+        tmp_path,
+        phase="module-restored",
+        source_present=False,
+        prior_power=prior_power,
+        xml=xml,
+        active=active,
+    )
+
+    with pytest.raises(ValueError, match="XML|power"):
+        ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.faults.actions == []
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "module-restored"
+        )
+
+
+@pytest.mark.parametrize(
+    ("xml", "active", "prior_power"),
+    [
+        (_SOURCE_XML.replace("/old", "/new"), False, "running"),
+        (_SOURCE_XML.replace("/old", "/new"), True, "running"),
+        (_SOURCE_XML, True, "inactive"),
+        ("<domain><name>substituted</name></domain>", False, "running"),
+        ("<domain><name>substituted</name></domain>", True, "running"),
+    ],
+)
+def test_recovery_rejects_every_unlisted_source_xml_power_combination_before_mutation(
+    tmp_path: Path,
+    xml: str,
+    active: bool,
+    prior_power: str,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="source-restored",
+        source_present=False,
+        prior_power=prior_power,
+        xml=xml,
+        active=active,
+    )
+    guest.states = {}
+
+    with pytest.raises(ValueError, match="XML|power"):
+        ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.faults.actions == []
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "source-restored"
+        )
+
+
+def test_activation_rejects_substituted_module_layout_before_mutation(tmp_path: Path) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = PresentComponentState(manifest="sha256:" + "f" * 64)
+
+    with pytest.raises(ValueError, match="layout"):
+        ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.faults.actions == []
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(_point(metadata).recovery_ref, metadata.binding).phase == (
+            "pre-stop-intent"
+        )
+
+
+def test_activation_rejects_substituted_artifact_reference_before_guest_mutation(
+    tmp_path: Path,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=False,
+    )
+    substituted = metadata.model_copy(
+        update={
+            "materialized_modules": OpaqueProviderRef(
+                ref=f"local-artifact-v1/{_BINDING.system_id}/foreign/{'a' * 64}/modules"
+            )
+        }
+    )
+    evidence = root / recovery_directory_name(_point(metadata).recovery_ref, metadata.binding)
+    (evidence / "intent.json").write_bytes(
+        json.dumps(
+            substituted.model_dump(mode="json", by_alias=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    )
+
+    with pytest.raises(ValueError, match="artifact reference"):
+        ports.activate(_point(substituted), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.faults.actions == []
+    assert guest.states == {}
+
+
+@pytest.mark.parametrize(
+    ("xml", "active"),
+    [
+        (_SOURCE_XML, True),
+        (_SOURCE_XML.replace("/old", "/new"), False),
+        ("<domain><name>substituted</name></domain>", False),
+    ],
+)
+def test_activation_rejects_unexpected_xml_or_power_before_module_mutation(
+    tmp_path: Path,
+    xml: str,
+    active: bool,
+) -> None:
+    ports, metadata, session, guest, root = _restart_fixture(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=False,
+        xml=xml,
+        active=active,
+    )
+
+    with pytest.raises(ValueError, match="XML|power"):
+        ports.activate(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert session.faults.actions == []
+    assert guest.states == {}
+    with RecoveryMetadataStore(root) as store:
+        reopened = store.reopen(_point(metadata).recovery_ref, metadata.binding)
+        assert reopened.phase == "pre-stop-intent"
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        RunningKernelObservation(architecture="ppc64le", release="6.12.0", gnu_build_id="01020304"),
+        RunningKernelObservation(architecture="x86_64", release="6.12.1", gnu_build_id="01020304"),
+        RunningKernelObservation(architecture="x86_64", release="6.12.0", gnu_build_id="deadbeef"),
+    ],
+)
+def test_observe_rejects_running_kernel_mismatch(
+    tmp_path: Path,
+    observation: RunningKernelObservation,
+) -> None:
+    metadata_template = _metadata("target-defined")
+    ports, metadata, session, _guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    session.running_observation = observation
+
+    with pytest.raises(ValueError, match="running kernel"):
+        ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+
+@pytest.mark.parametrize(
+    ("xml", "active"),
+    [
+        (_SOURCE_XML, True),
+        (_SOURCE_XML.replace("/old", "/new"), False),
+        ("<domain><name>substituted</name></domain>", True),
+    ],
+)
+def test_observe_requires_exact_running_target_before_kernel_probe(
+    tmp_path: Path,
+    xml: str,
+    active: bool,
+) -> None:
+    ports, metadata, session, _guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=xml,
+        active=active,
+    )
+
+    with pytest.raises(ValueError, match="XML"):
+        ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current"))
 
 
 class _RealSessionFactory:
@@ -1806,6 +2667,33 @@ def test_real_adapter_retry_rejects_crossed_pre_stop_before_host_access(tmp_path
     assert session.close_attempts == 1
 
 
+def test_real_adapter_retry_rejects_substituted_expected_kernel_before_host_access(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    materialization = _materialization()
+    metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
+    crossed = _pre_stop(metadata).model_copy(
+        update={
+            "expected_running": RunningKernelObservation(
+                architecture="x86_64",
+                release="6.12.0",
+                gnu_build_id="deadbeef",
+            )
+        }
+    )
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(crossed)
+    host = _RealPreparation(metadata, root)
+    io, session = _real_io(root, host)
+
+    with pytest.raises(ValueError, match="pre-stop intent does not match"):
+        _real_prepare(io, materialization)
+    assert host.actions == []
+    assert session.close_attempts == 1
+
+
 @pytest.mark.parametrize(
     ("field", "substitution"),
     [
@@ -1929,6 +2817,7 @@ def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
         "reopen",
         "activate-modules",
         "phase:module-restored",
+        "reopen",
         "define-target",
         "phase:target-defined",
     ]
@@ -1942,8 +2831,10 @@ def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
         "reopen",
         "recover-modules",
         "phase:module-restored",
+        "reopen",
         "define-source",
         "phase:source-restored",
+        "reopen",
         "restore-power",
         "phase:recovered",
     ]

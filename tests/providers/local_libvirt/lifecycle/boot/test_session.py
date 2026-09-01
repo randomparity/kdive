@@ -279,6 +279,12 @@ class Guest:
     def rm_rf(self, path: str) -> None:
         self.events.append(f"rm:{path}")
 
+    def mv(self, source: str, destination: str) -> None:
+        self.events.append(f"mv:{source}:{destination}")
+
+    def sync(self) -> None:
+        self.events.append("guest.sync")
+
     def find0(self, directory: str, files: str) -> None:
         del directory, files
         raise AssertionError("test must provide an instrumented find0 producer")
@@ -2333,6 +2339,25 @@ def test_guest_attaches_retained_overlay_fd_despite_path_replacement() -> None:
     assert f"guest.drive:{OVERLAY}:qcow2" not in events
     session.close()
     assert "overlay.close:40" in events
+
+
+def test_guest_publication_primitives_are_session_owned_and_inactive_fenced() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    session = _factory(events, domain).open(_lease(), _expected())
+
+    with session.guest() as guest:
+        guest.mv("/lib/modules/source", "/lib/modules/old")
+        guest.sync()
+        domain.active = True
+        with pytest.raises(RuntimeError, match="inactive"):
+            guest.mv("/lib/modules/staging", "/lib/modules/source")
+        domain.active = False
+
+    assert "mv:/lib/modules/source:/lib/modules/old" in events
+    assert "guest.sync" in events
+    assert "mv:/lib/modules/staging:/lib/modules/source" not in events
+    session.close()
 
 
 def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> None:

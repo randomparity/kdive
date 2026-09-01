@@ -23,6 +23,7 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     MAX_ARCHIVE_BYTES,
     MAX_ENTRIES,
@@ -51,6 +52,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    KernelRelease,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -105,7 +107,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     binding: ExternalBootActivationBinding
     plan_identity: Digest
     materialization_identity: Digest
-    release: str
+    release: KernelRelease
     materialized_modules: OpaqueProviderRef
     materialized_modules_sha256: Digest
     materialized_modules_bytes: Annotated[int, Field(ge=0)]
@@ -116,6 +118,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     target_boot: Digest
     target_projection_sha256: Digest
     target_xml: str
+    expected_running: RunningKernelObservation
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
     prior_power: Literal["running", "inactive"]
@@ -130,6 +133,8 @@ class LocalRecoveryMetadataV1(_ClosedValue):
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
+        if self.expected_running.release != self.release:
+            raise ValueError("expected running release does not match recovery release")
         return self
 
 
@@ -142,7 +147,7 @@ class LocalPreStopIntentV1(_ClosedValue):
     binding: ExternalBootActivationBinding
     plan_identity: Digest
     materialization_identity: Digest
-    release: str
+    release: KernelRelease
     materialized_modules: OpaqueProviderRef
     materialized_modules_sha256: Digest
     materialized_modules_bytes: Annotated[int, Field(ge=0)]
@@ -153,6 +158,7 @@ class LocalPreStopIntentV1(_ClosedValue):
     target_boot: Digest
     target_projection_sha256: Digest
     target_xml: str
+    expected_running: RunningKernelObservation
     prior_power: Literal["running", "inactive"]
 
     @model_validator(mode="after")
@@ -163,6 +169,8 @@ class LocalPreStopIntentV1(_ClosedValue):
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
+        if self.expected_running.release != self.release:
+            raise ValueError("expected running release does not match recovery release")
         return self
 
 
@@ -534,7 +542,9 @@ class _GuestfsTreeHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bi
     def chmod(self, mode: int, path: str) -> None: ...
     def chown(self, owner: int, group: int, path: str) -> None: ...
     def lsetxattr(self, xattr: str, val: bytes, vallen: int, path: str) -> None: ...
+    def mv(self, source: str, destination: str) -> None: ...
     def rm_rf(self, path: str) -> None: ...
+    def sync(self) -> None: ...
 
 
 class LibguestfsAuthenticatedGuestTree:
@@ -854,22 +864,171 @@ class _RealLocalExternalBootOperation:
             return store.reopen(recovery.recovery_ref, recovery.binding)
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        raise NotImplementedError("module activation is implemented by Task 3")
+        if self._host_state(metadata) != ("source", False):
+            raise ValueError("external-boot module activation requires inactive source XML/power")
+        desired = _present_component(metadata.target_state.modules, "target module state")
+        prior = _layout_component(metadata.source_state.modules)
+        with self._session.guest() as opened_guest:
+            guest = cast(_GuestfsTreeHandle, opened_guest)
+            publication = _SessionModulePublicationIO(
+                guest,
+                metadata,
+                self._recovery_root,
+                self._recovery_writer,
+                self._session,
+            )
+            if metadata.phase == "pre-stop-intent":
+                before = ModuleLayout(prior, None, None)
+                staged = ModuleLayout(prior, desired, None)
+                layout = publication.observe_layout()
+                if layout == before:
+                    source = self._kernel_bundle_source(metadata)
+                    try:
+                        publication.create_staging()
+                        manifest = self._recovery_writer.install(
+                            publication.staging_tree(),
+                            metadata.release,
+                            source,
+                        )
+                    finally:
+                        source.close()
+                    if manifest != desired.manifest or publication.observe_layout() != staged:
+                        raise ValueError(
+                            "external-boot staged target modules do not match metadata"
+                        )
+                elif layout != staged:
+                    raise ValueError("external-boot target staging layout conflicts with metadata")
+                publication.guest_sync()
+                publication.record_phase(
+                    PublicationPhase.MOVE_READY if prior is not None else PublicationPhase.OLD_ASIDE
+                )
+            self._finish_present_publication(publication, prior=prior, desired=desired)
+            completed = publication.metadata
+        self.record_phase(completed, "module-restored")
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._session.define_xml(metadata.target_xml)
+        while metadata.phase == "module-restored":
+            xml, active = self._host_state(metadata)
+            if xml == "source" and not active:
+                self._session.define_xml(metadata.target_xml)
+                continue
+            if xml == "target" and not active and metadata.prior_power == "inactive":
+                self.record_phase(metadata, "target-defined")
+                return
+            if xml == "target" and not active and metadata.prior_power == "running":
+                self._session.start()
+                continue
+            if xml == "target" and active and metadata.prior_power == "running":
+                self._require_readiness()
+                if self._host_state(metadata) != ("target", True):
+                    raise ValueError("external-boot target changed during readiness")
+                self.record_phase(metadata, "target-defined")
+                return
+            raise ValueError(
+                "external-boot target XML/power state conflicts with recovery metadata"
+            )
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
-        return self._session.observe_running()
+        if self._host_state(metadata) != ("target", True):
+            raise ValueError("external-boot observation requires exact running target XML/power")
+        observed = self._session.observe_running()
+        if observed != metadata.expected_running:
+            raise ValueError("external-boot running kernel does not match recovery metadata")
+        return observed
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
-        raise NotImplementedError("module recovery is implemented by Task 3")
+        self._stop_for_recovery(metadata)
+        target = _present_component(metadata.target_state.modules, "target module state")
+        desired = _layout_component(metadata.source_state.modules)
+        with self._session.guest() as opened_guest:
+            guest = cast(_GuestfsTreeHandle, opened_guest)
+            publication = _SessionModulePublicationIO(
+                guest,
+                metadata,
+                self._recovery_root,
+                self._recovery_writer,
+                self._session,
+            )
+            if metadata.phase in {"target-defined", "module-restored"}:
+                terminal = ModuleLayout(desired, None, None)
+                layout = publication.observe_layout()
+                if metadata.phase == "module-restored" and layout == terminal:
+                    return
+                if isinstance(metadata.capture, AbsentModuleCapture):
+                    if layout != ModuleLayout(target, None, None):
+                        raise ValueError(
+                            "external-boot absence recovery layout conflicts with metadata"
+                        )
+                    publication.guest_sync()
+                    publication.record_phase(PublicationPhase.MOVE_READY)
+                else:
+                    staged = ModuleLayout(target, desired, None)
+                    if layout == ModuleLayout(target, None, None):
+                        source = self._recovery_archive_source(metadata)
+                        try:
+                            publication.create_staging()
+                            manifest = self._recovery_writer.restore(
+                                publication.staging_tree(),
+                                metadata.release,
+                                metadata.capture,
+                                source,
+                            )
+                        finally:
+                            source.close()
+                        expected = _present_component(
+                            metadata.source_state.modules, "source module state"
+                        )
+                        if manifest != expected.manifest:
+                            raise ValueError(
+                                "external-boot staged recovery modules do not match metadata"
+                            )
+                    elif layout != staged:
+                        raise ValueError(
+                            "external-boot module recovery staging conflicts with metadata"
+                        )
+                    if publication.observe_layout() != staged:
+                        raise ValueError(
+                            "external-boot staged recovery modules changed before publication"
+                        )
+                    publication.guest_sync()
+                    publication.record_phase(PublicationPhase.MOVE_READY)
+            if isinstance(metadata.capture, AbsentModuleCapture):
+                self._finish_absence_publication(publication, prior=target)
+            else:
+                assert desired is not None
+                self._finish_present_publication(publication, prior=target, desired=desired)
+            completed = publication.metadata
+        self.record_phase(completed, "module-restored")
 
     def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._session.define_xml(metadata.source_xml)
+        while metadata.phase == "module-restored":
+            xml, active = self._host_state(metadata)
+            if xml == "target" and not active:
+                self._session.define_xml(metadata.source_xml)
+                continue
+            if xml == "source" and not active:
+                self.record_phase(metadata, "source-restored")
+                return
+            raise ValueError(
+                "external-boot source XML/power state conflicts with recovery metadata"
+            )
 
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:
-        self._session.restore_power(metadata.prior_power)
+        while metadata.phase == "source-restored":
+            xml, active = self._host_state(metadata)
+            if xml == "source" and not active and metadata.prior_power == "inactive":
+                self.record_phase(metadata, "recovered")
+                return
+            if xml == "source" and not active and metadata.prior_power == "running":
+                self._session.start()
+                continue
+            if xml == "source" and active and metadata.prior_power == "running":
+                self._require_readiness()
+                if self._host_state(metadata) != ("source", True):
+                    raise ValueError("external-boot source changed during readiness")
+                self.record_phase(metadata, "recovered")
+                return
+            raise ValueError("external-boot restored power state conflicts with recovery metadata")
 
     def record_phase(
         self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
@@ -920,6 +1079,173 @@ class _RealLocalExternalBootOperation:
                 metadata,
             )
 
+    @staticmethod
+    def _finish_present_publication(
+        publication: _SessionModulePublicationIO,
+        *,
+        prior: ComponentState | None,
+        desired: PresentComponentState,
+    ) -> None:
+        while publication.metadata.phase != PublicationPhase.PUBLICATION_COMPLETE:
+            phase = PublicationPhase(publication.metadata.phase)
+            advance_module_publication(
+                publication,
+                phase=phase,
+                layout=publication.observe_layout(),
+                prior=prior,
+                desired=desired,
+            )
+        if publication.observe_layout() != ModuleLayout(desired, None, None):
+            raise ValueError("external-boot completed module publication layout conflicts")
+
+    @staticmethod
+    def _finish_absence_publication(
+        publication: _SessionModulePublicationIO,
+        *,
+        prior: PresentComponentState,
+    ) -> None:
+        while publication.metadata.phase != PublicationPhase.ABSENCE_CLEANED:
+            phase = PublicationPhase(publication.metadata.phase)
+            advance_absence_publication(
+                publication,
+                phase=phase,
+                layout=publication.observe_layout(),
+                prior=prior,
+            )
+        if publication.observe_layout() != ModuleLayout(None, None, None):
+            raise ValueError("external-boot completed module absence layout conflicts")
+
+    def _host_state(
+        self, metadata: LocalRecoveryMetadataV1
+    ) -> tuple[Literal["source", "target"], bool]:
+        inspection = self._session.inspect_closed()
+        if inspection.xml == metadata.source_xml.encode():
+            return "source", inspection.active
+        if inspection.xml == metadata.target_xml.encode():
+            return "target", inspection.active
+        raise ValueError("external-boot observed domain XML does not match recovery metadata")
+
+    def _stop_for_recovery(self, metadata: LocalRecoveryMetadataV1) -> None:
+        xml, active = self._host_state(metadata)
+        if metadata.phase == "target-defined" and xml != "target":
+            raise ValueError("external-boot recovery expected the target domain XML")
+        if active and xml != "target":
+            raise ValueError("external-boot refuses to stop an unexpected running domain")
+        if not active:
+            self._session.require_inactive()
+            return
+        try:
+            self._session.stop_and_require_inactive()
+        except Exception as primary:
+            try:
+                after = self._host_state(metadata)
+            except Exception as observation_error:
+                primary.add_note(f"post-stop host-state observation failed: {observation_error!r}")
+                raise primary from None
+            if after == (xml, False):
+                self._session.require_inactive()
+                return
+            raise
+        if self._host_state(metadata) != (xml, False):
+            raise ValueError("external-boot stop did not preserve exact XML and inactivity")
+
+    def _require_readiness(self) -> None:
+        if self._session.readiness() != ReadinessResult(True, True, None):
+            raise ValueError("external-boot readiness did not answer with exact success")
+
+
+class _SessionModulePublicationIO:
+    """Session-owned adapter for one exact three-name module publication."""
+
+    def __init__(
+        self,
+        guest: _GuestfsTreeHandle,
+        metadata: LocalRecoveryMetadataV1,
+        recovery_root: Path,
+        writer: GuestRecoveryWriter,
+        session: LocalExternalBootSession,
+    ) -> None:
+        self._guest = guest
+        self.metadata = metadata
+        self._recovery_root = recovery_root
+        self._writer = writer
+        self._session = session
+        base = f"/lib/modules/.kdive-{metadata.binding.activation_id}"
+        self._live = f"/lib/modules/{metadata.release}"
+        self._staging = f"{base}-staging"
+        self._old = f"{base}-old"
+
+    def require_inactive(self) -> None:
+        self._session.require_inactive()
+
+    def observe_layout(self) -> ModuleLayout:
+        return ModuleLayout(
+            self._observe(self._live),
+            self._observe(self._staging),
+            self._observe(self._old),
+        )
+
+    def create_staging(self) -> None:
+        self._guest.mkdir(self._staging)
+
+    def staging_tree(self) -> LibguestfsAuthenticatedGuestTree:
+        return LibguestfsAuthenticatedGuestTree(
+            self._guest,
+            binding=self.metadata.binding,
+            release=self.metadata.release,
+            root=self._staging,
+            mutable=True,
+        )
+
+    def move_live_to_old(self) -> None:
+        self._guest.mv(self._live, self._old)
+
+    def move_staging_to_live(self) -> None:
+        self._guest.mv(self._staging, self._live)
+
+    def move_old_to_live(self) -> None:
+        self._guest.mv(self._old, self._live)
+
+    def remove_old(self) -> None:
+        self._guest.rm_rf(self._old)
+
+    def guest_sync(self) -> None:
+        self._guest.sync()
+
+    def record_phase(self, phase: PublicationPhase) -> None:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            self.metadata = store.record_phase(
+                _recovery_ref(self.metadata.binding),
+                self.metadata.binding,
+                self.metadata,
+                cast(RecoveryPhase, phase.value),
+            )
+
+    def _observe(self, root: str) -> ComponentState | None:
+        tree = LibguestfsAuthenticatedGuestTree(
+            self._guest,
+            binding=self.metadata.binding,
+            release=self.metadata.release,
+            root=root,
+            mutable=False,
+        )
+        kind = tree.root_kind()
+        if kind == "absent":
+            return None
+        if kind != "directory":
+            raise ValueError("external-boot module publication name is not a directory")
+        return self._writer.observe(tree, self.metadata.release)
+
+
+def _layout_component(state: ComponentState) -> PresentComponentState | None:
+    return state if isinstance(state, PresentComponentState) else None
+
+
+def _present_component(state: ComponentState, label: str) -> PresentComponentState:
+    if not isinstance(state, PresentComponentState):
+        raise ValueError(f"external-boot {label} must be present")
+    return state
+
 
 def _validate_preparation_owner(
     value: LocalPreStopIntentV1 | LocalRecoveryMetadataV1,
@@ -930,6 +1256,7 @@ def _validate_preparation_owner(
         value.binding != binding
         or value.materialization_identity != materialization.identity
         or value.plan_identity != materialization.plan_identity
+        or value.expected_running != materialization.kernel_observation
     ):
         raise ValueError("pre-stop intent does not match activation")
 
@@ -1044,14 +1371,26 @@ class LocalLibvirtExternalBoot:
     def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
             metadata = self._reopen(operation, recovery)
-            if metadata.phase not in {"pre-stop-intent", "module-restored", "target-defined"}:
+            resumable = {
+                "pre-stop-intent",
+                "move-ready",
+                "old-aside",
+                "rollback-ready",
+                "rollback-complete",
+                "new-live",
+                "publication-complete",
+                "module-restored",
+                "target-defined",
+            }
+            if metadata.phase not in resumable:
                 raise ValueError("external-boot activation phase is not resumable")
-            if metadata.phase == "pre-stop-intent":
+            if metadata.phase == "target-defined":
+                return
+            if metadata.phase != "module-restored":
                 operation.activate_modules(metadata)
-                metadata = operation.record_phase(metadata, "module-restored")
+                metadata = self._reopen(operation, recovery)
             if metadata.phase == "module-restored":
                 operation.define_target(metadata)
-                operation.record_phase(metadata, "target-defined")
 
     def observe(
         self, recovery: RecoveryPoint, authority: OpaqueProviderRef
@@ -1069,19 +1408,27 @@ class LocalLibvirtExternalBoot:
                 return
             if metadata.phase not in {
                 "target-defined",
+                "move-ready",
+                "old-aside",
+                "rollback-ready",
+                "rollback-complete",
+                "new-live",
+                "publication-complete",
+                "absence-live",
+                "absence-complete",
+                "absence-cleaned",
                 "module-restored",
                 "source-restored",
             }:
                 raise ValueError("external-boot recovery phase is not resumable")
-            if metadata.phase == "target-defined":
+            if metadata.phase not in {"source-restored"}:
                 operation.recover_modules(metadata)
-                metadata = operation.record_phase(metadata, "module-restored")
+                metadata = self._reopen(operation, recovery)
             if metadata.phase == "module-restored":
                 operation.define_source(metadata)
-                metadata = operation.record_phase(metadata, "source-restored")
+                metadata = self._reopen(operation, recovery)
             if metadata.phase == "source-restored":
                 operation.restore_power(metadata)
-                operation.record_phase(metadata, "recovered")
 
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
@@ -1559,6 +1906,7 @@ def _metadata_extends_intent(
         "target_boot",
         "target_projection_sha256",
         "target_xml",
+        "expected_running",
         "prior_power",
     )
     return all(getattr(metadata, field) == getattr(intent, field) for field in shared)
@@ -1662,12 +2010,34 @@ def _move_with_reclassification(
         raise ValueError("external-boot module publication conflict") from exc
 
 
+def _remove_with_reclassification(
+    io: ModulePublicationIO,
+    *,
+    before: ModuleLayout,
+    after: ModuleLayout,
+    after_phase: PublicationPhase,
+) -> None:
+    """Retry a no-effect removal or record its exact after-effect layout."""
+    try:
+        io.remove_old()
+    except OSError as exc:
+        io.require_inactive()
+        observed = io.observe_layout()
+        if observed == before:
+            io.remove_old()
+            return
+        if observed == after:
+            _sync_phase(io, after_phase)
+            return
+        raise ValueError("external-boot module removal conflict") from exc
+
+
 def advance_module_publication(
     io: ModulePublicationIO,
     *,
     phase: PublicationPhase,
     layout: ModuleLayout,
-    prior: ComponentState,
+    prior: ComponentState | None,
     desired: ComponentState,
 ) -> None:
     """Perform the sole ADR-0586 action allowed by a present-tree restart row."""
@@ -1679,6 +2049,9 @@ def advance_module_publication(
             io.require_inactive()
             observed = io.observe_layout()
             if observed == ModuleLayout(None, desired, prior):
+                if prior is None:
+                    io.move_staging_to_live()
+                    return
                 io.record_phase(PublicationPhase.ROLLBACK_READY)
                 return
             if observed == ModuleLayout(desired, None, prior):
@@ -1714,8 +2087,18 @@ def advance_module_publication(
         (PublicationPhase.ROLLBACK_READY, ModuleLayout(prior, desired, None)): lambda: _sync_phase(
             io, PublicationPhase.ROLLBACK_COMPLETE
         ),
-        (PublicationPhase.ROLLBACK_COMPLETE, ModuleLayout(prior, desired, None)): lambda: None,
-        (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, prior)): io.remove_old,
+        (
+            PublicationPhase.ROLLBACK_COMPLETE,
+            ModuleLayout(prior, desired, None),
+        ): lambda: io.record_phase(PublicationPhase.MOVE_READY),
+        (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, prior)): lambda: (
+            _remove_with_reclassification(
+                io,
+                before=ModuleLayout(desired, None, prior),
+                after=ModuleLayout(desired, None, None),
+                after_phase=PublicationPhase.PUBLICATION_COMPLETE,
+            )
+        ),
         (PublicationPhase.NEW_LIVE, ModuleLayout(desired, None, None)): lambda: _sync_phase(
             io, PublicationPhase.PUBLICATION_COMPLETE
         ),
@@ -1756,7 +2139,14 @@ def advance_absence_publication(
         (PublicationPhase.ABSENCE_LIVE, ModuleLayout(None, None, prior)): lambda: io.record_phase(
             PublicationPhase.ABSENCE_COMPLETE
         ),
-        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, prior)): io.remove_old,
+        (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, prior)): lambda: (
+            _remove_with_reclassification(
+                io,
+                before=ModuleLayout(None, None, prior),
+                after=ModuleLayout(None, None, None),
+                after_phase=PublicationPhase.ABSENCE_CLEANED,
+            )
+        ),
         (PublicationPhase.ABSENCE_COMPLETE, ModuleLayout(None, None, None)): lambda: _sync_phase(
             io, PublicationPhase.ABSENCE_CLEANED
         ),
