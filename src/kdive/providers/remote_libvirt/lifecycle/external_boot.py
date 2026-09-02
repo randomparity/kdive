@@ -21,16 +21,26 @@ from uuid import UUID
 import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.external_boot import (
+    Architecture,
     Digest,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
     RunningKernelObservation,
 )
+from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
@@ -47,6 +57,17 @@ _BOOT_PROJECTION_PREFIX = b"kdive-libvirt-boot-projection-v1"
 # (`ports/external_boot.py:26,44` measures `len(data)` over bytes).
 MAX_DEFINITION_BYTES = 65_536
 MAX_ARTIFACT_PATH_BYTES = 1_024
+MAX_GUEST_READ_BYTES = 65_536
+
+UNAME_PROGRAM = "/usr/bin/uname"
+CAT_PROGRAM = "/usr/bin/cat"
+OBSERVATION_PROGRAMS = frozenset({UNAME_PROGRAM, CAT_PROGRAM})
+PROC_CMDLINE_PATH = "/proc/cmdline"
+KERNEL_NOTES_PATH = "/sys/kernel/notes"
+
+# The shared contract's two architectures. A guest reporting anything else fails identity proof
+# here rather than inside the shared model, so the failure names the field.
+_ARCHITECTURES: tuple[Architecture, ...] = ("x86_64", "ppc64le")
 
 
 def _digest(prefix: bytes, payload: bytes) -> str:
@@ -523,3 +544,188 @@ def _start(domain: ActivationDomain, definition: RemoteExternalBootDefinition) -
             phase="start",
             libvirt_error_code=exc.get_error_code(),
         ) from exc
+
+
+class RemoteGuestIdentity(BaseModel):
+    """What one guest actually reports: the shared observation plus the saved command line."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    running: RunningKernelObservation
+    cmdline: bytes
+
+
+class _AgentRunner(Protocol):
+    def run(
+        self, domain: GuestDomain, argv: list[str], *, input_data: str | None = None
+    ) -> AgentExecResult: ...
+
+
+def _identity_failure(
+    reason: str, *, definition: RemoteExternalBootDefinition, **extra: object
+) -> CategorizedError:
+    """READINESS_FAILURE is retryable by category, so identity failures set terminal.
+
+    Without it a guest that booted the wrong kernel would be re-dispatched to observe the same
+    wrong guest until the deadline expired, which is the one condition this proof exists to stop.
+    Details name which field differed, never the observed value: the guest controls those bytes.
+    """
+    details: dict[str, object] = {
+        "system_id": definition.binding.system_id,
+        "run_id": definition.binding.run_id,
+        "activation_id": definition.binding.activation_id,
+    }
+    details.update(extra)
+    return CategorizedError(
+        f"remote-libvirt external-boot identity proof failed: {reason}",
+        category=ErrorCategory.READINESS_FAILURE,
+        details=details,
+        terminal=True,
+    )
+
+
+def _guest_read(
+    agent_exec: _AgentRunner,
+    domain: GuestDomain,
+    argv: list[str],
+    *,
+    what: str,
+    definition: RemoteExternalBootDefinition,
+) -> bytes:
+    """Run one read. A CategorizedError from the seam propagates with its own category."""
+    result = agent_exec.run(domain, argv)
+    if result.exit_status != 0:
+        raise _identity_failure(
+            f"the guest could not read {what}",
+            definition=definition,
+            read=what,
+            exit_status=result.exit_status,
+        )
+    if len(result.stdout) > MAX_GUEST_READ_BYTES:
+        raise _identity_failure(
+            f"the guest returned an oversized {what} capture", definition=definition, read=what
+        )
+    return result.stdout
+
+
+def _single_field(raw: bytes, *, what: str, definition: RemoteExternalBootDefinition) -> str:
+    """One line, one field. `uname -r -m` would return two fields on one line; this rejects that."""
+    text = raw.decode("utf-8", errors="replace")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if not text or "\n" in text or any(character.isspace() for character in text):
+        raise _identity_failure(
+            f"the guest returned a malformed {what}", definition=definition, mismatch=what
+        )
+    return text
+
+
+def observe_guest_identity(
+    agent_exec: _AgentRunner,
+    domain: GuestDomain,
+    definition: RemoteExternalBootDefinition,
+) -> RemoteGuestIdentity:
+    """Prove the running kernel and command line are exactly the ones the plan named.
+
+    One bounded attempt, no waiting: an agent that is not yet answering raises a retryable
+    ``TRANSPORT_FAILURE`` from the seam, and the caller's readiness deadline and its retry are the
+    wait (#2118 owns both).
+
+    ADR-0583 requires the observation to return the newline-stripped ``/proc/cmdline`` bytes and
+    core to compare them. They are returned, and this function also compares them and fails closed.
+    Do not read the return value as core enforcement: ``ExternalBootPorts.observe`` cannot carry a
+    command line today, so this comparison is the only one that runs.
+
+    Reads go through ``GuestAgentExec`` — the ``guest-exec`` RPC is the only one the repository
+    records as available on every catalog image — with the two-program allowlist
+    ``OBSERVATION_PROGRAMS``. ``uname`` prints every requested field on one space-separated line,
+    so the release and the machine are read separately.
+    """
+    expected_name = domain_name_for(UUID(definition.binding.system_id))
+    if domain.name() != expected_name:
+        raise CategorizedError(
+            "remote-libvirt external-boot observation was given another System's domain",
+            category=ErrorCategory.CONFLICT,
+            details={"system_id": definition.binding.system_id, "rule": "domain-binding"},
+        )
+
+    release = _single_field(
+        _guest_read(
+            agent_exec, domain, [UNAME_PROGRAM, "-r"], what="release", definition=definition
+        ),
+        what="release",
+        definition=definition,
+    )
+    machine = _single_field(
+        _guest_read(
+            agent_exec, domain, [UNAME_PROGRAM, "-m"], what="machine", definition=definition
+        ),
+        what="architecture",
+        definition=definition,
+    )
+    cmdline = _guest_read(
+        agent_exec,
+        domain,
+        [CAT_PROGRAM, PROC_CMDLINE_PATH],
+        what="the kernel command line",
+        definition=definition,
+    )
+    # ADR-0583 removes exactly one trailing newline and treats truncation as terminal. A
+    # /proc/cmdline read that does not end in a newline is truncated, not merely unterminated.
+    if not cmdline.endswith(b"\n"):
+        raise _identity_failure(
+            "the kernel command line read was truncated",
+            definition=definition,
+            mismatch="cmdline",
+        )
+    cmdline = cmdline[:-1]
+    if cmdline != definition.expected_cmdline.encode():
+        raise _identity_failure(
+            "the running command line is not the plan's",
+            definition=definition,
+            mismatch="cmdline",
+        )
+    notes = _guest_read(
+        agent_exec,
+        domain,
+        [CAT_PROGRAM, KERNEL_NOTES_PATH],
+        what="the kernel notes",
+        definition=definition,
+    )
+    try:
+        build_id = parse_gnu_build_id(notes)
+    except CategorizedError as exc:
+        # parse_gnu_build_id raises BUILD_FAILURE, whose message names a vmlinux that is not
+        # involved here. A running guest with unreadable kernel notes has failed identity proof.
+        raise _identity_failure(
+            "the running kernel has no readable GNU build id",
+            definition=definition,
+            mismatch="gnu_build_id",
+        ) from exc
+
+    if machine not in _ARCHITECTURES:
+        raise _identity_failure(
+            "the guest reported an architecture the shared contract does not name",
+            definition=definition,
+            mismatch="architecture",
+        )
+    try:
+        running = RunningKernelObservation(
+            architecture=machine, release=release, gnu_build_id=build_id
+        )
+    except ValidationError as exc:
+        raise _identity_failure(
+            "the guest reported an out-of-contract kernel identity", definition=definition
+        ) from exc
+    if running != definition.expected_running:
+        mismatch = next(
+            field
+            for field in ("architecture", "release", "gnu_build_id")
+            if getattr(running, field) != getattr(definition.expected_running, field)
+        )
+        raise _identity_failure(
+            "the running kernel is not the materialized kernel",
+            definition=definition,
+            mismatch=mismatch,
+        )
+    return RemoteGuestIdentity(running=running, cmdline=cmdline)

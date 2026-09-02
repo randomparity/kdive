@@ -28,17 +28,21 @@ from kdive.providers.ports.external_boot import (
     RootSpecV1,
     RunningKernelObservation,
 )
+from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     MAX_DEFINITION_BYTES,
+    MAX_GUEST_READ_BYTES,
     RemoteExternalBootDefinition,
     activate_definition,
     boot_projection_identity,
+    observe_guest_identity,
     prepare_target_definition,
     preserved_definition_identity,
     render_target_xml,
     require_disk_grub_source,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name, render_domain_xml
+from kdive.providers.shared.runtime_paths import domain_name_for
 
 _SYSTEM_ID = UUID("00000000-0000-0000-0000-00000000beef")
 _OTHER_SYSTEM_ID = UUID("00000000-0000-0000-0000-0000000000aa")
@@ -611,3 +615,155 @@ def test_activation_reports_an_xmldesc_failure_as_infrastructure_failure() -> No
     with pytest.raises(CategorizedError) as caught:
         activate_definition(_FakeConn(domain), definition)
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+_NOTES = bytes.fromhex("040000000800000003000000474e5500") + bytes.fromhex("ab" * 8)
+_CMDLINE = b"root=/dev/vda1 console=ttyS0\n"
+
+
+class _FakeGuestDomain:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+
+class _FakeAgentExec:
+    """Answers an exact argv with a canned result; an unconfigured argv is a hard failure."""
+
+    def __init__(self, replies: dict[tuple[str, ...], AgentExecResult]) -> None:
+        self._replies = replies
+        self.argvs: list[list[str]] = []
+        self.error: BaseException | None = None
+
+    def run(
+        self, domain: Any, argv: list[str], *, input_data: str | None = None
+    ) -> AgentExecResult:
+        self.argvs.append(list(argv))
+        if self.error is not None:
+            raise self.error
+        key = tuple(argv)
+        if key not in self._replies:
+            raise AssertionError(f"unconfigured argv: {argv}")
+        return self._replies[key]
+
+
+def _replies(
+    *,
+    release: bytes = b"6.9.0-kdive\n",
+    machine: bytes = b"x86_64\n",
+    cmdline: bytes = _CMDLINE,
+    notes: bytes = _NOTES,
+    exits: dict[str, int] | None = None,
+) -> dict[tuple[str, ...], AgentExecResult]:
+    codes = exits or {}
+    return {
+        ("/usr/bin/uname", "-r"): AgentExecResult(codes.get("release", 0), release, b""),
+        ("/usr/bin/uname", "-m"): AgentExecResult(codes.get("machine", 0), machine, b""),
+        ("/usr/bin/cat", "/proc/cmdline"): AgentExecResult(codes.get("cmdline", 0), cmdline, b""),
+        ("/usr/bin/cat", "/sys/kernel/notes"): AgentExecResult(codes.get("notes", 0), notes, b""),
+    }
+
+
+def _guest(system_id: UUID = _SYSTEM_ID) -> _FakeGuestDomain:
+    return _FakeGuestDomain(domain_name_for(system_id))
+
+
+def test_observation_returns_the_running_identity_and_the_command_line() -> None:
+    definition = _prepare()
+    agent = _FakeAgentExec(_replies())
+    identity = observe_guest_identity(agent, _guest(), definition)
+    assert identity.running == _observation()
+    assert identity.cmdline == b"root=/dev/vda1 console=ttyS0"
+    assert agent.argvs == [
+        ["/usr/bin/uname", "-r"],
+        ["/usr/bin/uname", "-m"],
+        ["/usr/bin/cat", "/proc/cmdline"],
+        ["/usr/bin/cat", "/sys/kernel/notes"],
+    ]
+
+
+def test_observation_refuses_a_domain_handle_for_another_system() -> None:
+    agent = _FakeAgentExec(_replies())
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(agent, _guest(_OTHER_SYSTEM_ID), _prepare())
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "domain-binding"
+    assert agent.argvs == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"release": b"6.9.0-other\n"},
+        {"machine": b"aarch64\n"},
+        {"machine": b"ppc64le\n"},
+        {"notes": b""},
+        {"notes": b"\x00\x01\x02"},
+        {"cmdline": b"root=/dev/vda1 console=ttyS1\n"},
+        {"cmdline": b"root=/dev/vda1 console=ttyS0"},
+        {"cmdline": b"root=/dev/vda1 console=ttyS0\n\n"},
+        # The shape a combined `uname -r -m` would have produced: one space-separated line.
+        {"release": b"6.9.0-kdive x86_64\n"},
+    ],
+    ids=[
+        "wrong-release",
+        "wrong-machine",
+        "unnamed-architecture",
+        "empty-notes",
+        "malformed-notes",
+        "cmdline-one-byte-differs",
+        "cmdline-no-trailing-newline",
+        "cmdline-two-trailing-newlines",
+        "uname-combined-output",
+    ],
+)
+def test_observation_fails_closed_and_terminal_on_an_identity_mismatch(kwargs: Any) -> None:
+    definition = _prepare()
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(_FakeAgentExec(_replies(**kwargs)), _guest(), definition)
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+    rendered = str(caught.value.details) + str(caught.value)
+    for leak in (b"aarch64", b"ttyS1", b"6.9.0-other"):
+        assert leak.decode() not in rendered
+
+
+@pytest.mark.parametrize(
+    "which",
+    ["release", "machine", "cmdline", "notes"],
+    ids=["release", "machine", "cmdline", "notes"],
+)
+def test_observation_treats_a_non_zero_exit_as_a_terminal_identity_failure(which: str) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(_FakeAgentExec(_replies(exits={which: 1})), _guest(), _prepare())
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+
+
+def test_observation_rejects_a_capture_larger_than_the_read_bound() -> None:
+    oversized = b"x" * (MAX_GUEST_READ_BYTES + 1)
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(_FakeAgentExec(_replies(cmdline=oversized)), _guest(), _prepare())
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ErrorCategory.TRANSPORT_FAILURE,
+        ErrorCategory.CONFIGURATION_ERROR,
+        ErrorCategory.INFRASTRUCTURE_FAILURE,
+    ],
+    ids=["unreachable-agent", "denied-rpc", "malformed-reply"],
+)
+def test_observation_propagates_the_agent_seams_own_failures_unchanged(
+    category: ErrorCategory,
+) -> None:
+    agent = _FakeAgentExec(_replies())
+    agent.error = CategorizedError("seam", category=category)
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(agent, _guest(), _prepare())
+    assert caught.value.category is category
+    assert caught.value.terminal is False
