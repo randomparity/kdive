@@ -221,6 +221,23 @@ class ExternalBootActivationRepository:
     ) -> ExternalBootActivation | None:
         return _activation(await self._get_row(conn, activation_id))
 
+    async def get_restricting_for_system(
+        self, conn: AsyncConnection, system_id: UUID
+    ) -> ExternalBootActivation | None:
+        """Return the System's activation that is not yet fully cleaned, if one exists.
+
+        The predicate is the one behind ``external_boot_activations_one_live_per_system``,
+        which is what makes at most one row match.
+        """
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT * FROM external_boot_activations WHERE system_id = %s "
+                "AND (state NOT IN ('recovered', 'abandoned') OR NOT cleanup_complete)",
+                (system_id,),
+            )
+            row = await cur.fetchone()
+        return _activation(row)
+
     async def get_reservation(
         self, conn: AsyncConnection, activation_id: UUID
     ) -> ExternalBootReservation | None:
