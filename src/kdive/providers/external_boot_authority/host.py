@@ -376,64 +376,157 @@ async def check_database_role(connection: Any) -> None:
                          FROM role_walk AS walk
                         WHERE NOT walk.cycle
                    ) AS membership_overflow
-        ), direct_application_acl AS (
+        ), accepted_role AS (
+            SELECT role.oid
+              FROM pg_roles AS role
+             WHERE role.rolname = 'kdive_provider_authority'
+        ), accepted_function AS (
+            SELECT unnest(ARRAY[
+                'public.acknowledge_external_boot_authority(uuid,bigint,uuid,uuid,uuid,uuid,'
+                    'text,uuid,integer,text,text,text,text,text,text,text,bigint,text,text)'
+                    ::regprocedure,
+                'public.resolve_allocating_external_boot_authority(text,uuid,bigint)'
+                    ::regprocedure,
+                'public.resolve_current_external_boot_authority_candidate(text,uuid,bigint)'
+                    ::regprocedure,
+                'public.resolve_current_external_boot_authority(text,uuid,bigint,bigint,text)'
+                    ::regprocedure,
+                'public.read_external_boot_authority_journal_head(text,uuid,bigint,text)'
+                    ::regprocedure,
+                'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,'
+                    'text,jsonb)'::regprocedure,
+                'public.list_external_boot_authority_journal_heads(text)'::regprocedure,
+                'public.authenticate_external_boot_authority_peer(bytea)'::regprocedure
+            ])::oid AS oid
+        ), accepted_public_function AS (
+            SELECT unnest(ARRAY[
+                'public.image_catalog_phase_two_recovery_disarm()'::regprocedure,
+                'public.reject_external_boot_release_mutation()'::regprocedure,
+                'public.reject_external_boot_reservation_identity_change()'::regprocedure,
+                'public.reject_system_root_provenance_update()'::regprocedure,
+                'public.set_updated_at()'::regprocedure
+            ])::oid AS oid
+        ), excess_application_acl AS (
             SELECT EXISTS (
                 SELECT 1
                   FROM pg_class AS object
                   JOIN pg_namespace AS schema ON schema.oid = object.relnamespace
                   CROSS JOIN session_role AS role
-                  CROSS JOIN LATERAL aclexplode(object.relacl) AS acl
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      object.relacl,
+                      acldefault(
+                          CASE WHEN object.relkind = 'S' THEN 's' ELSE 'r' END::"char",
+                          object.relowner
+                      )
+                  )) AS acl
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND acl.grantee = role.oid
+                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
+                   AND NOT (
+                       acl.grantee = accepted_role.oid
+                       AND NOT acl.is_grantable
+                       AND acl.privilege_type = 'SELECT'
+                       AND schema.nspname = 'public'
+                       AND object.relkind IN ('r', 'p')
+                       AND object.relname IN (
+                           'external_boot_authorities',
+                           'external_boot_authority_acknowledgements'
+                       )
+                   )
                 UNION ALL
                 SELECT 1
                   FROM pg_attribute AS column_acl
                   JOIN pg_class AS object ON object.oid = column_acl.attrelid
                   JOIN pg_namespace AS schema ON schema.oid = object.relnamespace
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                   CROSS JOIN LATERAL aclexplode(column_acl.attacl) AS acl
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND acl.grantee = role.oid
+                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_proc AS function_row
                   JOIN pg_namespace AS schema ON schema.oid = function_row.pronamespace
                   CROSS JOIN session_role AS role
-                  CROSS JOIN LATERAL aclexplode(function_row.proacl) AS acl
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      function_row.proacl, acldefault('f', function_row.proowner)
+                  )) AS acl
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND acl.grantee = role.oid
+                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
+                   AND NOT (
+                       NOT acl.is_grantable
+                       AND acl.privilege_type = 'EXECUTE'
+                       AND (
+                           (
+                               acl.grantee = accepted_role.oid
+                               AND function_row.oid IN (SELECT oid FROM accepted_function)
+                           )
+                           OR (
+                               acl.grantee = 0
+                               AND function_row.oid IN (SELECT oid FROM accepted_public_function)
+                           )
+                       )
+                   )
                 UNION ALL
                 SELECT 1
                   FROM pg_type AS type_row
                   JOIN pg_namespace AS schema ON schema.oid = type_row.typnamespace
                   CROSS JOIN session_role AS role
-                  CROSS JOIN LATERAL aclexplode(type_row.typacl) AS acl
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      type_row.typacl, acldefault('T', type_row.typowner)
+                  )) AS acl
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND acl.grantee = role.oid
+                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
+                   AND NOT (
+                       acl.grantee = 0
+                       AND NOT acl.is_grantable
+                       AND acl.privilege_type = 'USAGE'
+                   )
                 UNION ALL
                 SELECT 1
                   FROM pg_namespace AS schema
                   CROSS JOIN session_role AS role
-                  CROSS JOIN LATERAL aclexplode(schema.nspacl) AS acl
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      schema.nspacl, acldefault('n', schema.nspowner)
+                  )) AS acl
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND acl.grantee = role.oid
+                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
+                   AND NOT (
+                       acl.grantee IN (0, accepted_role.oid)
+                       AND NOT acl.is_grantable
+                       AND acl.privilege_type = 'USAGE'
+                       AND schema.nspname = 'public'
+                   )
                 UNION ALL
                 SELECT 1
                   FROM pg_database AS database_row
                   CROSS JOIN session_role AS role
-                  CROSS JOIN LATERAL aclexplode(database_row.datacl) AS acl
-                 WHERE database_row.datname = current_database() AND acl.grantee = role.oid
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      database_row.datacl, acldefault('d', database_row.datdba)
+                  )) AS acl
+                 WHERE database_row.datname = current_database()
+                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
+                   AND NOT (
+                       acl.grantee = 0
+                       AND NOT acl.is_grantable
+                       AND acl.privilege_type IN ('CONNECT', 'TEMPORARY')
+                   )
                 UNION ALL
                 SELECT 1
                   FROM pg_default_acl AS default_acl
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                   CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS acl
-                 WHERE acl.grantee = role.oid
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
             ) AS present
         ), owned_application_object AS (
             SELECT EXISTS (
@@ -441,43 +534,49 @@ async def check_database_role(connection: Any) -> None:
                   FROM pg_class AS object
                   JOIN pg_namespace AS schema ON schema.oid = object.relnamespace
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND object.relowner = role.oid
+                   AND object.relowner IN (role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_proc AS function_row
                   JOIN pg_namespace AS schema ON schema.oid = function_row.pronamespace
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND function_row.proowner = role.oid
+                   AND function_row.proowner IN (role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_type AS type_row
                   JOIN pg_namespace AS schema ON schema.oid = type_row.typnamespace
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND type_row.typowner = role.oid
+                   AND type_row.typowner IN (role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_namespace AS schema
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                  WHERE schema.nspname !~ '^pg_'
                    AND schema.nspname <> 'information_schema'
-                   AND schema.nspowner = role.oid
+                   AND schema.nspowner IN (role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_database AS database_row
                   CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
                  WHERE database_row.datname = current_database()
-                   AND database_row.datdba = role.oid
+                   AND database_row.datdba IN (role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_default_acl AS default_acl
                   CROSS JOIN session_role AS role
-                 WHERE default_acl.defaclrole = role.oid
+                  CROSS JOIN accepted_role
+                 WHERE default_acl.defaclrole IN (role.oid, accepted_role.oid)
             ) AS present
         )
         SELECT role.rolname, role.rolcanlogin, role.rolinherit, role.rolsuper,
@@ -487,10 +586,10 @@ async def check_database_role(connection: Any) -> None:
                    'public.list_external_boot_authority_journal_heads(text)', 'EXECUTE'),
                has_function_privilege(session_user,
                    'public.authenticate_external_boot_authority_peer(bytea)', 'EXECUTE'),
-               direct_application_acl.present OR owned_application_object.present
+               excess_application_acl.present OR owned_application_object.present
           FROM session_role AS role
           CROSS JOIN membership_shape
-          CROSS JOIN direct_application_acl
+          CROSS JOIN excess_application_acl
           CROSS JOIN owned_application_object
     """
     try:

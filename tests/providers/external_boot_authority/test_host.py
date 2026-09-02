@@ -353,6 +353,9 @@ def test_host_database_role_query_inventories_all_application_privileges() -> No
     ):
         assert catalog in query
     assert "aclexplode" in query
+    assert "acldefault" in query
+    assert "acl.grantee IN (0, role.oid, accepted_role.oid)" in query
+    assert "accepted_public_function" in query
 
 
 def test_host_diagnostics_are_bounded_and_secret_free() -> None:
