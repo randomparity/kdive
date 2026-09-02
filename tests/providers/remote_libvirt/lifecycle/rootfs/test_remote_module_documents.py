@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any, cast
 
@@ -149,6 +150,90 @@ def test_documents_reject_extra_fields_unknown_versions_and_noncanonical_json() 
 def test_operation_parser_enforces_16_kibibyte_cap_before_validation() -> None:
     with pytest.raises(ValueError, match="16384"):
         RemoteModuleOperationV1.from_canonical_json(b" " * 16_385)
+
+
+def test_wire_form_is_the_framed_file_the_appliance_reader_accepts(tmp_path: Path) -> None:
+    appliance = _appliance_module()
+    operation = RemoteModuleOperationV1.model_validate(_operation())
+    framed = operation.to_wire_bytes()
+    path = tmp_path / "operation-v1.json"
+
+    assert framed == operation.to_canonical_json() + b"\n"
+    path.write_bytes(framed)
+    assert appliance._read_operation(path) == _operation()
+
+    path.write_bytes(operation.to_canonical_json())
+    with pytest.raises(appliance.ApplianceError, match="INVALID_DOCUMENT"):
+        appliance._read_operation(path)
+
+
+def test_wire_parser_reads_back_what_the_appliance_writes() -> None:
+    result = RemoteModuleResultV1.model_validate(_result())
+    appliance_written = (
+        json.dumps(json.loads(result.to_canonical_json()), sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode()
+
+    assert RemoteModuleResultV1.from_wire_bytes(appliance_written) == result
+    assert RemoteModuleResultV1.from_wire_bytes(result.to_wire_bytes()) == result
+
+
+@pytest.mark.parametrize("framing", [b"", b"\n\n"])
+def test_wire_parser_names_a_framing_error_rather_than_a_canonical_one(framing: bytes) -> None:
+    operation = RemoteModuleOperationV1.model_validate(_operation())
+
+    with pytest.raises(ValueError, match="not newline-framed"):
+        RemoteModuleOperationV1.from_wire_bytes(operation.to_canonical_json() + framing)
+    with pytest.raises(ValueError, match="not canonical JSON"):
+        RemoteModuleOperationV1.from_wire_bytes(operation.to_canonical_json() + b" \n")
+
+
+def test_wire_parser_bounds_the_file_at_the_appliance_document_limit() -> None:
+    with pytest.raises(ValueError, match="framed remote module document exceeds 16384 bytes"):
+        RemoteModuleResultV1.from_wire_bytes(b" " * 16_384 + b"\n")
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _operation("restore", capture_absent=False, installed_manifest=DIGESTS["f"]),
+        _result(capture_absent=False),
+    ],
+)
+def test_documents_reject_capture_absent_false(document: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        if document["protocol"] == "remote-module-operation-v1":
+            RemoteModuleOperationV1.model_validate(document)
+        else:
+            RemoteModuleResultV1.model_validate(document)
+
+
+def test_identity_absent_early_failure_result_is_accepted_for_any_operation() -> None:
+    operation = RemoteModuleOperationV1.model_validate(_operation())
+    result = RemoteModuleResultV1.model_validate(
+        {
+            "protocol": "remote-module-result-v1",
+            "status": "failure",
+            "phase": "accepted",
+            "error_code": "INVALID_DOCUMENT",
+        }
+    )
+
+    result.validate_for(operation)
+
+
+@pytest.mark.parametrize("field", ["root_volume", "root_volume_key"])
+def test_volume_key_requires_nfc_text(field: str) -> None:
+    decomposed = unicodedata.normalize("NFD", "root-\u00c5")
+    assert decomposed != unicodedata.normalize("NFC", decomposed)
+
+    with pytest.raises(ValidationError):
+        if field == "root_volume":
+            RemoteModuleOperationV1.model_validate(
+                _operation(root_volume={"key": decomposed, "identity": DIGESTS["c"]})
+            )
+        else:
+            RemoteModuleResultV1.model_validate(_result(root_volume_key=decomposed))
 
 
 @pytest.mark.parametrize(

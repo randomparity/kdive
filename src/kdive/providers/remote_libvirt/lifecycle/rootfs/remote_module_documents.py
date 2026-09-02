@@ -13,6 +13,7 @@ from kdive.providers.ports.external_boot import (
     KernelRelease,
     OpaqueProviderRef,
     _ClosedValue,
+    _nfc,
 )
 
 type RemoteModulePhase = Literal[
@@ -46,6 +47,10 @@ type _BoundedVolumeKey = Annotated[str, Field(min_length=1, max_length=255)]
 
 _OPERATION_MAX_BYTES = 16_384
 _DOCUMENT_MAX_BYTES = 65_536
+# DOCUMENT_LIMIT in deploy/remote_module_appliance/appliance.py, applied there to the whole
+# framed file. Every document's field bounds cap its canonical form well under this, so the
+# limit bites only on a corrupt or foreign file read back from a volume.
+_APPLIANCE_FILE_MAX_BYTES = 16_384
 _IDENTITY_FIELDS = (
     "system_id",
     "run_id",
@@ -72,7 +77,11 @@ class _RemoteModuleDocument(_ClosedValue):
     protocol: str
 
     def to_canonical_json(self) -> bytes:
-        """Return compact sorted UTF-8 JSON without a trailing newline."""
+        """Return compact sorted UTF-8 JSON without a trailing newline.
+
+        This is the unframed identity form: the bytes ``identity_for`` digests. Bytes written
+        to or read from an appliance volume carry one framing newline; use the wire pair below.
+        """
         return json.dumps(
             self.model_dump(mode="json", exclude_none=True),
             sort_keys=True,
@@ -82,7 +91,7 @@ class _RemoteModuleDocument(_ClosedValue):
 
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
-        """Parse a bounded document and reject alternate byte encodings."""
+        """Parse a bounded unframed document and reject alternate byte encodings."""
         limit = _OPERATION_MAX_BYTES if cls is RemoteModuleOperationV1 else _DOCUMENT_MAX_BYTES
         if len(data) > limit:
             raise ValueError(f"remote module document exceeds {limit} bytes")
@@ -90,6 +99,25 @@ class _RemoteModuleDocument(_ClosedValue):
         if value.to_canonical_json() != data:
             raise ValueError("remote module document is not canonical JSON")
         return value
+
+    def to_wire_bytes(self) -> bytes:
+        """Return the framed on-volume file the appliance reads: canonical JSON plus a newline.
+
+        The appliance rejects an operation file that does not end in a newline and writes every
+        result and checkpoint with one, so an unframed document never survives the round trip.
+        """
+        return self.to_canonical_json() + b"\n"
+
+    @classmethod
+    def from_wire_bytes(cls, data: bytes) -> Self:
+        """Parse a framed on-volume file, requiring exactly one trailing newline."""
+        if len(data) > _APPLIANCE_FILE_MAX_BYTES:
+            raise ValueError(
+                f"framed remote module document exceeds {_APPLIANCE_FILE_MAX_BYTES} bytes"
+            )
+        if not data.endswith(b"\n") or data.endswith(b"\n\n"):
+            raise ValueError("remote module document is not newline-framed")
+        return cls.from_canonical_json(data[:-1])
 
 
 def identity_for(document: _RemoteModuleDocument) -> str:
@@ -99,6 +127,7 @@ def identity_for(document: _RemoteModuleDocument) -> str:
 
 
 def _closed_volume_key(value: str) -> str:
+    value = _nfc(value)
     if (
         not value.isprintable()
         or value.startswith(("/", "\\"))
@@ -110,6 +139,9 @@ def _closed_volume_key(value: str) -> str:
 
 
 class _RootVolumeV1(_ClosedValue):
+    # The pool-scoped volume name resolved by storageVolLookupByName, not the host-path form
+    # virStorageVolGetKey returns for file-backed pools: ADR-0585 keeps host paths out of the
+    # operation document, so the validator below rejects them.
     key: _BoundedVolumeKey
     identity: Digest
 
@@ -130,7 +162,7 @@ class RemoteModuleOperationV1(_RemoteModuleDocument):
     source_manifest: Digest
     capture_manifest: Digest | None = None
     installed_manifest: Digest | None = None
-    capture_absent: bool | None = None
+    capture_absent: Literal[True] | None = None
     appliance_image_digest: Digest
 
     @model_validator(mode="after")
@@ -167,7 +199,7 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
     source_manifest: Digest | None = None
     installed_manifest: Digest | None = None
     capture_manifest: Digest | None = None
-    capture_absent: bool | None = None
+    capture_absent: Literal[True] | None = None
     entry_count: Annotated[int, Field(ge=0, le=200_000)] | None = None
     content_bytes: Annotated[int, Field(ge=0, le=8_589_934_592)] | None = None
 
@@ -245,7 +277,14 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
         return False
 
     def validate_for(self, operation: RemoteModuleOperationV1) -> None:
-        """Reject durable evidence belonging to a different operation attempt."""
+        """Reject durable evidence belonging to a different operation attempt.
+
+        An identity-absent early-failure result carries nothing to compare, so it is accepted
+        for any operation. The appliance writes that shape when it fails before reading the
+        operation document, and binding it to an attempt comes from the scratch-volume
+        reference it was read through, never from this method. A caller that needs the
+        stronger guarantee checks the result is identity-complete before trusting it.
+        """
         allowed_phases = (
             {"accepted", "captured", "staging-intent", "replacement-ready", "installed"}
             if operation.operation == "capture_install"
