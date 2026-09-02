@@ -65,8 +65,17 @@ run (`-x`, `--pdb`, a broad `-k`) runs the whole suite single-process. Serial is
 different topology from the gate's, so a failure caused by xdist itself can vanish under
 escalation — reproduce those with direct pytest carrying the gate's marker exclusion and
 parallelism flags (`_TEST_MARKERS` / `_TEST_XDIST` in the justfile, where it is described).
-For one known test, direct pytest stays fine (see above). Run gate recipes bare — never
-piped through `tail`/`head` or with output redirected — so exit codes stay truthful.
+For one known test, direct pytest stays fine (see above). Never pipe a gate recipe through
+`tail`/`head`: a pipeline reports the *last* command's exit code, so the gate's own status is
+lost. Redirection does not have that problem — `just ci > <file> 2>&1; echo $?` reports the
+recipe's exit code faithfully — so capture output that way when you need to read it.
+
+Agents should capture rather than inherit the harness's streams. `just ci` runs `lint-ansible`,
+and ansible-core aborts with `ERROR: Ansible requires blocking IO on stdin/stdout/stderr` when
+any of the three is non-blocking, which is how an agent harness commonly supplies them. Run it
+as `just ci > <file> 2>&1 < /dev/null; echo $?`: the redirects give blocking regular files for
+stdout and stderr, `< /dev/null` gives a blocking stdin, and the exit code stays truthful.
+
 Reserve `just ci` for pre-push parity; while iterating, invoke the specific recipe you
 need (`just lint`, `just type`, `prek run`).
 
