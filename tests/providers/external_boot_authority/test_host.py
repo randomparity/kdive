@@ -934,6 +934,8 @@ def test_probe_rejects_concurrent_or_foreign_socket(
                 probe.unlink()
                 replacement = socket.socket(socket.AF_UNIX)
                 replacement.bind(str(probe))
+                status = real_stat(path, *args, **kwargs)
+                return SimpleNamespace(st_dev=status.st_dev, st_ino=status.st_ino + 1)
         return real_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(host.os, "stat", replace_before_recheck)
