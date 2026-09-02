@@ -15,10 +15,11 @@ and the existing provider-neutral authority service and journal.
 
 A provisioned host has a dedicated `kdive-provider-authority` identity, an authenticated and
 supervised authority process, a root-installed runtime, an authority-only database credential,
-an authority-owned journal, and a mutation-capable libvirt socket that fixed workers and the
-reconciler cannot access. Fixed workers keep read-only libvirt observation through the daemon's
-read-only socket. Readiness remains false until the service proves its journal directory,
-credential, database role, provider socket, and denial boundary.
+an authority-owned journal, and a distinct dormant authority-owned libvirt endpoint that fixed
+workers and the reconciler cannot access. The current fixed-worker endpoint, KVM access, and
+provider behavior remain unchanged until #2140 can replace them atomically. Readiness remains
+false until the service proves its journal directory, credential, database role, dormant provider
+endpoint, and denial boundary.
 
 The deployment does not register an external-boot provider capability. Existing production
 composition tests continue to prove that `external_boot_authority_v1` is absent.
@@ -32,7 +33,8 @@ composition tests continue to prove that `external_boot_authority_v1` is absent.
 
 - `external-boot-authority-host` loads only systemd credentials and fixed configuration, checks
   the local journal and access boundary, verifies its database session is a member of only the
-  least-privilege `kdive_provider_authority` role, and stays supervised while ready.
+  least-privilege `kdive_provider_authority` role, and repeats the full check on a fixed interval.
+  Any drift exits the process so process liveness retracts readiness and systemd restarts it.
 - `check-external-boot-authority-host` runs the same checks once and emits one bounded,
   secret-free readiness result for Ansible and operators.
 
@@ -45,9 +47,11 @@ without that adapter is deliberately deployment readiness, not capability readin
 Ansible creates these independent principals and groups:
 
 - `kdive-provider-authority` owns the service, journal, service credential, database credential,
-  installed runtime, and libvirt mutation group.
-- `kdive-live-observe` grants fixed workers read-only access to `libvirt-sock-ro`.
-- `kdive-provider-authority` is the only KDIVE service identity in the libvirt mutation group.
+  installed runtime, and its distinct dormant libvirt session.
+- Existing fixed workers keep their current `kdive-live-libvirt` and `kvm` memberships and their
+  current provider endpoint until #2140 supplies a complete replacement.
+- `kdive-provider-authority` is the only KDIVE service identity able to traverse the new dormant
+  authority endpoint.
 
 The authority runtime root is `/opt/kdive-provider-authority`; credentials are under
 `/etc/kdive/credentials/provider-authority`; journals are under
@@ -55,17 +59,22 @@ The authority runtime root is `/opt/kdive-provider-authority`; credentials are u
 `/run/kdive/provider-authority`. Each protected parent is inspected without following links before
 Ansible creates or changes it.
 
-The dedicated session libvirtd publishes its read-write socket to the authority group and its
-read-only socket to the observation group. Fixed worker units lose `kvm` and mutation-group
-membership; the runner account remains an operator outside the fixed worker/reconciler boundary.
+The authority account runs a separate session libvirtd under
+`/run/kdive/provider-authority/libvirt`. Its Unix-user session is a separate provider namespace
+from the existing operator-owned fixed-worker daemon, so current workers cannot observe or mutate
+authority-owned objects. The authority daemon is installed dormant: #2140 must bind provider
+adapters, prove mutation exclusivity, and only then advertise capability or retire current access.
 
 ### Database authority
 
 Migrations 0122 and 0123 already create `kdive_provider_authority`, revoke direct table access,
 and grant only the binding-resolution, acknowledgement, and journal-head functions accepted by
-ADR-0584. Provisioning installs a login DSN whose role is a member of that existing role. The
-readiness probe checks membership and rejects superuser, role creation, database creation,
-replication, bypass-RLS, and direct journal-table privileges. It never prints the DSN.
+ADR-0584. Migration 0125 adds one security-definer inventory function: it authenticates the
+calling role, accepts one configured authority instance, and returns only the bounded lane identity
+and exact trusted-head fields needed for restoration. It grants execution only to
+`kdive_provider_authority`; no direct table access or lifecycle write is added. Provisioning
+installs a login DSN whose role is a member of that existing role. The readiness probe checks role
+shape and never prints the DSN.
 
 ### Readiness
 
@@ -73,39 +82,41 @@ The one-shot and long-running probes fail closed unless all of these hold:
 
 1. the process identity is the configured authority uid;
 2. credentials are regular, non-symlink files owned by that uid with mode `0400`;
-3. the journal root and every retained lane are real authority-owned directories/files with the
-   exact modes required by `FileAuthorityJournal`;
+3. the database inventory and confined local journal lanes are a bijection, and every retained
+   lane is a real authority-owned directory/file whose exact terminal record equals its trusted
+   head;
 4. the configured provider mutation socket is a socket reachable by the authority identity;
 5. the database session has the accepted role shape and can execute only the authority functions;
-6. the configured denial identities cannot traverse the authority runtime, credentials, journal,
-   helper, or mutation socket paths; and
-7. the read-only provider socket is reachable by a fixed observation identity and rejects a
-   mutation operation in the clean-host verification carrier.
+6. the configured worker and reconciler identities cannot traverse the authority runtime,
+   credentials, journal, helper, or mutation socket paths; and
+7. the existing fixed-worker provider/KVM path remains usable and unchanged.
 
-The runtime writes no durable readiness override. Restart repeats every check. Journal restoration
-is therefore a prerequisite: any corrupt, foreign, missing, longer, or valid-prefix-truncated lane
-causes `FileAuthorityJournal.load()` or the trusted-head comparison to fail before readiness.
+The runtime writes no durable readiness override. It repeats every check at the configured bounded
+interval and exits on any drift; #2140 must also call the same check immediately before enabling an
+adapter or admitting its first request. Journal restoration is therefore a prerequisite: any
+corrupt, foreign, missing, extra, longer, or valid-prefix-truncated lane fails the inventory/local
+bijection or trusted-head comparison before readiness.
 
 ## Threat model
 
 ### Boundary inventory
 
 The added boundaries are systemd credential delivery into the authority process, the authority
-database connection, the authority journal filesystem, and the split read-only/read-write libvirt
-sockets. No network listener or caller-selected path, URI, command, provider definition, or
-credential is added. The existing libvirt socket boundary is narrowed for fixed workers.
+database connection, the authority journal filesystem, and a distinct authority-owned libvirt
+session. No network listener or caller-selected path, URI, command, provider definition, or
+credential is added. The existing fixed-worker endpoint is unchanged.
 
 ### Actors and controls
 
-- A compromised fixed worker or reconciler may read provider state but must not reach mutation
-  credentials, socket, helper, journal, or runtime. Unix ownership, non-overlapping groups,
-  systemd unit groups, and negative Ansible probes enforce this.
+- A compromised fixed worker or reconciler retains existing-provider access but must not reach the
+  dormant authority endpoint's credentials, socket, helper, journal, runtime, or provider objects.
+  Distinct Unix identities/session namespaces, ownership, and negative Ansible probes enforce this.
 - A compromised tenant cannot select any host path or credential because the host commands accept
   configuration only from root-owned files and systemd credential descriptors.
 - A local platform administrator remains trusted, matching ADR-0584. Root can bypass filesystem
   ACLs and is explicitly outside this boundary.
-- A stale authority process cannot claim readiness from a cached stamp: every start reconstructs
-  journal and database evidence.
+- A stale authority process cannot claim readiness from a cached stamp: startup and every periodic
+  interval reconstruct journal, database, provider, and access evidence, then exit on drift.
 - A malicious or replaced path component cannot redirect privileged writes: provisioning and the
   runtime reject symlinked or foreign-owned protected paths.
 
@@ -125,8 +136,11 @@ lifecycle state. Those are either accepted exclusions or owned by #2140/#2118.
 
 - Host-runtime tests exercise safe path/credential checks, role-shape failures, journal restore
   failures, and bounded diagnostics.
-- Structural deployment tests prove account/group separation, installed modes, systemd
-  supervision, credential delivery, read-only worker URI, and absence of mutation access.
+- Structural deployment tests prove account/session separation, installed modes, systemd
+  supervision, credential delivery, and absence of worker/reconciler authority-endpoint access.
+- The authorized Ubuntu 26.04 x86_64 carrier executes the role from a clean KDIVE state, starts and
+  restarts both endpoints, runs positive/negative readiness probes, injects drift, and verifies
+  readiness retracts. Native provider behavior remains the later #2151/#2152 proof.
 - Provider-neutral adversarial tests explicitly cover unresolved calls across takeover/restart,
   valid-prefix journal loss, independent lane heads, and stale provider/core writes.
 - Existing composition tests continue to prove capability advertisement is disabled.
@@ -134,7 +148,8 @@ lifecycle state. Those are either accepted exclusions or owned by #2140/#2118.
 
 ## Rollback
 
-Reverting removes the authority unit and restores the prior fixed-worker libvirt group shape.
-Because provider capability advertisement remains disabled, rollback has no active external-boot
-operation to migrate. Journal and credential directories are retained rather than deleted; an
-operator may inspect or remove them only after confirming no later #2140 deployment uses them.
+Reverting removes the dormant authority unit and migration function while leaving the current
+fixed-worker provider path untouched. Because provider capability advertisement remains disabled,
+rollback has no active external-boot operation to migrate. Journal and credential directories are
+retained rather than deleted; an operator may inspect or remove them only after confirming no later
+#2140 deployment uses them.

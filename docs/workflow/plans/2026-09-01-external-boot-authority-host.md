@@ -12,15 +12,51 @@ Tech stack: Python 3.14, asyncio/psycopg, systemd, Ansible, pytest.
 - Target architectures: x86_64 and ppc64le.
 - Python 3.14 under `uv`; no new dependency.
 - Provider adapters and capability advertisement remain owned by #2140.
+- Migration `0125` is the only assigned migration and supplies the bounded trusted-head inventory.
+- Preserve current fixed-worker provider/KVM access until #2140 replaces it atomically.
 - Lifecycle orchestration remains owned by #2118.
 - Never expose credentials, DSNs, provider output, or journal bytes in diagnostics.
 - Guardrails: focused tests while iterating; `just lint`; whole-tree `just type`; relevant
   `prek` hooks; `just ci` before delivery.
 
-Expected implementation size: 450–750 changed lines (L) — derived from one runtime module, CLI
-wiring, two systemd artifacts, Ansible provisioning/verification, tests, and runbook diagnostics.
+Expected implementation size: 650–950 changed lines (L) — derived from migration 0125, one runtime
+module, CLI wiring, systemd artifacts, Ansible provisioning/verification, tests, and diagnostics.
 
-## Task 1: Add the fail-closed host readiness runtime
+## Task 1: Add the least-privilege trusted-head inventory
+
+Files:
+
+- Create `src/kdive/db/schema/0125_external_boot_authority_head_inventory.sql`.
+- Modify `src/kdive/db/external_boot_authority_journal.py`.
+- Create `tests/db/test_external_boot_authority_head_inventory_migration.py` and update exact
+  migration-tail assertions generated from the schema inventory.
+
+Interfaces:
+
+- SQL `list_external_boot_authority_journal_heads(text)` returns only authority instance, System,
+  sequence, digest, phase, authority, generation, and operation identity for the supplied instance.
+- `list_journal_heads(conn, authority_instance: str) -> tuple[JournalHead, ...]` is Task 2's exact
+  inventory input.
+
+Verification:
+
+- Mode: focused-test. Contract: only `kdive_provider_authority` can execute the security-definer
+  inventory, runtime roles have no table access, results are instance-scoped and bounded, and no
+  lifecycle write is possible. Red observation: migration 0125 is absent. Green command:
+  `uv run python -m pytest tests/db/test_external_boot_authority_head_inventory_migration.py -q`.
+
+Steps:
+
+1. Add migration privilege, isolation, empty, multi-instance, and malformed-input tests and confirm
+   they fail because 0125 is absent.
+2. Add migration 0125 and the typed repository reader; run the focused command and expect green.
+3. Regenerate/update migration inventory assertions and run the migration-order guard.
+4. Commit as `feat(db): expose bounded authority head inventory`.
+
+Acceptance: the authority can discover a trusted head whose local lane is absent without direct
+table access or unrelated tenant/lifecycle data.
+
+## Task 2: Add the fail-closed host readiness runtime
 
 Files:
 
@@ -35,7 +71,7 @@ Interfaces:
 - `check_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` validates identity,
   protected paths, journal restoration, database role shape, and provider socket access.
 - `run_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` performs the same check,
-  reports readiness through process state, and remains supervised.
+  repeats it at the configured bounded interval, and exits on drift.
 - CLI handlers expose `external-boot-authority-host` and
   `check-external-boot-authority-host`; Task 3's unit and Ansible probe rely on those names.
 
@@ -48,6 +84,9 @@ Verification:
 - Mode: focused-test. Contract: role shape and diagnostics fail closed without secret values.
   Cases: `test_host_rejects_privileged_database_role` and
   `test_host_diagnostics_are_bounded_and_secret_free`; same focused green command.
+- Mode: focused-test. Contract: the database inventory and local lanes are a bijection, exact heads
+  match, and periodic socket/ACL/role/journal drift exits the service. Cases:
+  `test_host_rejects_missing_or_extra_lane` and `test_host_exits_when_boundary_drifts`; same command.
 
 Steps:
 
@@ -61,49 +100,49 @@ Steps:
 5. Commit as `feat(authority): add fail-closed host readiness`.
 
 Acceptance: no caller-selected path or provider definition crosses the boundary; a failed check
-exits non-zero with only component/reason; restart repeats all checks.
+exits non-zero with only component/reason; startup and periodic checks detect complete-lane loss and
+post-start drift.
 
-## Task 2: Split provider observation from mutation authority
+## Task 3: Provision a distinct dormant authority endpoint
 
 Files:
 
-- Modify `deploy/systemd/libvirtd-live.conf`.
-- Modify `deploy/systemd/system/kdive-live-worker@.service`.
+- Create `deploy/systemd/libvirtd-external-boot-authority.conf`.
 - Modify `deploy/ansible/roles/live_vm_host/defaults/main.yml`.
 - Modify `deploy/ansible/roles/live_vm_host/tasks/main.yml`.
 - Modify `deploy/ansible/roles/live_vm_host/tasks/verify.yml`.
-- Modify `tests/deploy/test_live_worker_provisioning.py` and `tests/deploy/test_systemd_units.py`.
+- Modify `tests/deploy/test_live_worker_provisioning.py`.
 
 Interfaces:
 
-- `live_vm_host_worker_observe_group` names the read-only libvirt group.
-- `live_vm_host_authority_account` and `live_vm_host_authority_group` name the sole mutation
-  principal.
-- `live_vm_host_worker_libvirt_uri` points to `libvirt-sock-ro`; Task 3's authority config points
-  separately to `libvirt-sock`.
+- `live_vm_host_authority_account` names the owner of a separate session libvirtd under
+  `/run/kdive/provider-authority/libvirt`.
+- Existing worker accounts, groups, unit, URI, and KVM access remain byte-for-byte unchanged.
+- Task 4's authority service config points only to the distinct authority socket.
 
 Verification:
 
-- Mode: focused-test. Contract: fixed workers have the observation group, no authority group, no
-  `kvm`, and only the read-only socket URI. Cases in `test_live_worker_provisioning.py` and
-  `test_systemd_units.py`; red observation is assertions matching the old mutation group/URI;
-  green command is `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py tests/deploy/test_systemd_units.py -q`.
-- Mode: focused-test. Contract: libvirtd creates distinct RO and RW sockets with disjoint groups.
-  Case `test_libvirt_configuration_splits_observation_and_mutation`; same focused green command.
+- Mode: focused-test. Contract: Ansible creates a distinct authority Unix identity/session/socket,
+  workers and reconciler cannot traverse it, and current worker/KVM configuration is unchanged.
+  Cases `test_authority_endpoint_is_a_distinct_session` and
+  `test_existing_worker_provider_contract_is_preserved`; red observation is missing authority
+  endpoint; green command is
+  `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py -q`.
 
 Steps:
 
-1. Change structural tests to require the new groups, sockets, and unit membership; run the focused
-   command and expect failures against the old configuration.
-2. Update libvirtd configuration, defaults, account/group tasks, worker unit, and URI publication.
-3. Replace worker mutation-access verification with positive read-only observation and negative
-   mutation/group/path probes; run the focused command and expect green.
-4. Commit as `feat(deploy): isolate authority provider access`.
+1. Add structural tests for the separate authority account/session and unchanged worker contract;
+   run the focused command and expect the missing-endpoint failures.
+2. Add authority libvirtd configuration, defaults, account, protected paths, and user unit without
+   editing the existing worker unit/configuration.
+3. Add negative worker/reconciler traversal probes and positive unchanged-worker probes; run the
+   focused command and expect green.
+4. Commit as `feat(deploy): provision dormant authority endpoint`.
 
-Acceptance: fixed workers and the reconciler cannot reach the authority mutation socket,
-credential, helper, journal, or runtime paths while worker observation remains usable.
+Acceptance: fixed workers and the reconciler cannot reach the distinct authority mutation socket,
+credential, helper, journal, runtime, or objects; their current provider workload remains usable.
 
-## Task 3: Install and supervise the authority service
+## Task 4: Install and supervise the authority service
 
 Files:
 
@@ -129,6 +168,10 @@ Verification:
   every positive and negative readiness proof. Case
   `test_ansible_installs_authority_in_clean_host_order`; red observation is missing declarations;
   green command is `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py -q`.
+- Mode: focused-test. Contract: the authorized clean Ubuntu carrier executes provisioning from a
+  clean KDIVE state, starts/restarts both services, verifies access denial, and injects drift that
+  retracts readiness. Carrier: `dave@ub26-big.dev.pdx.drc.nz`; expected green command is the scoped
+  playbook/proof command recorded in the runbook and first-run evidence.
 
 Steps:
 
@@ -137,12 +180,14 @@ Steps:
 3. Add authority identity, directories, credentials, venv installation, unit install/start, and
    readiness verification to Ansible in dependency order.
 4. Run both focused deployment files and `just lint-ansible`; expect green.
-5. Commit as `feat(deploy): supervise external boot authority`.
+5. Resolve exact pre-existing remote targets read-only, execute clean-host provisioning and every
+   positive/negative/drift proof, then clean only proof-owned KDIVE development artifacts.
+6. Commit as `feat(deploy): supervise external boot authority`.
 
 Acceptance: clean provisioning fails before completion if service recovery, database least
 privilege, provider mutation access, or worker/reconciler denial is unproven.
 
-## Task 4: Close adversarial and operator evidence
+## Task 5: Close adversarial and operator evidence
 
 Files:
 
