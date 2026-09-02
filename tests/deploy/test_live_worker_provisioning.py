@@ -19,6 +19,7 @@ INSTALLER = SYSTEMD / "install-live-worker-lifecycle.sh"
 MAIN_TASKS = ROLE / "tasks" / "main.yml"
 VERIFY_TASKS = ROLE / "tasks" / "verify.yml"
 DEFAULTS = ROLE / "defaults" / "main.yml"
+AUTHORITY_LIBVIRT_CONFIG = SYSTEMD / "libvirtd-external-boot-authority.conf"
 
 
 def _text(path: Path) -> str:
@@ -45,6 +46,136 @@ def test_fixed_slot_accounts_and_groups_are_declared() -> None:
     witness_dsn = defaults["live_vm_host_worker_witness_dsn"]
     assert isinstance(witness_dsn, str)
     assert "kdive-witness-member:kdive-witness-local" in witness_dsn
+
+
+def test_authority_endpoint_is_a_distinct_session() -> None:
+    assert AUTHORITY_LIBVIRT_CONFIG.is_file(), "missing authority endpoint configuration"
+
+    defaults = _yaml(DEFAULTS)
+    assert defaults["live_vm_host_authority_account"] == "kdive-provider-authority"
+    assert defaults["live_vm_host_authority_client_group"] == ("kdive-provider-authority-client")
+    assert defaults["live_vm_host_authority_runtime_root"] == ("/run/kdive/provider-authority")
+    assert defaults["live_vm_host_authority_libvirt_uri"] == (
+        "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
+    )
+    assert defaults["live_vm_host_authority_denied_paths"] == [
+        "/opt/kdive-provider-authority",
+        "/etc/kdive/credentials/provider-authority",
+        "/var/lib/kdive/provider-authority",
+        "/var/lib/kdive/provider-authority/journal",
+        "/run/kdive/provider-authority",
+        "/run/kdive/provider-authority/request",
+        "/run/kdive/provider-authority/libvirt",
+    ]
+
+    config = _text(AUTHORITY_LIBVIRT_CONFIG)
+    assert 'unix_sock_group = "kdive-provider-authority"' in config
+    assert 'unix_sock_rw_perms = "0700"' in config
+    assert 'unix_sock_dir = "/run/kdive/provider-authority/libvirt"' in config
+    assert "kdive-live-libvirt" not in config
+    assert "/run/kdive/live-libvirt" not in config
+
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    for evidence in (
+        "Create the external-boot authority groups",
+        "Create the external-boot authority account",
+        "Inspect authority protected paths without following links",
+        "Create authority protected paths",
+        "Install the authority session-libvirt configuration",
+        "Install the dormant authority session-libvirtd user unit",
+        "Enable the dormant authority session-libvirtd user unit",
+        "Start the dormant authority session libvirtd",
+    ):
+        assert evidence in tasks
+    account = tasks[
+        tasks.index("- name: Create the external-boot authority account") : tasks.index(
+            "- name: Create the reconciler proof group"
+        )
+    ]
+    assert "create_home: false" in account
+    reconciler = tasks[
+        tasks.index("- name: Create the reconciler denial-proof identity") : tasks.index(
+            "- name: Enable linger for the external-boot authority account"
+        )
+    ]
+    assert "home: /opt/kdive" in reconciler
+    assert 'groups: ["{{ live_vm_host_authority_client_group }}"]' in tasks
+    assert "loginctl enable-linger {{ live_vm_host_authority_account }}" in tasks
+    runtime_environment = (
+        "Environment=XDG_RUNTIME_DIR=/run/kdive/provider-authority"  # pragma: allowlist secret
+    )
+    assert runtime_environment in tasks
+    assert (
+        "ExecStart=/usr/sbin/libvirtd --daemon \\\n"
+        "        --config /etc/kdive/libvirtd-external-boot-authority.conf \\\n"
+        "        --pid-file /run/kdive/provider-authority/libvirt/libvirtd.pid" in tasks
+    )
+    for path in (
+        "/opt/kdive-provider-authority",
+        "/etc/kdive/credentials/provider-authority",
+        "/var/lib/kdive/provider-authority/journal",
+        "/run/kdive/provider-authority/request",
+        "/run/kdive/provider-authority/libvirt",
+    ):
+        assert path in tasks
+        assert path in verify
+    assert "Assert the dormant authority endpoint is distinct and reachable" in verify
+    assert "Verify the authority session-libvirtd user unit syntax" in verify
+    assert "Prove fixed workers and the reconciler cannot traverse authority paths" in verify
+    assert "(live_vm_host_worker_accounts + ['kdive'])" in verify
+    assert "cannot access the authority mutation socket" in verify
+    assert "cannot read the authority provider config" in verify
+    assert "cannot access authority provider objects" in verify
+    assert "virsh -c {{ live_vm_host_authority_libvirt_uri }} list" in verify
+
+
+def test_existing_worker_provider_contract_is_preserved() -> None:
+    defaults = _yaml(DEFAULTS)
+    assert defaults["live_vm_host_worker_accounts"] == [
+        f"kdive-worker-{slot}" for slot in range(1, 9)
+    ]
+    assert defaults["live_vm_host_worker_control_group"] == "kdive-live-control"
+    assert defaults["live_vm_host_worker_libvirt_group"] == "kdive-live-libvirt"
+    assert defaults["live_vm_host_worker_libvirt_runtime"] == "/run/kdive/live-libvirt"
+    assert defaults["live_vm_host_worker_libvirt_uri"] == (
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+    )
+    assert _text(SYSTEMD / "libvirtd-live.conf") == (
+        "# Dedicated session daemon shared by the operator and fixed KDIVE worker accounts.\n"
+        'unix_sock_group = "kdive-live-libvirt"\n'
+        'unix_sock_rw_perms = "0770"\n'
+        'unix_sock_dir = "/run/kdive/live-libvirt/libvirt"\n'
+    )
+    assert _text(SYSTEMD / "system" / "kdive-live-worker@.service") == (
+        "[Unit]\n"
+        "Description=KDIVE retained live worker slot %i\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        "User=kdive-worker-%i\n"
+        "SupplementaryGroups=kdive-live-libvirt\n"
+        "EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env\n"
+        "LoadCredential=worker-incarnation:"
+        "/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential\n"
+        "ExecStart=/usr/local/libexec/kdive-live-worker-gate %i\n"
+        "Restart=no\n"
+        "KillMode=control-group\n"
+        "ExitType=cgroup\n"
+        "RemainAfterExit=yes\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    assert 'groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]' in tasks
+    assert "Start the operator-owned dedicated session libvirtd" in tasks
+    assert "Verify existing worker provider path remains usable after authority endpoint" in verify
+    assert "Verify every worker can use the KVM device" in verify
+    assert "live_vm_host_authority_client_group" in verify
+    assert "or live_vm_host_authority_client_group in" in verify
 
 
 def test_ansible_uses_declarative_account_and_file_modules() -> None:

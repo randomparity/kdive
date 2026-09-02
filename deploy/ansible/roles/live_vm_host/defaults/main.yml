@@ -75,3 +75,19 @@ live_vm_host_worker_fixture_files:
   - rootfs_catalog.toml
   - profiles/console-ready_ppc64le.yaml
   - profiles/console-ready_x86_64.yaml
+
+# Dormant provider-host authority boundary (ADR-0584). This endpoint is separate from the
+# fixed-worker provider contract above; #2140 owns any later adapter binding or worker cutover.
+live_vm_host_authority_account: kdive-provider-authority
+live_vm_host_authority_client_group: kdive-provider-authority-client
+live_vm_host_authority_runtime_root: /run/kdive/provider-authority
+live_vm_host_authority_libvirt_uri: >-
+  qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock
+live_vm_host_authority_denied_paths:
+  - /opt/kdive-provider-authority
+  - /etc/kdive/credentials/provider-authority
+  - /var/lib/kdive/provider-authority
+  - /var/lib/kdive/provider-authority/journal
+  - /run/kdive/provider-authority
+  - /run/kdive/provider-authority/request
+  - /run/kdive/provider-authority/libvirt
