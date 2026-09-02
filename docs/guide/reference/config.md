@@ -54,9 +54,9 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID` | — | — | yes | Unix gid allowed to traverse the external-boot authority request endpoint. |
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_GID` | — | — | yes | Unix gid that owns the external-boot authority provider endpoint. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE` | — | — | yes | Stable authority-instance identifier bound into the local TLS server identity. |
-| `KDIVE_EXTERNAL_BOOT_AUTHORITY_GID` | — | — | yes | Unix gid that owns the authority-private provider socket and directory. |
-| `KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID` | — | — | yes | Unix gid allowed to traverse the authority request-socket directory and own its socket. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR` | — | `/var/lib/kdive/provider-authority/journal` | no | Private root containing one exact external-boot authority journal lane per System. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET` | — | `/run/kdive/provider-authority/libvirt/libvirt-sock` | no | Dormant authority-owned provider mutation socket checked for local reachability. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET` | — | `/run/kdive/provider-authority/request/authority.sock` | no | Mutual-TLS AF_UNIX request socket owned by the external-boot authority. |
