@@ -200,6 +200,7 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert isinstance(authority_packages, list)
     assert "python3-psycopg" in authority_packages
     assert '- {path: /etc/kdive/credentials, mode: "0711"}' in tasks
+    assert 'mode: "2750"' in tasks[tasks.index("Create authority protected children") :]
 
     ordered = (
         "Install external-boot authority prerequisites",

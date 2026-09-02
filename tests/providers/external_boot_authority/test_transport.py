@@ -257,7 +257,8 @@ def _config(tmp_path: Path, material: dict[str, Path], instance: str = "authorit
     database_dsn = _write(tmp_path / "database-dsn", b"postgresql:///kdive", 0o400)
     provider_socket = tmp_path / "provider.sock"
     request_dir = tmp_path / "request"
-    request_dir.mkdir(mode=0o750)
+    request_dir.mkdir(mode=0o2750)
+    request_dir.chmod(0o2750)
     return AuthorityHostConfig(
         authority_instance=instance,
         authority_uid=os.geteuid(),
@@ -575,6 +576,7 @@ def test_listener_evidence_detects_socket_and_credential_drift(tmp_path: Path) -
 
         listener = await serve_authority_transport(config, authenticate)
         try:
+            assert config.request_socket.stat().st_gid == config.request_socket.parent.stat().st_gid
             listener.validate()
             assert listener.server.is_serving() is False
             await listener.start_serving()

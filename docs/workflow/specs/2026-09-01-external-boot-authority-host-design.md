@@ -98,8 +98,9 @@ the complete projection profile for the supervised unit; it rejects mixed profil
 foreign-owned parents, writable parents, and any other owner/mode combination. Journals are under
 `/var/lib/kdive/provider-authority/journal`; runtime state is under
 `/run/kdive/provider-authority`; the request socket is
-`/run/kdive/provider-authority/request/authority.sock`. Each protected parent is inspected without
-following links before Ansible creates or changes it.
+`/run/kdive/provider-authority/request/authority.sock`. The request directory is setgid to the
+authority-client group so the authority-created mode-`0660` socket inherits that group. Each
+protected parent is inspected without following links before Ansible creates or changes it.
 
 The authority account runs a separate session libvirtd under
 `/run/kdive/provider-authority/libvirt`. Its Unix-user session is a separate provider namespace

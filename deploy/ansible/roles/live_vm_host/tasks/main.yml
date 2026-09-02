@@ -409,7 +409,7 @@
     follow: false
   loop:
     - {path: /var/lib/kdive/provider-authority/journal, mode: "0700"}
-    - {path: /run/kdive/provider-authority/request, mode: "0710"}
+    - {path: /run/kdive/provider-authority/request, mode: "2750"}
     - {path: /run/kdive/provider-authority/libvirt, mode: "0700"}
   register: live_vm_host_authority_protected_children_before
 
@@ -437,7 +437,7 @@
       mode: "0700"
     - path: /run/kdive/provider-authority/request
       group: "{{ live_vm_host_authority_client_group }}"
-      mode: "0750"
+      mode: "2750"
     - path: /run/kdive/provider-authority/libvirt
       group: "{{ live_vm_host_authority_account }}"
       mode: "0700"
