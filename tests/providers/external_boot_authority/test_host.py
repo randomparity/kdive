@@ -70,12 +70,98 @@ def _config(tmp_path: Path) -> AuthorityHostConfig:
     )
 
 
+def _access_boundary_config(tmp_path: Path) -> AuthorityHostConfig:
+    config = _config(tmp_path)
+    install = tmp_path / "install"
+    credentials = tmp_path / "credential-source"
+    state = tmp_path / "state"
+    journal = state / "journal"
+    runtime = tmp_path / "run" / "provider-authority"
+    request = runtime / "request"
+    provider = runtime / "libvirt"
+    for path, mode in (
+        (install, 0o700),
+        (credentials, 0o700),
+        (state, 0o700),
+        (journal, 0o700),
+        (runtime, 0o710),
+        (request, 0o2750),
+        (provider, 0o700),
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(mode)
+    return replace(
+        config,
+        install_dir=install,
+        credentials_source_dir=credentials,
+        state_dir=state,
+        journal_dir=journal,
+        request_socket=request / "authority.sock",
+        provider_socket=provider / "libvirt.sock",
+        denied_identities=("kdive-worker-1", "kdive"),
+    )
+
+
 def test_host_rejects_unsafe_credentials(tmp_path: Path) -> None:
     config = _config(tmp_path)
     validate_credential_paths(config)
     config.server_certificate.chmod(0o444)
     with pytest.raises(HostReadinessError, match="credentials: unsafe-file"):
         validate_credential_paths(config)
+
+
+def test_access_boundary_rejects_denied_group_membership_and_acl_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _access_boundary_config(tmp_path)
+    denied_uid = config.authority_uid + 10_000
+    denied_gid = config.authority_gid + 10_000
+
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=denied_uid, pw_gid=denied_gid),
+    )
+    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
+    host._validate_access_boundary(config)  # noqa: SLF001
+
+    monkeypatch.setattr(
+        host.os,
+        "getgrouplist",
+        lambda _name, gid: [gid, config.authority_client_gid],
+    )
+    with pytest.raises(HostReadinessError, match="access-boundary: denied-identity"):
+        host._validate_access_boundary(config)  # noqa: SLF001
+
+    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
+    real_listxattr = host.os.listxattr
+
+    def named_acl(path: Any = None, *, follow_symlinks: bool = True) -> list[str]:
+        if Path(path) == config.request_socket.parent:
+            return ["system.posix_acl_access"]
+        return real_listxattr(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(host.os, "listxattr", named_acl)
+    with pytest.raises(HostReadinessError, match="access-boundary: unsafe-acl"):
+        host._validate_access_boundary(config)  # noqa: SLF001
+
+
+def test_access_boundary_rejects_world_traversable_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _access_boundary_config(tmp_path)
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(
+            pw_uid=config.authority_uid + 10_000,
+            pw_gid=config.authority_gid + 10_000,
+        ),
+    )
+    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
+    config.request_socket.parent.parent.chmod(0o755)
+    with pytest.raises(HostReadinessError, match="access-boundary: unsafe-path"):
+        host._validate_access_boundary(config)  # noqa: SLF001
     config.server_certificate.chmod(0o400)
     config.database_dsn.chmod(0o600)
     with pytest.raises(HostReadinessError, match="credentials: unsafe-file"):
@@ -952,6 +1038,12 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     assert config.journal_dir == Path("/var/lib/kdive/provider-authority/journal")
     assert config.request_socket == Path("/run/kdive/provider-authority/request/authority.sock")
     assert config.provider_socket == Path("/run/kdive/provider-authority/libvirt/libvirt-sock")
+    assert config.install_dir == Path("/opt/kdive-provider-authority")
+    assert config.credentials_source_dir == Path("/etc/kdive/credentials/provider-authority")
+    assert config.state_dir == Path("/var/lib/kdive/provider-authority")
+    assert config.denied_identities == tuple(
+        [f"kdive-worker-{slot}" for slot in range(1, 9)] + ["kdive"]
+    )
     assert config.database_dsn == tmp_path / "database-dsn"
     assert config.server_private_key == tmp_path / "service-credential"
     assert {setting.name for setting in authority_settings.SETTINGS} == {

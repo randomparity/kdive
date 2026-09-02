@@ -41,6 +41,7 @@ SOCKET_MODE = 0o660
 SOCKET_DIRECTORY_MODE = 0o2750
 _TLS_TIMEOUT_SECONDS = 5.0
 _MAX_JSON_NESTING = 64
+_POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 type Operation = Literal["acknowledge-takeover", "execute-mutation"]
 type AuthenticatePeer = Callable[[SecretStr], Awaitable[AuthenticatedPeer]]
@@ -277,6 +278,8 @@ def validate_socket_parent(path: Path, owner_uid: int, group_gid: int) -> None:
         or stat.S_IMODE(parent.st_mode) != SOCKET_DIRECTORY_MODE
     ):
         raise OSError("authority socket parent is unsafe")
+    if frozenset(os.listxattr(path.parent, follow_symlinks=False)) & _POSIX_ACL_XATTRS:
+        raise OSError("authority socket parent ACL is unsafe")
 
 
 def check_stale_socket(path: Path, owner_uid: int) -> None:
@@ -395,6 +398,8 @@ class AuthorityListener:
             or self.server.is_serving() != self.started
         ):
             raise OSError("listener evidence invalid")
+        if frozenset(os.listxattr(self.socket_path, follow_symlinks=False)) & _POSIX_ACL_XATTRS:
+            raise OSError("listener socket ACL is unsafe")
         if any(_fingerprint(path) != expected for path, expected in self.fingerprints.items()):
             raise OSError("listener TLS evidence changed")
 

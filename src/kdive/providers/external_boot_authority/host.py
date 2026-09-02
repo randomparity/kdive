@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pwd
 import re
 import socket
 import stat
@@ -64,6 +65,21 @@ _SAFE_DIAGNOSTIC = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _DATABASE_CONNECTION_OPTIONS = (
     "-c statement_timeout=5000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000"
 )
+_AUTHORITY_INSTALL_DIR = Path("/opt/kdive-provider-authority")
+_AUTHORITY_CREDENTIALS_SOURCE_DIR = Path("/etc/kdive/credentials/provider-authority")
+_AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
+_FIXED_DENIED_IDENTITIES = (
+    "kdive-worker-1",
+    "kdive-worker-2",
+    "kdive-worker-3",
+    "kdive-worker-4",
+    "kdive-worker-5",
+    "kdive-worker-6",
+    "kdive-worker-7",
+    "kdive-worker-8",
+    "kdive",
+)
+_POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 
 class HostReadinessError(CategorizedError):
@@ -100,6 +116,10 @@ class AuthorityHostConfig:
     worker_client_ca: Path
     health_client_certificate: Path
     health_client_key: Path
+    install_dir: Path = _AUTHORITY_INSTALL_DIR
+    credentials_source_dir: Path = _AUTHORITY_CREDENTIALS_SOURCE_DIR
+    state_dir: Path = _AUTHORITY_STATE_DIR
+    denied_identities: tuple[str, ...] = _FIXED_DENIED_IDENTITIES
 
     @classmethod
     def from_environment(cls) -> AuthorityHostConfig:
@@ -188,6 +208,44 @@ def validate_credential_paths(config: AuthorityHostConfig) -> None:
     }
     if len(profiles) != 1:
         raise HostReadinessError("credentials", "mixed-profiles")
+
+
+def _validate_access_boundary(config: AuthorityHostConfig) -> None:
+    runtime_dir = config.request_socket.parent.parent
+    protected_directories = (
+        (config.install_dir, config.authority_uid, config.authority_gid, 0o700),
+        (config.credentials_source_dir, config.authority_uid, config.authority_gid, 0o700),
+        (config.state_dir, config.authority_uid, config.authority_gid, 0o700),
+        (config.journal_dir, config.authority_uid, config.authority_gid, 0o700),
+        (runtime_dir, config.authority_uid, config.authority_client_gid, 0o710),
+        (config.request_socket.parent, config.authority_uid, config.authority_client_gid, 0o2750),
+        (config.provider_socket.parent, config.authority_uid, config.authority_gid, 0o700),
+    )
+    for path, owner_uid, group_gid, mode in protected_directories:
+        try:
+            status = os.stat(path, follow_symlinks=False)
+            attributes = frozenset(os.listxattr(path, follow_symlinks=False))
+        except OSError:
+            raise HostReadinessError("access-boundary", "unsafe-path") from None
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != owner_uid
+            or status.st_gid != group_gid
+            or stat.S_IMODE(status.st_mode) != mode
+        ):
+            raise HostReadinessError("access-boundary", "unsafe-path")
+        if attributes & _POSIX_ACL_XATTRS:
+            raise HostReadinessError("access-boundary", "unsafe-acl")
+
+    authority_groups = {config.authority_gid, config.authority_client_gid}
+    for identity in config.denied_identities:
+        try:
+            account = pwd.getpwnam(identity)
+            identity_groups = set(os.getgrouplist(identity, account.pw_gid))
+        except KeyError, OSError:
+            raise HostReadinessError("access-boundary", "identity-missing") from None
+        if account.pw_uid in {0, config.authority_uid} or identity_groups & authority_groups:
+            raise HostReadinessError("access-boundary", "denied-identity")
 
 
 def _validate_journal_root(config: AuthorityHostConfig) -> int:
@@ -880,6 +938,7 @@ async def _check_static_authority_host(
     """Reconstruct the identity, filesystem, database, journal, and provider facts."""
     if os.geteuid() != config.authority_uid:
         raise HostReadinessError("identity", "uid-mismatch")
+    await asyncio.to_thread(_validate_access_boundary, config)
     validate_credential_paths(config)
     heads = await _database_heads(config)
     await (journal_validator or JournalInventoryValidator()).validate(config, heads)

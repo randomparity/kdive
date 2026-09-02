@@ -643,6 +643,17 @@ def test_listener_evidence_detects_socket_and_credential_drift(
             with pytest.raises(OSError, match="unsafe"):
                 listener.validate()
             config.request_socket.parent.chmod(0o2750)
+            real_listxattr = transport.os.listxattr
+
+            def named_socket_acl(path: Any = None, *, follow_symlinks: bool = True) -> list[str]:
+                if Path(path) == config.request_socket:
+                    return ["system.posix_acl_access"]
+                return real_listxattr(path, follow_symlinks=follow_symlinks)
+
+            with monkeypatch.context() as drift:
+                drift.setattr(transport.os, "listxattr", named_socket_acl)
+                with pytest.raises(OSError, match="listener socket ACL is unsafe"):
+                    listener.validate()
             material["worker_client_ca"].chmod(0o644)
             material["worker_client_ca"].write_bytes(
                 material["worker_client_ca"].read_bytes() + b"\n"
