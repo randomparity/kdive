@@ -101,6 +101,23 @@ host cannot build still fails fast, since that host would have no usable
 `[[remote_libvirt]]` block. See
 [ADR-0481](../../docs/adr/0481-build-host-image-admission-and-staged-volume-confirmation.md).
 
+### External-boot guest userland
+
+External-boot identity proof reads the running guest's kernel identity by spawning
+`/usr/bin/uname` and `/usr/bin/cat` through the guest agent, **by absolute path**. Every catalog
+image owes both as executable files, and `coreutils` is what supplies them on both package
+families — an image exposing those applets only at `/usr/sbin/busybox` does not satisfy the check.
+The scratch installroot names `coreutils` explicitly rather than relying on `systemd` to pull it
+in; the other three entries take their userland from a base image this repository downloads rather
+than composes, so they rest on the build check alone.
+
+`guest_base_image` verifies both paths in each qcow2 it builds **before** staging it, so a
+non-conformant image never reaches the pool and never appears in an `[[image]]` block. The check is
+guarded like the rest of the build, so it does not run when a staged volume is already present: an
+image staged earlier stays unverified until it is rebuilt with `force_image_rebuild=true`, the same
+refresh the in-guest helpers need. See
+[ADR-0590](../../docs/adr/0590-external-boot-requires-a-posix-userland-in-every-catalog-image.md).
+
 ### What the emitted `[[image]]` blocks claim
 
 `remote_libvirt_facts` stats each selected image's volume in `storage_pool_target` and emits
@@ -147,7 +164,9 @@ with a clear message if it is not set in `host_vars/`.
   host): it builds the rootfs from the host OS family but the bootloader install + boot
   must be confirmed on hardware, like the ppc64le note below. It is admitted only on
   Fedora/Debian-family hosts (`host_distros`, above), so that confirmation has to happen
-  on one of those.
+  on one of those. Its userland is declared (the installroot names `busybox` and `coreutils`) and
+  the build verifies the external-boot paths before staging, but neither the build nor that
+  verification has run on a real host.
 - ppc64le paths are implemented but **unvalidated** (no ppc64le test host).
 - `root_device` on a catalog entry is metadata only for remote-libvirt — the in-guest GRUB
   owns the real root (ADR-0183); the platform injects no `root=` for remote.

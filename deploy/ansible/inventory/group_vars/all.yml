@@ -88,6 +88,11 @@ kdive_image_catalog:
     # repositories — `dnf --installroot ... busybox` there dies with "Unable to find a
     # match: busybox". The constraint is per-DISTRO, not per-family: Fedora and Rocky are
     # both ansible_os_family=RedHat, and only Fedora ships busybox in its base repos.
+    # External-boot admission (ADR-0590, #2160). The installroot names `coreutils`, so
+    # /usr/bin/uname and /usr/bin/cat — which the external-boot identity proof spawns by absolute
+    # path — are a declared property of this image rather than a transitive systemd dependency.
+    # guest_base_image verifies both paths in each qcow2 it builds, for every entry here, before
+    # staging it.
     host_distros: [Fedora, Debian, Ubuntu]
 
 host_images_default: [fedora-kdive-remote-base-43]

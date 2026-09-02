@@ -217,6 +217,32 @@
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
+# --- Verify the guest userland the external-boot identity proof reads (ADR-0590). ---
+# The identity proof spawns /usr/bin/uname and /usr/bin/cat through guest-exec against a path-keyed
+# allowlist, so an image exposing those applets only at /usr/sbin/busybox does not satisfy it. Every
+# catalog image owes both paths, not just the scratch one. Checking here, before the copy below,
+# means a non-conformant image never becomes a staged volume.
+#
+# Guarded like that copy: the local qcow2 exists only when a build ran, so an image already staged
+# is not re-verified until force_image_rebuild. `test -x` is a shell builtin, so the check does not
+# depend on the binaries it tests. `changed_when: false` describes the task's contract — it asserts
+# rather than customizes — not the qcow2's bytes, which virt-customize rewrites on every invocation
+# (random seed, SELinux relabel).
+- name: Verify the external-boot guest userland for {{ image.name }}
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - >-
+        test -x /usr/bin/uname && test -x /usr/bin/cat || { echo "kdive: image lacks
+        /usr/bin/uname and/or /usr/bin/cat, which the external-boot identity proof spawns by
+        absolute path (ADR-0590); install coreutils in this image" >&2; exit 1; }
+  when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: false
+
 - name: Stage the finished image into the (root-owned) pool for {{ image.name }}
   ansible.builtin.copy:
     src: "{{ guest_base_image_qcow2 }}"
