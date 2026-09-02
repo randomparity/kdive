@@ -61,6 +61,10 @@ class _TransportError(RuntimeError):
         super().__init__(category)
 
 
+class SocketLockBusyError(OSError):
+    """The fixed authority-socket probe lock is already held."""
+
+
 def authority_server_name(authority_instance: str) -> str:
     """Derive the stable reserved DNS name bound into an authority server certificate."""
     digest = hashlib.sha256(authority_instance.encode("utf-8")).digest()
@@ -237,13 +241,14 @@ def validate_protected_parents(path: Path, owner_uid: int, *, require_root: bool
             raise OSError("protected parent chain is unsafe")
 
 
-def validate_socket_parent(path: Path, owner_uid: int) -> None:
+def validate_socket_parent(path: Path, owner_uid: int, group_gid: int) -> None:
     """Reject a request path whose parent chain is linked or whose leaf is unsafe."""
     validate_protected_parents(path, owner_uid)
     parent = os.stat(path.parent, follow_symlinks=False)
     if (
         not stat.S_ISDIR(parent.st_mode)
         or parent.st_uid != owner_uid
+        or parent.st_gid != group_gid
         or stat.S_IMODE(parent.st_mode) != SOCKET_DIRECTORY_MODE
     ):
         raise OSError("authority socket parent is unsafe")
@@ -298,7 +303,7 @@ def acquire_socket_lock(path: Path, owner_uid: int) -> int:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise OSError("busy") from None
+            raise SocketLockBusyError("busy") from None
         return descriptor
     except BaseException:
         if descriptor is not None:
@@ -332,6 +337,7 @@ class AuthorityListener:
     server: asyncio.Server
     socket_path: Path
     authority_uid: int
+    request_gid: int
     server_name: str
     tls_context: ssl.SSLContext
     fingerprints: dict[Path, tuple[int, int, int, int, str]]
@@ -353,11 +359,12 @@ class AuthorityListener:
             or self.tls_context.verify_mode is not ssl.CERT_REQUIRED
         ):
             raise OSError("listener evidence invalid")
-        validate_socket_parent(self.socket_path, self.authority_uid)
+        validate_socket_parent(self.socket_path, self.authority_uid, self.request_gid)
         status = os.stat(self.socket_path, follow_symlinks=False)
         if (
             not stat.S_ISSOCK(status.st_mode)
             or status.st_uid != self.authority_uid
+            or status.st_gid != self.request_gid
             or stat.S_IMODE(status.st_mode) != SOCKET_MODE
             or (status.st_dev, status.st_ino) != self.socket_identity
             or self.server.is_serving() != self.started
@@ -391,7 +398,11 @@ async def serve_authority_transport(
     service: AuthorityService | None = None,
 ) -> AuthorityListener:
     """Bind the dormant authenticated boundary without beginning to serve it."""
-    validate_socket_parent(config.request_socket, config.authority_uid)
+    validate_socket_parent(
+        config.request_socket,
+        config.authority_uid,
+        config.authority_client_gid,
+    )
     lock_path = config.request_socket.with_suffix(".lock")
     lock_descriptor = acquire_socket_lock(lock_path, config.authority_uid)
     try:
@@ -434,6 +445,7 @@ async def serve_authority_transport(
             server,
             config.request_socket,
             config.authority_uid,
+            config.authority_client_gid,
             authority_server_name(config.authority_instance),
             context,
             fingerprints,

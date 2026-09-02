@@ -6,6 +6,7 @@ import asyncio
 import os
 import socket
 import tempfile
+import threading
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -25,6 +26,7 @@ from kdive.providers.external_boot_authority.host import (
     run_authority_host,
     validate_credential_paths,
 )
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     JournalPhase,
@@ -53,6 +55,8 @@ def _config(tmp_path: Path) -> AuthorityHostConfig:
     return AuthorityHostConfig(
         authority_instance="authority-a",
         authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        authority_client_gid=os.getegid(),
         journal_dir=journal,
         request_socket=tmp_path / "request" / "authority.sock",
         provider_socket=tmp_path / "libvirt.sock",
@@ -321,6 +325,36 @@ def test_host_rejects_nested_effective_database_role() -> None:
     assert "WITH RECURSIVE" in connection.queries[0]
 
 
+def test_host_database_role_query_inventories_all_application_privileges() -> None:
+    valid = (
+        "kdive-provider-authority",
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        ("kdive_provider_authority",),
+        False,
+        True,
+        True,
+        False,
+    )
+    connection = _Connection(valid)
+    asyncio.run(host.check_database_role(connection))
+    query = connection.queries[0]
+    for catalog in (
+        "pg_class",
+        "pg_attribute",
+        "pg_proc",
+        "pg_type",
+        "pg_namespace",
+    ):
+        assert catalog in query
+    assert "aclexplode" in query
+
+
 def test_host_diagnostics_are_bounded_and_secret_free() -> None:
     unsafe = "sensitive-password sensitive-token"
     error = HostReadinessError(
@@ -399,6 +433,81 @@ def test_host_requires_exact_terminal_journal_head(tmp_path: Path) -> None:
         restore_journal_inventory(config, (replace(head, digest="sha256:" + "4" * 64),))
 
 
+def test_journal_validation_runs_outside_the_transport_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    event_loop_thread = threading.get_ident()
+    validation_threads: list[int] = []
+
+    def validate(*_args: object, **_kwargs: object) -> None:
+        validation_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(host, "_restore_journal_inventory", validate)
+    asyncio.run(host.JournalInventoryValidator().validate(config, ()))
+    assert validation_threads
+    assert validation_threads[0] != event_loop_thread
+
+
+def test_periodic_journal_validation_reuses_unchanged_lane_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    system_id = uuid4()
+    record = JournalRecordV1(
+        authority_id=uuid4(),
+        generation=1,
+        system_id=system_id,
+        activation_id=uuid4(),
+        run_id=uuid4(),
+        plan_identity="sha256:" + "2" * 64,
+        purpose="activate",
+        operation=AuthorityOperation.ACTIVATE,
+        provider_kind="local-libvirt",
+        authority_instance=config.authority_instance,
+        operation_identity="operation-a",
+        operation_digest="sha256:" + "3" * 64,
+        sequence=1,
+        previous_digest="sha256:" + "0" * 64,
+        phase=JournalPhase.WATERMARK_INSTALLED,
+        attempt_id=uuid4(),
+    )
+    lane = config.journal_dir / f"{system_id}.jsonl"
+    lane.write_bytes(canonical_record_bytes(record) + b"\n")
+    lane.chmod(0o600)
+    head = JournalHead(
+        authority_instance=config.authority_instance,
+        system_id=system_id,
+        sequence=record.sequence,
+        digest=record_digest(record),
+        phase=record.phase,
+        authority_id=record.authority_id,
+        generation=record.generation,
+        operation_identity=record.operation_identity,
+        pending_takeover=None,
+        suspended_operation=None,
+    )
+    load_calls = 0
+    original_load = FileAuthorityJournal.load
+
+    def count_load(
+        journal: FileAuthorityJournal, *, deadline: float | None = None
+    ) -> tuple[JournalRecordV1, ...]:
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(journal, deadline=deadline)
+
+    monkeypatch.setattr(FileAuthorityJournal, "load", count_load)
+    validator = host.JournalInventoryValidator()
+
+    async def validate_twice() -> None:
+        await validator.validate(config, (head,))
+        await validator.validate(config, (head,))
+
+    asyncio.run(validate_twice())
+    assert load_calls == 1
+
+
 def test_host_exits_when_boundary_drifts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
     listener = SimpleNamespace(
@@ -439,7 +548,51 @@ def test_host_exits_when_boundary_drifts(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     with pytest.raises(HostReadinessError, match="inventory-mismatch"):
         asyncio.run(run_authority_host(config))
-    assert notices == ["READY=1", "STOPPING=1"]
+    assert notices == ["READY=1", "WATCHDOG=1", "STOPPING=1"]
+
+
+def test_host_retracts_readiness_when_periodic_check_stalls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    notices: list[str] = []
+
+    class Listener:
+        def validate(self) -> None:
+            return None
+
+        async def start_serving(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def serve(*_args: object, **_kwargs: object) -> Listener:
+        return Listener()
+
+    async def static_check(*_args: object) -> None:
+        return None
+
+    async def stalled_check(*_args: object) -> None:
+        await asyncio.Event().wait()
+
+    async def health(*_args: object) -> None:
+        return None
+
+    async def no_wait(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(host, "serve_authority_transport", serve)
+    monkeypatch.setattr(host, "_check_static_authority_host", static_check)
+    monkeypatch.setattr(host, "check_authority_host", stalled_check)
+    monkeypatch.setattr(host, "check_tls_health", health)
+    monkeypatch.setattr(host, "_notify_systemd", notices.append)
+    monkeypatch.setattr(host.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(host, "READINESS_CHECK_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(HostReadinessError, match="readiness: timeout"):
+        asyncio.run(run_authority_host(config))
+    assert notices == ["READY=1", "WATCHDOG=1", "STOPPING=1"]
 
 
 def test_host_notifies_readiness_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -483,7 +636,7 @@ def test_host_notifies_readiness_state(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setattr(host.asyncio, "sleep", stop_after_ready)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run_authority_host(config))
-    assert notices == ["READY=1", "STOPPING=1"]
+    assert notices == ["READY=1", "WATCHDOG=1", "STOPPING=1"]
 
 
 def test_host_validates_listener_before_ready(
@@ -554,7 +707,7 @@ def test_host_retracts_on_listener_drift(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(host.asyncio, "sleep", no_wait)
     with pytest.raises(HostReadinessError, match="listener: invalid-evidence"):
         asyncio.run(run_authority_host(config))
-    assert notices == ["READY=1", "STOPPING=1"]
+    assert notices == ["READY=1", "WATCHDOG=1", "STOPPING=1"]
 
 
 def test_host_retracts_when_transport_certificate_expires(
@@ -598,7 +751,7 @@ def test_host_retracts_when_transport_certificate_expires(
     with pytest.raises(HostReadinessError, match="handshake-failed"):
         asyncio.run(run_authority_host(config))
     assert handshakes == 2
-    assert notices == ["READY=1", "STOPPING=1"]
+    assert notices == ["READY=1", "WATCHDOG=1", "STOPPING=1"]
 
 
 def test_probe_recovers_owned_stale_socket(tmp_path: Path) -> None:
@@ -691,6 +844,71 @@ def test_probe_rejects_concurrent_or_foreign_socket(
         os.close(descriptor)
 
 
+def test_one_shot_probe_reports_lock_contention(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    config.request_socket.parent.mkdir(mode=0o2750)
+    config.request_socket.parent.chmod(0o2750)
+
+    async def static_check(*_args: object) -> None:
+        return None
+
+    async def busy(*_args: object, **_kwargs: object) -> object:
+        raise transport.SocketLockBusyError("busy")
+
+    monkeypatch.setattr(host, "_check_static_authority_host", static_check)
+    monkeypatch.setattr(host, "serve_authority_transport", busy)
+    with pytest.raises(HostReadinessError, match="probe: probe-busy"):
+        asyncio.run(host.check_authority_host_once(config))
+
+
+def test_provider_socket_rejects_mode_and_group_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+    provider_dir = tmp_path / "provider"
+    provider_dir.mkdir(mode=0o700)
+    provider = provider_dir / "libvirt-sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(provider))
+    provider.chmod(0o700)
+
+    class Writer:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def connect(_path: str) -> tuple[object, Writer]:
+        return object(), Writer()
+
+    config = replace(config, provider_socket=provider)
+    monkeypatch.setattr(host.asyncio, "open_unix_connection", connect)
+    try:
+        asyncio.run(host._check_provider_socket(config))  # noqa: SLF001
+        provider.chmod(0o770)
+        with pytest.raises(HostReadinessError, match="provider-socket: unsafe-acl"):
+            asyncio.run(host._check_provider_socket(config))  # noqa: SLF001
+        provider.chmod(0o700)
+        real_stat = host.os.stat
+
+        def foreign_group(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            status = real_stat(path, *args, **kwargs)
+            if Path(path) in {provider_dir, provider}:
+                fields = list(status)
+                fields[5] = status.st_gid + 1
+                return os.stat_result(fields)
+            return status
+
+        monkeypatch.setattr(host.os, "stat", foreign_group)
+        with pytest.raises(HostReadinessError, match="provider-socket: unsafe-acl"):
+            asyncio.run(host._check_provider_socket(config))  # noqa: SLF001
+    finally:
+        server.close()
+
+
 def test_authority_host_config_reads_fixed_registry_and_credentials(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -698,11 +916,15 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
 
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE", "authority-a")
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_UID", str(os.geteuid()))
+    monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_GID", str(os.getegid()))
+    monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID", str(os.getegid()))
     monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
     kdive_config.load()
     config = AuthorityHostConfig.from_environment()
     assert config.authority_instance == "authority-a"
     assert config.authority_uid == os.geteuid()
+    assert config.authority_gid == os.getegid()
+    assert config.authority_client_gid == os.getegid()
     assert config.journal_dir == Path("/var/lib/kdive/provider-authority/journal")
     assert config.request_socket == Path("/run/kdive/provider-authority/request/authority.sock")
     assert config.provider_socket == Path("/run/kdive/provider-authority/libvirt/libvirt-sock")
@@ -711,6 +933,8 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     assert {setting.name for setting in authority_settings.SETTINGS} == {
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_UID",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_GID",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET",
@@ -722,6 +946,8 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
     [
         ("KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE", " "),
         ("KDIVE_EXTERNAL_BOOT_AUTHORITY_UID", "0"),
+        ("KDIVE_EXTERNAL_BOOT_AUTHORITY_GID", "0"),
+        ("KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID", "0"),
     ],
 )
 def test_authority_host_config_rejects_invalid_required_values(
@@ -731,6 +957,8 @@ def test_authority_host_config_rejects_invalid_required_values(
 
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE", "authority-a")
     monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_UID", str(os.geteuid()))
+    monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_GID", str(os.getegid()))
+    monkeypatch.setenv("KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID", str(os.getegid()))
     monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
     monkeypatch.setenv(name, value)
     kdive_config.load()

@@ -7,9 +7,10 @@ import os
 import re
 import socket
 import stat
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -26,6 +27,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import record_digest
 from kdive.providers.external_boot_authority.settings import (
+    AUTHORITY_CLIENT_GID,
+    AUTHORITY_GID,
     AUTHORITY_INSTANCE,
     AUTHORITY_JOURNAL_DIR,
     AUTHORITY_PROVIDER_SOCKET,
@@ -34,6 +37,7 @@ from kdive.providers.external_boot_authority.settings import (
 )
 from kdive.providers.external_boot_authority.transport import (
     AuthorityListener,
+    SocketLockBusyError,
     authority_server_name,
     health_tls_context,
     serve_authority_transport,
@@ -45,14 +49,21 @@ if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 
 READINESS_INTERVAL_SECONDS = 30.0
+READINESS_CHECK_TIMEOUT_SECONDS = 20.0
+JOURNAL_VALIDATION_TIMEOUT_SECONDS = 10.0
 _HEALTH_ACCEPT_TIMEOUT_SECONDS = 0.1
 PRIVATE_FILE_MODE = 0o400
 SYSTEMD_CREDENTIAL_MODE = 0o440
 JOURNAL_DIRECTORY_MODE = 0o700
+PROVIDER_DIRECTORY_MODE = 0o700
+PROVIDER_SOCKET_MODE = 0o700
 MAX_JOURNAL_LANES = 4_096
 _DATABASE_DSN_MAX_BYTES = 4_096
 _DIAGNOSTIC_MAX_BYTES = 192
 _SAFE_DIAGNOSTIC = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_DATABASE_CONNECTION_OPTIONS = (
+    "-c statement_timeout=5000 -c lock_timeout=5000 -c idle_in_transaction_session_timeout=5000"
+)
 
 
 class HostReadinessError(CategorizedError):
@@ -77,6 +88,8 @@ class HostReadinessError(CategorizedError):
 class AuthorityHostConfig:
     authority_instance: str
     authority_uid: int
+    authority_gid: int
+    authority_client_gid: int
     journal_dir: Path
     request_socket: Path
     provider_socket: Path
@@ -100,6 +113,8 @@ class AuthorityHostConfig:
         try:
             authority_instance = config_registry.require(AUTHORITY_INSTANCE)
             authority_uid = config_registry.require(AUTHORITY_UID)
+            authority_gid = config_registry.require(AUTHORITY_GID)
+            authority_client_gid = config_registry.require(AUTHORITY_CLIENT_GID)
             journal_dir = config_registry.require(AUTHORITY_JOURNAL_DIR)
             request_socket = config_registry.require(AUTHORITY_REQUEST_SOCKET)
             provider_socket = config_registry.require(AUTHORITY_PROVIDER_SOCKET)
@@ -108,6 +123,8 @@ class AuthorityHostConfig:
         return cls(
             authority_instance=authority_instance,
             authority_uid=authority_uid,
+            authority_gid=authority_gid,
+            authority_client_gid=authority_client_gid,
             journal_dir=journal_dir,
             request_socket=request_socket,
             provider_socket=provider_socket,
@@ -192,8 +209,23 @@ def _validate_journal_root(config: AuthorityHostConfig) -> int:
     return descriptor
 
 
-def _local_lanes(config: AuthorityHostConfig, root_fd: int) -> dict[str, str]:
-    lanes: dict[str, str] = {}
+type _JournalIdentity = tuple[int, int, int, int, int]
+
+
+def _journal_identity(status: os.stat_result) -> _JournalIdentity:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _local_lanes(
+    config: AuthorityHostConfig, root_fd: int
+) -> dict[str, tuple[str, _JournalIdentity]]:
+    lanes: dict[str, tuple[str, _JournalIdentity]] = {}
     try:
         names = os.listdir(root_fd)
     except OSError:
@@ -220,12 +252,17 @@ def _local_lanes(config: AuthorityHostConfig, root_fd: int) -> dict[str, str]:
             UUID(system_id)
         except ValueError:
             raise HostReadinessError("journal", "unsafe-tree") from None
-        lanes[system_id] = name
+        lanes[system_id] = (name, _journal_identity(status))
     return lanes
 
 
-def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalHead, ...]) -> None:
-    """Require an exact local/database lane bijection and terminal head equality."""
+def _restore_journal_inventory(
+    config: AuthorityHostConfig,
+    heads: tuple[JournalHead, ...],
+    cache: dict[str, tuple[_JournalIdentity, JournalHead]],
+    *,
+    deadline: float | None,
+) -> None:
     if len(heads) > MAX_JOURNAL_LANES:
         raise HostReadinessError("journal", "lane-limit")
     root_fd = _validate_journal_root(config)
@@ -236,13 +273,19 @@ def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalH
     trusted = {str(head.system_id): head for head in heads}
     if len(trusted) != len(heads) or set(local) != set(trusted):
         raise HostReadinessError("journal", "inventory-mismatch")
+    validated: dict[str, tuple[_JournalIdentity, JournalHead]] = {}
     for system_id, head in trusted.items():
+        lane_name, identity = local[system_id]
+        evidence = (identity, head)
+        if cache.get(system_id) == evidence:
+            validated[system_id] = evidence
+            continue
         journal: FileAuthorityJournal | None = None
         try:
             journal = FileAuthorityJournal(
-                config.journal_dir, local[system_id], owner_uid=config.authority_uid
+                config.journal_dir, lane_name, owner_uid=config.authority_uid
             )
-            records = journal.load()
+            records = journal.load(deadline=deadline)
             if not records:
                 raise HostReadinessError("journal", "head-mismatch")
             terminal = records[-1]
@@ -258,13 +301,43 @@ def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalH
                 or terminal.operation_identity != head.operation_identity
             ):
                 raise HostReadinessError("journal", "head-mismatch")
+            validated[system_id] = evidence
         except HostReadinessError:
+            raise
+        except TimeoutError:
             raise
         except OSError, ValueError:
             raise HostReadinessError("journal", "invalid-lane") from None
         finally:
             if journal is not None:
                 journal.close()
+    cache.clear()
+    cache.update(validated)
+
+
+def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalHead, ...]) -> None:
+    """Require an exact local/database lane bijection and terminal head equality."""
+    _restore_journal_inventory(config, heads, {}, deadline=None)
+
+
+@dataclass(slots=True)
+class JournalInventoryValidator:
+    """Reuse unchanged lane evidence while keeping journal parsing off the event loop."""
+
+    _cache: dict[str, tuple[_JournalIdentity, JournalHead]] = field(default_factory=dict)
+
+    async def validate(self, config: AuthorityHostConfig, heads: tuple[JournalHead, ...]) -> None:
+        deadline = time.monotonic() + JOURNAL_VALIDATION_TIMEOUT_SECONDS
+        try:
+            await asyncio.to_thread(
+                _restore_journal_inventory,
+                config,
+                heads,
+                self._cache,
+                deadline=deadline,
+            )
+        except TimeoutError:
+            raise HostReadinessError("journal", "validation-timeout") from None
 
 
 async def check_database_role(connection: Any) -> None:
@@ -303,6 +376,109 @@ async def check_database_role(connection: Any) -> None:
                          FROM role_walk AS walk
                         WHERE NOT walk.cycle
                    ) AS membership_overflow
+        ), direct_application_acl AS (
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pg_class AS object
+                  JOIN pg_namespace AS schema ON schema.oid = object.relnamespace
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(object.relacl) AS acl
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND acl.grantee = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_attribute AS column_acl
+                  JOIN pg_class AS object ON object.oid = column_acl.attrelid
+                  JOIN pg_namespace AS schema ON schema.oid = object.relnamespace
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(column_acl.attacl) AS acl
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND acl.grantee = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_proc AS function_row
+                  JOIN pg_namespace AS schema ON schema.oid = function_row.pronamespace
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(function_row.proacl) AS acl
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND acl.grantee = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_type AS type_row
+                  JOIN pg_namespace AS schema ON schema.oid = type_row.typnamespace
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(type_row.typacl) AS acl
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND acl.grantee = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_namespace AS schema
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(schema.nspacl) AS acl
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND acl.grantee = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_database AS database_row
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(database_row.datacl) AS acl
+                 WHERE database_row.datname = current_database() AND acl.grantee = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_default_acl AS default_acl
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS acl
+                 WHERE acl.grantee = role.oid
+            ) AS present
+        ), owned_application_object AS (
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pg_class AS object
+                  JOIN pg_namespace AS schema ON schema.oid = object.relnamespace
+                  CROSS JOIN session_role AS role
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND object.relowner = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_proc AS function_row
+                  JOIN pg_namespace AS schema ON schema.oid = function_row.pronamespace
+                  CROSS JOIN session_role AS role
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND function_row.proowner = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_type AS type_row
+                  JOIN pg_namespace AS schema ON schema.oid = type_row.typnamespace
+                  CROSS JOIN session_role AS role
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND type_row.typowner = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_namespace AS schema
+                  CROSS JOIN session_role AS role
+                 WHERE schema.nspname !~ '^pg_'
+                   AND schema.nspname <> 'information_schema'
+                   AND schema.nspowner = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_database AS database_row
+                  CROSS JOIN session_role AS role
+                 WHERE database_row.datname = current_database()
+                   AND database_row.datdba = role.oid
+                UNION ALL
+                SELECT 1
+                  FROM pg_default_acl AS default_acl
+                  CROSS JOIN session_role AS role
+                 WHERE default_acl.defaclrole = role.oid
+            ) AS present
         )
         SELECT role.rolname, role.rolcanlogin, role.rolinherit, role.rolsuper,
                role.rolcreatedb, role.rolcreaterole, role.rolreplication, role.rolbypassrls,
@@ -311,10 +487,11 @@ async def check_database_role(connection: Any) -> None:
                    'public.list_external_boot_authority_journal_heads(text)', 'EXECUTE'),
                has_function_privilege(session_user,
                    'public.authenticate_external_boot_authority_peer(bytea)', 'EXECUTE'),
-               has_table_privilege(session_user,
-                   'public.external_boot_authority_journal_heads', 'SELECT,INSERT,UPDATE,DELETE')
+               direct_application_acl.present OR owned_application_object.present
           FROM session_role AS role
           CROSS JOIN membership_shape
+          CROSS JOIN direct_application_acl
+          CROSS JOIN owned_application_object
     """
     try:
         async with connection.cursor() as cursor:
@@ -337,7 +514,7 @@ async def check_database_role(connection: Any) -> None:
         membership_overflow,
         can_list,
         can_authenticate,
-        has_table_access,
+        has_excess_application_privilege,
     ) = row
     membership_names = tuple(memberships)
     if any(
@@ -349,7 +526,7 @@ async def check_database_role(connection: Any) -> None:
             bypass_rls,
             membership_overflow,
             any(name != "kdive_provider_authority" for name in membership_names),
-            has_table_access,
+            has_excess_application_privilege,
         )
     ):
         raise HostReadinessError("database-role", "excessive-privilege")
@@ -384,7 +561,11 @@ def _read_dsn(config: AuthorityHostConfig) -> str:
 @asynccontextmanager
 async def _database_connection(config: AuthorityHostConfig) -> AsyncIterator[AsyncConnection]:
     try:
-        connection = await AsyncConnection.connect(_read_dsn(config), connect_timeout=5)
+        connection = await AsyncConnection.connect(
+            _read_dsn(config),
+            connect_timeout=5,
+            options=_DATABASE_CONNECTION_OPTIONS,
+        )
     except Exception:
         raise HostReadinessError("database", "connection-failed") from None
     try:
@@ -411,9 +592,22 @@ async def _check_provider_socket(config: AuthorityHostConfig) -> None:
     except OSError:
         raise HostReadinessError("provider-socket", "unsafe-path") from None
     try:
+        parent = os.stat(config.provider_socket.parent, follow_symlinks=False)
         status = os.stat(config.provider_socket, follow_symlinks=False)
-        if not stat.S_ISSOCK(status.st_mode) or status.st_uid != config.authority_uid:
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != config.authority_uid
+            or parent.st_gid != config.authority_gid
+            or stat.S_IMODE(parent.st_mode) != PROVIDER_DIRECTORY_MODE
+            or not stat.S_ISSOCK(status.st_mode)
+            or status.st_uid != config.authority_uid
+            or status.st_gid != config.authority_gid
+            or stat.S_IMODE(status.st_mode) != PROVIDER_SOCKET_MODE
+        ):
             raise OSError
+    except OSError:
+        raise HostReadinessError("provider-socket", "unsafe-acl") from None
+    try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(config.provider_socket)), timeout=5
         )
@@ -424,19 +618,26 @@ async def _check_provider_socket(config: AuthorityHostConfig) -> None:
         raise HostReadinessError("provider-socket", "unreachable") from None
 
 
-async def _check_static_authority_host(config: AuthorityHostConfig) -> None:
+async def _check_static_authority_host(
+    config: AuthorityHostConfig,
+    journal_validator: JournalInventoryValidator | None = None,
+) -> None:
     """Reconstruct the identity, filesystem, database, journal, and provider facts."""
     if os.geteuid() != config.authority_uid:
         raise HostReadinessError("identity", "uid-mismatch")
     validate_credential_paths(config)
     heads = await _database_heads(config)
-    restore_journal_inventory(config, heads)
+    await (journal_validator or JournalInventoryValidator()).validate(config, heads)
     await _check_provider_socket(config)
 
 
-async def check_authority_host(config: AuthorityHostConfig, listener: AuthorityListener) -> None:
+async def check_authority_host(
+    config: AuthorityHostConfig,
+    listener: AuthorityListener,
+    journal_validator: JournalInventoryValidator | None = None,
+) -> None:
     """Reconstruct every static, journal, database, provider, socket, and TLS fact."""
-    await _check_static_authority_host(config)
+    await _check_static_authority_host(config, journal_validator)
     try:
         listener.validate()
     except OSError, ValueError:
@@ -495,15 +696,24 @@ async def _authenticate(config: AuthorityHostConfig, credential: SecretStr) -> A
             raise ValueError("unauthenticated") from None
 
 
+async def _bounded_readiness_check(check: Awaitable[None]) -> None:
+    try:
+        async with asyncio.timeout(READINESS_CHECK_TIMEOUT_SECONDS):
+            await check
+    except TimeoutError:
+        raise HostReadinessError("readiness", "timeout") from None
+
+
 async def run_authority_host(config: AuthorityHostConfig) -> None:
     """Validate, publish readiness, and retract it before exiting on any later drift."""
     listener: AuthorityListener | None = None
+    journal_validator = JournalInventoryValidator()
 
     async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
         return await _authenticate(config, credential)
 
     try:
-        await _check_static_authority_host(config)
+        await _bounded_readiness_check(_check_static_authority_host(config, journal_validator))
         try:
             listener = await serve_authority_transport(config, authenticate, service=None)
         except Exception:
@@ -513,12 +723,18 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
         except OSError, ValueError:
             raise HostReadinessError("listener", "invalid-evidence") from None
         await listener.start_serving()
-        await check_tls_health(listener, config)
+        await _bounded_readiness_check(check_tls_health(listener, config))
         _notify_systemd("READY=1")
+        _notify_systemd("WATCHDOG=1")
         while True:
             await asyncio.sleep(READINESS_INTERVAL_SECONDS)
-            await check_authority_host(config, listener)
-            await check_tls_health(listener, config)
+
+            async def periodic_check() -> None:
+                await check_authority_host(config, listener, journal_validator)
+                await check_tls_health(listener, config)
+
+            await _bounded_readiness_check(periodic_check())
+            _notify_systemd("WATCHDOG=1")
     finally:
         try:
             _notify_systemd("STOPPING=1")
@@ -531,17 +747,20 @@ async def check_authority_host_once(config: AuthorityHostConfig) -> None:
     """Run the complete check on fixed sibling probe and lock paths."""
     probe = config.request_socket.with_name("authority-probe.sock")
     try:
-        validate_socket_parent(probe, config.authority_uid)
+        validate_socket_parent(probe, config.authority_uid, config.authority_client_gid)
     except OSError:
         raise HostReadinessError("probe", "unsafe-directory") from None
     probe_config = replace(config, request_socket=probe)
-    await _check_static_authority_host(probe_config)
+    journal_validator = JournalInventoryValidator()
+    await _bounded_readiness_check(_check_static_authority_host(probe_config, journal_validator))
 
     async def never_authenticate(_credential: SecretStr) -> AuthenticatedPeer:
         raise ValueError("health client has no incarnation credential")
 
     try:
         listener = await serve_authority_transport(probe_config, never_authenticate, service=None)
+    except SocketLockBusyError:
+        raise HostReadinessError("probe", "probe-busy") from None
     except Exception:
         raise HostReadinessError("listener", "bind-failed") from None
     try:
@@ -550,6 +769,6 @@ async def check_authority_host_once(config: AuthorityHostConfig) -> None:
         except OSError, ValueError:
             raise HostReadinessError("listener", "invalid-evidence") from None
         await listener.start_serving()
-        await check_tls_health(listener, probe_config)
+        await _bounded_readiness_check(check_tls_health(listener, probe_config))
     finally:
         await _close_listener(listener)

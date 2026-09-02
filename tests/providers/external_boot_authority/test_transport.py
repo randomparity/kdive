@@ -262,6 +262,8 @@ def _config(tmp_path: Path, material: dict[str, Path], instance: str = "authorit
     return AuthorityHostConfig(
         authority_instance=instance,
         authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        authority_client_gid=os.getegid(),
         journal_dir=journal,
         request_socket=request_dir / "authority.sock",
         provider_socket=provider_socket,
@@ -566,7 +568,9 @@ def test_transport_rejects_linked_request_parent(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_listener_evidence_detects_socket_and_credential_drift(tmp_path: Path) -> None:
+def test_listener_evidence_detects_socket_and_credential_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     async def run() -> None:
         material = _tls_material(tmp_path, "authority-a")
         config = _config(tmp_path, material)
@@ -589,6 +593,20 @@ def test_listener_evidence_detects_socket_and_credential_drift(tmp_path: Path) -
             with pytest.raises(OSError, match="listener evidence invalid"):
                 listener.validate()
             config.request_socket.chmod(0o660)
+            real_stat = transport.os.stat
+
+            def foreign_socket_group(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+                status = real_stat(path, *args, **kwargs)
+                if Path(path) == config.request_socket:
+                    fields = list(status)
+                    fields[5] = status.st_gid + 1
+                    return os.stat_result(fields)
+                return status
+
+            with monkeypatch.context() as drift:
+                drift.setattr(transport.os, "stat", foreign_socket_group)
+                with pytest.raises(OSError, match="listener evidence invalid"):
+                    listener.validate()
             config.request_socket.parent.chmod(0o770)
             with pytest.raises(OSError, match="unsafe"):
                 listener.validate()

@@ -8,10 +8,12 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.sql import SQL, Identifier
 from pydantic import SecretStr
 
 from kdive.db import external_boot_authority_journal as journal_repository
 from kdive.db import migrate
+from kdive.providers.external_boot_authority.host import HostReadinessError, check_database_role
 from kdive.providers.external_boot_authority.protocol import JournalPhase
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from tests.db.external_boot_authority_support import _RoleDsns
@@ -355,3 +357,74 @@ def test_typed_readers_return_bounded_heads_and_hash_secret_before_sql(
         for head in heads
     )
     assert peer == AuthenticatedPeer(incarnation_id="docker:typed-reader")
+
+
+def test_host_role_shape_rejects_direct_grants_and_application_object_ownership(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    login = authority_role_dsns.logins["kdive_provider_authority"]
+    owned_table = f"authority_role_shape_{uuid4().hex}"
+    granted_function = f"authority_role_shape_{uuid4().hex}"
+    granted_schema = f"authority_role_shape_{uuid4().hex}"
+
+    async def validate() -> None:
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as connection:
+            await check_database_role(connection)
+
+    asyncio.run(validate())
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute(SQL("GRANT SELECT ON public.systems TO {}").format(Identifier(login)))
+    try:
+        with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+            asyncio.run(validate())
+    finally:
+        with psycopg.connect(migrated_url, autocommit=True) as admin:
+            admin.execute(SQL("REVOKE SELECT ON public.systems FROM {}").format(Identifier(login)))
+
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute(
+            SQL("CREATE FUNCTION public.{}() RETURNS integer LANGUAGE sql AS 'SELECT 1'").format(
+                Identifier(granted_function)
+            )
+        )
+        admin.execute(
+            SQL("GRANT EXECUTE ON FUNCTION public.{}() TO {}").format(
+                Identifier(granted_function), Identifier(login)
+            )
+        )
+    try:
+        with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+            asyncio.run(validate())
+    finally:
+        with psycopg.connect(migrated_url, autocommit=True) as admin:
+            admin.execute(SQL("DROP FUNCTION public.{}()").format(Identifier(granted_function)))
+
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute(SQL("CREATE SCHEMA {}").format(Identifier(granted_schema)))
+        admin.execute(
+            SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                Identifier(granted_schema), Identifier(login)
+            )
+        )
+    try:
+        with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+            asyncio.run(validate())
+    finally:
+        with psycopg.connect(migrated_url, autocommit=True) as admin:
+            admin.execute(SQL("DROP SCHEMA {}").format(Identifier(granted_schema)))
+
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute(SQL("CREATE TABLE public.{} (value integer)").format(Identifier(owned_table)))
+        admin.execute(
+            SQL("ALTER TABLE public.{} OWNER TO {}").format(
+                Identifier(owned_table), Identifier(login)
+            )
+        )
+    try:
+        with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+            asyncio.run(validate())
+    finally:
+        with psycopg.connect(migrated_url, autocommit=True) as admin:
+            admin.execute(SQL("DROP TABLE public.{}").format(Identifier(owned_table)))

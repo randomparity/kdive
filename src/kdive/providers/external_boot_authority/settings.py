@@ -14,10 +14,10 @@ def _nonempty(raw: str) -> str:
     return value
 
 
-def _positive_uid(raw: str) -> int:
+def _positive_unix_id(raw: str) -> int:
     value = int(raw)
     if value < 1:
-        raise ValueError("must be a positive Unix uid")
+        raise ValueError("must be a positive Unix uid or gid")
     return value
 
 
@@ -42,11 +42,27 @@ AUTHORITY_INSTANCE = Setting(
 )
 AUTHORITY_UID = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_UID",
-    parse=_positive_uid,
+    parse=_positive_unix_id,
     group="external-boot-authority",
     required_when=_always,
     help="Unix uid that owns and runs the external-boot authority host boundary.",
     suggest="the positive uid assigned to kdive-provider-authority",
+)
+AUTHORITY_GID = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_GID",
+    parse=_positive_unix_id,
+    group="external-boot-authority",
+    required_when=_always,
+    help="Unix gid that owns the external-boot authority provider endpoint.",
+    suggest="the positive gid assigned to kdive-provider-authority",
+)
+AUTHORITY_CLIENT_GID = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID",
+    parse=_positive_unix_id,
+    group="external-boot-authority",
+    required_when=_always,
+    help="Unix gid allowed to traverse the external-boot authority request endpoint.",
+    suggest="the positive gid assigned to kdive-provider-authority-client",
 )
 AUTHORITY_JOURNAL_DIR = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR",
@@ -73,6 +89,8 @@ AUTHORITY_PROVIDER_SOCKET = Setting(
 SETTINGS = [
     AUTHORITY_INSTANCE,
     AUTHORITY_UID,
+    AUTHORITY_GID,
+    AUTHORITY_CLIENT_GID,
     AUTHORITY_JOURNAL_DIR,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_PROVIDER_SOCKET,

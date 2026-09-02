@@ -233,10 +233,10 @@ async def test_mutation_reuses_one_validated_journal_scan_across_checkpoints(
             validation_calls += 1
             return FileAuthorityJournal._prepare_record(state, record)
 
-        def load(self) -> tuple[JournalRecordV1, ...]:
+        def load(self, *, deadline: float | None = None) -> tuple[JournalRecordV1, ...]:
             nonlocal load_calls
             load_calls += 1
-            return super().load()
+            return super().load(deadline=deadline)
 
     def journal_factory(_system_id: object) -> FileAuthorityJournal:
         nonlocal factory_calls
