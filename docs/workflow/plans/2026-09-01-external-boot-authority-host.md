@@ -105,8 +105,15 @@ Interfaces:
 
 Verification:
 
-- Mode: focused-test. Contract: credential and journal paths must be regular, authority-owned,
-  non-symlinked, and exact-mode. Cases: `test_host_rejects_unsafe_credentials` and
+- Mode: focused-test. Contract: credentials must form one complete provenance profile: either
+  authority-owned mode-`0400` source files under protected root/authority parents, or root-owned
+  mode-`0440` systemd projections under exclusively root-owned protected parents. Links, mixed
+  profiles, writable or foreign ancestry, and other owners/modes fail closed; journal paths remain
+  authority-owned, non-symlinked, and exact-mode. Cases `test_host_rejects_unsafe_credentials`,
+  `test_host_accepts_systemd_projected_credentials`,
+  `test_host_rejects_unsafe_systemd_projection`,
+  `test_host_rejects_systemd_projection_under_unsafe_ancestry`,
+  `test_host_rejects_mixed_source_and_projected_credentials`, and
   `test_host_rejects_invalid_journal_tree`; red observation is missing module/import; green command
   is `uv run python -m pytest tests/providers/external_boot_authority/test_host.py -q`.
 - Mode: focused-test. Contract: role shape and diagnostics fail closed without secret values.
@@ -227,8 +234,10 @@ Interfaces:
   certificate/key, uses
   `User=kdive-provider-authority`, and hardens filesystem/network access. `service-credential` is
   the TLS server private key rather than an unused sentinel.
-- Ansible installs the venv, root/authority-owned credentials, journal and runtime directories,
-  request-client group, unit, configuration, and readiness probe in clean-host order. Production
+- Ansible installs the venv, authority-owned mode-`0400` credential sources under their protected
+  directory, journal and runtime directories, request-client group, unit, configuration, and
+  readiness probe in clean-host order. `LoadCredential=` presents the supervised process only with
+  root-owned mode-`0440` projections beneath systemd's protected root-owned directory. Production
   workers receive no client material; provisioning creates a transient proof identity and
   short-lived client certificate, proves the complete authentication path, then removes both and
   retires the proof worker incarnation.

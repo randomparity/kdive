@@ -106,6 +106,7 @@ live_vm_host_authority_packages:
   - acl
   - openssl
   - postgresql
+  - python3-psycopg
 live_vm_host_authority_libvirt_uri: >-
   qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock
 live_vm_host_authority_denied_paths:

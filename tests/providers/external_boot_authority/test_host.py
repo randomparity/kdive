@@ -82,6 +82,130 @@ def test_host_rejects_unsafe_credentials(tmp_path: Path) -> None:
         validate_credential_paths(config)
 
 
+def _projected_credentials(tmp_path: Path) -> AuthorityHostConfig:
+    config = _config(tmp_path)
+    credentials = tmp_path / "run" / "credentials" / "authority.service"
+    credentials.mkdir(parents=True, mode=0o700)
+    projected = replace(
+        config,
+        database_dsn=_file(credentials / "database-dsn", mode=0o440),
+        server_private_key=_file(credentials / "service-credential", mode=0o440),
+        server_certificate=_file(credentials / "server-certificate", mode=0o440),
+        server_ca=_file(credentials / "server-ca", mode=0o440),
+        worker_client_ca=_file(credentials / "worker-client-ca", mode=0o440),
+        health_client_certificate=_file(credentials / "health-client-certificate", mode=0o440),
+        health_client_key=_file(credentials / "health-client-key", mode=0o440),
+    )
+    return projected
+
+
+def _with_uid(status: os.stat_result, owner_uid: int) -> os.stat_result:
+    fields = list(status)
+    fields[4] = owner_uid
+    return os.stat_result(fields)
+
+
+def _mock_projection_ownership(monkeypatch: pytest.MonkeyPatch, credentials: Path) -> None:
+    real_stat = host.os.stat
+    real_fstat = host.os.fstat
+
+    def root_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        status = real_stat(path, *args, **kwargs)
+        candidate = Path(path)
+        if (
+            candidate == credentials
+            or candidate in credentials.parents
+            or credentials in candidate.parents
+        ):
+            return _with_uid(status, 0)
+        return status
+
+    def root_fstat(descriptor: int) -> Any:
+        status = real_fstat(descriptor)
+        target = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        owner = 0 if credentials in target.parents else status.st_uid
+        return _with_uid(status, owner)
+
+    monkeypatch.setattr(host.os, "stat", root_stat)
+    monkeypatch.setattr(host.os, "fstat", root_fstat)
+
+
+def test_host_accepts_systemd_projected_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _projected_credentials(tmp_path)
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, config.database_dsn.parent)
+        validate_credential_paths(config)
+
+
+def test_host_rejects_unsafe_systemd_projection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _projected_credentials(tmp_path)
+    real_fstat = host.os.fstat
+
+    config.server_ca.chmod(0o400)
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, config.database_dsn.parent)
+        with pytest.raises(HostReadinessError, match="credentials: unsafe-file"):
+            validate_credential_paths(config)
+    config.server_ca.chmod(0o440)
+
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, config.database_dsn.parent)
+        patch.setattr(host.os, "fstat", real_fstat)
+        with pytest.raises(HostReadinessError, match="credentials: unsafe-file"):
+            validate_credential_paths(config)
+
+    config.server_ca.unlink()
+    config.server_ca.symlink_to(config.worker_client_ca)
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, config.database_dsn.parent)
+        with pytest.raises(HostReadinessError, match="credentials: unsafe-file"):
+            validate_credential_paths(config)
+
+
+def test_host_rejects_systemd_projection_under_unsafe_ancestry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _projected_credentials(tmp_path)
+    credentials = config.database_dsn.parent
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, credentials)
+        real_stat = host.os.stat
+
+        def foreign_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            status = real_stat(path, *args, **kwargs)
+            if Path(path) == credentials.parent:
+                return _with_uid(status, 1234)
+            return status
+
+        patch.setattr(host.os, "stat", foreign_stat)
+        with pytest.raises(HostReadinessError, match="credentials: unsafe-path"):
+            validate_credential_paths(config)
+
+    credentials.chmod(0o770)
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, credentials)
+        with pytest.raises(HostReadinessError, match="credentials: unsafe-path"):
+            validate_credential_paths(config)
+
+
+def test_host_rejects_mixed_source_and_projected_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected = _projected_credentials(tmp_path)
+    source_root = tmp_path / "source"
+    source_root.mkdir(mode=0o700)
+    source = _config(source_root)
+    mixed = replace(projected, database_dsn=source.database_dsn)
+    with monkeypatch.context() as patch:
+        _mock_projection_ownership(patch, projected.database_dsn.parent)
+        with pytest.raises(HostReadinessError, match="credentials: mixed-profiles"):
+            validate_credential_paths(mixed)
+
+
 def test_host_rejects_untrusted_protected_parent_chains(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

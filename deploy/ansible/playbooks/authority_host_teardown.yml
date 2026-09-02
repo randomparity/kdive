@@ -60,13 +60,21 @@
     - name: Revoke the authority database LOGIN
       ansible.builtin.command:
         argv:
-          - /usr/bin/psql
-          - --set
-          - "authority_login={{ authority_database_login }}"
-          - --command
-          - ALTER ROLE :"authority_login" NOLOGIN
+          - /usr/bin/python3
+          - -c
+          - |
+            import os
+            from psycopg import connect, sql
+
+            login = os.environ["AUTHORITY_LOGIN"]
+            with connect(os.environ["AUTHORITY_ADMIN_DSN"]) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (login,))
+                    if cursor.fetchone() is not None:
+                        cursor.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(login)))
       environment:
-        PGDATABASE: "{{ authority_database_admin_dsn }}"
+        AUTHORITY_ADMIN_DSN: "{{ authority_database_admin_dsn }}"
+        AUTHORITY_LOGIN: "{{ authority_database_login }}"
       become: true
       become_user: postgres
       when:

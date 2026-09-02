@@ -220,17 +220,18 @@ def _fingerprint(path: Path) -> tuple[int, int, int, int, str]:
         os.close(descriptor)
 
 
-def validate_protected_parents(path: Path, owner_uid: int) -> None:
-    """Require an absolute, non-writable parent chain owned by root or the authority."""
+def validate_protected_parents(path: Path, owner_uid: int, *, require_root: bool = False) -> None:
+    """Require an absolute, non-writable parent chain with the selected ownership."""
     if not path.is_absolute():
         raise OSError("protected path is not absolute")
+    allowed_owner_uids = {0} if require_root else {0, owner_uid}
     current = Path(path.root)
     for part in path.parts[1:-1]:
         current /= part
         status = os.stat(current, follow_symlinks=False)
         if (
             not stat.S_ISDIR(status.st_mode)
-            or status.st_uid not in {0, owner_uid}
+            or status.st_uid not in allowed_owner_uids
             or stat.S_IMODE(status.st_mode) & 0o022
         ):
             raise OSError("protected parent chain is unsafe")

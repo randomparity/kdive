@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from psycopg import AsyncConnection
 from pydantic import SecretStr
@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 READINESS_INTERVAL_SECONDS = 30.0
 _HEALTH_ACCEPT_TIMEOUT_SECONDS = 0.1
 PRIVATE_FILE_MODE = 0o400
+SYSTEMD_CREDENTIAL_MODE = 0o440
 JOURNAL_DIRECTORY_MODE = 0o700
 MAX_JOURNAL_LANES = 4_096
 _DATABASE_DSN_MAX_BYTES = 4_096
@@ -120,22 +121,32 @@ class AuthorityHostConfig:
         )
 
 
-def _validate_file(path: Path, *, owner_uid: int, mode: int, component: str) -> None:
-    _validate_parent_components(path, component, owner_uid)
+type CredentialProfile = Literal["authority-source", "systemd-projection"]
+
+
+def _validate_credential_file(path: Path, *, owner_uid: int) -> CredentialProfile:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     except OSError:
-        raise HostReadinessError(component, "unsafe-file") from None
+        raise HostReadinessError("credentials", "unsafe-file") from None
     try:
         status = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(status.st_mode)
-            or status.st_uid != owner_uid
-            or stat.S_IMODE(status.st_mode) != mode
-        ):
-            raise HostReadinessError(component, "unsafe-file")
+        identity = (status.st_uid, stat.S_IMODE(status.st_mode))
+        if not stat.S_ISREG(status.st_mode):
+            raise HostReadinessError("credentials", "unsafe-file")
+        if identity == (owner_uid, PRIVATE_FILE_MODE):
+            profile: CredentialProfile = "authority-source"
+        elif identity == (0, SYSTEMD_CREDENTIAL_MODE):
+            profile = "systemd-projection"
+        else:
+            raise HostReadinessError("credentials", "unsafe-file")
     finally:
         os.close(descriptor)
+    try:
+        validate_protected_parents(path, owner_uid, require_root=profile == "systemd-projection")
+    except OSError:
+        raise HostReadinessError("credentials", "unsafe-path") from None
+    return profile
 
 
 def _validate_parent_components(path: Path, component: str, owner_uid: int) -> None:
@@ -146,18 +157,20 @@ def _validate_parent_components(path: Path, component: str, owner_uid: int) -> N
 
 
 def validate_credential_paths(config: AuthorityHostConfig) -> None:
-    for path in (
-        config.database_dsn,
-        config.server_private_key,
-        config.server_certificate,
-        config.server_ca,
-        config.worker_client_ca,
-        config.health_client_certificate,
-        config.health_client_key,
-    ):
-        _validate_file(
-            path, owner_uid=config.authority_uid, mode=PRIVATE_FILE_MODE, component="credentials"
+    profiles = {
+        _validate_credential_file(path, owner_uid=config.authority_uid)
+        for path in (
+            config.database_dsn,
+            config.server_private_key,
+            config.server_certificate,
+            config.server_ca,
+            config.worker_client_ca,
+            config.health_client_certificate,
+            config.health_client_key,
         )
+    }
+    if len(profiles) != 1:
+        raise HostReadinessError("credentials", "mixed-profiles")
 
 
 def _validate_journal_root(config: AuthorityHostConfig) -> int:
@@ -351,12 +364,7 @@ async def check_database_role(connection: Any) -> None:
 
 
 def _read_dsn(config: AuthorityHostConfig) -> str:
-    _validate_file(
-        config.database_dsn,
-        owner_uid=config.authority_uid,
-        mode=PRIVATE_FILE_MODE,
-        component="credentials",
-    )
+    validate_credential_paths(config)
     descriptor = os.open(config.database_dsn, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
         raw = os.read(descriptor, _DATABASE_DSN_MAX_BYTES + 1)

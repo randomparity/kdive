@@ -1425,15 +1425,24 @@
 - name: Retire the transient authority proof worker incarnation
   ansible.builtin.command:
     argv:
-      - /usr/bin/psql
-      - --set
-      - "proof_incarnation={{ live_vm_host_authority_proof_incarnation }}"
-      - --command
-      - >-
-        UPDATE worker_incarnations SET state='terminated', terminated_at=clock_timestamp(),
-        outcome='killed' WHERE incarnation=:'proof_incarnation' AND state='active';
+      - /usr/bin/python3
+      - -c
+      - |
+        import os
+        from psycopg import connect
+
+        with connect(os.environ["AUTHORITY_ADMIN_DSN"]) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE worker_incarnations
+                          SET state='terminated', terminated_at=clock_timestamp(), outcome='killed'
+                        WHERE incarnation=%s AND state='active'""",
+                    (os.environ["AUTHORITY_PROOF_INCARNATION"],),
+                )
   environment:
-    PGDATABASE: "{{ live_vm_host_authority_database_admin_dsn }}"
+    AUTHORITY_ADMIN_DSN: "{{ live_vm_host_authority_database_admin_dsn }}"
+    AUTHORITY_PROOF_INCARNATION: >-
+      {{ live_vm_host_authority_proof_incarnation }}
   become: true
   become_user: postgres
   when: live_vm_host_authority_proof_enabled | bool

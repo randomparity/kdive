@@ -77,8 +77,9 @@ CA validity and purpose using the standard-library TLS stack; it can never const
 
 Ansible creates these independent principals and groups:
 
-- `kdive-provider-authority` owns the service, journal, service credential, database credential,
-  installed runtime, and its distinct dormant libvirt session.
+- `kdive-provider-authority` owns the service, journal, installed credential source files,
+  installed runtime, and its distinct dormant libvirt session. systemd owns the per-unit
+  `LoadCredential=` projections consumed by the long-running process.
 - `kdive-provider-authority-client` owns traversal of the request-socket parent. The carrier proof
   creates one non-service proof identity in this group and gives only that identity a short-lived
   client certificate and an active test worker-incarnation credential.
@@ -88,8 +89,13 @@ Ansible creates these independent principals and groups:
 - `kdive-provider-authority` is the only KDIVE service identity able to traverse the new dormant
   authority endpoint.
 
-The authority runtime root is `/opt/kdive-provider-authority`; credentials are under
-`/etc/kdive/credentials/provider-authority`; journals are under
+The authority runtime root is `/opt/kdive-provider-authority`; credential sources are under
+`/etc/kdive/credentials/provider-authority`, owned by `kdive-provider-authority` with mode `0400`
+under a protected source-directory chain. systemd projects the complete credential set as
+root-owned mode-`0440` regular files beneath a root-owned, non-group/world-writable credential
+directory chain. The runtime accepts either the complete source profile for the one-shot probe or
+the complete projection profile for the supervised unit; it rejects mixed profiles, links,
+foreign-owned parents, writable parents, and any other owner/mode combination. Journals are under
 `/var/lib/kdive/provider-authority/journal`; runtime state is under
 `/run/kdive/provider-authority`; the request socket is
 `/run/kdive/provider-authority/request/authority.sock`. Each protected parent is inspected without
@@ -121,8 +127,9 @@ role. The readiness probe checks role shape and never prints the DSN.
 The one-shot and long-running probes fail closed unless all of these hold:
 
 1. the process identity is the configured authority uid;
-2. the database and TLS private credentials are regular, non-symlink files owned by that uid with
-   mode `0400`, and the public certificate/CA files are exact-mode regular files;
+2. every credential is a regular, non-symlink file in one complete provenance profile: either an
+   authority-owned mode-`0400` Ansible source under protected root/authority-owned parents, or a
+   root-owned mode-`0440` systemd projection under exclusively root-owned protected parents;
 3. the database inventory and confined local journal lanes are a bijection, and every retained
    lane is a real authority-owned directory/file whose exact terminal record equals its trusted
    head;

@@ -196,6 +196,9 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
         "/etc/kdive/credentials/provider-authority"
     )
     assert defaults["live_vm_host_authority_database_login"] == "kdive_authority_host"
+    authority_packages = defaults["live_vm_host_authority_packages"]
+    assert isinstance(authority_packages, list)
+    assert "python3-psycopg" in authority_packages
 
     ordered = (
         "Install external-boot authority prerequisites",
@@ -242,6 +245,9 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "live_vm_repo_url.endswith('.bundle')" in tasks
 
     teardown = _text(AUTHORITY_TEARDOWN)
+    assert "/usr/bin/python3" in teardown
+    assert "from psycopg import connect, sql" in teardown
+    assert "PGDATABASE:" not in teardown
     for evidence in (
         "Stop and disable the external-boot authority service",
         "Stop and disable the dormant authority endpoint",
@@ -252,6 +258,9 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
         "Verify the fixed-worker provider path remains usable",
     ):
         assert evidence in teardown
+
+    assert "from psycopg import connect" in tasks
+    assert "PGDATABASE:" not in tasks
 
 
 def test_ansible_uses_declarative_account_and_file_modules() -> None:
