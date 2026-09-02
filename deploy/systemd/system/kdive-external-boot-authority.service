@@ -1,0 +1,47 @@
+[Unit]
+Description=KDIVE dormant external-boot provider authority
+Documentation=https://github.com/randomparity/kdive
+After=network-online.target
+After=systemd-tmpfiles-setup.service
+Wants=network-online.target
+Wants=systemd-tmpfiles-setup.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=kdive-provider-authority
+Group=kdive-provider-authority
+EnvironmentFile=/etc/kdive/provider-authority.env
+LoadCredential=database-dsn:/etc/kdive/credentials/provider-authority/database-dsn
+LoadCredential=service-credential:/etc/kdive/credentials/provider-authority/service-credential
+LoadCredential=server-certificate:/etc/kdive/credentials/provider-authority/server-certificate
+LoadCredential=server-ca:/etc/kdive/credentials/provider-authority/server-ca
+LoadCredential=worker-client-ca:/etc/kdive/credentials/provider-authority/worker-client-ca
+LoadCredential=health-client-certificate:/etc/kdive/credentials/provider-authority/health-client-certificate
+LoadCredential=health-client-key:/etc/kdive/credentials/provider-authority/health-client-key
+ExecStart=/opt/kdive-provider-authority/.venv/bin/python -m kdive external-boot-authority-host
+Restart=on-failure
+RestartSec=5s
+WatchdogSec=90s
+TimeoutStartSec=90s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+UMask=0077
+ReadWritePaths=/var/lib/kdive/provider-authority/journal
+ReadWritePaths=/run/kdive/provider-authority/request
+
+[Install]
+WantedBy=multi-user.target

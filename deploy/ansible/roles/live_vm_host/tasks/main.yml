@@ -1,4 +1,7 @@
 ---
+- name: Validate external-boot authority inputs before direct role mutation
+  ansible.builtin.import_tasks: authority_preflight.yml
+
 - name: Assert the runner host is Ubuntu/Debian (system Python 3.14 + python3-guestfs, ADR-0387)
   # The venv strategy relies on the system interpreter being Python 3.14 with a matching
   # python3-guestfs binding. Ubuntu 26.04 ships both; RHEL/Rocky ship Python 3.12 and no 3.14
@@ -8,6 +11,14 @@
     fail_msg: >-
       live_vm_host targets the Ubuntu 26.04 runner base (ADR-0387); this host is
       {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+- name: Install external-boot authority prerequisites
+  ansible.builtin.apt:
+    name: "{{ live_vm_host_authority_packages }}"
+    state: present
+    update_cache: true
+  tags: [authority_prerequisites]
+  when: live_vm_host_authority_enabled | bool
 
 - name: Ensure the runner service account exists in kvm and libvirt
   ansible.builtin.user:
@@ -23,6 +34,7 @@
     name: "{{ live_vm_host_packages }}"
     state: present
     update_cache: true
+  tags: [authority_prerequisites]
 
 - name: "Install Docker Engine + compose plugin (the self-hosted job's on-box stack, #1293)"
   # The self-hosted live_vm gate brings up the compose backends on the box via
@@ -83,7 +95,7 @@
     group: "{{ github_runner_user }}"
     mode: "0755"
 
-- name: Check out the project source for the venv
+- name: Check out the remote project source for the venv
   ansible.builtin.git:
     repo: "{{ live_vm_repo_url }}"
     dest: "{{ live_vm_venv }}"
@@ -91,6 +103,63 @@
   become: true
   become_user: "{{ github_runner_user }}"
   register: live_vm_host_checkout
+  when: not live_vm_repo_url.endswith('.bundle')
+
+- name: Clone the exact Git bundle for the venv
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/git
+      - clone
+      - --no-hardlinks
+      - "{{ live_vm_repo_url }}"
+      - "{{ live_vm_venv }}"
+  args:
+    creates: "{{ live_vm_venv }}/.git"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_bundle_clone
+  when: live_vm_repo_url.endswith('.bundle')
+
+- name: Read the Git bundle checkout revision before reconciliation  # noqa: command-instead-of-module
+  # The git module runs ls-remote through file://, which cannot probe a bundle file.
+  ansible.builtin.command: "/usr/bin/git -C {{ live_vm_venv }} rev-parse HEAD"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_bundle_revision_before
+  changed_when: false
+  when: live_vm_repo_url.endswith('.bundle')
+
+- name: Check out the requested exact Git bundle revision  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/git
+      - -C
+      - "{{ live_vm_venv }}"
+      - checkout
+      - --detach
+      - "{{ live_vm_repo_version }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_bundle_checkout
+  changed_when: live_vm_host_bundle_revision_before.stdout != live_vm_repo_version
+  when: live_vm_repo_url.endswith('.bundle')
+
+- name: Read the exact Git bundle checkout revision  # noqa: command-instead-of-module
+  ansible.builtin.command: "/usr/bin/git -C {{ live_vm_venv }} rev-parse HEAD"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_bundle_revision
+  changed_when: false
+  failed_when: live_vm_host_bundle_revision.stdout != live_vm_repo_version
+  when: live_vm_repo_url.endswith('.bundle')
+
+- name: Record the exact Git bundle checkout result
+  ansible.builtin.set_fact:
+    live_vm_host_checkout:
+      after: "{{ live_vm_host_bundle_revision.stdout }}"
+      changed: >-
+        {{ live_vm_host_bundle_clone is changed or live_vm_host_bundle_checkout is changed }}
+  when: live_vm_repo_url.endswith('.bundle')
 
 - name: Build the venv against the SYSTEM interpreter (ABI-match python3-guestfs)  # noqa: no-handler
   # noqa no-handler: not a handler on purpose — the venv must exist before the libguestfs
@@ -197,6 +266,100 @@
     append: false
   loop: "{{ live_vm_host_worker_accounts }}"
 
+- name: Create the external-boot authority groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+    state: present
+  loop:
+    - "{{ live_vm_host_authority_account }}"
+    - "{{ live_vm_host_authority_client_group }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create the external-boot authority account
+  ansible.builtin.user:
+    name: "{{ live_vm_host_authority_account }}"
+    system: true
+    create_home: false
+    home: /var/lib/kdive/provider-authority
+    shell: /usr/sbin/nologin
+    group: "{{ live_vm_host_authority_account }}"
+    groups: ["{{ live_vm_host_authority_client_group }}"]
+    append: false
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create the reconciler proof group
+  ansible.builtin.group:
+    name: kdive
+    system: true
+    state: present
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create the reconciler denial-proof identity
+  ansible.builtin.user:
+    name: kdive
+    system: true
+    create_home: false
+    home: /opt/kdive
+    shell: /usr/sbin/nologin
+    group: kdive
+  when: live_vm_host_authority_enabled | bool
+
+- name: Enable linger for the external-boot authority account
+  ansible.builtin.command: "loginctl enable-linger {{ live_vm_host_authority_account }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ live_vm_host_authority_account }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Look up the external-boot authority account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ live_vm_host_authority_account }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Look up the external-boot authority groups
+  ansible.builtin.getent:
+    database: group
+  when: live_vm_host_authority_enabled | bool
+
+- name: Record the external-boot authority uid and home
+  ansible.builtin.set_fact:
+    live_vm_host_authority_uid: >-
+      {{ ansible_facts.getent_passwd[live_vm_host_authority_account][1] }}
+    live_vm_host_authority_home: >-
+      {{ ansible_facts.getent_passwd[live_vm_host_authority_account][4] }}
+    live_vm_host_authority_gid: >-
+      {{ ansible_facts.getent_group[live_vm_host_authority_account][1] }}
+    live_vm_host_authority_client_gid: >-
+      {{ ansible_facts.getent_group[live_vm_host_authority_client_group][1] }}
+  when: live_vm_host_authority_enabled | bool
+
+- name: Install the external-boot authority tmpfiles policy
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/kdive-provider-authority.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      d /run/kdive 0755 root root -
+      d /run/kdive/provider-authority 0710 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_client_group }} -
+      d /run/kdive/provider-authority/request 2750 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_client_group }} -
+      d /run/kdive/provider-authority/libvirt 0700 {{ live_vm_host_authority_account }} {{ live_vm_host_authority_account }} -
+  register: live_vm_host_authority_tmpfiles_policy
+  when: live_vm_host_authority_enabled | bool
+  notify:
+    - Restart the dormant authority session libvirtd after deployed changes
+    - Restart the external-boot authority service after deployed changes
+
+- name: Apply the external-boot authority tmpfiles policy
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-tmpfiles
+      - --create
+      - /etc/tmpfiles.d/kdive-provider-authority.conf
+  changed_when: live_vm_host_authority_tmpfiles_policy is changed
+  when: live_vm_host_authority_enabled | bool
+
 - name: Look up the live-worker operator account
   ansible.builtin.getent:
     database: passwd
@@ -216,7 +379,8 @@
   loop:
     - {path: /usr/local/libexec, mode: "0755"}
     - {path: /etc/kdive, mode: "0755"}
-    - {path: /etc/kdive/credentials, mode: "0700"}
+    # Traverse-only lets each service reach its own private child without listing sibling names.
+    - {path: /etc/kdive/credentials, mode: "0711"}
     - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
     - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}
 
@@ -265,6 +429,176 @@
     owner: root
     group: root
     mode: "0755"
+
+- name: Inspect authority protected paths without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+  loop:
+    - {path: /opt/kdive-provider-authority, mode: "0700"}
+    - {path: /etc/kdive/credentials/provider-authority, mode: "0700"}
+    - {path: /var/lib/kdive/provider-authority, mode: "0700"}
+    - {path: /run/kdive/provider-authority, mode: "0710"}
+  register: live_vm_host_authority_protected_paths_before
+  when: live_vm_host_authority_enabled | bool
+
+- name: Require real authority protected paths
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists
+        or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: >-
+      An authority protected path must be a real directory; the existing entry was left
+      untouched.
+  loop: "{{ live_vm_host_authority_protected_paths_before.results }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create authority protected paths
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /opt/kdive-provider-authority
+      group: "{{ live_vm_host_authority_account }}"
+      mode: "0700"
+    - path: /etc/kdive/credentials/provider-authority
+      group: "{{ live_vm_host_authority_account }}"
+      mode: "0700"
+    - path: /var/lib/kdive/provider-authority
+      group: "{{ live_vm_host_authority_account }}"
+      mode: "0700"
+    - path: /run/kdive/provider-authority
+      group: "{{ live_vm_host_authority_client_group }}"
+      mode: "0710"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Inspect authority protected children without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+  loop:
+    - {path: /var/lib/kdive/provider-authority/journal, mode: "0700"}
+    - {path: /run/kdive/provider-authority/request, mode: "2750"}
+    - {path: /run/kdive/provider-authority/libvirt, mode: "0700"}
+  register: live_vm_host_authority_protected_children_before
+  when: live_vm_host_authority_enabled | bool
+
+- name: Require real authority protected children
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists
+        or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: >-
+      An authority protected child must be a real directory; the existing entry was left
+      untouched.
+  loop: "{{ live_vm_host_authority_protected_children_before.results }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create authority protected children
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: /var/lib/kdive/provider-authority/journal
+      group: "{{ live_vm_host_authority_account }}"
+      mode: "0700"
+    - path: /run/kdive/provider-authority/request
+      group: "{{ live_vm_host_authority_client_group }}"
+      mode: "2750"
+    - path: /run/kdive/provider-authority/libvirt
+      group: "{{ live_vm_host_authority_account }}"
+      mode: "0700"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create the external-boot authority venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} venv --python /usr/bin/python3
+      {{ live_vm_host_authority_runtime_install }}/.venv
+  args:
+    creates: "{{ live_vm_host_authority_runtime_install }}/.venv/bin/python"
+  register: live_vm_host_authority_venv
+  when: live_vm_host_authority_enabled | bool
+
+- name: Install KDIVE into the authority venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} pip install --python
+      {{ live_vm_host_authority_runtime_install }}/.venv/bin/python {{ live_vm_venv }}
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_checkout is changed or live_vm_host_authority_venv is changed
+  register: live_vm_host_authority_install
+  changed_when: true
+  notify: Restart the external-boot authority service after deployed changes
+
+- name: Record the installed external-boot authority revision
+  ansible.builtin.copy:
+    dest: "{{ live_vm_host_authority_runtime_install }}/revision"
+    content: "{{ live_vm_host_checkout.after }}\n"
+    owner: root
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0440"
+  register: live_vm_host_authority_revision_result
+  when: live_vm_host_authority_enabled | bool
+
+- name: Install external-boot authority credentials
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ live_vm_host_authority_credentials_dir }}/{{ item.name }}"
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0400"
+  loop:
+    - {name: database-dsn, source: "{{ live_vm_host_authority_database_dsn_source }}"}
+    - {name: service-credential, source: "{{ live_vm_host_authority_server_key_source }}"}
+    - {name: server-certificate, source: "{{ live_vm_host_authority_server_certificate_source }}"}
+    - {name: server-ca, source: "{{ live_vm_host_authority_server_ca_source }}"}
+    - {name: worker-client-ca, source: "{{ live_vm_host_authority_worker_client_ca_source }}"}
+    - {name: health-client-certificate, source: "{{ live_vm_host_authority_health_client_certificate_source }}"}
+    - {name: health-client-key, source: "{{ live_vm_host_authority_health_client_key_source }}"}
+  no_log: true
+  register: live_vm_host_authority_credentials
+  when: live_vm_host_authority_enabled | bool
+  notify: Restart the external-boot authority service after deployed changes
+
+- name: Install the external-boot authority environment
+  ansible.builtin.copy:
+    dest: "{{ live_vm_host_authority_environment }}"
+    content: |
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE={{ live_vm_host_authority_instance }}
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_UID={{ live_vm_host_authority_uid }}
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_GID={{ live_vm_host_authority_gid }}
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID={{ live_vm_host_authority_client_gid }}
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR=/var/lib/kdive/provider-authority/journal
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock
+    owner: root
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0640"
+  register: live_vm_host_authority_environment_result
+  when: live_vm_host_authority_enabled | bool
+  notify: Restart the external-boot authority service after deployed changes
+
+- name: Install the external-boot authority service unit
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/system/kdive-external-boot-authority.service"
+    dest: /etc/systemd/system/kdive-external-boot-authority.service
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  register: live_vm_host_authority_service_unit
+  when: live_vm_host_authority_enabled | bool
+  notify: Restart the external-boot authority service after deployed changes
 
 - name: Create the protected session-libvirt socket namespaces
   block:
@@ -481,6 +815,18 @@
     owner: root
     group: root
     mode: "0644"
+
+- name: Install the authority session-libvirt configuration
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/libvirtd-external-boot-authority.conf"
+    dest: /etc/kdive/libvirtd-external-boot-authority.conf
+    remote_src: true
+    owner: root
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0640"
+  register: live_vm_host_authority_libvirt_config
+  when: live_vm_host_authority_enabled | bool
+  notify: Restart the dormant authority session libvirtd after deployed changes
 
 - name: Publish the selected worker libvirt URI
   ansible.builtin.copy:
@@ -901,6 +1247,215 @@
     owner: "{{ github_runner_user }}"
     group: "{{ github_runner_user }}"
     mode: "0700"
+
+- name: Ensure the authority systemd user unit directory exists
+  ansible.builtin.file:
+    path: "{{ live_vm_host_authority_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0700"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Install the dormant authority session-libvirtd user unit
+  ansible.builtin.copy:
+    dest: >-
+      {{ live_vm_host_authority_home
+      }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
+    content: |
+      [Unit]
+      Description=kdive dormant external-boot authority session libvirt daemon
+      ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt
+
+      [Service]
+      Type=forking
+      Environment=XDG_RUNTIME_DIR=/run/kdive/provider-authority
+      ExecStart=/usr/sbin/libvirtd --daemon \
+        --config /etc/kdive/libvirtd-external-boot-authority.conf \
+        --pid-file /run/kdive/provider-authority/libvirt/libvirtd.pid
+      PIDFile=/run/kdive/provider-authority/libvirt/libvirtd.pid
+      Restart=on-failure
+      RestartSec=5s
+
+      [Install]
+      WantedBy=default.target
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0644"
+  register: live_vm_host_authority_user_unit
+  when: live_vm_host_authority_enabled | bool
+  notify: Restart the dormant authority session libvirtd after deployed changes
+
+- name: Enable the dormant authority session-libvirtd user unit
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-external-boot-authority.service
+    scope: user
+    enabled: true
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_authority_uid }}"
+  become: true
+  become_user: "{{ live_vm_host_authority_account }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Start the dormant authority session libvirtd
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-external-boot-authority.service
+    scope: user
+    state: started
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ live_vm_host_authority_uid }}"
+  become: true
+  become_user: "{{ live_vm_host_authority_account }}"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Start the external-boot authority service
+  ansible.builtin.systemd_service:
+    name: kdive-external-boot-authority.service
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: live_vm_host_authority_enabled | bool
+
+- name: Apply authority service restarts before readiness validation
+  ansible.builtin.meta: flush_handlers
+  when: live_vm_host_authority_enabled | bool
+
+- name: Run the one-shot authority readiness probe
+  ansible.builtin.command: >-
+    {{ live_vm_host_authority_runtime_install }}/.venv/bin/python -m kdive
+    check-external-boot-authority-host
+  environment:
+    CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_GID: "{{ live_vm_host_authority_gid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID: "{{ live_vm_host_authority_client_gid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
+  become: true
+  become_user: "{{ live_vm_host_authority_account }}"
+  changed_when: false
+  when: live_vm_host_authority_enabled | bool
+
+- name: Create the transient authority proof identity
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Create the transient authority proof primary group
+      ansible.builtin.group:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        system: true
+        state: present
+
+    - name: Create the transient authority proof account
+      ansible.builtin.user:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        system: true
+        create_home: false
+        home: /nonexistent
+        shell: /usr/sbin/nologin
+        group: "{{ live_vm_host_authority_proof_account }}"
+        groups: ["{{ live_vm_host_authority_client_group }}"]
+        append: false
+
+    - name: Create the transient authority proof directory
+      ansible.builtin.file:
+        path: "{{ live_vm_host_authority_runtime_root }}/proof"
+        state: directory
+        owner: "{{ live_vm_host_authority_proof_account }}"
+        group: "{{ live_vm_host_authority_proof_account }}"
+        mode: "0700"
+
+    - name: Install transient authority proof material
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "{{ live_vm_host_authority_runtime_root }}/proof/{{ item.name }}"
+        owner: "{{ live_vm_host_authority_proof_account }}"
+        group: "{{ live_vm_host_authority_proof_account }}"
+        mode: "0400"
+      loop:
+        - {name: client-certificate, source: "{{ live_vm_host_authority_proof_client_certificate }}"}
+        - {name: client-key, source: "{{ live_vm_host_authority_proof_client_key }}"}
+        - {name: server-ca, source: "{{ live_vm_host_authority_server_ca_source }}"}
+        - {name: worker-credential, source: "{{ live_vm_host_authority_proof_worker_credential }}"}
+        - {name: request.json, source: "{{ live_vm_host_authority_proof_request }}"}
+      no_log: true
+
+    - name: Install the transient authority proof client
+      ansible.builtin.copy:
+        dest: "{{ live_vm_host_authority_runtime_root }}/proof/client.py"
+        owner: root
+        group: "{{ live_vm_host_authority_proof_account }}"
+        mode: "0550"
+        content: |
+          import asyncio
+          import json
+          import ssl
+          import sys
+          from pathlib import Path
+
+          from kdive.providers.external_boot_authority.transport import authority_server_name
+
+          ROOT = Path("/run/kdive/provider-authority/proof")
+
+          async def main() -> None:
+              mode = sys.argv[1]
+              context = ssl.create_default_context(
+                  ssl.Purpose.SERVER_AUTH,
+                  cafile=ROOT / "server-ca",
+              )
+              context.minimum_version = ssl.TLSVersion.TLSv1_3
+              context.maximum_version = ssl.TLSVersion.TLSv1_3
+              if mode != "no-certificate":
+                  context.load_cert_chain(ROOT / "client-certificate", ROOT / "client-key")
+              credential = (ROOT / "worker-credential").read_text().strip()
+              if mode == "bad-credential":
+                  credential += "-invalid"
+              request = json.loads((ROOT / "request.json").read_text())
+              envelope = json.dumps(
+                  {
+                      "credential": credential,
+                      "operation": "acknowledge-takeover",
+                      "request": request,
+                  },
+                  separators=(",", ":"),
+                  sort_keys=True,
+              ).encode()
+              reader, writer = await asyncio.open_unix_connection(
+                  "/run/kdive/provider-authority/request/authority.sock",
+                  ssl=context,
+                  server_hostname=authority_server_name("{{ live_vm_host_authority_instance }}"),
+              )
+              writer.write(len(envelope).to_bytes(4, "big") + envelope)
+              await writer.drain()
+              size = int.from_bytes(await reader.readexactly(4), "big")
+              response = json.loads(await reader.readexactly(size))
+              writer.close()
+              await writer.wait_closed()
+              expected = "unauthenticated" if mode == "bad-credential" else "provider-not-configured"
+              assert response == {"category": expected, "status": "error"}, response
+
+          try:
+              asyncio.run(main())
+          except (asyncio.IncompleteReadError, ConnectionError, OSError, ssl.SSLError):
+              if sys.argv[1] != "no-certificate":
+                  raise
+          else:
+              if sys.argv[1] == "no-certificate":
+                  raise SystemExit("server accepted a client without a certificate")
+
+    - name: Prove mutual TLS server client and worker authentication
+      ansible.builtin.command: >-
+        {{ live_vm_venv }}/.venv/bin/python
+        {{ live_vm_host_authority_runtime_root }}/proof/client.py {{ item }}
+      loop: [valid, bad-credential, no-certificate]
+      become: true
+      become_user: "{{ live_vm_host_authority_proof_account }}"
+      changed_when: false
+
 - name: Install the boot-persistent session libvirtd user unit
   ansible.builtin.copy:
     dest: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
@@ -912,7 +1467,10 @@
       Type=forking
       # The daemon's sockets and pid live under the dedicated runtime root, not /run/user.
       Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt
-      ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
+      # A lingering user manager can predate Ansible's group update. sg resolves the declared
+      # fixed-worker group on every start so libvirtd can apply unix_sock_group without a reboot.
+      ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c \
+        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'
       PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid
       Restart=on-failure
       RestartSec=5s
@@ -964,3 +1522,53 @@
 
 - name: Run the host-contract gate
   ansible.builtin.import_tasks: verify.yml
+
+- name: Retire the transient authority proof worker incarnation
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import os
+        from psycopg import connect
+
+        with connect(os.environ["AUTHORITY_ADMIN_DSN"]) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE worker_incarnations
+                          SET state='terminated', terminated_at=clock_timestamp(), outcome='killed'
+                        WHERE incarnation=%s AND state='active'""",
+                    (os.environ["AUTHORITY_PROOF_INCARNATION"],),
+                )
+  environment:
+    AUTHORITY_ADMIN_DSN: "{{ live_vm_host_authority_database_admin_dsn }}"
+    AUTHORITY_PROOF_INCARNATION: >-
+      {{ live_vm_host_authority_proof_incarnation }}
+  become: true
+  become_user: postgres
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_proof_enabled | bool
+  no_log: true
+  changed_when: true
+
+- name: Remove the transient authority proof identity and material
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Remove transient authority proof material
+      ansible.builtin.file:
+        path: "{{ live_vm_host_authority_runtime_root }}/proof"
+        state: absent
+
+    - name: Remove the transient authority proof account
+      ansible.builtin.user:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        state: absent
+        remove: true
+
+    - name: Remove the transient authority proof primary group
+      ansible.builtin.group:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        state: absent

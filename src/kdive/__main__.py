@@ -142,6 +142,28 @@ def _handle_lifecycle_witness(
     )
 
 
+def _handle_external_boot_authority_host(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del args, secret_registry, telemetry
+    from kdive.providers.external_boot_authority.host import AuthorityHostConfig, run_authority_host
+
+    asyncio.run(run_authority_host(AuthorityHostConfig.from_environment()))
+
+
+def _handle_check_external_boot_authority_host(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del args, secret_registry, telemetry
+    from kdive.providers.external_boot_authority.host import (
+        AuthorityHostConfig,
+        check_authority_host_once,
+    )
+
+    asyncio.run(check_authority_host_once(AuthorityHostConfig.from_environment()))
+    print("ready")
+
+
 def _handle_migrate(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
@@ -317,6 +339,16 @@ _COMMANDS: tuple[_Command, ...] = (
         "run the Kubernetes worker lifecycle authority",
         _handle_lifecycle_witness,
         runnable=True,
+    ),
+    _Command(
+        "external-boot-authority-host",
+        "run the fail-closed external-boot authority host",
+        _handle_external_boot_authority_host,
+    ),
+    _Command(
+        "check-external-boot-authority-host",
+        "check the external-boot authority host boundary once",
+        _handle_check_external_boot_authority_host,
     ),
     _Command("migrate", "apply database migrations", _handle_migrate, runnable=True),
     _Command(

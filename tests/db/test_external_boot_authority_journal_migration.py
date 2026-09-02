@@ -52,6 +52,7 @@ _FUNCTIONS = {
     "resolve_current_external_boot_authority(text,uuid,bigint,bigint,text)",
     "read_external_boot_authority_journal_head(text,uuid,bigint,text)",
     "advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,text,jsonb)",
+    "list_external_boot_authority_journal_heads(text)",
 }
 
 _DIGEST = "sha256:" + "d" * 64
@@ -316,11 +317,11 @@ def _allocate_successor(
     return successor_case, successor
 
 
-def test_migration_0124_is_the_unique_inventory_tail() -> None:
+def test_migration_0125_is_the_unique_inventory_tail() -> None:
     migrations = migrate.discover_migrations()
     assert (migrations[-1].version, migrations[-1].filename) == (
-        "0124",
-        "0124_external_boot_activation_binding.sql",
+        "0125",
+        "0125_external_boot_authority_head_inventory.sql",
     )
 
 
@@ -397,6 +398,7 @@ def test_journal_functions_are_security_definer_with_pinned_search_path(
     assert {row[0] for row in rows} == {
         "read_external_boot_authority_journal_head(text,uuid,bigint,text)",
         "advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,text,jsonb)",
+        "list_external_boot_authority_journal_heads(text)",
     }
     assert all(row[1] and row[2] == ['search_path=""'] for row in rows)
 

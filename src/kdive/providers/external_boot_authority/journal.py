@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -366,8 +367,10 @@ class FileAuthorityJournal:
             cls._validate_record(state, record)
         return state
 
-    def load(self) -> tuple[JournalRecordV1, ...]:
+    def load(self, *, deadline: float | None = None) -> tuple[JournalRecordV1, ...]:
         """Load and verify exact canonical bytes, sequence, chain, lane, and ownership."""
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("authority journal validation deadline exceeded")
         if self._entry_status() is None:
             self._cache = _JournalCache([], _ValidationState(), None, 0, b"")
             return ()
@@ -382,6 +385,8 @@ class FileAuthorityJournal:
                 state = _ValidationState()
                 consumed = 0
                 while line := stream.readline(MAX_MESSAGE_BYTES + 2):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("authority journal validation deadline exceeded")
                     consumed += len(line)
                     if consumed > self._max_bytes:
                         raise ValueError("authority journal exceeds configured byte maximum")

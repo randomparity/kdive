@@ -15,6 +15,7 @@ SERVICES = ("kdive-server", "kdive-worker", "kdive-reconciler")
 LIVE_WORKER = SYSTEM / "kdive-live-worker@.service"
 LIVE_SOCKET = SYSTEM / "kdive-live-worker-lifecycle.socket"
 LIVE_SERVICE = SYSTEM / "kdive-live-worker-lifecycle@.service"
+AUTHORITY_SERVICE = SYSTEM / "kdive-external-boot-authority.service"
 
 
 @pytest.mark.parametrize("name", SERVICES)
@@ -80,3 +81,39 @@ def test_live_lifecycle_service_uses_only_installed_root_witness() -> None:
     for directive in expected:
         assert directive in text
     assert text.count("ExecStart=") == 1
+
+
+def test_external_boot_authority_unit_is_isolated_and_supervised() -> None:
+    text = AUTHORITY_SERVICE.read_text(encoding="utf-8")
+    for directive in (
+        "Type=notify",
+        "NotifyAccess=main",
+        "After=systemd-tmpfiles-setup.service",
+        "Wants=systemd-tmpfiles-setup.service",
+        "User=kdive-provider-authority",
+        "Group=kdive-provider-authority",
+        "EnvironmentFile=/etc/kdive/provider-authority.env",
+        "LoadCredential=database-dsn:/etc/kdive/credentials/provider-authority/database-dsn",
+        "LoadCredential=service-credential:/etc/kdive/credentials/provider-authority/service-credential",
+        "LoadCredential=server-certificate:/etc/kdive/credentials/provider-authority/server-certificate",
+        "LoadCredential=server-ca:/etc/kdive/credentials/provider-authority/server-ca",
+        "LoadCredential=worker-client-ca:/etc/kdive/credentials/provider-authority/worker-client-ca",
+        "LoadCredential=health-client-certificate:/etc/kdive/credentials/provider-authority/health-client-certificate",
+        "LoadCredential=health-client-key:/etc/kdive/credentials/provider-authority/health-client-key",
+        "ExecStart=/opt/kdive-provider-authority/.venv/bin/python "
+        "-m kdive external-boot-authority-host",
+        "Restart=on-failure",
+        "RestartSec=5s",
+        "WatchdogSec=90s",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "RestrictAddressFamilies=AF_UNIX",
+        "ReadWritePaths=/var/lib/kdive/provider-authority/journal",
+        "ReadWritePaths=/run/kdive/provider-authority/request",
+    ):
+        assert directive in text
+    assert "service-credential:" in text
+    assert "sentinel" not in text

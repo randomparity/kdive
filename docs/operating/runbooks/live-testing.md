@@ -165,6 +165,12 @@ dependency for one of these: declare it in the owning Ansible role in the same
 change, or the next clean runner reprovision breaks (see the cross-platform and
 provisioning-parity notes in [AGENTS.md](../../../AGENTS.md)).
 
+The dormant external-boot authority host is not a fourth live-test tier and does not supply a
+provider adapter. Its one-shot readiness, journal-restoration, request-socket, and mutual-TLS
+diagnosis are owned by the [self-hosted KVM runner runbook](self-hosted-kvm-runner.md#dormant-external-boot-authority-diagnosis).
+Keep the current fixed-worker provider/KVM path for these tests; capability advertisement remains
+disabled until #2140.
+
 ### `live_vm_remote` — direct provider ops against a remote `qemu+tls://` host
 
 ```

@@ -19,6 +19,13 @@ INSTALLER = SYSTEMD / "install-live-worker-lifecycle.sh"
 MAIN_TASKS = ROLE / "tasks" / "main.yml"
 VERIFY_TASKS = ROLE / "tasks" / "verify.yml"
 DEFAULTS = ROLE / "defaults" / "main.yml"
+AUTHORITY_LIBVIRT_CONFIG = SYSTEMD / "libvirtd-external-boot-authority.conf"
+AUTHORITY_ENV = SYSTEMD / "provider-authority.env.example"
+AUTHORITY_SERVICE = SYSTEMD / "system" / "kdive-external-boot-authority.service"
+AUTHORITY_TEARDOWN = ROOT / "deploy" / "ansible" / "playbooks" / "authority_host_teardown.yml"
+AUTHORITY_PROOF = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
+AUTHORITY_PREFLIGHT = ROLE / "tasks" / "authority_preflight.yml"
+RUNNER_PLAY = ROOT / "deploy" / "ansible" / "playbooks" / "runner.yml"
 
 
 def _text(path: Path) -> str:
@@ -45,6 +52,336 @@ def test_fixed_slot_accounts_and_groups_are_declared() -> None:
     witness_dsn = defaults["live_vm_host_worker_witness_dsn"]
     assert isinstance(witness_dsn, str)
     assert "kdive-witness-member:kdive-witness-local" in witness_dsn
+
+
+def test_authority_endpoint_is_a_distinct_session() -> None:
+    assert AUTHORITY_LIBVIRT_CONFIG.is_file(), "missing authority endpoint configuration"
+
+    defaults = _yaml(DEFAULTS)
+    assert defaults["live_vm_host_authority_enabled"] is False
+    assert defaults["live_vm_host_authority_account"] == "kdive-provider-authority"
+    assert defaults["live_vm_host_authority_client_group"] == ("kdive-provider-authority-client")
+    assert defaults["live_vm_host_authority_runtime_root"] == ("/run/kdive/provider-authority")
+    assert defaults["live_vm_host_authority_libvirt_uri"] == (
+        "qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock"
+    )
+    assert defaults["live_vm_host_authority_denied_paths"] == [
+        "/opt/kdive-provider-authority",
+        "/etc/kdive/credentials/provider-authority",
+        "/var/lib/kdive/provider-authority",
+        "/var/lib/kdive/provider-authority/journal",
+        "/run/kdive/provider-authority",
+        "/run/kdive/provider-authority/request",
+        "/run/kdive/provider-authority/libvirt",
+    ]
+
+    config = _text(AUTHORITY_LIBVIRT_CONFIG)
+    assert 'unix_sock_group = "kdive-provider-authority"' in config
+    assert 'unix_sock_rw_perms = "0700"' in config
+    assert 'unix_sock_dir = "/run/kdive/provider-authority/libvirt"' in config
+    assert "kdive-live-libvirt" not in config
+    assert "/run/kdive/live-libvirt" not in config
+
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    for evidence in (
+        "Create the external-boot authority groups",
+        "Create the external-boot authority account",
+        "Inspect authority protected paths without following links",
+        "Create authority protected paths",
+        "Install the authority session-libvirt configuration",
+        "Install the dormant authority session-libvirtd user unit",
+        "Enable the dormant authority session-libvirtd user unit",
+        "Start the dormant authority session libvirtd",
+    ):
+        assert evidence in tasks
+    account = tasks[
+        tasks.index("- name: Create the external-boot authority account") : tasks.index(
+            "- name: Create the reconciler proof group"
+        )
+    ]
+    assert "create_home: false" in account
+    reconciler = tasks[
+        tasks.index("- name: Create the reconciler denial-proof identity") : tasks.index(
+            "- name: Enable linger for the external-boot authority account"
+        )
+    ]
+    assert "home: /opt/kdive" in reconciler
+    assert 'groups: ["{{ live_vm_host_authority_client_group }}"]' in tasks
+    assert "loginctl enable-linger {{ live_vm_host_authority_account }}" in tasks
+    runtime_environment = (
+        "Environment=XDG_RUNTIME_DIR=/run/kdive/provider-authority"  # pragma: allowlist secret
+    )
+    assert runtime_environment in tasks
+    assert (
+        "ExecStart=/usr/sbin/libvirtd --daemon \\\n"
+        "        --config /etc/kdive/libvirtd-external-boot-authority.conf \\\n"
+        "        --pid-file /run/kdive/provider-authority/libvirt/libvirtd.pid" in tasks
+    )
+    for path in (
+        "/opt/kdive-provider-authority",
+        "/etc/kdive/credentials/provider-authority",
+        "/var/lib/kdive/provider-authority/journal",
+        "/run/kdive/provider-authority/request",
+        "/run/kdive/provider-authority/libvirt",
+    ):
+        assert path in tasks
+        assert path in verify
+    assert "Assert the dormant authority endpoint is distinct and reachable" in verify
+    assert "Verify the authority session-libvirtd user unit syntax" in verify
+    assert "Prove fixed workers and the reconciler cannot traverse authority paths" in verify
+    assert "(live_vm_host_worker_accounts + ['kdive'])" in verify
+    assert "cannot access the authority mutation socket" in verify
+    assert "cannot read the authority provider config" in verify
+    assert "cannot access authority provider objects" in verify
+    assert "virsh -c {{ live_vm_host_authority_libvirt_uri }} list" in verify
+
+
+def test_existing_worker_provider_contract_is_preserved() -> None:
+    defaults = _yaml(DEFAULTS)
+    assert defaults["live_vm_host_worker_accounts"] == [
+        f"kdive-worker-{slot}" for slot in range(1, 9)
+    ]
+    assert defaults["live_vm_host_worker_control_group"] == "kdive-live-control"
+    assert defaults["live_vm_host_worker_libvirt_group"] == "kdive-live-libvirt"
+    assert defaults["live_vm_host_worker_libvirt_runtime"] == "/run/kdive/live-libvirt"
+    assert defaults["live_vm_host_worker_libvirt_uri"] == (
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock"
+    )
+    assert _text(SYSTEMD / "libvirtd-live.conf") == (
+        "# Dedicated session daemon shared by the operator and fixed KDIVE worker accounts.\n"
+        'unix_sock_group = "kdive-live-libvirt"\n'
+        'unix_sock_rw_perms = "0770"\n'
+        'unix_sock_dir = "/run/kdive/live-libvirt/libvirt"\n'
+    )
+    assert _text(SYSTEMD / "system" / "kdive-live-worker@.service") == (
+        "[Unit]\n"
+        "Description=KDIVE retained live worker slot %i\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        "User=kdive-worker-%i\n"
+        "SupplementaryGroups=kdive-live-libvirt\n"
+        "EnvironmentFile=/var/lib/kdive/live-workers/slots/%i/worker.env\n"
+        "LoadCredential=worker-incarnation:"
+        "/var/lib/kdive/live-workers/slots/%i/worker-incarnation.credential\n"
+        "ExecStart=/usr/local/libexec/kdive-live-worker-gate %i\n"
+        "Restart=no\n"
+        "KillMode=control-group\n"
+        "ExitType=cgroup\n"
+        "RemainAfterExit=yes\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    assert 'groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]' in tasks
+    assert "Start the operator-owned dedicated session libvirtd" in tasks
+    assert "Verify existing worker provider path remains usable after authority endpoint" in verify
+    assert "Verify every worker can use the KVM device" in verify
+    assert "live_vm_host_authority_client_group" in verify
+    assert "or live_vm_host_authority_client_group in" in verify
+
+
+def test_ansible_installs_authority_in_clean_host_order() -> None:
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    defaults = _yaml(DEFAULTS)
+
+    assert AUTHORITY_SERVICE.is_file()
+    assert AUTHORITY_ENV.is_file()
+    assert AUTHORITY_TEARDOWN.is_file()
+    assert AUTHORITY_PROOF.is_file()
+    assert AUTHORITY_PREFLIGHT.is_file()
+    assert defaults["live_vm_host_authority_runtime_install"] == "/opt/kdive-provider-authority"
+    assert defaults["live_vm_host_authority_credentials_dir"] == (
+        "/etc/kdive/credentials/provider-authority"
+    )
+    assert defaults["live_vm_host_authority_database_login"] == "kdive_authority_host"
+    authority_packages = defaults["live_vm_host_authority_packages"]
+    assert isinstance(authority_packages, list)
+    assert "python3-psycopg" in authority_packages
+    assert '- {path: /etc/kdive/credentials, mode: "0711"}' in tasks
+    assert 'mode: "2750"' in tasks[tasks.index("Create authority protected children") :]
+
+    ordered = (
+        "Install external-boot authority prerequisites",
+        "Create the external-boot authority groups",
+        "Create the external-boot authority account",
+        "Create authority protected paths",
+        "Install KDIVE into the authority venv",
+        "Install external-boot authority credentials",
+        "Install the external-boot authority environment",
+        "Install the external-boot authority service unit",
+        "Start the dormant authority session libvirtd",
+        "Start the external-boot authority service",
+        "Run the one-shot authority readiness probe",
+        "Create the transient authority proof identity",
+        "Prove mutual TLS server client and worker authentication",
+        "Retire the transient authority proof worker incarnation",
+        "Remove the transient authority proof identity",
+    )
+    positions = [tasks.index(f"- name: {name}") for name in ordered]
+    assert positions == sorted(positions)
+
+    for evidence in (
+        "Assert the authority service is ready",
+        "Assert the authority database LOGIN is least privilege",
+        "Prove fixed workers and the reconciler cannot traverse authority paths",
+        "Verify existing worker provider path remains usable after authority endpoint",
+        "Prove authority service restart restores readiness",
+        "Prove authority readiness retracts on credential and ACL drift",
+        "Prove journal restoration gates authority readiness",
+    ):
+        assert evidence in verify
+    assert "NRestarts" in verify
+
+    preflight = _text(AUTHORITY_PREFLIGHT)
+    assert "Validate external-boot authority inputs before host mutation" in preflight
+    for source in (
+        "live_vm_host_authority_database_dsn_source",
+        "live_vm_host_authority_server_key_source",
+        "live_vm_host_authority_server_certificate_source",
+        "live_vm_host_authority_server_ca_source",
+        "live_vm_host_authority_worker_client_ca_source",
+        "live_vm_host_authority_health_client_certificate_source",
+        "live_vm_host_authority_health_client_key_source",
+    ):
+        assert source in preflight
+    assert tasks.index("authority_preflight.yml") < tasks.index(
+        "Install external-boot authority prerequisites"
+    )
+    runner_play = _text(RUNNER_PLAY)
+    assert runner_play.index("authority_preflight.yml") < runner_play.index("roles:")
+
+    proof = _text(AUTHORITY_PROOF)
+    assert proof.startswith("#!/bin/bash\nset -euo pipefail\n")
+    assert "git bundle create" in proof
+    assert "live_vm_repo_url" in proof
+    assert "live_vm_repo_version" in proof
+    assert "git rev-parse HEAD" in proof
+    assert "authority_host_teardown.yml" in proof
+    assert "teardown pass 1" in proof
+    assert "teardown pass 2" in proof
+    assert "reboot: validating boot-persistent authority services" in proof
+    assert "provision: installing exact revision $revision" in proof
+    assert "live_vm_repo_version: $revision" in proof
+    assert "upgrade: installing exact revision" in proof
+    assert "proof: exercising authority failure boundaries" in proof
+    assert "converged: rerunning the exact revision" in proof
+    assert "authority_inputs_digest" in proof
+    assert "converged: unrelated changed task groups" in proof
+    assert "changed=0" not in proof
+    assert '--extra-vars "live_vm_host_authority_enabled=true"' in proof
+    assert "cleanup_remote_proof" in proof
+    assert proof.index("upgrade: installing exact revision") < proof.index(
+        "proof: exercising authority failure boundaries"
+    )
+    assert "--set=password=" not in proof
+    assert "ub26-big.dev.pdx.drc.nz" not in proof
+    assert "Clone the exact Git bundle for the venv" in tasks
+    assert "live_vm_repo_url.endswith('.bundle')" in tasks
+    assert "asyncio.IncompleteReadError" in tasks
+
+    teardown = _text(AUTHORITY_TEARDOWN)
+    assert "/usr/bin/python3" in teardown
+    assert "from psycopg import connect, sql" in teardown
+    assert "PGDATABASE:" not in teardown
+    for evidence in (
+        "Require the authority database administrative DSN",
+        "Stop and disable the external-boot authority service",
+        "Stop and disable the dormant authority endpoint",
+        "Revoke the authority database LOGIN",
+        "Assert the authority database LOGIN is revoked",
+        "Assert authority services and processes are inactive",
+        "Remove transient proof identity and material",
+        "Retire the transient proof worker incarnation",
+        "Assert authority units and endpoint artifacts are absent",
+        "Assert retained authority evidence remains",
+        "Verify the fixed-worker provider path remains usable",
+    ):
+        assert evidence in teardown
+    assert "failed_when: false" not in teardown
+    assert '"{{ authority_install }}"' in teardown
+
+    journal_drift = verify[
+        verify.index("- name: Prove journal restoration gates authority readiness") : verify.index(
+            "- name: Prove authority readiness retracts on credential and ACL drift"
+        )
+    ]
+    access_drift = verify[
+        verify.index(
+            "- name: Prove authority readiness retracts on credential and ACL drift"
+        ) : verify.index("- name: Create root-owned permission-probe markers for every slot")
+    ]
+    assert "  always:" in journal_drift
+    assert "  always:" in access_drift
+
+    assert "from psycopg import connect" in tasks
+    assert "PGDATABASE:" not in tasks
+
+
+def test_authority_teardown_reports_login_revocation_only_on_transition() -> None:
+    document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
+    assert isinstance(document, list)
+    play = cast(dict[str, object], document[0])
+    tasks = cast(list[object], play["tasks"])
+    revoke = cast(
+        dict[str, object],
+        next(
+            task
+            for task in tasks
+            if isinstance(task, dict) and task.get("name") == "Revoke the authority database LOGIN"
+        ),
+    )
+
+    assert revoke["register"] == "authority_database_login_revocation"
+    assert revoke["changed_when"] == (
+        'authority_database_login_revocation.stdout == "login-revoked"'
+    )
+    assert revoke["no_log"] is True
+    command = cast(dict[str, object], revoke["ansible.builtin.command"])
+    argv = cast(list[object], command["argv"])
+    script = argv[-1]
+    assert isinstance(script, str)
+    assert "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s" in script
+    assert 'print("login-revoked")' in script
+
+
+def test_authority_services_restart_on_deployed_input_changes() -> None:
+    tasks = _text(MAIN_TASKS)
+    for registration in (
+        "live_vm_host_authority_install",
+        "live_vm_host_authority_credentials",
+        "live_vm_host_authority_environment_result",
+        "live_vm_host_authority_service_unit",
+        "live_vm_host_authority_libvirt_config",
+        "live_vm_host_authority_user_unit",
+    ):
+        assert f"register: {registration}" in tasks
+    assert "Restart the dormant authority session libvirtd after deployed changes" in tasks
+    assert "Restart the external-boot authority service after deployed changes" in tasks
+    assert tasks.index(
+        "Restart the external-boot authority service after deployed changes"
+    ) < tasks.index("Run the one-shot authority readiness probe")
+
+
+def test_authority_runtime_is_recreated_at_boot_with_exact_acl() -> None:
+    tasks = _text(MAIN_TASKS)
+    assert "Install the external-boot authority tmpfiles policy" in tasks
+    assert "Apply the external-boot authority tmpfiles policy" in tasks
+    assert "d /run/kdive/provider-authority 0710" in tasks
+    assert "d /run/kdive/provider-authority/request 2750" in tasks
+    assert "d /run/kdive/provider-authority/libvirt 0700" in tasks
+    assert "ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt" in tasks
+
+
+def test_fixed_worker_user_unit_renders_the_configured_libvirt_group() -> None:
+    tasks = _text(MAIN_TASKS)
+    assert "ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c" in tasks
+    assert "ExecStart=/usr/bin/sg kdive-live-libvirt -c" not in tasks
 
 
 def test_ansible_uses_declarative_account_and_file_modules() -> None:
@@ -540,10 +877,15 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
 def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
     """The dedicated session daemon survives reboots (#2032): linger + an enabled user unit."""
     tasks = _text(MAIN_TASKS)
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["live_vm_host_packages"]
+    assert isinstance(packages, list)
+    assert "login" in packages
     assert "kdive-libvirtd-live.service" in tasks
     assert (
-        "ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
-        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid" in tasks
+        "ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c \\\n"
+        "        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
+        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'" in tasks
     )
     # The user manager is reached through the runner's XDG_RUNTIME_DIR (no login session needed).
     enable = tasks.index("- name: Enable the boot-persistent session libvirtd user unit")

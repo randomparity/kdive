@@ -714,6 +714,7 @@ def test_sweep_is_silent_after_exact_concurrent_removal_finishes(
         container,
         get_results=[container, container, docker.errors.NotFound("gone")],
     )
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", tmp_path / "sweep.lock")
     monkeypatch.setattr(xdist_backend, "_REMOVAL_POLL_S", 0.0)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
