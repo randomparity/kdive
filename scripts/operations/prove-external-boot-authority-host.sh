@@ -106,7 +106,10 @@ git -C "$source_root" checkout -q "$revision"
 install -d -m 0700 "$secrets"
 
 install -m 0600 /dev/null "$remote_root/inventory"
-printf '[live_vm_runners]\nlocalhost ansible_connection=local\n' >"$remote_root/inventory"
+printf '%s\n' \
+  '[live_vm_runners]' \
+  'localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3' \
+  >"$remote_root/inventory"
 install -m 0600 /dev/null "$remote_root/proof.yml"
 cat >"$remote_root/proof.yml" <<EOF
 ---
