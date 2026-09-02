@@ -99,6 +99,8 @@ class SeedActivation(Protocol):
         state: ExternalBootActivationState,
         cleanup_complete: bool = False,
         ready_reservation: bool = False,
+        system_id: UUID | None = None,
+        run_id: UUID | None = None,
     ) -> SeededActivation: ...
 
 
@@ -305,41 +307,54 @@ async def _insert_attempt(conn: AsyncConnection, activation: ExternalBootActivat
     )
 
 
-@pytest.fixture
-def seeded_activation() -> SeedActivation:
-    """Seed one activation in a requested state, with the System and Run it is bound to."""
+async def seed_activation(
+    conn: AsyncConnection,
+    *,
+    state: ExternalBootActivationState,
+    cleanup_complete: bool = False,
+    ready_reservation: bool = False,
+    system_id: UUID | None = None,
+    run_id: UUID | None = None,
+) -> SeededActivation:
+    """Seed one activation in a requested state, with the System and Run it is bound to.
 
-    async def _seed(
-        conn: AsyncConnection,
-        *,
-        state: ExternalBootActivationState,
-        cleanup_complete: bool = False,
-        ready_reservation: bool = False,
-    ) -> SeededActivation:
+    ``system_id`` / ``run_id`` restrict an **existing** System and Run instead — the call-site
+    tests drive real handlers, which need a System seeded by the lifecycle helpers rather than
+    the minimal owners this inserts on its own. Exposed as a plain function as well as the
+    ``seeded_activation`` fixture, because tests outside this package cannot reach the fixture
+    and must not grow a second insert path.
+    """
+    if (system_id is None) != (run_id is None):
+        raise ValueError("pass both system_id and run_id, or neither")
+    if system_id is None or run_id is None:
         system_id, run_id = uuid4(), uuid4()
         await _insert_owners(conn, system_id, run_id)
-        activation = build_activation(
-            activation_id=uuid4(),
-            system_id=system_id,
-            run_id=run_id,
-            state=state,
-            cleanup_complete=cleanup_complete,
-        )
-        placeholders = ", ".join(["%s"] * len(_ACTIVATION_COLUMNS))
+    activation = build_activation(
+        activation_id=uuid4(),
+        system_id=system_id,
+        run_id=run_id,
+        state=state,
+        cleanup_complete=cleanup_complete,
+    )
+    placeholders = ", ".join(["%s"] * len(_ACTIVATION_COLUMNS))
+    await conn.execute(
+        f"INSERT INTO external_boot_activations ({', '.join(_ACTIVATION_COLUMNS)}) "  # noqa: S608
+        f"VALUES ({placeholders})",
+        tuple(_column_value(activation, column) for column in _ACTIVATION_COLUMNS),
+    )
+    if activation.current_attempt_id is not None:
+        await _insert_attempt(conn, activation)
+    if ready_reservation:
         await conn.execute(
-            f"INSERT INTO external_boot_activations ({', '.join(_ACTIVATION_COLUMNS)}) "  # noqa: S608
-            f"VALUES ({placeholders})",
-            tuple(_column_value(activation, column) for column in _ACTIVATION_COLUMNS),
+            "INSERT INTO external_boot_reservations "
+            "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
+            "VALUES (%s, 'stores/main', %s, 4096, 'ready', %s)",
+            (activation.id, f"owners/{activation.id}", _AT),
         )
-        if activation.current_attempt_id is not None:
-            await _insert_attempt(conn, activation)
-        if ready_reservation:
-            await conn.execute(
-                "INSERT INTO external_boot_reservations "
-                "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
-                "VALUES (%s, 'stores/main', %s, 4096, 'ready', %s)",
-                (activation.id, f"owners/{activation.id}", _AT),
-            )
-        return SeededActivation(activation=activation, system_id=system_id, run_id=run_id)
+    return SeededActivation(activation=activation, system_id=system_id, run_id=run_id)
 
-    return _seed
+
+@pytest.fixture
+def seeded_activation() -> SeedActivation:
+    """The :func:`seed_activation` seeding path, as a fixture."""
+    return seed_activation

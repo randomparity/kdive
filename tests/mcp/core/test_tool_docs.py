@@ -9,7 +9,6 @@ documented, the destructive hint matches the reviewed set, and every
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import re
 import textwrap
@@ -18,17 +17,11 @@ from pathlib import Path
 from typing import Any, cast, get_type_hints
 
 import pytest
-from fastmcp.server.auth.providers.jwt import JWTVerifier
-from fastmcp.tools.function_tool import FunctionTool
-from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
-from kdive.mcp.assembly.app import build_app
-from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from kdive.profiles.build import BuildProfile
-from kdive.security.secrets.secret_registry import SecretRegistry
 from scripts.generate.gen_tool_reference import (
     _BUILD_PROFILE_EXAMPLES,
     _MAX_SCHEMA_DEPTH,
@@ -36,7 +29,7 @@ from scripts.generate.gen_tool_reference import (
     render_param_detail,
     render_schema_type,
 )
-from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
+from tests.mcp.tool_registry_support import build_registered_tools
 
 _HERE = Path(__file__).resolve()
 _REPO_ROOT = next(parent for parent in _HERE.parents if (parent / "pyproject.toml").is_file())
@@ -175,22 +168,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
 }
 
 
-def _build_tools() -> list[FunctionTool]:
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    kp = make_keypair()
-    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(
-        pool,
-        verifier=verifier,
-        secret_registry=SecretRegistry(),
-        worker_death_verifier=CatalogWorkerDeathVerifier(),
-    )
-    # list_tools() is typed as Sequence[mcp.types.Tool] but the fastmcp runtime
-    # returns list[FunctionTool] — cast to the concrete type so the rest of the
-    # module can access .fn / .meta / .annotations without type errors.
-    return cast(list[FunctionTool], asyncio.run(app.list_tools()))
-
-
 def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     """Whether ``fn`` calls ``target`` directly or via a delegate it transitively calls.
 
@@ -281,7 +258,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     return _walk(fn)
 
 
-TOOLS = _build_tools()
+TOOLS = build_registered_tools()
 
 
 def test_every_tool_has_a_description() -> None:

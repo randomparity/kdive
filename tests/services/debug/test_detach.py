@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 from uuid import UUID
 
 import psycopg
+import pytest
 
 from kdive.db.repositories import SYSTEMS
-from kdive.domain.capacity.state import DebugSessionState, SystemState
+from kdive.domain.capacity.state import (
+    DebugSessionState,
+    ExternalBootActivationState,
+    SystemState,
+)
+from kdive.providers.ports.handles import TransportHandle
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
+from kdive.services.debug.lifecycle import detach_locked
+from kdive.services.external_boot import ExternalBootDenied
 from tests.reconciler.conftest import connect, seed_debug_session, seed_run, seed_system
+from tests.services.external_boot.conftest import seed_activation
 
 
 async def _session_state(conn: psycopg.AsyncConnection, session_id: UUID) -> str:
@@ -87,6 +99,51 @@ def test_detach_audit_event_captures_force_crash_transition(migrated_url: str) -
         assert event.transition == "live->detached"
         assert event.args == {"system_id": str(system_id)}
         assert event.project == "proj"
+        await conn.close()
+
+    asyncio.run(_run())
+
+
+class _InertConnector:
+    """Records closes; a denied detach must not reach it."""
+
+    def __init__(self) -> None:
+        self.closed: list[str] = []
+
+    def close_transport(self, handle: TransportHandle) -> None:
+        self.closed.append(str(handle))
+
+
+def test_detach_locked_is_denied_for_a_session_run_that_does_not_own_the_activation(
+    migrated_url: str,
+) -> None:
+    """ADR-0583: ``debug_detach`` is owning-Run scoped, and the guard precedes the transition."""
+
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        system_id = await seed_system(conn, system_state=SystemState.READY)
+        owning_run_id = await seed_run(conn, system_id)
+        other_run_id = await seed_run(conn, system_id)
+        session_id = await seed_debug_session(
+            conn, other_run_id, state=DebugSessionState.LIVE, transport_handle="handle-1"
+        )
+        await seed_activation(
+            conn,
+            state=ExternalBootActivationState.ACTIVE,
+            system_id=system_id,
+            run_id=owning_run_id,
+        )
+        connector = _InertConnector()
+        ctx = RequestContext(
+            principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.ADMIN}
+        )
+
+        with pytest.raises(ExternalBootDenied) as denied:
+            await detach_locked(conn, ctx, session_id, system_id, cast(Any, connector))
+
+        assert denied.value.next_actions == ["runs.get", "runs.release_external_boot"]
+        assert connector.closed == []
+        assert await _session_state(conn, session_id) == DebugSessionState.LIVE.value
         await conn.close()
 
     asyncio.run(_run())

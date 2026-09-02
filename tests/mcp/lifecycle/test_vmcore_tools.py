@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.db.repositories import IMAGE_CATALOG
-from kdive.domain.capacity.state import JobState
+from kdive.domain.capacity.state import ExternalBootActivationState, JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
@@ -45,6 +45,7 @@ from tests.mcp._seed import _PROFILE as _SEED_PROFILE
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_str
 from tests.mcp.systems_support import provider_resolver
+from tests.services.external_boot.conftest import seed_activation
 
 _AUTH = Authorizing(principal="u", agent_session="s", project="proj")
 _TEST_CAPTURE_METHODS = frozenset({CaptureMethod.HOST_DUMP})
@@ -1637,3 +1638,31 @@ def test_register_handlers_binds_capture_vmcore() -> None:
         artifact_store=capture_double,
     )
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None
+
+
+def test_vmcore_fetch_is_denied_for_a_run_that_does_not_own_the_activation(
+    migrated_url: str,
+) -> None:
+    """ADR-0583: ``capture_vmcore`` is owning-Run scoped, so a sibling Run is refused."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, owning_run = await _crashed_run(pool)
+            other_run = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
+            async with pool.connection() as conn:
+                await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.ACTIVE,
+                    system_id=UUID(sys_id),
+                    run_id=UUID(owning_run),
+                )
+            resp = await _fetch_vmcore(pool, _ctx(), run_id=other_run)
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.object_id == other_run
+            assert resp.suggested_next_actions == ["runs.get", "runs.release_external_boot"]
+            async with pool.connection() as conn:
+                cur = await conn.execute("SELECT count(*) FROM jobs WHERE kind = 'capture_vmcore'")
+                row = await cur.fetchone()
+                assert row is not None and row[0] == 0
+
+    asyncio.run(_run())

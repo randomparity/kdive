@@ -21,6 +21,7 @@ from pydantic import SecretStr
 from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.capacity.state import (
     AllocationState,
+    ExternalBootActivationState,
     InvestigationState,
     JobState,
     RunState,
@@ -77,6 +78,7 @@ from tests.mcp.lifecycle.runs_support import (
     seed_system,
 )
 from tests.mcp.systems_support import provider_resolver
+from tests.services.external_boot.conftest import seed_activation
 from tests.support.object_store import INERT_OBJECT_STORE
 from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
@@ -6550,5 +6552,36 @@ def test_set_run_requires_contributor(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             with pytest.raises(AuthorizationError):
                 await set_run(pool, ctx(Role.VIEWER), run_id, outcome_note="note")
+
+    asyncio.run(_run())
+
+
+def test_install_is_denied_while_an_external_boot_activation_restricts_the_system(
+    migrated_url: str,
+) -> None:
+    """ADR-0583 rejects install and re-stage even for the Run that owns the activation."""
+
+    async def _run() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None and run.system_id is not None
+                await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.ACTIVE,
+                    system_id=run.system_id,
+                    run_id=run.id,
+                )
+            resp = await install(pool, ctx(), run_id)
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.object_id == run_id
+            assert resp.suggested_next_actions == ["runs.get", "runs.release_external_boot"]
+            async with pool.connection() as conn:
+                cur = await conn.execute(
+                    "SELECT count(*) FROM jobs WHERE dedup_key = %s", (f"{run_id}:install",)
+                )
+                row = await cur.fetchone()
+                assert row is not None and row[0] == 0
 
     asyncio.run(_run())

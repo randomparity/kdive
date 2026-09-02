@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -21,6 +22,11 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 _TERMINAL_JOB = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
 _NEXT_ACTIONS = ["runs.create"]
@@ -58,8 +64,31 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
 
 
 async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -> ToolResponse:
-    """Transition the Run + best-effort cancel its build job under the per-Run lock."""
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+    """Transition the Run + best-effort cancel its build job under the per-Run lock.
+
+    An unbound Run (ADR-0169) has no System to lock or to decide admission against, so the
+    SYSTEM lock is genuinely conditional here — unlike install and boot, which return
+    ``_not_bound`` before they reach their locks. SYSTEM leads RUN in the total co-hold order.
+
+    ``conn`` has already read the Run, so the stack's transaction is a SAVEPOINT: the locks
+    release at end-of-request, and only the envelope render follows the block.
+    """
+    async with AsyncExitStack() as locks:
+        await locks.enter_async_context(conn.transaction())
+        if run.system_id is not None:
+            await locks.enter_async_context(
+                advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)
+            )
+        await locks.enter_async_context(advisory_xact_lock(conn, LockScope.RUN, run.id))
+        if run.system_id is not None:
+            try:
+                await check_external_boot_admission(
+                    conn, run.system_id, ExternalBootOperation.RUN_CANCEL
+                )
+            except ExternalBootDenied as exc:
+                return ToolResponse.failure_from_error(
+                    str(run.id), exc, suggested_next_actions=exc.next_actions
+                )
         locked = await RUNS.get(conn, run.id)
         prior = locked.state if locked is not None else run.state
         try:

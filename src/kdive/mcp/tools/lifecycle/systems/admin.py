@@ -44,6 +44,11 @@ from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.validation import (
@@ -165,6 +170,14 @@ async def _reprovision_in_lock(
     # System is iterating, not administering. Enforced in-handler (the handler-direct path
     # bypasses the registrar gate), mirroring control.power.
     require_role(ctx, system.project, Role.CONTRIBUTOR)
+    try:
+        await check_external_boot_admission(
+            conn, system_id, ExternalBootOperation.SYSTEM_REPROVISION
+        )
+    except ExternalBootDenied as exc:
+        return ToolResponse.failure_from_error(
+            str(system_id), exc, suggested_next_actions=exc.next_actions
+        )
     try:
         # An upload-rootfs reprovision resolves the base within the System's investigation, so the
         # System must already carry a write-once binding (ADR-0441 §2); reject a missing one here
@@ -369,6 +382,9 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
+        # ADR-0583 admits teardown in every restricted state, so this can only ever return; it is
+        # called for symmetry with the other System-lifecycle sites.
+        await check_external_boot_admission(conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN)
         if system.state is SystemState.TORN_DOWN:
             # The System is already terminal, but its Allocation may still be `active`; point the
             # agent at the second wind-down step so the idempotent replay steers identically to a

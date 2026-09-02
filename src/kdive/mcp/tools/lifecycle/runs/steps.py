@@ -32,6 +32,11 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 from kdive.services.runs.build_catalog import resolve_build, resolve_build_expiry
 from kdive.services.runs.steps import (
     build_baked_cmdline_extra,
@@ -178,14 +183,29 @@ async def _restage_and_enqueue_install(
         audit_args["cmdline"] = cmdline.strip()
     if crashkernel is not None:
         audit_args["crashkernel"] = crashkernel.strip()
+    # SYSTEM leads the block: the total co-hold order is SYSTEM -> INVESTIGATION -> RUN
+    # (locks.py), and peers already hold ALLOCATION -> SYSTEM. `install_run` returns
+    # `_not_bound` for an unbound Run, so `run.system_id` is set by the time this runs.
+    # `conn` has already read the Run, so this is a SAVEPOINT: every lock here releases at
+    # end-of-request. Only the envelope render follows the block.
+    system_id = run.require_system_id()
     async with (
         conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, run.investigation_id),
         advisory_xact_lock(conn, LockScope.RUN, run.id),
     ):
         locked_run = await RUNS.get(conn, run.id)
         if locked_run is None or locked_run.investigation_id != run.investigation_id:
             return _config_error(str(run.id))
+        try:
+            await check_external_boot_admission(
+                conn, system_id, ExternalBootOperation.RUN_INSTALL, run_id=run.id
+            )
+        except ExternalBootDenied as exc:
+            return ToolResponse.failure_from_error(
+                str(run.id), exc, suggested_next_actions=exc.next_actions
+            )
         requested_cmdline = (
             cmdline.strip()
             if cmdline is not None
@@ -440,7 +460,24 @@ async def _enqueue_step(
     a pre-existing job was returned unchanged (no fresh boot enqueued), ``False`` for a fresh or
     recycled boot.
     """
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+    # SYSTEM leads the block (locks.py total order). `boot_run` returns `_not_bound` for an
+    # unbound Run, so `run.system_id` is set by the time this runs. `conn` has already read the
+    # Run, so this is a SAVEPOINT: the locks release at end-of-request, and only the envelope
+    # render follows the block.
+    system_id = run.require_system_id()
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+        advisory_xact_lock(conn, LockScope.RUN, run.id),
+    ):
+        try:
+            await check_external_boot_admission(
+                conn, system_id, ExternalBootOperation.RUN_BOOT, run_id=run.id
+            )
+        except ExternalBootDenied as exc:
+            return ToolResponse.failure_from_error(
+                str(run.id), exc, suggested_next_actions=exc.next_actions
+            )
         if force:
             progress = await step_progress(conn, run.id)
             if progress.boot == RUN_STEP_RUNNING:

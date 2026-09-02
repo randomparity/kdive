@@ -26,6 +26,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
@@ -75,6 +76,11 @@ from kdive.security.artifacts.bpf_filter import hygiene_reason
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 _FORCE_CRASH = JobKind.FORCE_CRASH
 # Idempotency-store kinds (the registered tool names); ADR-0193.
@@ -152,14 +158,26 @@ async def power_system(
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_POWER_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_POWER
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        system_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_POWER_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def _authorize_destructive(
@@ -250,14 +268,26 @@ async def force_crash_system(
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_FORCE_CRASH_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.FORCE_CRASH
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        system_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_FORCE_CRASH_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def diagnostic_sysrq_system(
@@ -312,14 +342,26 @@ async def diagnostic_sysrq_system(
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_DIAGNOSTIC_SYSRQ_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_SYSRQ
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        system_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_DIAGNOSTIC_SYSRQ_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def watch_for_crash_system(
@@ -383,14 +425,26 @@ async def watch_for_crash_system(
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_WATCH_FOR_CRASH_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        system_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_WATCH_FOR_CRASH_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def capture_traffic_system(
@@ -508,14 +562,26 @@ async def _capture_traffic(
                 )
                 return job_envelope(job, "run_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=run.project,
-                kind=_CAPTURE_TRAFFIC_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+                try:
+                    await check_external_boot_admission(
+                        conn, system.id, ExternalBootOperation.CAPTURE_TRAFFIC, run_id=uid
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        run_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=run.project,
+                    kind=_CAPTURE_TRAFFIC_KIND,
+                    do_work=_enqueue,
+                )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:

@@ -28,6 +28,7 @@ from kdive.db.repositories import (
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
+    ExternalBootActivationState,
     InvestigationState,
     ResourceStatus,
     RunState,
@@ -60,6 +61,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import provider_resolver
+from tests.services.external_boot.conftest import seed_activation
 
 _DT = datetime(2026, 7, 17, tzinfo=UTC)
 
@@ -699,6 +701,39 @@ def test_viewer_is_denied_the_mutating_snapshot_tools(migrated_url: str) -> None
                 await _snapshot(pool, _ctx(role=Role.VIEWER), resolver, sid, "cp")
             with pytest.raises(RoleDenied):
                 await _restore(pool, _ctx(role=Role.VIEWER), resolver, sid, "cp")
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_restore_is_denied_while_an_external_boot_activation_restricts_the_system(
+    migrated_url: str,
+) -> None:
+    """ADR-0583: a restricted System admits no snapshot op, however healthy it looks."""
+
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            run_id = await _seed_run(pool, sid, RunState.SUCCEEDED)
+            await _seed_snapshot(pool, sid, "before-bug", SnapshotState.AVAILABLE)
+            async with pool.connection() as conn:
+                await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.ACTIVE,
+                    system_id=sid,
+                    run_id=run_id,
+                )
+            resp = await _restore(pool, _ctx(), provider_resolver(), sid, "before-bug")
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.suggested_next_actions == ["runs.get", "runs.release_external_boot"]
+            assert resp.data["activation_state"] == "active"
+            async with pool.connection() as conn:
+                sys_row = await SYSTEMS.get(conn, sid)
+                assert sys_row is not None and sys_row.state is SystemState.READY
+            assert await _job_count(pool, sid, JobKind.RESTORE) == 0
         finally:
             await pool.close()
 

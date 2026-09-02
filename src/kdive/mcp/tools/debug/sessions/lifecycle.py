@@ -73,6 +73,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.serialization import JsonValue
 from kdive.services.debug import lifecycle as debug_lifecycle
+from kdive.services.external_boot import ExternalBootDenied
 
 if TYPE_CHECKING:
     from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, DebugRuntimeResolver
@@ -520,6 +521,11 @@ async def _attach_debug_session(
         async with pool.connection() as conn:
             try:
                 return await insert_session_locked(conn, ctx, request, opened)
+            except ExternalBootDenied as exc:
+                await _close(request.connector, str(opened))
+                return ToolResponse.failure_from_error(
+                    str(request.run.id), exc, suggested_next_actions=exc.next_actions
+                )
             except Exception:
                 await _close(request.connector, str(opened))
                 raise
@@ -644,7 +650,12 @@ async def _detach_locked(
     system_id: UUID,
     connector: Connector,
 ) -> ToolResponse:
-    result = await debug_lifecycle.detach_locked(conn, ctx, session_id, system_id, connector)
+    try:
+        result = await debug_lifecycle.detach_locked(conn, ctx, session_id, system_id, connector)
+    except ExternalBootDenied as exc:
+        return ToolResponse.failure_from_error(
+            str(session_id), exc, suggested_next_actions=exc.next_actions
+        )
     return _render_detach_result(result)
 
 

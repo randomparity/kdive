@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -31,6 +32,11 @@ from kdive.providers.ports.handles import SystemHandle
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.ssh_authorized_key import validate_authorized_public_key
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
@@ -144,13 +150,25 @@ async def authorize_ssh_key(
             # idempotent, but a *distinct* key gets its own job — a System-only key would collapse
             # every key after the first into the first job (dedup_key is a permanent UNIQUE column).
             fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-            job = await queue.enqueue(
-                conn,
-                JobKind.AUTHORIZE_SSH_KEY,
-                AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
-                job_authorizing(ctx, system.project),
-                f"{system_id}:authorize_ssh_key:{fingerprint}",
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing but the envelope render follows it, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_AUTHORIZE_SSH_KEY
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        system_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.AUTHORIZE_SSH_KEY,
+                    AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:authorize_ssh_key:{fingerprint}",
+                )
     return ToolResponse.from_job(job)
 
 

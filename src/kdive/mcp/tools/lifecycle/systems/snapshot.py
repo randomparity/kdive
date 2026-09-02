@@ -37,6 +37,11 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.services.debug.sessions import active_session_ids_for_system
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 # libvirt snapshot names are agent-chosen; constrain to a shell/XML-safe charset so the name is
 # injection-safe in the snapshot XML the provider renders and safe as a dedup-key component.
@@ -191,6 +196,14 @@ async def snapshot_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
+            try:
+                await check_external_boot_admission(
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT
+                )
+            except ExternalBootDenied as exc:
+                return ToolResponse.failure_from_error(
+                    system_id, exc, suggested_next_actions=exc.next_actions
+                )
             collision = await _resolve_snapshot_collision(conn, uid, validated)
             if isinstance(collision, ToolResponse):
                 return collision
@@ -265,6 +278,14 @@ async def restore_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
+            try:
+                await check_external_boot_admission(
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT
+                )
+            except ExternalBootDenied as exc:
+                return ToolResponse.failure_from_error(
+                    system_id, exc, suggested_next_actions=exc.next_actions
+                )
             snapshot = await snapshot_by_name(conn, uid, name)
             if snapshot is None or snapshot.state is not SnapshotState.AVAILABLE:
                 return _config_error(
@@ -387,6 +408,14 @@ async def delete_snapshot(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
+            try:
+                await check_external_boot_admission(
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT
+                )
+            except ExternalBootDenied as exc:
+                return ToolResponse.failure_from_error(
+                    system_id, exc, suggested_next_actions=exc.next_actions
+                )
             snapshot = await snapshot_by_name(conn, uid, name)
             if snapshot is None:
                 return _config_error(

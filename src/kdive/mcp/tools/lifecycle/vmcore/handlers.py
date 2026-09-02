@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
@@ -46,6 +47,11 @@ from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 from kdive.services.runs.steps import system_arch
 
 # The standard first-pass crash(8) batch `postmortem.crash` runs when the caller omits
@@ -284,14 +290,26 @@ async def _fetch_vmcore(
                 )
                 return job_envelope(job, "run_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=run.project,
-                kind=_VMCORE_FETCH_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the Run and System
+            # above, so this block defers to the request's own commit and holds the SYSTEM lock
+            # until then. Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+                try:
+                    await check_external_boot_admission(
+                        conn, system.id, ExternalBootOperation.CAPTURE_VMCORE, run_id=uid
+                    )
+                except ExternalBootDenied as exc:
+                    return ToolResponse.failure_from_error(
+                        run_id, exc, suggested_next_actions=exc.next_actions
+                    )
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=run.project,
+                    kind=_VMCORE_FETCH_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def _postmortem_crash(

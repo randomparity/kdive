@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from mcp.types import ToolAnnotations
 from psycopg import AsyncConnection
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
@@ -24,6 +25,8 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.external_boot import admission as admission_module
+from tests.mcp.tool_registry_support import build_registered_tools
 from tests.services.external_boot.conftest import SeedActivation, build_activation
 
 _STATE = ExternalBootActivationState
@@ -125,6 +128,12 @@ def _denial(
     return raised.value
 
 
+def test_the_admitted_table_is_total_over_the_activation_state_enum() -> None:
+    """Totality, so no restricting activation can reach an undecided operation."""
+    assert admission_module._ADMITTED.keys() == set(ExternalBootActivationState)
+    assert admission_module._OWNING_RUN_SCOPED == _OWNING_RUN_SCOPED
+
+
 def test_the_expected_table_decides_every_operation() -> None:
     assert _ADMITTING_STATES.keys().isdisjoint(_NEVER_ADMITTED)
     assert set(_ADMITTING_STATES) | _NEVER_ADMITTED == set(ExternalBootOperation)
@@ -216,3 +225,124 @@ def test_get_restricting_for_system_sees_only_uncleaned_activations(
             assert await repo.get_restricting_for_system(conn, uuid4()) is None
 
     asyncio.run(_run())
+
+
+# Every registered mutating tool, mapped to the operation its handler guards with. A tool here
+# is enforced by `tests/services/external_boot/test_reverse_admission.py`.
+_GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
+    "control.capture_traffic": _OP.CAPTURE_TRAFFIC,
+    "control.diagnostic_sysrq": _OP.SYSTEM_SYSRQ,
+    "control.force_crash": _OP.FORCE_CRASH,
+    "control.power": _OP.SYSTEM_POWER,
+    "control.watch_for_crash": _OP.SYSTEM_WATCH_CRASH,
+    "debug.end_session": _OP.DEBUG_DETACH,
+    "debug.start_session": _OP.DEBUG_ATTACH,
+    "runs.bind": _OP.RUN_BIND,
+    "runs.boot": _OP.RUN_BOOT,
+    "runs.cancel": _OP.RUN_CANCEL,
+    "runs.create": _OP.RUN_CREATE,
+    "runs.install": _OP.RUN_INSTALL,
+    "systems.authorize_ssh_key": _OP.SYSTEM_AUTHORIZE_SSH_KEY,
+    "systems.delete_snapshot": _OP.SYSTEM_SNAPSHOT,
+    "systems.reprovision": _OP.SYSTEM_REPROVISION,
+    "systems.restore": _OP.SYSTEM_SNAPSHOT,
+    "systems.snapshot": _OP.SYSTEM_SNAPSHOT,
+    "systems.teardown": _OP.SYSTEM_TEARDOWN,
+    "vmcore.fetch": _OP.CAPTURE_VMCORE,
+}
+
+# The reviewed exemptions, each with the reason it decides nothing about a System's external
+# boot. A new mutating tool belongs in one map or the other before it can ship.
+_UNGUARDED_TOOLS: dict[str, str] = {
+    "accounting.set_budget": "accounting state; touches no System",
+    "accounting.set_quota": "accounting state; touches no System",
+    "allocations.release": "the Allocation wind-down after teardown, which the matrix admits",
+    "allocations.renew": "extends a lease; changes nothing about the guest",
+    "allocations.request": "grants capacity before any System exists",
+    "artifacts.create_investigation_upload": "mints an upload slot; touches no System",
+    "artifacts.create_run_upload": "mints an upload slot; touches no System",
+    "debug.advance": "in-session debugger control on an already-admitted attach",
+    "debug.clear_breakpoint": "in-session debugger control on an already-admitted attach",
+    "debug.clear_watchpoint": "in-session debugger control on an already-admitted attach",
+    "debug.continue": "in-session debugger control on an already-admitted attach",
+    "debug.interrupt": "in-session debugger control on an already-admitted attach",
+    "debug.load_module_symbols": "in-session debugger control on an already-admitted attach",
+    "debug.set_breakpoint": "in-session debugger control on an already-admitted attach",
+    "debug.set_watchpoint": "in-session debugger control on an already-admitted attach",
+    "images.delete": "image catalog administration; touches no System",
+    "images.extend": "image catalog administration; touches no System",
+    "images.prune_expired": "image catalog administration; touches no System",
+    "images.publish": "image catalog administration; touches no System",
+    "images.upload": "image catalog administration; touches no System",
+    "introspect.script": "read-only guest introspection over an already-admitted transport",
+    "inventory.clear_override": "operator inventory bookkeeping on a Resource, not a System",
+    "investigations.close": "Investigation bookkeeping; closes through systems.teardown",
+    "investigations.complete_rootfs_upload": "finishes an upload; touches no System",
+    "investigations.link": "Investigation bookkeeping; touches no System",
+    "investigations.open": "Investigation bookkeeping; touches no System",
+    "investigations.set": "Investigation bookkeeping; touches no System",
+    "investigations.unlink": "Investigation bookkeeping; touches no System",
+    "jobs.cancel": "cancels a job the guard already admitted when it was enqueued",
+    "ops.diagnostics": "operator read-out; enqueues no System work",
+    "ops.export_systems_toml": "operator read-out; enqueues no System work",
+    "ops.force_release": "operator break-glass, the escape hatch a stuck activation needs",
+    "ops.force_teardown": "operator break-glass, the escape hatch a stuck activation needs",
+    "ops.reconcile_now": "operator break-glass reconcile; must run against a stuck activation",
+    "ops.reconcile_systems": "operator break-glass reconcile; must run against a stuck activation",
+    "ops.recover_build_use": "build-ledger repair; touches no System",
+    "ops.set_cost_class_coeff": "accounting configuration; touches no System",
+    "ops.set_host_capacity": "capacity configuration on a Resource, not a System",
+    "ops.set_queue_paused": "worker-lane configuration; touches no System",
+    "resources.deregister": "Resource administration below the System layer",
+    "resources.drain": "Resource administration below the System layer",
+    "resources.register": "Resource administration below the System layer",
+    "resources.renew": "Resource administration below the System layer",
+    "resources.set_scheduling": "Resource administration below the System layer",
+    "resources.set_status": "Resource administration below the System layer",
+    "runs.complete_build": "records a build result; the guest is untouched",
+    "runs.set": "Run metadata; the guest is untouched",
+    "shapes.delete": "shape catalog administration; touches no System",
+    "shapes.set": "shape catalog administration; touches no System",
+    "systems.check_ssh_reachable": (
+        "read-only liveness probe (read_only, VIEWER); ADR-0583 does not reject System "
+        "observation in any restricted state"
+    ),
+    "systems.provision": "creates the System; no activation can restrict it yet",
+    "tools.invoke": "gateway dispatcher; the re-entered inner tool carries its own guard",
+}
+
+# The two operations no ordinary tool performs: they belong to the external-boot lifecycle
+# #2118 lands, not to a reverse operation this task enforces.
+_LIFECYCLE_ONLY = frozenset({_OP.EXTERNAL_BOOT_RELEASE, _OP.EXTERNAL_BOOT_RESOLVE_CONFLICT})
+
+
+def _registered_tools() -> dict[str, ToolAnnotations | None]:
+    return {tool.name: tool.annotations for tool in build_registered_tools()}
+
+
+def test_every_registered_mutating_tool_is_guarded_or_exempt() -> None:
+    """The inverted gate: enumerate the registry, not the enum.
+
+    A forward-only assertion (every ``ExternalBootOperation`` has a call site) is blind to the
+    failure it exists to catch — a mutating tool nobody wrote an enum member for is absent from
+    both sides of that comparison, which is how the 2026-09-02 scope audit found three unguarded
+    handlers. Enumerating the registry instead makes a new mutating tool fail here until someone
+    decides its admission.
+    """
+    decided = _GUARDED_TOOLS.keys() | _UNGUARDED_TOOLS.keys()
+    mutating = {
+        name
+        for name, annotations in _registered_tools().items()
+        if annotations is not None and annotations.readOnlyHint is False
+    }
+    assert mutating - decided == set()
+    assert _GUARDED_TOOLS.keys().isdisjoint(_UNGUARDED_TOOLS)
+    # Every decided name is a tool that actually exists, so a rename cannot leave a stale entry
+    # silently exempting nothing.
+    assert decided - _registered_tools().keys() == set()
+    assert all(reason.strip() for reason in _UNGUARDED_TOOLS.values())
+
+
+def test_every_operation_the_matrix_decides_has_a_guarded_tool() -> None:
+    """The forward half: a member added without a call site fails too."""
+    assert set(_GUARDED_TOOLS.values()) == set(ExternalBootOperation) - _LIFECYCLE_ONLY
