@@ -159,10 +159,12 @@ with connect(dbname=os.environ["AUTHORITY_DATABASE"]) as connection:
     with connection.cursor() as cursor:
         cursor.execute(
             sql.SQL(
-                "CREATE ROLE {} LOGIN PASSWORD %s NOSUPERUSER NOCREATEDB "
+                "CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB "
                 "NOCREATEROLE NOREPLICATION"
-            ).format(sql.Identifier(os.environ["AUTHORITY_LOGIN"])),
-            (password,),
+            ).format(
+                sql.Identifier(os.environ["AUTHORITY_LOGIN"]),
+                sql.Literal(password),
+            )
         )
         cursor.execute(
             sql.SQL("GRANT kdive_provider_authority TO {}").format(
