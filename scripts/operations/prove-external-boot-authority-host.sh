@@ -79,6 +79,7 @@ if command -v psql >/dev/null; then
     exit 3
   }
 fi
+true
 REMOTE_PRESTATE
 
 echo "source: transferring exact Git bundle"
