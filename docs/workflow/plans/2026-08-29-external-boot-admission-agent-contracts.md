@@ -3,21 +3,26 @@
 ## Goal and architecture
 
 Implement issue #2117 through one System-locked admission matrix and three truthful agent contracts.
-Release and conflict resolution persist an idempotent ADR-0584 BOOT-job request under the System
-lock; #2118 later enables worker claim and executes it.
+Under the operator's recorded scope amendment (2026-09-02) the three contracts are
+admission-and-authorization surfaces: they resolve, authorize, and admit, then return
+`configuration_error` with `reason=recovery_executor_unavailable`. None commits an activation
+transition, allocates authority, or enqueues a job. #2118 owns the executor and owns flipping them
+live.
 
 Architecture: a new `kdive.services.external_boot` package holds a pure decision table
-(`admission.py`) and a transactional request writer (`recovery_requests.py`). Every mutating
+(`admission.py`) and the three non-writing contract services (`recovery_requests.py`). Every mutating
 lifecycle call site calls the decision table inside the `LockScope.SYSTEM` transaction lock it
 already holds — or is extended to hold — immediately before its durable enqueue or transition. Three
 FastMCP wrappers expose release, conflict resolution, and orphan repair, each declaring ADR-0175
-maturity metadata that tells an agent exactly how much of the path is executable today.
+`partial` maturity so an agent learns from the schema that the executor is absent.
 
 Tech stack: Python 3.14, psycopg 3, PostgreSQL, FastMCP, Pydantic, pytest, uv, and just.
 
-Expected implementation size: 2000–2800 changed lines (L) — derived from the file map and task list
-below: four service/db modules, six guarded call sites, three MCP wrappers with registration, one
-config setting, regenerated reference docs, and their matching test files.
+Expected implementation size: 1600–2200 changed lines (L) — derived from the file map and task list
+below: two service modules, one repository read method, thirteen guarded call sites, three MCP
+wrappers with registration, regenerated reference docs, and their matching test files. The amendment
+removed the config setting, the `queue.enqueue` keyword, and the transactional request writer that
+the pre-amendment estimate of 2000–2800 included.
 
 ## Global constraints
 
@@ -27,7 +32,11 @@ config setting, regenerated reference docs, and their matching test files.
   maturity). No new ADR number and no new migration number are assigned; write neither.
 - Do not implement job handlers, reconciliation, or provider mechanisms. Do not modify migration
   `0122_external_boot_authority.sql` or enable worker claim of marked jobs — that is #2118's.
-- Never report orphan repair success while its executor is unavailable.
+- **No tool may commit an activation transition it cannot complete.** `recovery_requests.py` calls no
+  activation-writing method, builds no `ExternalBootAuthorityMarkerV1`, and enqueues no job. Task 4
+  step 6 holds this with a gate, not a convention.
+- Never report release, conflict-resolution, or orphan-repair success while the executor is
+  unavailable.
 - Ruff line length 100; lint set `E,F,I,UP,B,SIM`. `ty` runs whole-tree (src + tests) with strict
   defaults.
 - Doc-style guard: use **Milestone**, never "Sprint"; avoid "critical", "robust", "comprehensive",
@@ -39,25 +48,23 @@ config setting, regenerated reference docs, and their matching test files.
 - Guardrails: `just lint`, `just type`, `just test-verbose <path>`, and `just ci`. Run them bare.
 - Branch: `feat/external-boot-admission-agent-contracts-2117`; base: `main`.
 
-## Status: Tasks 3 and 4 are blocked
+## Status: all tasks buildable under the recorded amendment
 
-An adversarial review on 2026-09-02 refuted three premises Tasks 3 and 4 rest on. The spec's
-*Blocked precondition* section holds the evidence. In short: nothing in `src/` creates or transitions
+The 2026-09-02 adversarial review refuted three premises the pre-amendment Tasks 3 and 4 rested on.
+The spec's *Settled precondition* section holds the evidence: nothing in `src/` creates or transitions
 an external-boot activation, the server cannot allocate external-boot mutation authority (the 0122
-functions are role-gated to `kdive_worker`), and the authority marker's `authority_instance` and
-`provider_kind` are on neither the activation nor the reservation row. A shipped
-`runs.release_external_boot` would therefore commit `active -> recovering` with no exit but
-`systems.teardown`.
+functions are role-gated to `kdive_worker` and revoked from `kdive_server`), and the authority
+marker's `authority_instance` and `provider_kind` are on neither the activation nor the reservation
+row.
 
-**Tasks 1 and 2 are unaffected and remain buildable as written.** They are the matrix and its
+The operator then narrowed the criterion on the same day. Tasks 3 and 4 below are **rewritten** to
+match: the three contracts validate and report, and the transition, the authority marker, the job
+enqueue, the recovery deadline, and the configuration setting that served them are all removed. Each
+refuted premise is answered by deleting its dependent rather than by working around it.
+
+**Tasks 1 and 2 are unchanged** and were unaffected throughout. They are the matrix and its
 enforcement — a guard that denies nothing while no activation exists and denies correctly once one
-does. Task 5's gates apply to whatever ships.
-
-Tasks 3 and 4 wait on an operator decision recorded in the spec: narrow the "absolute
-deadline/retry/recovery contracts" criterion so the three tools ship as admission-and-authorization
-surfaces returning a truthful `configuration_error` with `reason=recovery_executor_unavailable`, or
-move the executable half to the issue that owns the activation lifecycle. Their text below is kept as
-written so the decision has a concrete proposal to act on; do not implement it as-is.
+does.
 
 ## Lock-order constraint (binds Tasks 2 and 3)
 
@@ -74,7 +81,7 @@ Created:
 - `src/kdive/services/external_boot/__init__.py`
 - `src/kdive/services/external_boot/admission.py` — the closed decision table.
 - `tests/services/external_boot/conftest.py` — the shared activation-seeding factory.
-- `src/kdive/services/external_boot/recovery_requests.py` — release and conflict-resolution writers.
+- `src/kdive/services/external_boot/recovery_requests.py` — the three non-writing contract services.
 - `src/kdive/mcp/tools/ops/external_boot.py` — the `ops.resolve_recovery_orphan` plane.
 - `tests/services/external_boot/__init__.py`
 - `tests/services/external_boot/test_admission.py`
@@ -85,8 +92,6 @@ Created:
 Modified:
 
 - `src/kdive/db/external_boot_activations.py` — add the restricting-activation lookup.
-- `src/kdive/jobs/queue.py` — one optional `external_boot_marker` keyword on `enqueue`.
-- `src/kdive/config/core_settings.py` — add the recovery-readiness timeout setting.
 - `src/kdive/mcp/tools/lifecycle/runs/steps.py` — guard install and boot; extend their locks.
 - `src/kdive/mcp/tools/lifecycle/control/registrar.py` — guard power and force-crash; add locks.
 - `src/kdive/mcp/tools/lifecycle/vmcore/handlers.py` — guard vmcore capture; add a lock.
@@ -98,7 +103,8 @@ Modified:
 - `src/kdive/mcp/tools/lifecycle/runs/registrar.py` — `runs.release_external_boot` wrapper.
 - `src/kdive/mcp/tools/lifecycle/systems/registrar.py` — `systems.resolve_external_boot_conflict`.
 - `src/kdive/mcp/assembly/tool_registration.py` — register the new `ops` plane.
-- `docs/guide/reference/` and `docs/guide/reference/config.md` — regenerated, not hand-edited.
+- `src/kdive/mcp/tools/_docmeta.py` — add `ops.resolve_recovery_orphan` to `DESTRUCTIVE_TOOLS`.
+- `docs/guide/reference/` — regenerated, not hand-edited.
 
 ---
 
@@ -177,15 +183,27 @@ and nothing else.
 The next actions are **not** in `details`: `ToolResponse.failure_from_error` runs `exc.details`
 through `safe_error_details` (`src/kdive/serialization.py:96`), which reduces each value to a JSON
 scalar and drops non-scalars apart from the reserved `errors` / `accepted_values` / `available` keys,
-so a list there is silently discarded. The module exposes them separately:
+so a list there is silently discarded. They ride the raised error instead, on a `CategorizedError`
+subclass this module owns:
 
 ```python
-def next_actions_for(state: ExternalBootActivationState) -> list[str]: ...
+class ExternalBootDenied(CategorizedError):
+    """A matrix denial, carrying the next actions `details` cannot carry."""
+
+    def __init__(self, message: str, *, details: dict[str, object], next_actions: list[str]) -> None:
+        super().__init__(message, category=ErrorCategory.CONFLICT, details=details, terminal=True)
+        self.next_actions = next_actions
 ```
 
-returning `["runs.get"]`, plus `"runs.release_external_boot"` for `ACTIVE`, plus `"systems.teardown"`
-for `RECOVERY_CONFLICT` and `RECOVERY_FAILED`. Every call site passes it explicitly:
-`ToolResponse.failure_from_error(object_id, exc, suggested_next_actions=next_actions_for(...))`.
+`next_actions` is `["runs.get"]`, plus `"runs.release_external_boot"` for `ACTIVE`, plus
+`"systems.teardown"` for `RECOVERY_CONFLICT` and `RECOVERY_FAILED`. Every MCP call site passes it
+through unchanged: `ToolResponse.failure_from_error(object_id, exc,
+suggested_next_actions=exc.next_actions)`.
+
+The actions travel on the error rather than through a `next_actions_for(state)` function every call
+site would have to call with the right state, because the call sites do not have the state — they
+have the exception. Binding the two together is what stops a site from reporting one state's actions
+for another's denial.
 
 New repository method:
 
@@ -311,56 +329,86 @@ Sites that already hold `LockScope.SYSTEM` gain only a guard call inside the exi
 
 | file:function | operation passed | run_id passed |
 |---|---|---|
-| `services/runs/admission.py:_create_locked` (lock at :320-324) | `RUN_CREATE` | `None` |
-| `services/runs/bind.py:_bind_locked` (lock at :151-154) | `RUN_BIND` | the bound `run_id` |
+| `services/runs/admission.py:_create_locked` (lock at :320-325) | `RUN_CREATE` | `None` |
+| `services/runs/bind.py:_bind_locked` (lock at :149-155) | `RUN_BIND` | the bound `run_id` param |
 | `mcp/tools/lifecycle/systems/admin.py:_teardown_locked` (lock at :360) | `SYSTEM_TEARDOWN` | `None` |
-| `mcp/tools/lifecycle/systems/admin.py:_reprovision_locked` (lock at :132) | `SYSTEM_REPROVISION` | `None` |
-| `mcp/tools/lifecycle/systems/snapshot.py:snapshot_system` (lock at :187), `restore_system` (:261), `delete_snapshot` (:385) | `SYSTEM_SNAPSHOT` | `None` |
+| `mcp/tools/lifecycle/systems/admin.py:_reprovision_locked` (lock at :129-133) | `SYSTEM_REPROVISION` | `None` |
+| `mcp/tools/lifecycle/systems/snapshot.py:snapshot_system` (lock at :184-188), `restore_system` (:258-262), `delete_snapshot` (:382-386) | `SYSTEM_SNAPSHOT` | `None` |
 | `services/debug/lifecycle.py:insert_session_locked` (lock at :95) | `DEBUG_ATTACH` | `request.run.id` |
 | `services/debug/lifecycle.py:detach_locked` (lock at :172) | `DEBUG_DETACH` | the session's Run id |
 
 `_teardown_locked` calls the guard for symmetry and for its returned binding; `SYSTEM_TEARDOWN` is
 admitted in every state, so the call can only ever return, never raise.
 
-Sites that must acquire `LockScope.SYSTEM` first:
+`detach_locked` is the one site that must widen a query to obtain its `run_id`: its `SELECT` at
+:169-171 fetches `state, transport_handle, project` and no `run_id`, so `DEBUG_DETACH`'s owning-Run
+comparison has nothing to compare. Add `run_id` to that select list; it is a column on
+`debug_sessions` the row already has.
+
+Sites that must acquire `LockScope.SYSTEM` first. The two `runs/steps.py` sites already hold locks
+that come **after** `SYSTEM` in the total order, so the new lock goes at the head of the existing
+`async with`. The four `control/registrar.py` sites and `_fetch_vmcore` hold **no** advisory lock
+today — the survey confirmed `control/registrar.py` imports no `LockScope` at all — so each gains a
+new `conn.transaction()` plus one `SYSTEM` lock around its guard and its existing
+`keyed_mutation(...)` call:
 
 - `mcp/tools/lifecycle/runs/steps.py:_restage_and_enqueue_install` (the locked body `install_run`
-  delegates to) — the existing block at :181-184 is
+  delegates to via `keyed_mutation` at :115-122) — the existing block at :181-185 is
   `conn.transaction(), advisory_xact_lock(INVESTIGATION, run.investigation_id),
   advisory_xact_lock(RUN, run.id)`. Insert `advisory_xact_lock(conn, LockScope.SYSTEM,
-  run.system_id)` as the first lock in that same `async with`, guarded by `run.system_id is not
-  None`. Call the guard with `RUN_INSTALL` and `run_id=run.id` immediately after `locked_run` is
-  re-read and before the `queue.get_by_dedup_key` replay check.
+  run.system_id)` as the first lock in that same `async with`. Call the guard with `RUN_INSTALL` and
+  `run_id=run.id` immediately after `locked_run` is re-read at :186 and before the
+  `queue.get_by_dedup_key` replay check.
 - `mcp/tools/lifecycle/runs/steps.py:_enqueue_step` — the block at :443 is
-  `conn.transaction(), advisory_xact_lock(RUN, run.id)`. Insert the `SYSTEM` lock first on the same
-  condition, then call the guard with `RUN_BOOT` and `run_id=run.id`.
-- `mcp/tools/lifecycle/control/registrar.py:diagnostic_sysrq_system` (:263) — wrap its
-  `_enqueue`/`keyed_mutation` pair in `conn.transaction(), advisory_xact_lock(conn,
-  LockScope.SYSTEM, uid)` and call the guard with `SYSTEM_SYSRQ` and `run_id=None`. `SYSTEM_SYSRQ` is
-  in no admitted row, so any restricting activation denies it.
+  `conn.transaction(), advisory_xact_lock(RUN, run.id)`. Insert the `SYSTEM` lock first, then call
+  the guard with `RUN_BOOT` and `run_id=run.id`.
 
-A `SYSTEM` lock that must be acquired only when `run.system_id is not None` cannot be written as a
-plain conditional inside a single `async with`. Use `contextlib.AsyncExitStack`, following the
-existing pattern at `src/kdive/mcp/tools/catalog/artifacts/uploads.py:775-782`.
-- `mcp/tools/lifecycle/control/registrar.py:power_system` — wrap the state re-read, guard call, and
-  `keyed_mutation(...)` in `conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid)`,
-  calling the guard with `SYSTEM_POWER` and `run_id=None`.
-- `mcp/tools/lifecycle/control/registrar.py:force_crash_system` — same wrapping, calling the guard
-  with `FORCE_CRASH` and `run_id=None`. `FORCE_CRASH` is not owning-Run scoped, so it is admitted in
-  `active` and denied in every other restricted state.
-- `mcp/tools/lifecycle/control/registrar.py:capture_traffic` (the handler enqueuing
-  `JobKind.CAPTURE_TRAFFIC` at :498) — wrap its `_enqueue`/`keyed_mutation` pair in
-  `conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)` and call the guard
-  with `CAPTURE_TRAFFIC` and `run_id=uid`.
-- `mcp/tools/lifecycle/vmcore/handlers.py:_fetch_vmcore` — wrap the `_enqueue`/`keyed_mutation` pair
-  in `conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)` and call the
-  guard with `CAPTURE_VMCORE` and `run_id=uid` inside it.
+Both are reached only after their caller has already returned `_not_bound(run_id)` for an unbound Run
+(`install_run` at :107-108, `boot_run` at :299-300), so `run.system_id` is non-`None` at the lock and
+no conditional acquisition is needed. Narrow it for the type checker with a local
+`system_id = run.system_id` plus an `assert`-free early return rather than `AsyncExitStack`; the
+conditional-lock machinery an earlier draft called for has no condition left to test.
 
-Each MCP-layer site converts the raised `CategorizedError` with
-`ToolResponse.failure_from_error(<object_id>, exc)`, passing the same `object_id` that site already
-uses for its other failures (`run_id` for run and vmcore tools, `system_id` for control, snapshot,
-and admin tools). `services/runs/admission.py:_create_locked` and `services/debug/lifecycle.py` let
-the error propagate to their existing callers, which already convert `CategorizedError`.
+- `mcp/tools/lifecycle/control/registrar.py:power_system` (:103-162) — wrap the guard call and the
+  existing `keyed_mutation(...)` at :155-162 in `conn.transaction(), advisory_xact_lock(conn,
+  LockScope.SYSTEM, uid)`, calling the guard with `SYSTEM_POWER` and `run_id=None`.
+- `mcp/tools/lifecycle/control/registrar.py:force_crash_system` (:210-260) — same wrapping, calling
+  the guard with `FORCE_CRASH` and `run_id=None`. `FORCE_CRASH` is not owning-Run scoped, so it is
+  admitted in `active` and denied in every other restricted state.
+- `mcp/tools/lifecycle/control/registrar.py:diagnostic_sysrq_system` (:263-322) — same wrapping,
+  calling the guard with `SYSTEM_SYSRQ` and `run_id=None`. `SYSTEM_SYSRQ` is in no admitted row, so
+  any restricting activation denies it.
+- `mcp/tools/lifecycle/control/registrar.py:_capture_traffic` (:436-518, the handler behind
+  `control.capture_traffic`) — wrap its guard and `keyed_mutation(...)` in `conn.transaction(),
+  advisory_xact_lock(conn, LockScope.SYSTEM, system.id)`, using the `system` already fetched at :462
+  after the unbound-Run check at :456-461, and call the guard with `CAPTURE_TRAFFIC` and
+  `run_id=uid`.
+- `mcp/tools/lifecycle/vmcore/handlers.py:_fetch_vmcore` (:195-294) — wrap its guard and the
+  `keyed_mutation(...)` at :287-294 in `conn.transaction(), advisory_xact_lock(conn,
+  LockScope.SYSTEM, system.id)`, using the `system` fetched at :229, and call the guard with
+  `CAPTURE_VMCORE` and `run_id=uid`.
+
+`_fetch_vmcore` is the MCP enqueue path, not the worker handler ADR-0562's `LockScope` note is
+about. That note describes `capture_vmcore`'s **job handler** taking `RUN`, `RUN`, `SYSTEM`, `RUN` in
+separate committed transactions; this site holds no other advisory lock, so the added `SYSTEM` lock
+is held alone and creates no co-hold to order.
+
+Where a site already opens `conn.transaction()` inside `keyed_mutation`, the new outer
+`conn.transaction()` makes the inner one a **savepoint** (`src/kdive/db/locks.py:126-135`). The
+guard and the enqueue stay atomic; the consequence is that the `SYSTEM` advisory lock now releases at
+end-of-request rather than end-of-block. That is accepted because no site spans external I/O inside
+the block — provider-resolver and refusal checks stay outside it — and each carries a comment saying
+so, because the behavior is invisible at the call site.
+
+Each MCP-layer site converts the raised `ExternalBootDenied` with
+`ToolResponse.failure_from_error(<object_id>, exc,
+suggested_next_actions=exc.next_actions)`, passing the same `object_id` that site already uses
+for its other failures: `run_id` for the run and vmcore tools (`_fetch_vmcore` uses the raw
+`run_id` string at :262, not `str(uid)`), and `system_id` for control (`diagnostic_sysrq_system`
+uses the raw string at :292) and `str(system_id)` for admin (:174, :215). `snapshot.py` has no
+`failure_from_error` call today and gains its first. `services/runs/admission.py:_create_locked`,
+`services/runs/bind.py:_bind_locked`, and `services/debug/lifecycle.py` let the error propagate to
+their existing MCP callers, which already convert `CategorizedError`.
 
 ### Steps
 
@@ -403,53 +451,49 @@ has a negative test.
 
 ---
 
-## Task 3: Persist release and conflict-resolution requests
+## Task 3: The three admission-and-authorization services
 
 Files: create `src/kdive/services/external_boot/recovery_requests.py`; modify
-`src/kdive/config/core_settings.py` and `src/kdive/jobs/queue.py`; create
-`tests/services/external_boot/test_recovery_requests.py`; extend `tests/jobs/test_queue.py`;
-regenerate `docs/guide/reference/config.md`.
+`src/kdive/services/debug/sessions.py` only if the System-scoped session lookup it already exposes
+needs no change (verify first, do not add a second one); create
+`tests/services/external_boot/test_recovery_requests.py`.
 
-Where this fits: Task 4's wrappers call exactly these two functions. Nothing else writes a recovery
-request.
+Where this fits: Task 4's wrappers call exactly these three functions and add nothing of their own.
+Nothing else implements a contract.
+
+**The amendment governs this task.** Each service resolves, authorizes, admits, and reports. None
+writes. This task adds no configuration setting, no `queue.enqueue` keyword, no
+`ExternalBootAuthorityMarkerV1`, no `begin_recovery_attempt` call, and no deadline — every one of
+those existed in the pre-amendment draft solely to serve a transition that is now out of scope.
 
 ### Interfaces
 
+Consumed from Task 1: `check_external_boot_admission`, `ExternalBootOperation`, and
+`ExternalBootDenied` exactly as defined above.
+
 Consumed from the existing codebase (each confirmed present at the stated path):
 
-- `kdive.jobs.queue.enqueue(conn, kind, payload, authorizing, dedup_key, *, max_attempts=DEFAULT_MAX_ATTEMPTS, recycle=JobRecyclePolicy.NEVER) -> Job` (`queue.py:63`). With the default
-  `recycle`, a repeated `dedup_key` returns the pre-existing `Job` unchanged.
-- `kdive.jobs.payloads.RunPayload(run_id: str)` — the `JobKind.BOOT` payload model
-  (`payloads.py`, mapped at `:396`).
-- `kdive.jobs.models.ExternalBootAuthorityMarkerV1` (`models.py:188`) with fields `activation_id:
-  UUID`, `run_id: UUID`, `system_id: UUID`, `plan_identity: str` (pattern
-  `^sha256:[0-9a-f]{64}$`), `purpose: Literal["activate","recover","resolve-conflict","release","teardown"]`,
-  `provider_kind: Literal["local-libvirt","remote-libvirt"]`, `authority_instance: str`,
-  `operation: Literal["activate","recover","resolve-conflict","release","cleanup","teardown","deadline","recovery-attempt","fail"]`,
-  `operation_identity: str`.
-- `kdive.domain.operations.jobs.JobKind.BOOT` (`jobs.py:27`).
-- `kdive.mcp.tools._common.authorizing(ctx, project)` — re-exported from `kdive.jobs.context`
-  (`_common.py:15,318`). Call sites import it under the local alias `job_authorizing`
-  (`runs/steps.py:26`); follow that convention. There is no symbol named `job_authorizing` in
-  `_common.py`.
-- `kdive.mcp.tools._common.job_envelope(job, object_key, object_id)` (`_common.py:305`).
-- `kdive.db.external_boot_activations.ExternalBootActivationRepository.begin_recovery_attempt(conn, *, system_id, activation_id, operation_owner_id, authority_generation, expected_state, attempt_id, recovery_readiness_deadline, resolution_operation=None, resolution_identity=None, acknowledged_composite_state=None) -> CasResult` (`external_boot_activations.py:595`) and
-  `CasStatus.APPLIED` / `SUPERSEDED` / `NOT_FOUND` (`:33`).
-- `kdive.security.authz.rbac.require_role(ctx, project, role)` (`rbac.py:136`) and
-  `Role.CONTRIBUTOR` / `Role.ADMIN` (`rbac.py:26`).
-- `kdive.services.debug.sessions.active_session_ids_for_system(conn, system_id) -> list[str]`
-  (`sessions.py`).
-- `kdive.config.registry.Setting` (`registry.py:35`).
+- `kdive.security.authz.rbac.require_role(ctx, project, role)` (`rbac.py:136`), `Role.CONTRIBUTOR` /
+  `Role.ADMIN` (`rbac.py:26`), `require_platform_role(ctx, role)` (`rbac.py:203`), and
+  `PlatformRole.PLATFORM_ADMIN` (`rbac.py:45`).
+- `kdive.mcp.responses.ToolResponse.failure(object_id, category, *, detail, suggested_next_actions,
+  data)` and `ToolResponse.failure_from_error(object_id, exc, *, category=None,
+  suggested_next_actions=None, data=None)` (`responses.py:279`).
+- `kdive.domain.errors.ErrorCategory.CONFLICT` / `CONFIGURATION_ERROR` (`errors.py:24,40`).
+- `kdive.db.locks.advisory_xact_lock(conn, scope, key)` (`locks.py:94`) and `LockScope`
+  (`locks.py:36`).
+- `kdive.services.debug.sessions` — the System-scoped active-session lookup. **Read the module and
+  use whatever it actually exports**; the pre-amendment draft cited
+  `active_session_ids_for_system(conn, system_id) -> list[str]` without verifying it, and that
+  citation is one of the four this design has already had to correct once. If no System-scoped
+  lookup exists, write the query inline in `recovery_requests.py` rather than adding a second
+  public name to `sessions.py`.
 
 Provided to Task 4:
 
 ```python
 async def request_release(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    *,
-    run_id: str,
-    idempotency_key: str | None = None,
+    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
 ) -> ToolResponse: ...
 
 
@@ -460,119 +504,118 @@ async def resolve_conflict(
     system_id: str,
     operation: str,
     observed_identity: str,
-    idempotency_key: str | None = None,
+) -> ToolResponse: ...
+
+
+async def resolve_recovery_orphan(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    object_identities: list[str],
+    disposition: str,
 ) -> ToolResponse: ...
 ```
 
-Both return a job envelope on success, enriched via the `data` mapping with `activation_id`,
-`activation_state`, `server_time`, and `recovery_readiness_deadline` (all ISO-8601 UTC strings for
-the two time fields). Both return `ToolResponse.failure_from_error(...)` on a `CategorizedError`.
+No `idempotency_key` parameter on any of the three: an idempotency key makes a replayed **commit**
+return the first commit's envelope, and none of these commits. #2118 adds it with the transition it
+belongs to.
 
-New setting, appended to `src/kdive/config/core_settings.py` following the shape of
-`LIVE_SCRIPT_MAX_TIMEOUT_SECONDS` (`core_settings.py:459`) and added to the same module-level
-registry list that setting is in:
+### The shared unavailable response
+
+One private helper builds the terminal response for all three, so the reason string and the
+disclosure cannot drift apart:
 
 ```python
-EXTERNAL_BOOT_RECOVERY_READINESS_TIMEOUT_SECONDS = Setting(
-    name="KDIVE_EXTERNAL_BOOT_RECOVERY_READINESS_TIMEOUT_SECONDS",
-    parse=_int,
-    default="1800",
-    group="jobs",
-    processes=_SERVER,
-    help=(
-        "Seconds allowed for one external-boot recovery attempt, measured from the database "
-        "server_time at which the attempt is recorded. The server computes one absolute UTC "
-        "recovery_readiness_deadline from this value and returns it on the release and "
-        "conflict-resolution envelopes; worker and job retries reuse it and never extend it. "
-        "An attempt that reaches the deadline without readiness moves the activation to "
-        "recovery_failed with its evidence retained (ADR-0583)."
-    ),
-    suggest="an integer number of seconds, e.g. 1800",
-)
+_UNAVAILABLE_REASON = "recovery_executor_unavailable"
+
+
+def _executor_unavailable(object_id: str, tool: str) -> ToolResponse: ...
 ```
+
+It returns `ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, detail=<one
+sentence naming the tool and that the external-boot recovery executor is not installed>,
+suggested_next_actions=["systems.get"], data={"reason": _UNAVAILABLE_REASON})`.
+
+The literal `recovery_executor_unavailable` is used by all three, including
+`ops.resolve_recovery_orphan`. The pre-amendment draft gave the orphan tool its own
+`repair_executor_unavailable`; the operator's amendment names one reason for all three, and one
+reason is correct here because there is one missing thing — the external-boot recovery executor
+#2118 owns.
 
 ### Behavior
 
 `request_release`:
 
-1. Resolve the Run; a missing Run, a Run outside `ctx.projects`, or an unbound Run is
-   `configuration_error` with no membership disclosure.
+1. Parse `run_id`; a malformed id is `configuration_error`. Resolve the Run; a missing Run, a Run
+   outside `ctx.projects`, or an unbound Run (`run.system_id is None`) is `configuration_error` with
+   no membership disclosure.
 2. `require_role(ctx, run.project, Role.CONTRIBUTOR)`.
 3. Open one transaction holding `advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)`.
 4. `check_external_boot_admission(conn, run.system_id, ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
-   run_id=run.id)`. A non-`active` activation or a non-owning Run raises `CONFLICT` from Task 1.
-5. Refuse with `CONFLICT` and `data={"reason": "system_job_active", "job_ids": [...]}` while any
-   `JobKind` job for the System is `queued` or `running`, regardless of owning Run.
-6. Refuse with `CONFLICT` and `data={"reason": "debug_session_active", "session_ids": [...]}` when
-   `active_session_ids_for_system` is non-empty.
-7. Read `server_time` with `SELECT clock_timestamp()` on the same connection and compute
-   `deadline = server_time + timedelta(seconds=<setting>)`.
-8. Call `begin_recovery_attempt` with `expected_state=ACTIVE`, a fresh `attempt_id`,
-   `resolution_operation=None`, and that deadline. `CasStatus.SUPERSEDED` or `NOT_FOUND` raises
-   `CONFLICT`.
-9. `queue.enqueue(conn, JobKind.BOOT, RunPayload(run_id=str(run.id)), job_authorizing(ctx,
-   run.project), f"{activation.id}:external_boot:release:{attempt_id}",
-   external_boot_marker=marker)`, where `marker` is an `ExternalBootAuthorityMarkerV1` built from
-   the activation row with `purpose="release"`, `operation="release"`, and
-   `operation_identity=f"release:{activation.id}:{attempt_id}"`.
+   run_id=run.id)`. A non-`active` activation, a non-owning Run, or no activation at all raises
+   `ExternalBootDenied` from Task 1; convert it with `failure_from_error(run_id, exc,
+   suggested_next_actions=exc.next_actions)`. Note that **no activation** is a denial here and an
+   admission everywhere else: `EXTERNAL_BOOT_RELEASE` against a System with nothing to release is
+   `conflict`, which Task 1's table already produces because the operation is owning-Run scoped and
+   there is no owning Run to match.
+5. Refuse with `CONFLICT` and `data={"reason": "system_job_active", "job_ids": [...]}` while any job
+   for the System is `queued` or `running`, regardless of owning Run.
+6. Refuse with `CONFLICT` and `data={"reason": "debug_session_active", "session_ids": [...]}` when a
+   DebugSession for the System is attaching or live.
+7. Return `_executor_unavailable(run_id, "runs.release_external_boot")`.
 
-   `RunPayload` inherits `_PayloadBase`'s `extra="forbid"` (`payloads.py:34`), so the marker cannot
-   ride inside it. Add one optional keyword to `kdive.jobs.queue.enqueue`:
-
-   ```python
-   external_boot_marker: ExternalBootAuthorityMarkerV1 | None = None
-   ```
-
-   When it is not `None`, `enqueue` merges `{"external_boot_authority_v1":
-   external_boot_marker.model_dump(mode="json")}` into the `payload_json` dict that
-   `dump_payload` returned (`queue.py:90`) before the `Jsonb(payload_json)` insert. That is the one
-   place the sibling key can be written without loosening a payload model, `queue.py` already
-   imports from `kdive.jobs.models`, and the replay path is unaffected: `ON CONFLICT DO NOTHING`
-   leaves an existing marked row exactly as it was.
-10. Return `job_envelope(job, "run_id", run.id)` with the four enrichment fields merged into `data`.
-
-The whole of steps 3–9 is one transaction: a queue or CAS failure rolls the transition and the
-deadline back together. A replay with the same idempotency key returns the recorded envelope through
-the existing `keyed_mutation` path, so the deadline is never recomputed.
+Steps 5 and 6 are kept from the pre-amendment draft deliberately. They are the two conditions
+ADR-0583 names as blocking release, they are checkable today, and reporting them is what makes this
+an admission surface rather than a stub: the caller gets the same refusal it will get once the
+executor lands.
 
 `resolve_conflict` is the same shape with these differences: it resolves the System rather than the
-Run, requires `Role.ADMIN`, requires `operation == "restore-recorded-source"` exactly (anything else
-is `configuration_error` with `reason=unsupported_resolution_operation`), passes
-`ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT`, requires the activation state to be
-`recovery_conflict`, passes `observed_identity` as `acknowledged_composite_state` to
-`begin_recovery_attempt` with `expected_state=RECOVERY_CONFLICT`, and uses `purpose="resolve-conflict"`,
-`operation="resolve-conflict"`. A `SUPERSEDED` CAS means the observed identity no longer matches;
-raise `CONFLICT` with `data={"reason": "observed_identity_stale"}` and leave the row untouched.
+Run; requires `Role.ADMIN`; requires `operation == "restore-recorded-source"` exactly (anything else
+is `configuration_error` with `data={"reason": "unsupported_resolution_operation"}`); passes
+`ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT`, which Task 1 admits only in
+`recovery_conflict`; and has no job or session refusal, because a System in `recovery_conflict`
+already fails the matrix for every operation that could start one. It does **not** compare
+`observed_identity` against the stored composite state: that compare-and-set is one half of
+`begin_recovery_attempt`, and calling it would commit the transition the amendment forbids.
+`observed_identity` is accepted, bounded, and validated for shape only; the wrapper docstring says
+exactly that, so an agent is not told a stale digest is being checked when it is not.
 
-The marker's `plan_identity`, `provider_kind`, and `authority_instance` come from the activation row
-and its reservation; read them rather than constructing them.
+`resolve_recovery_orphan`: resolve the System; `require_platform_role(ctx,
+PlatformRole.PLATFORM_ADMIN)`; validate `disposition in {"delete", "adopt"}` and that
+`object_identities` is non-empty, within its length bound, and every element within its own length
+bound; then return `_executor_unavailable(system_id, "ops.resolve_recovery_orphan")`. It runs no
+admission check: ADR-0583 scopes it to quarantined recovery objects, which are not the activation the
+matrix keys on, and no quarantine record exists on this branch to read.
 
 ### Steps
 
-1. Write `tests/services/external_boot/test_recovery_requests.py` over `migrated_url`: RBAC denial
-   for viewer and for contributor-on-conflict-resolution; unbound and foreign Run
-   `configuration_error`; non-`active` state `conflict`; active-job and active-session refusals with
-   their exact `reason`; a stale `observed_identity` leaving `recovery_conflict` unchanged; a replay
-   returning the same `job_id`, `attempt`, and `recovery_readiness_deadline`; and a forced queue
-   failure leaving the activation state unchanged. Run
+1. Read `src/kdive/services/debug/sessions.py` and record the exact System-scoped active-session
+   symbol and signature it exports, or that it exports none. Do not cite an unread name.
+2. Write `tests/services/external_boot/test_recovery_requests.py` over `migrated_url`, using the
+   `seeded_activation` factory from Task 1 step 0: RBAC denial for viewer on release and for
+   contributor on conflict resolution and on orphan repair; unbound, foreign, and malformed Run
+   `configuration_error` with no membership disclosure; a non-`active` state and a non-owning Run
+   both `conflict` with the expected `suggested_next_actions`; the active-job and active-session
+   refusals with their exact `reason`; `unsupported_resolution_operation` for a non-literal
+   operation; an out-of-bound `object_identities` rejection; and, for each of the three, an
+   admissible call returning `error_category == "configuration_error"` with
+   `data["reason"] == "recovery_executor_unavailable"`. Run
    `just test-verbose tests/services/external_boot/test_recovery_requests.py` and expect collection
    to fail on the missing module.
-2. Add a case to `tests/jobs/test_queue.py` asserting that `enqueue(..., external_boot_marker=m)`
-   stores `payload["external_boot_authority_v1"]` equal to `m.model_dump(mode="json")` and that a
-   replay of the same `dedup_key` leaves it unchanged, and that omitting the keyword stores no such
-   key. Run `just test-verbose tests/jobs/test_queue.py` and expect the new case to fail.
-3. Add the `external_boot_marker` keyword to `kdive.jobs.queue.enqueue`. Re-run the command from
-   step 2 and expect exit 0.
-4. Add the setting to `src/kdive/config/core_settings.py`. Run `just config-docs` to regenerate
-   `docs/guide/reference/config.md`, then `just config-docs-check`, `just config-guard`, and
-   `just env-docs-check`; expect exit 0 from all three.
-5. Write `src/kdive/services/external_boot/recovery_requests.py`. Re-run the command from step 1 and
+3. Add the amendment's hard-rule test to the same file: seed an `active` activation, read the whole
+   `external_boot_activations` row, call all three services with admissible arguments, re-read the
+   row, and assert it is unchanged field for field — including `state`, `current_attempt_id`, and
+   `updated_at`. Assert `external_boot_recovery_attempts` and `jobs` gained no row for the System.
+   This proves "no tool commits a transition it cannot complete" against the database rather than
+   against the source.
+4. Write `src/kdive/services/external_boot/recovery_requests.py`. Re-run the command from step 2 and
    expect exit 0.
-6. Run `just lint`, `just type`; expect exit 0. Commit.
+5. Run `just lint` and `just type`; expect exit 0. Commit.
 
-Acceptance: queued rows carry a valid `ExternalBootAuthorityMarkerV1` under
-`external_boot_authority_v1`; no tool claims worker execution exists; a rolled-back transaction
-leaves neither a job nor a transition.
+Acceptance: each service resolves, authorizes, and admits before reporting; every response is a
+failure envelope; no activation row, recovery-attempt row, or job row is created or changed by any
+of the three.
 
 ---
 
@@ -580,111 +623,134 @@ leaves neither a job nor a transition.
 
 Files: modify `src/kdive/mcp/tools/lifecycle/runs/registrar.py`,
 `src/kdive/mcp/tools/lifecycle/systems/registrar.py`,
-`src/kdive/mcp/assembly/tool_registration.py`; create
+`src/kdive/mcp/assembly/tool_registration.py`, `src/kdive/mcp/tools/_docmeta.py`; create
 `src/kdive/mcp/tools/ops/external_boot.py`; create
 `tests/mcp/lifecycle/test_external_boot_contracts.py`; regenerate `docs/guide/reference/`.
 
-Where this fits: the last task. It exposes Task 3's services and nothing new of its own.
+Where this fits: the last build task. It exposes Task 3's services and nothing new of its own.
 
 ### Interfaces
 
-Consumed from Task 3: `request_release` and `resolve_conflict` exactly as defined above.
+Consumed from Task 3: `request_release`, `resolve_conflict`, and `resolve_recovery_orphan` exactly as
+defined above.
 
 Consumed from the existing codebase:
 
-- `kdive.mcp.tools._docmeta.mutating() -> ToolAnnotations` (`_docmeta.py:66`) and
-  `maturity_meta(maturity) -> dict[str, object]` (`_docmeta.py:24`).
-- `kdive.security.authz.rbac.require_platform_role(ctx, role)` (`rbac.py:203`) and
-  `PlatformRole.PLATFORM_ADMIN` (`rbac.py:45`).
-- The generator's maturity contract (`scripts/generate/gen_tool_reference.py:212`): a `partial`
+- `kdive.mcp.tools._docmeta.mutating() -> ToolAnnotations` and `destructive() -> ToolAnnotations`
+  (`_docmeta.py:66,62`), `maturity_meta(maturity) -> dict[str, object]` (`_docmeta.py:24`), and
+  `DESTRUCTIVE_TOOLS` (`_docmeta.py:37`).
+- The generator's maturity contract (`scripts/generate/gen_tool_reference.py:203-237`): a `partial`
   tool's `meta` must carry `maturity_detail` with a `reason` drawn from exactly
   `{"provider_support", "live_dependency", "unproven_worker_path", "operator_gate",
   "degraded_stub"}`, a non-empty `detail`, and a non-empty `promotion`. A non-`partial` tool must
   carry no `maturity_detail`. The generator raises on violation, so `just docs-check` fails
   independently of the suite.
+- `_pool_only_plane_registrar` (`mcp/assembly/tool_registration.py:87-90`) and the `ops.*` plane list
+  it feeds (`:285-311`).
 
 Provided to later work: three registered tool names — `runs.release_external_boot`,
 `systems.resolve_external_boot_conflict`, `ops.resolve_recovery_orphan`.
 
 ### Registration metadata
 
-`runs.release_external_boot` and `systems.resolve_external_boot_conflict`:
+All three register `partial` with `reason: "degraded_stub"`. The pre-amendment draft gave release and
+conflict resolution `unproven_worker_path`, which described a queued job no worker would claim; under
+the amendment there is no job and no worker path, so `degraded_stub` is the accurate member of the
+closed set:
 
 ```python
 meta=_docmeta.maturity_meta("partial")
 | {
     "maturity_detail": {
-        "reason": "unproven_worker_path",
+        "reason": "degraded_stub",
         "detail": (
-            "The release request, its recovery deadline, and its authority-marked recovery "
-            "job commit atomically, but no worker claims an authority-marked job yet: "
-            "migration 0122 excludes that payload from claim_worker_job. The job stays "
-            "queued until the external-boot recovery executor lands."
+            "Validates the caller's identity, role, and the System-wide external-boot "
+            "admission matrix, then reports configuration_error with "
+            "reason=recovery_executor_unavailable. No activation transition is committed "
+            "and no recovery job is enqueued, because the external-boot recovery executor "
+            "is not installed."
         ),
-        "promotion": "Promoted when the external-boot recovery job handler and worker claim path land (#2118).",
+        "promotion": (
+            "Promoted when the external-boot recovery job handler and worker claim path "
+            "land (#2118)."
+        ),
     }
 }
 ```
 
-`ops.resolve_recovery_orphan` uses the same shape with `"reason": "degraded_stub"`, a `detail`
-naming that no durable quarantine record exists yet so the tool validates authorization and the
-repair reference and then returns `configuration_error` with
-`reason=repair_executor_unavailable`, and the same `promotion` sentence.
+`ops.resolve_recovery_orphan` uses the same shape with a `detail` naming that it validates the
+platform role and the bounded repair reference before reporting the same reason.
 
 `ops.resolve_recovery_orphan` takes `annotations=_docmeta.destructive()` and is added to
-`_docmeta.DESTRUCTIVE_TOOLS` (`_docmeta.py:37`), because its promoted behavior deletes or adopts
-quarantined recovery objects.
+`_docmeta.DESTRUCTIVE_TOOLS`, because its promoted behavior deletes or adopts quarantined recovery
+objects. The other two take `annotations=_docmeta.mutating()`.
 
 ### Wrapper contracts
 
-Each wrapper docstring states, in prose an agent reads at call time: the required role, the
-admissible activation state, that the call is idempotent under `idempotency_key`, and the complete
-time contract — the deadline is an absolute UTC timestamp, `data.server_time` is the reference
-clock, the scope is one recovery attempt, reaching the deadline without readiness moves the
-activation to `recovery_failed` with evidence retained, and the recovery action is
-`systems.teardown`. Each also states that the returned job stays `queued` until the recovery
-executor lands, so an agent does not poll it as an in-flight operation.
+Each wrapper docstring opens by saying what the tool does **today** — validates authorization and
+admissibility, then reports that the recovery executor is unavailable — before describing the
+operation it will perform once promoted. An agent that reads only the first sentence must not come
+away believing the operation happened.
+
+Each then states the required role, the admissible activation state, and the recovery action for the
+state it cannot act on (`systems.teardown` for a System stuck in `recovery_conflict` or
+`recovery_failed`; `runs.get` to observe). Each names #2118 as the promotion.
+
+**No wrapper states a limit**, so `AGENTS.md`'s five-part limit contract (unit, reference clock,
+scope, consequence, recovery action) has nothing to attach to: there is no deadline, no retry
+budget, and no attempt scope under the amendment. Do not write a time contract for a time bound that
+does not exist — that is the phantom the amendment removed. Task 4 step 1 asserts the absence
+directly so a later edit cannot reintroduce it silently.
 
 `Field` descriptions, one line each, no newlines (the generator rejects a newline in a parameter
 description):
 
-- `runs.release_external_boot(run_id, idempotency_key=None)`.
-- `systems.resolve_external_boot_conflict(system_id, operation, observed_identity,
-  idempotency_key=None)` — `operation`'s description names the single accepted literal
-  `restore-recorded-source`; `observed_identity`'s names that it must equal the composite state
-  identity returned by the most recent `systems.get`, and that a stale value leaves the conflict
-  untouched.
-- `ops.resolve_recovery_orphan(system_id, object_identities, disposition,
-  idempotency_key=None)` — `disposition` accepts `delete` or `adopt`; `object_identities` is a
-  bounded list of quarantined recovery-object identities.
+- `runs.release_external_boot(run_id)`.
+- `systems.resolve_external_boot_conflict(system_id, operation, observed_identity)` — `operation`'s
+  description names the single accepted literal `restore-recorded-source`; `observed_identity`'s
+  states that it is the composite state identity from the most recent `systems.get` and that it is
+  currently validated for shape only, because the compare-and-set that consumes it lands with the
+  executor.
+- `ops.resolve_recovery_orphan(system_id, object_identities, disposition)` — `disposition` accepts
+  `delete` or `adopt`; `object_identities` is a bounded list of quarantined recovery-object
+  identities.
 
 ### Steps
 
 1. Write `tests/mcp/lifecycle/test_external_boot_contracts.py`: build the app through the existing
-   assembly helper the other `tests/mcp/lifecycle` files use, then assert each tool is registered;
-   its `meta["maturity"] == "partial"`; its `maturity_detail` passes
+   assembly helper the other `tests/mcp/lifecycle` files use, then assert each of the three tools is
+   registered; its `meta["maturity"] == "partial"`; its `maturity_detail` passes
    `scripts.generate.gen_tool_reference._maturity_detail`; every parameter has a newline-free
-   description; the docstring contains the words `server_time`, `deadline`, and `recovery_failed`;
-   the RBAC denial envelope for each role boundary; the replay envelope equality; and that
-   `ops.resolve_recovery_orphan` returns `error_category == "configuration_error"` with
-   `data["reason"] == "repair_executor_unavailable"`. Run
+   description; the docstring discloses `recovery_executor_unavailable` and names #2118; the
+   docstring contains **no** deadline vocabulary (assert the absence of `deadline`, `server_time`,
+   and `seconds`, so a reintroduced time contract fails a gate); the RBAC denial envelope for each
+   role boundary; and that each tool returns `error_category == "configuration_error"` with
+   `data["reason"] == "recovery_executor_unavailable"` on an admissible call. Run
    `just test-verbose tests/mcp/lifecycle/test_external_boot_contracts.py` and expect failure
    because no tool is registered.
 2. Add the two lifecycle wrappers to `runs/registrar.py` and `systems/registrar.py`, matching the
    surrounding registration style (`runs.boot` at `runs/registrar.py:625` is the closest analogue).
-3. Create `src/kdive/mcp/tools/ops/external_boot.py` with a `register(app, pool)` function and add
-   `_pool_only_plane_registrar(ops_external_boot.register)` to `build_plane_registrars` in
+3. Create `src/kdive/mcp/tools/ops/external_boot.py` with
+   `def register(app: FastMCP, pool: AsyncConnectionPool) -> None:` — the plain pool-only shape
+   `ops/queue.py:263` and `ops/tuning.py:359` use — and add
+   `_pool_only_plane_registrar(ops_external_boot_tools.register)` to `build_plane_registrars` in
    `src/kdive/mcp/assembly/tool_registration.py`, beside the other `ops` registrars. Add
    `"ops.resolve_recovery_orphan"` to `_docmeta.DESTRUCTIVE_TOOLS`.
 4. Re-run the command from step 1 and expect exit 0.
 5. Run `just docs` to regenerate the tool reference, then `just docs-check` and
    `just doc-constants-check`; expect exit 0. If `doc-constants-check` reports a stale tool count,
    run its generator without `--check` and commit the regenerated file.
-6. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
+6. Add the import-closure gate to `tests/services/external_boot/test_recovery_requests.py`: walk
+   `kdive.services.external_boot.recovery_requests`'s module-level names and assert none of
+   `begin_recovery_attempt`, `finish_recovery_attempt`, `record_conflict`, `release_reservation`,
+   `mark_cleanup_complete`, `transition`, `create`, `ExternalBootAuthorityMarkerV1`, or
+   `enqueue` is reachable from it. Static enforcement of the amendment's hard rule, beside Task 3
+   step 3's behavioral one. Run `just test-verbose tests/services/external_boot` and expect exit 0.
+7. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
 
-Acceptance: the three tools are registered; their FastMCP schemas carry the complete unit, clock,
-scope, consequence, and recovery contract; every response is a valid `ToolResponse`; and the
-generated reference matches a fresh generation.
+Acceptance: the three tools are registered; their FastMCP schemas disclose that the executor is
+absent and state no time bound; every response is a valid `ToolResponse`; the generated reference
+matches a fresh generation; and both hard-rule gates pass.
 
 ---
 
@@ -699,32 +765,49 @@ generated reference matches a fresh generation.
 5. Open a PR closing #2117, publish `WORK:REVIEW`, and hand off the exact merge-ready SHA without
    merging.
 
-Rollback is `git revert` of the branch. Queued external requests are durable: before reverting a
-deployed build, drain or execute them through #2118's executor, because reverting removes the only
-tools that can create them but not the rows already created.
+Rollback is `git revert` of the branch. Nothing this branch registers creates a durable row, so a
+revert leaves no queued external request behind and needs no drain. The pre-amendment plan's drain
+step is removed with the enqueue it described.
 
 ## Design-review dispositions (2026-09-02, `$gauntlet` pass 1, 12 findings)
 
-Blocked — these three are one condition, and they stop Tasks 3 and 4 pending the operator decision
-recorded in the spec's *Blocked precondition*:
+Eight were `accepted-fixed` in the pre-amendment revision and remain fixed: the
+`suggested_next_actions` sanitizer defect; the two missing call sites (`runs.bind`,
+`control.diagnostic_sysrq`); `capture_traffic` dropped from the steps and tests; the
+maturity-metadata visibility claim; the savepoint consequence of the new `conn.transaction()`
+blocks; the `FORCE_CRASH` scoping argument, restated as an explicit residual; four bad interface
+citations; and the missing shared activation-seeding fixture.
 
-- The release transition is a one-way door into `recovering` with no exit but `systems.teardown`.
-- The authority marker cannot be constructed and the server cannot allocate authority.
-- `CasStatus.SUPERSEDED` conflates a stale identity with an unready reservation and a missing row;
-  if the transition ships, read the reservation under the same lock and refuse an unready one with
-  its own `reservation_not_ready` reason before calling `begin_recovery_attempt`.
+Four were dispositioned `blocked` on the criterion the operator amended on 2026-09-02. Each is
+re-dispositioned here against the amended criterion, concern and remedy judged separately:
 
-Also blocked with them, because it only exists if the transition does: the documented idempotency is
-wrong — a fresh `attempt_id` in the `dedup_key` means the dedup never fires. The correct seam is
-`keyed_mutation`, which stores the envelope; the `dedup_key` idempotency claim should be deleted
-rather than repaired.
-
-Accepted and fixed in this revision: the `suggested_next_actions` sanitizer defect; the two missing
-call sites (`runs.bind`, `control.diagnostic_sysrq`); `capture_traffic` dropped from the steps and
-tests; the maturity-metadata visibility claim; the savepoint consequence of the new
-`conn.transaction()` blocks; the `FORCE_CRASH` scoping argument, restated as an explicit residual;
-four bad interface citations; and the missing shared activation-seeding fixture.
+1. **The release transition is a one-way door into `recovering` with no exit but
+   `systems.teardown`** — `accepted-fixed`. The concern was verified and remains true of the
+   pre-amendment design. The remedy applied is the amendment's own: no tool commits the transition,
+   so the door has no entrance. Held by two gates rather than by prose — Task 3 step 3 asserts the
+   activation row is unchanged after all three tools run, and Task 4 step 6 asserts the module cannot
+   reach a writing name.
+2. **The authority marker cannot be constructed and the server cannot allocate authority** —
+   `accepted-fixed`. Both halves were verified against the tree (`ExternalBootAuthorityMarkerV1`'s
+   non-optional `provider_kind` and `authority_instance`; `allocate_external_boot_authority`'s
+   `kdive_worker` role gate, revoked from `kdive_server`). The remedy is removal of the only caller:
+   nothing in Task 3 builds a marker or allocates authority.
+3. **`CasStatus.SUPERSEDED` conflates a stale identity, an unready reservation, and a missing row** —
+   `rejected-with-evidence`, on the amended design only. The concern is accurate about
+   `begin_recovery_attempt`, which this branch no longer calls; its proposed remedy ("read the
+   reservation under the same lock before calling `begin_recovery_attempt`") is conditioned on a call
+   that does not exist here. The concern transfers to #2118 with the CAS, and is recorded in the
+   follow-up return rather than acted on: acting on it would mean writing the transition the
+   amendment excludes. `resolve_conflict` does not compare `observed_identity` at all, and its
+   `Field` description says so, so no caller is told a check is happening that is not.
+4. **The documented `dedup_key` idempotency never fires** — `accepted-fixed` by deletion. Its
+   remedy was "delete the claim rather than repair it". Under the amendment there is no enqueue, no
+   `dedup_key`, and no `idempotency_key` parameter on any of the three tools, so the claim and its
+   subject are both gone. Task 4 step 1 asserts the wrappers carry no time or retry vocabulary, which
+   catches a reintroduction.
 
 ## Deferrals
 
-None. No finding was dispositioned `deferred-tracked`; no `docs/debt/` record was written.
+None. No finding was dispositioned `deferred-tracked`; no `docs/debt/` record was written. Finding 3
+is `rejected-with-evidence` for this branch and belongs to #2118's CAS work, which the amendment
+already assigns.

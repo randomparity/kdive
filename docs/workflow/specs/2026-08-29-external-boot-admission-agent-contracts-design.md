@@ -8,11 +8,16 @@ capture, and DebugSession attach/detach. It also exposes the contributor release
 conflict resolution, and platform-admin orphan-repair contracts with uniform `ToolResponse`
 envelopes.
 
+**Under the operator's recorded scope amendment (issue #2117, 2026-09-02) the three contracts ship
+as admission-and-authorization surfaces.** Each resolves its object, enforces RBAC, and runs the
+same admission matrix every other mutating call site runs, then returns a truthful
+`configuration_error` carrying `reason=recovery_executor_unavailable`. No tool commits an activation
+transition, allocates authority, or enqueues a job, because no tool on this branch can complete one.
+#2118 owns the executor and owns flipping these three tools from `configuration_error` to live.
+
 Job execution, reconciliation, provider mutation, and provider recovery mechanisms remain owned by
-#2118 and the provider issues. This slice persists and enqueues the minimum versioned BOOT-job
-request accepted by ADR-0584; it does not register an external recovery handler and does not enable
-worker claim of authority-marked jobs. Python 3.14, x86_64, and ppc64le remain supported and no
-dependency is added. No new migration and no new ADR number are assigned.
+#2118 and the provider issues. Python 3.14, x86_64, and ppc64le remain supported and no dependency
+is added. No new migration, no new ADR number, and no new configuration setting are assigned.
 
 ## Verified preconditions
 
@@ -35,11 +40,13 @@ before this design was accepted:
 - `kdive.jobs.worker` already finalizes marked jobs through `queue.complete_external_boot` /
   `queue.fail_external_boot`.
 
-## Blocked precondition — the activation lifecycle has no Python implementation
+## Settled precondition — the activation lifecycle has no Python implementation
 
-The design below was reviewed adversarially on 2026-09-02 and three of its load-bearing premises were
-refuted against the tree. They are recorded here because they decide what this issue can ship, and
-they are not visible from the migrations alone.
+The design was reviewed adversarially on 2026-09-02 and three of its load-bearing premises were
+refuted against the tree. The operator then amended this issue's completion criterion on the same
+day. The refutations stand as recorded facts; what changed is what this issue builds on top of them.
+They are kept here because they are the reason the three contracts are non-executing, and they are
+not visible from the migrations alone.
 
 **1. Nothing in `src/` creates or transitions an external-boot activation.** `rg -n
 'external_boot_activations' src/ --type py` matches only the repository module itself;
@@ -75,14 +82,22 @@ phantom feature the earlier draft set out to avoid, and `partial` maturity does 
 The admission matrix itself is unaffected: it is a guard, it denies nothing while no activation
 exists, and it denies correctly the moment the lifecycle that creates activations lands.
 
-**Open decision, owned by the operator.** Issue #2117's frozen completion criteria require MCP
-wrappers carrying "absolute deadline/retry/recovery contracts". With no truthful transition to
-anchor it, there is no absolute deadline to return. Either that criterion is narrowed — the three
-contracts ship as admission-and-authorization surfaces returning a truthful
-`configuration_error` with `reason=recovery_executor_unavailable`, exactly as this design already
-accepted for `ops.resolve_recovery_orphan` — or the executable half moves to whichever issue owns the
-activation lifecycle and the server-side authority boundary. This design does not choose; the rest of
-the document describes the matrix, which is buildable either way.
+**The operator's decision, recorded 2026-09-02.** The "absolute deadline/retry/recovery contracts"
+criterion is narrowed. The three contracts ship as admission-and-authorization surfaces returning a
+truthful `configuration_error` with `reason=recovery_executor_unavailable`, matching the treatment
+this design already accepted for `ops.resolve_recovery_orphan`. Activation lifecycle execution and
+reconciliation stay with #2118, which also owns flipping these three tools live. The hard rule the
+amendment adds: **no tool may commit an activation transition it cannot complete**, so the
+`active -> recovering` one-way door above is not reachable from anything this issue registers.
+
+That decision removes each refuted premise by removing its dependent, rather than by working around
+it. Nothing here constructs an `ExternalBootAuthorityMarkerV1`, so premise 3 has no subject; nothing
+calls `allocate_external_boot_authority`, so premise 2 has no subject; nothing calls
+`begin_recovery_attempt`, so premise 1 has no subject and the one-way door has no entrance. The
+`external_boot_marker` keyword on `queue.enqueue`, the
+`EXTERNAL_BOOT_RECOVERY_READINESS_TIMEOUT_SECONDS` setting, and the recovery-deadline computation
+that the earlier draft introduced are all dropped with the transition they existed to serve: each
+had exactly one caller, and that caller is gone.
 
 ## Architecture
 
@@ -107,8 +122,10 @@ Those actions ride the envelope's own `suggested_next_actions` field, never
 `CategorizedError.details`. `ToolResponse.failure_from_error` passes `exc.details` through
 `safe_error_details` (`src/kdive/serialization.py:96`), which reduces every key to a JSON scalar and
 drops non-scalars apart from three reserved list keys — so a list placed in `details` is silently
-discarded. The admission service therefore exposes `next_actions_for(state) -> list[str]` beside the
-table, and each call site passes it as `failure_from_error(..., suggested_next_actions=...)`.
+discarded. The admission service therefore raises `ExternalBootDenied`, a `CategorizedError` subclass
+carrying the actions as an attribute, and each call site passes them through as
+`failure_from_error(..., suggested_next_actions=exc.next_actions)`. Binding the actions to the error
+that computed them is what keeps a call site from reporting one state's actions for another's denial.
 
 ### Reverse admission
 
@@ -141,40 +158,57 @@ That is accepted because each block spans no external I/O — provider-resolver 
 outside it — and each site carries a comment saying so, since the behavior is invisible at the call
 site.
 
-### Recovery requests — blocked, see *Blocked precondition* above
+### The three contracts — admission and authorization, no transition
 
-The rest of this section describes the state-mutating form of release and conflict resolution. It is
-**not buildable on this branch** and is retained only so the operator's decision has something
-concrete to accept or narrow. Three of its steps are refuted: the marker of step 9 cannot be
-constructed, the authority it names cannot be allocated by the server, and the transition of step 8
-has no exit. Its idempotency claim is separately wrong — step 8 mints a fresh `attempt_id` and
-step 9 embeds it in the `dedup_key`, so the dedup never fires on a retry; the repository's actual
-idempotency seam is `keyed_mutation` (`src/kdive/mcp/tools/lifecycle/support/_idempotency.py:70`),
-which stores the envelope, as `install_run` and `power_system` already use it.
+`services/external_boot/recovery_requests.py` owns all three. Each is the same four-stage pipeline,
+and the stages run in this order because each later stage would otherwise leak what an earlier one is
+there to withhold:
 
-`services/external_boot/recovery_requests.py` owns release and conflict-resolution admission. Under
-the System lock, release requires contributor on the owning Run, an `active` activation, no active
-System job, and no attaching or live DebugSession for the System regardless of owning Run. Conflict
-resolution requires project admin, the literal operation `restore-recorded-source`, and the exact
-current conflict composite-state identity. Each operation reads database `server_time`, computes one
-absolute UTC `recovery_readiness_deadline` from a configured timeout, persists the transition
-request through `begin_recovery_attempt`, and enqueues one idempotent `JobKind.BOOT` job carrying the
-`external_boot_authority_v1` marker in the same transaction. Ordinary retry returns that same job and
-never extends the deadline; `queue.enqueue` is idempotent by `dedup_key` construction, so a replay
-returns the pre-existing row unchanged.
+1. **Resolve.** A malformed, missing, or out-of-project object id, and for release an unbound Run, is
+   `configuration_error` with no membership disclosure — the existing convention at every lifecycle
+   tool.
+2. **Authorize.** `require_role(ctx, project, Role.CONTRIBUTOR)` for release,
+   `Role.ADMIN` for conflict resolution, `require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)`
+   for orphan repair.
+3. **Admit.** Under `advisory_xact_lock(conn, LockScope.SYSTEM, system_id)`, run the same
+   `check_external_boot_admission` every other call site runs — `EXTERNAL_BOOT_RELEASE` (owning-Run
+   scoped, `active` only) and `EXTERNAL_BOOT_RESOLVE_CONFLICT` (System scoped, `recovery_conflict`
+   only). A denial is the matrix's own `CONFLICT` envelope, identical to the one a racing Run's
+   install receives. Orphan repair validates its bounded `object_identities` and closed `disposition`
+   literal instead, because ADR-0583 scopes it to quarantined objects rather than to an activation.
+4. **Report unavailable.** Return `ToolResponse.failure(..., ErrorCategory.CONFIGURATION_ERROR)`
+   with `data={"reason": "recovery_executor_unavailable"}` and the literal next actions. The read
+   transaction ends without writing.
 
-### Truthful maturity — why the enqueued job is not a phantom feature
+Stage 3's System lock is taken for a read-only check, which looks unnecessary and is not: it is what
+makes the denial mean the same thing as every other call site's denial. Without it, this tool could
+report `active` while a concurrent `preparing` commit is mid-flight, and an agent would act on a
+state the matrix had already left.
 
-The durable half of each contract is real on this branch: the `active -> recovering` transition, the
-recorded attempt, the absolute deadline, the allocated authority, and the queued marked job all
-commit atomically. The executing half is not: migration 0122 excludes marked payloads from
-`claim_worker_job`, so no worker claims the row until #2118 enables it. A tool that presented that
-row as an in-flight recovery would be telling an agent something false.
+The amendment's hard rule is enforced structurally rather than by review: `recovery_requests.py`
+imports nothing that can transition an activation. `ExternalBootActivationRepository` reaches it only
+through `check_external_boot_admission`, which calls exactly one read method. A test asserts the
+module's import closure contains no name that writes.
 
-This design therefore uses the repository's own disclosure mechanism (ADR-0175) rather than inventing
-one. `runs.release_external_boot` and `systems.resolve_external_boot_conflict` register with
-`meta={"maturity": "partial", "maturity_detail": {"reason": ...}}`, the reason naming that the
-recovery executor is delivered separately.
+Release additionally reports the two blocking conditions ADR-0583 names, so the answer an agent gets
+is the answer it will get once the executor lands: `CONFLICT` with
+`data={"reason": "system_job_active", ...}` while any job for the System is `queued` or `running`,
+and `CONFLICT` with `data={"reason": "debug_session_active", ...}` while any DebugSession for the
+System is attaching or live, regardless of owning Run. Reporting these now is what distinguishes an
+admission surface from a stub: a caller learns its request is inadmissible for a reason that outlives
+the missing executor.
+
+There is no `idempotency_key` parameter on any of the three. An idempotency key exists to make a
+replayed **commit** return the first commit's envelope; none of these tools commits, so the key would
+have nothing to key. #2118 adds it with the transition it belongs to.
+
+### Truthful maturity — what an agent is told
+
+No part of any of the three contracts executes on this branch, so the disclosure is not a nuance
+about a queued job; it is the whole contract. Each registers `meta={"maturity": "partial",
+"maturity_detail": {"reason": "degraded_stub", ...}}` under ADR-0175, the `detail` naming that the
+tool validates authorization and admissibility and then reports the executor absent, and the
+`promotion` naming #2118.
 
 **The metadata is not the disclosure an agent reads.** FastMCP serializes the wrapper docstring and
 `Field` descriptions into the tool schema; `meta.maturity` drives `just docs` reference generation
@@ -182,83 +216,108 @@ and the `[partial: <reason>]` tag the lifecycle-prompt registrar renders on a jo
 (`src/kdive/mcp/prompts/registrar.py:240-250`), and neither reaches an agent that calls the tool
 without going through a prompt journey. So the schema-visible half is the docstring, and it carries
 the disclosure in prose; the metadata is the machine-readable record beside it. Claiming otherwise
-was an error in the earlier draft of this section.
+was an error in an earlier draft of this section.
 
-`ops.resolve_recovery_orphan` is a platform-admin repair admission contract. No durable quarantine
-record or executable repair mechanism exists yet, so it validates authorization and the bounded
-repair reference and returns a truthful `configuration_error` with `reason=repair_executor_unavailable`
-and recovery guidance. It never reports success and registers `partial` for the same reason. It is
-registered rather than withheld because ADR-0583 makes it the only authorized disposition of a
-quarantined orphan, and an agent that cannot discover it has no way to learn that.
+The three are registered rather than withheld because ADR-0583 makes them the only authorized
+dispositions of an active activation, a recovery conflict, and a quarantined orphan. An agent that
+cannot discover them has no way to learn what the matrix's denials are steering it toward — the
+matrix's own `suggested_next_actions` name `runs.release_external_boot` and `systems.teardown`, and
+a next action naming an unregistered tool is the phantom feature this design is avoiding.
 
 ### Agent surface
 
 MCP wrappers live with the existing runs and systems registrars; the repair tool is a new
 `mcp/tools/ops/external_boot.py` plane registered beside the other `ops` registrars. Wrapper
-docstrings and every `Field` description state RBAC, admissible state, idempotency, and the full time
-contract required by `AGENTS.md`: unit (seconds), reference clock (database `server_time`), scope
-(one recovery attempt), consequence of violation (`recovering -> recovery_failed` with evidence
-retained), and recovery action (a literal tool name). Successful release and conflict responses are
-job envelopes enriched with `activation_id`, `activation_state`, `server_time`, and the absolute
-`recovery_readiness_deadline`. Failure envelopes use the stable taxonomy and literal tool names only.
+docstrings and every `Field` description state the required role, the admissible activation state,
+and — first, before either — that the tool does not perform the operation it names today: it
+validates and reports, and returns `configuration_error` with `reason=recovery_executor_unavailable`
+on an otherwise-admissible request.
+
+`AGENTS.md` requires any stated limit to carry all five of unit, reference clock, scope, consequence,
+and recovery action. **These wrappers state no limit**, because the amended contract has none: no
+deadline is computed, no attempt is recorded, and no retry budget is consumed. Naming a deadline that
+nothing enforces is exactly the phantom the amendment removed. What each docstring carries in its
+place is the recovery action for the state it cannot act on — `systems.teardown` for a System stuck
+in `recovery_conflict` or `recovery_failed`, and `runs.get` to observe — plus the named issue that
+promotes the tool. When #2118 lands the executor and the deadline it enforces, the five-part limit
+contract lands with it.
+
+Every response from all three is a failure envelope. There is no success path to shape, so there is
+no job envelope, no `activation_id` enrichment, and no `server_time`.
 
 ## Failure contract
 
-- Foreign or missing objects fail as `configuration_error` without disclosing membership.
+- Foreign, missing, or malformed objects fail as `configuration_error` without disclosing membership.
+- An RBAC denial is the existing `require_role` / `require_platform_role` envelope, unchanged.
 - A matrix denial is non-retryable `conflict`; callers follow the returned action for the current
-  activation state.
-- Active jobs or sessions block release before any transition or enqueue and identify only bounded
-  object ids already authorized to the caller.
-- Replayed release or conflict requests return the same job, attempt, and deadline.
-- A changed conflict identity leaves `recovery_conflict` untouched and returns `conflict`.
-- Queue or transaction failure rolls back the transition and the deadline together.
-- The orphan-repair tool never reports success while its separately owned executor is absent.
+  activation state. A release or conflict-resolution denial is byte-identical in shape to the denial
+  a racing Run's install receives, because it is the same code path.
+- Active jobs or sessions block release with their own `reason` and identify only bounded object ids
+  already authorized to the caller.
+- An admissible request returns `configuration_error` with `reason=recovery_executor_unavailable`.
+  None of the three ever reports success, and none writes.
+- No tool commits an activation transition. The `active -> recovering` door has no caller.
 
 ## Threat model
 
 **Boundary inventory.** This change adds three MCP entry points (`runs.release_external_boot`,
-`systems.resolve_external_boot_conflict`, `ops.resolve_recovery_orphan`) and one server→worker queue
-boundary (the marked `JobKind.BOOT` payload). It widens no existing boundary: the guarded call sites
-gain a check and a lock, never a new caller or a new parameter.
+`systems.resolve_external_boot_conflict`, `ops.resolve_recovery_orphan`). It adds **no** queue,
+provider, or authority boundary: nothing enqueues, nothing allocates authority, and nothing reaches a
+provider. It widens no existing boundary — the guarded call sites gain a check and a lock, never a
+new caller or a new parameter. Every one of the three new entry points is strictly deny-or-report;
+none has a state-changing outcome, which removes the class of vulnerability that a partially
+executable recovery path would have carried.
 
 **Actor model.** The untrusted party is an authenticated project member reaching the MCP transport
-with Run/System ids, an idempotency key, and a conflict observation digest. Provider-host
-administrators and database administrators remain trusted exactly as ADR-0584 states. The worker is
-trusted to hold its incarnation credential; the authority host is trusted to hold its mTLS identity.
+with Run/System ids, a conflict observation digest, and a bounded list of recovery-object
+identities. Provider-host administrators and database administrators remain trusted exactly as
+ADR-0584 states.
 
 **Control per boundary.**
 
 - Each new tool: existing project-membership resolution plus `require_role` /
   `require_platform_role` — contributor for release, project `admin` for conflict resolution,
   `PLATFORM_ADMIN` for repair. A foreign or unknown identifier returns `configuration_error` with no
-  membership disclosure, which is the existing convention at every lifecycle tool.
-- Input bounding: bounded Pydantic fields reject malformed or oversized ids, idempotency keys, and
-  digests before any database read. The conflict operation is a closed literal, not free text.
+  membership disclosure, which is the existing convention at every lifecycle tool. Authorization runs
+  **before** the admission read, so an unauthorized caller learns nothing about whether the System
+  carries an activation.
+- Input bounding: bounded Pydantic fields reject malformed or oversized ids and digests before any
+  database read. The conflict operation and the repair disposition are closed literals, not free
+  text, and `object_identities` is length-bounded both per element and in list length.
 - Concurrency: the System advisory lock plus the partial unique index on uncleaned activations
-  prevent two Runs from both passing admission. Exact digest compare-and-set prevents an
-  administrator from approving a composite state that changed after observation.
-- Queue boundary: the payload receives only immutable ids, the server-computed operation identity,
-  the attempt id, and the deadline. No credential, provider definition, command, path, or secret
-  crosses it. The authority allocator revalidates the locked job and actor attempt in the database
-  before any mutation.
+  prevent two Runs from both passing admission at a guarded call site.
 - Response leakage: denial data is limited to the activation id, activation state, and owning Run id
-  — all already authorized to a caller who can read the System.
+  — all already authorized to a caller who can read the System. The
+  `recovery_executor_unavailable` response carries no object state at all.
+- Reverse-admission call sites: each gains a read under a lock it either already held or now acquires
+  ahead of its existing locks in the documented total order. None gains a new caller, parameter, or
+  privilege, and a guard that raises leaves the site's own transaction rolled back to where it was.
 
 **Explicitly out of scope.** Provider execution, journal integrity, reconciliation, orphan deletion
 or adoption, and live-provider behavior are owned elsewhere and are not represented as completed
 behavior here. Authority-host deployment hardening is ADR-0584's and #2150's. Denial-of-service
-through repeated admitted-then-denied calls is bounded by the existing per-tool authorization and
-idempotency paths and is not separately addressed.
+through repeated denied calls is bounded by the existing per-tool authorization path; each of the
+three new tools performs at most one indexed single-row read under a per-System lock and writes
+nothing, so it is a weaker amplifier than the lifecycle tools already exposed beside it.
 
 ## Verification
 
 Table tests cover every activation state against every operation, owning versus other Run, and
 cleaned terminal states. PostgreSQL tests prove reverse admission is atomic and race another Run's
-install against release so exactly one side proceeds. Focused MCP tests cover RBAC, redaction,
-idempotent replay, unchanged deadlines, conflict compare-and-set, literal next actions, wrapper
-schemas, the declared `partial` maturity and its reason, and the truthful unavailable repair
-response. Existing control, snapshot, vmcore, Run, and DebugSession tests gain negative cases at the
-shared service boundary. Generated tool reference output is regenerated with `just docs`.
-`just lint`, `just type`, focused `just test-verbose` commands, and `just ci` are the required gates.
+install against a committing activation so exactly one side proceeds. Focused MCP tests cover RBAC,
+redaction, literal next actions, wrapper schemas, the declared `partial` maturity and its reason, and
+the truthful `recovery_executor_unavailable` response from each of the three tools.
+
+Two tests exist specifically to hold the amendment's hard rule:
+
+- an import-closure assertion that `services/external_boot/recovery_requests.py` reaches no
+  activation-writing name, so a later edit that adds a transition fails a gate rather than shipping;
+- a PostgreSQL assertion that calling all three tools against a seeded `active` activation leaves the
+  activation row byte-identical, so the "no transition it cannot complete" rule is proven on the
+  database rather than argued from the source.
+
+Existing control, snapshot, vmcore, Run, and DebugSession tests gain negative cases at the shared
+service boundary. Generated tool reference output is regenerated with `just docs`. `just lint`,
+`just type`, focused `just test-verbose` commands, and `just ci` are the required gates.
 Verification for this issue runs on x86_64; the native ppc64le proof is deferred to a separate later
 run on native POWER hardware.
