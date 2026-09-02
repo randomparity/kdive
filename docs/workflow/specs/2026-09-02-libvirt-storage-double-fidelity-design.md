@@ -26,26 +26,41 @@ input asserts nothing about what the platform keeps, and the green gate was the 
 
 ## Platform evidence
 
-Reproduced on this host against libvirt 12.0.0 / libvirt-python 12.0.0, x86_64, 2026-09-02, by
-creating a dir-pool volume through `virStorageVolCreateXML` whose XML carried a `<metadata>` child
-and a `<bogusElement>` child:
+Reproduced on this host on 2026-09-02: Fedora 44 x86_64, libvirt daemon and libs 12.0.0,
+libvirt-python 12.5.0 in the project venv (`importlib.metadata.version("libvirt-python")`; the
+system binding is 12.0.0 and the venv shadows it). Two volumes were created in a `dir` pool over a
+temporary directory through `virStorageVolCreateXML` and read back with `XMLDesc(0)`.
 
-- The create is accepted with no error.
-- `XMLDesc(0)` returns a `<volume type='file'>` whose top-level children are exactly `name`, `key`,
-  `capacity`, `allocation`, `physical`, and `target`, and whose `target` children are exactly
-  `path`, `format`, `permissions`, and `timestamps`. Neither `metadata` nor `bogusElement` appears
-  anywhere in the readback.
-- `permissions` carries `mode`, `owner`, `group`, and `label`; `timestamps` carries `atime`,
-  `mtime`, `ctime`, and `btime`.
-- `grep -c metadata /usr/share/libvirt/schemas/storagevol.rng` matches nothing; the same grep
-  against `domaincommon.rng` matches, so the element exists for domains and not for volumes.
+The submitted overlay document carried a `<metadata>` child, a `<bogusElement>` child, a
+`kdive='owned'` attribute on `<name>`, no root `type` attribute, and the `<backingStore>` branch
+`render_volume_xml` emits (`src/kdive/providers/remote_libvirt/lifecycle/xml.py:54-64`).
+
+- Every create is accepted with no error.
+- The readback root is `<volume type='file'>` — libvirt supplies the `type` attribute the
+  submitted document omitted.
+- Top-level children of the backed overlay are exactly `name`, `key`, `capacity`, `allocation`,
+  `physical`, `target`, and `backingStore`. For the base volume, submitted with no
+  `<backingStore>`, they are the same list without `backingStore`: libvirt renders that branch
+  only when the volume has one.
+- `target` and `backingStore` each carry exactly `path`, `format`, `permissions`, and
+  `timestamps`. `permissions` carries `mode`, `owner`, `group`, and `label`; `timestamps` carries
+  `atime`, `mtime`, `ctime`, and `btime`. The `label` element carries the file's security label, so
+  it is present on this SELinux host and is not universal.
+- `metadata`, `bogusElement`, and the `kdive` attribute appear nowhere in either readback.
+- The qcow2 overlay reads back `capacity` 1048576, `allocation` 200704, `physical` 196616, and
+  `info()` returns `[0, 1048576, 200704]`. Allocation and physical are host facts about the file on
+  disk; they are neither equal to capacity nor to each other, and `info()[2]` is the allocation.
+- `grep -c metadata /usr/share/libvirt/schemas/storagevol.rng` matches nothing (exit 1); the same
+  grep against `domaincommon.rng` matches 3, so the element exists for domains and not for volumes.
 - `virStorageVol` exposes `XMLDesc`, `delete`, `download`, `info`, `infoFlags`, `key`, `name`,
   `path`, `resize`, `storagePoolLookupByVolume`, `upload`, `wipe`, and `wipePattern` — no metadata
   accessor. `virDomain` exposes `metadata` and `setMetadata`.
 
 That readback is the modelled set. Modelling only the subset the current provider code reads would
 be the same defect one level down: a field a later change starts writing would be echoed back
-because nothing modelled its absence.
+because nothing modelled its absence. `backingStore` is the concrete instance of that trap — a
+modelled set gathered from a raw capacity-only volume omits it, and every overlay the remote
+provider creates carries one.
 
 ## Components
 
@@ -55,7 +70,7 @@ Holds a frozen modelled state and renders `XMLDesc` from it. It never retains th
 document, so no unmodelled input can reach a readback. Its libvirt-shaped surface is `name()`,
 `key()`, `path()`, `info()`, `XMLDesc(flags=0)`, and `delete(flags=0)` — the calls the remote
 provider's storage paths make (`src/kdive/providers/remote_libvirt/lifecycle/storage.py` reads
-`info()[1]` and `path()`; the `StorageVol` protocol there declares `delete`).
+`info()[1]` and `path()`; the `Volume` protocol there declares `path`, `info`, and `delete`).
 
 ### `FakeStoragePool` (`tests/providers/remote_libvirt/fakes.py`)
 
@@ -70,34 +85,59 @@ request, which is a separate question from what the platform keeps.
 ### Field derivation
 
 From the submitted document the double retains `name`, `capacity` (with its `unit` attribute),
-the root `type` attribute, and `target/format@type`. Everything else in the modelled set is
-derived, matching libvirt: `key` and `target/path` are the pool target path joined with the name;
-`allocation` and `physical` equal the retained capacity; `target/permissions` and
-`target/timestamps` carry fixed placeholder values. Absent optional input takes a stated default —
-root `type` defaults to `file`, `target/format@type` to `raw`, `capacity/@unit` to `bytes`, an
-absent `capacity` to `0`.
+the root `type` attribute, `target/format@type`, and — when the document carries a
+`<backingStore>` — that branch's `path` and `format@type`. `key` and `target/path` are the pool
+target path joined with the name, matching libvirt for a dir pool. Absent optional input takes a
+stated default: root `type` defaults to `file`, `target/format@type` to `raw`, `capacity/@unit` to
+`bytes`, an absent `capacity` to `0`, and an absent `<backingStore>` renders no `backingStore`
+element at all, which is what libvirt does.
 
-The placeholder permission and timestamp values are deliberately not realistic. Their job is to
-prove the tags are rendered, which is what the live-tier comparison checks; a test asserting a
-double's mtime would be asserting the double against itself.
+`allocation`, `physical`, `permissions`, and `timestamps` are **placeholders, not derivations**.
+Real libvirt fills them from the file on disk — the observed overlay reads back allocation 200704
+and physical 196616 against a capacity of 1048576 — and a double cannot reproduce a host fact. So
+it renders `0` for allocation and physical (carrying the capacity's unit), `0600`/`0`/`0`/empty for
+the permission children, and `0` for every timestamp. Their job is to prove the tags are rendered,
+which is what the live-tier comparison checks. `info()` returns `[0, capacity, allocation]`, so
+`info()[1]` is the one element a caller can rely on; `src/kdive/providers/remote_libvirt/lifecycle/storage.py`
+reads exactly that.
+
+A test asserting a double's mtime, allocation, or security label would be asserting the double
+against itself.
 
 ### `require_live_vm_storage_double` (`tests/live_vm/__init__.py`)
 
 A new gate beside its five siblings, following the module's stated skip-versus-fail discipline. It
 resolves the URI the same way the other families do — `KDIVE_LIBVIRT_URI` when set, otherwise the
-caller's default of `qemu:///session` — then probes it by opening and immediately closing a
-connection, and returns a frozen `StorageDoubleContract(libvirt_uri=...)`.
+caller's default of `qemu:///session` — and returns a frozen
+`StorageDoubleContract(libvirt_uri=...)`.
 
-The probe is what makes the split:
+Two checks stand in front of that, in order:
 
-- `KDIVE_LIBVIRT_URI` unset and the open fails — this host runs no session daemon, so the family's
-  environment is absent and the gate skips.
-- `KDIVE_LIBVIRT_URI` set and the open fails — an operator declared a host that does not answer.
+1. **The URI must be a local session URI**, tested with the module's existing
+   `_is_local_session_uri`. This family's proof defines a pool whose target is a `tmp_path` on the
+   client machine, under a `0700` directory owned by the invoking user, so it is a session-mode
+   requirement rather than a generic libvirt one. `KDIVE_LIBVIRT_URI` is the shared override for
+   every local family and defaults to `qemu:///system` for two of them, so an operator setting it
+   for the throwaway family would otherwise silently retarget this one at a mode where the
+   comparison is meaningless. A non-session URI fails loud, exactly as
+   `require_live_vm_throwaway(session_required=True)` does for the same reason (#1258).
+2. **The host must answer for storage.** The gate opens the URI and calls `listStoragePools()`
+   before closing, because the proof needs the storage driver and not just a connection. Modern
+   libvirt is modular: a host with `virtqemud` socket-activated and no storage driver installed
+   answers `libvirt.open` and then fails at `storagePoolDefineXML`, which would reach the operator
+   as an unexplained error rather than as the skip or the loud failure the module's discipline
+   promises. Probing the capability the proof consumes is what keeps that legible.
+
+`libvirt.libvirtError` from either call is a failed probe, and the split is the family discipline:
+
+- `KDIVE_LIBVIRT_URI` unset and the probe fails — this host runs no session daemon, so the
+  family's environment is absent and the gate skips.
+- `KDIVE_LIBVIRT_URI` set and the probe fails — an operator declared a host that does not answer.
   That is a mis-provisioned runner, not "no environment", so the gate fails loud, exactly as the
   throwaway family fails loud on a rootfs path that is set but not a file.
 
 Only `libvirt.libvirtError` is treated as a failed probe. Any other exception is a defect in the
-test environment and propagates.
+test environment and propagates. The probe connection is closed on both paths.
 
 The gate returns a URI rather than the open connection. A resolver that handed back a live
 connection would put its lifetime in the caller's hands across a `pytest.skip`, and would not fit
@@ -113,37 +153,55 @@ Not gated; runs in ordinary CI. It asserts:
 1. A submitted `<metadata>` child does not appear in the readback.
 2. A submitted unknown element does not appear in the readback.
 3. The readback is not the submitted string — the direct guard against a return to echoing.
-4. The readback's top-level child tag set and `target` child tag set equal the modelled set named
-   under *Platform evidence*.
-5. Retained fields round-trip: name, capacity and its unit, root `type`, `target/format@type`.
-6. Derived fields derive: `key` and `target/path` from the pool target path; `allocation` and
-   `physical` from capacity.
-7. Defaults apply when the optional input is absent.
-8. Attributes on a modelled element that libvirt does not keep are dropped.
-9. Pool behaviour: lookup returns the created volume, an unknown name raises
-   `VIR_ERR_NO_STORAGE_VOL`, delete removes it, `created_xml` records the submitted documents.
+4. The readback's top-level child tag tuple, `target` child tag tuple, `backingStore` child tag
+   tuple, and the `permissions` and `timestamps` child tag tuples under each equal the modelled set
+   named under *Platform evidence*.
+5. Retained fields round-trip: name, capacity and its unit, root `type`, `target/format@type`, and
+   the `backingStore` path and format when one was submitted.
+6. Derived fields derive: `key` and `target/path` from the pool target path.
+7. Placeholder fields render as placeholders: `allocation` and `physical` are `0` carrying the
+   capacity's unit, and `info()` is `[0, capacity, 0]`.
+8. Defaults apply when the optional input is absent — including a document with no
+   `<backingStore>`, whose readback carries no `backingStore` element.
+9. Attributes on a modelled element that libvirt does not keep are dropped.
+10. Pool behaviour: lookup returns the created volume, an unknown name raises
+    `VIR_ERR_NO_STORAGE_VOL`, delete removes it, `created_xml` records the submitted documents.
 
 Assertion 3 is the one that fails if the double is reverted to echoing, and assertions 1, 2, 4, and
-8 all fail with it.
+9 all fail with it.
 
 ### `tests/live_vm/test_libvirt_storage_double_fidelity.py` — the double against libvirt
 
 Marked `live_vm`, behind `require_live_vm_storage_double()`. It defines and starts a `dir` pool
-over `tmp_path`, creates one volume through the real `createXML` with a `<metadata>` child and a
-`<bogusElement>` child, feeds the identical document to `FakeStoragePool.createXML`, and compares
-the two readbacks on:
+over `tmp_path` and creates two volumes through the real `createXML`: a base, and an overlay backed
+by it whose document also carries a `<metadata>` child, a `<bogusElement>` child, and an unknown
+attribute. The overlay document is the shape `render_volume_xml` produces, so the comparison
+exercises the input the provider actually submits rather than a hand-written raw volume — a proof
+run on a capacity-only volume would pass while the double silently dropped `backingStore`.
+
+Both documents are fed to `FakeStoragePool.createXML`, and each pair of readbacks is compared on:
 
 - the root tag and its `type` attribute,
-- the top-level child tag set,
-- the `target` child tag set,
+- the top-level child tag tuple — which distinguishes the two volumes, since only the overlay
+  carries `backingStore`,
+- the `target` child tag tuple, and the `backingStore` child tag tuple for the overlay,
+- the `timestamps` child tag tuple under each of those,
+- the `permissions` child tag tuple under each of those, with `label` excluded from the
+  comparison and asserted separately as a subset relation: the real readback's permission children
+  must be a subset of the double's. `label` carries the file's security label, so a runner without
+  SELinux emits three children where this host emits four, and comparing it exactly would turn a
+  portable proof into a host-specific one.
 
-then asserts neither readback contains `metadata` or `bogusElement` anywhere. It compares tag
-structure, not values: `path`, `permissions`, and `timestamps` values are host facts a double
-cannot and should not reproduce, while the tag set is the fidelity claim the unit proof rests on.
+It then asserts neither readback contains `metadata`, `bogusElement`, or the unknown attribute
+anywhere. It compares tag structure, not values: `path`, `allocation`, `physical`, `permissions`,
+and `timestamps` values are host facts a double cannot and should not reproduce, while the tag set
+is the fidelity claim the unit proof rests on.
 
-Teardown deletes every volume, then destroys and undefines the pool, then closes the connection,
-under a `finally` that tolerates an already-absent object so a mid-test failure does not leave the
-host holding a defined pool.
+`conn` and `pool` are bound to `None` before the `try`, and teardown skips whichever is still
+`None`. Otherwise a failure in `storagePoolDefineXML` leaves `pool` unbound and the `finally`
+raises `UnboundLocalError` over the libvirt error that explains what went wrong. Teardown deletes
+every volume the pool lists, then destroys and undefines the pool, then closes the connection, each
+step guarded so an already-absent object does not mask the real failure.
 
 This test is the reason the unit proof can be trusted. Without it the modelled set is one author's
 transcription of one readback, and nothing notices when a libvirt upgrade changes it.
@@ -168,11 +226,29 @@ to fail that way is not modelling the discard.
   — and `just ci` passed 15,304 tests over a production-fatal design. An assertion on the request
   cannot detect what the platform drops from it.
 - **Model only the fields the provider reads today (`name`, `key`, `capacity`, `target/path`).**
-  judgment: a later change that starts writing a field outside that subset gets it echoed back,
-  which is the defect this issue exists to close, one level down.
-- **Model the readback values as well as the tags — real permissions, real timestamps.** judgment:
-  a double reproducing host filesystem facts would be asserted against itself, and the live-tier
+  verified: `render_volume_xml` (`src/kdive/providers/remote_libvirt/lifecycle/xml.py:54-64`) emits
+  a `<backingStore>` on every overlay, and submitting that document to real libvirt (qemu:///session,
+  dir pool, daemon 12.0.0) returns a seventh top-level child `backingStore` with its own `path`,
+  `format`, `permissions`, and `timestamps`. A double built from the raw-volume subset would drop a
+  field libvirt keeps, so a test asserting an overlay has no backing chain would go green and be
+  wrong in production — the same defect this issue closes, pointed the other way.
+- **Gather the modelled set from a raw, capacity-only volume.** verified: the same probe. That
+  input is the one class whose readback makes a six-child set look complete; the provider never
+  submits it for an overlay.
+- **Model the readback values as well as the tags — real permissions, real timestamps, real
+  allocation.** verified: the observed overlay reads back capacity 1048576 with allocation 200704
+  and physical 196616, and `info()` returns `[0, 1048576, 200704]` — values that come from the file
+  on disk. judgment: a double reproducing them would be asserted against itself, and the live-tier
   comparison already covers everything a value comparison could.
+- **Render `allocation` and `physical` equal to capacity, which reads as a derivation.** verified:
+  the probe above shows all three differ on a qcow2 overlay. A plausible-looking wrong value is
+  worse than an obvious placeholder, so the double renders `0` and the spec says it is a
+  placeholder.
+- **Let the gate accept any `KDIVE_LIBVIRT_URI`.** verified: `tests/live_vm/__init__.py:12-13`
+  records that variable as the shared override for every local family, and the throwaway and
+  provisioned families default to `qemu:///system`. judgment: the proof's pool target is a
+  client-side `tmp_path`, so an override set for another family would retarget this one at a mode
+  where the comparison means nothing.
 - **Have the gate return an open `libvirt.virConnect`.** judgment: it puts a connection's lifetime
   across a `pytest.skip` boundary in the caller's hands and breaks the pure `EnvResolution[T]`
   shape the five existing families share, to save one connection open in a live-tier test.

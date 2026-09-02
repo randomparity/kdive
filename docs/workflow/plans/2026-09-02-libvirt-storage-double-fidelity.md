@@ -35,9 +35,10 @@ Design: `docs/workflow/specs/2026-09-02-libvirt-storage-double-fidelity-design.m
 - `just check-mermaid` needs `npm ci` run once in `.github/scripts/mermaid-check/` in a fresh
   worktree (known gap #2156).
 
-Expected implementation size: 450–600 changed lines (M) — derived from the file map below: the two
-double classes plus their rendering helper, the unit proof, the gate and its contract, the
-live-tier proof, and the gate's unit coverage.
+Expected implementation size: 520–680 changed lines (M) — derived from the file map below: the two
+double classes plus their rendering helper and the `backingStore` branch, the unit proof's sixteen
+tests, the gate with its three-check resolver and contract, the live-tier proof over a base and a
+backed overlay, and the gate's eight unit tests.
 
 ## File map
 
@@ -51,18 +52,20 @@ live-tier proof, and the gate's unit coverage.
 
 ## The modelled set
 
-Reproduced against libvirt 12.0.0 / libvirt-python 12.0.0 on x86_64. A dir-pool volume readback is:
+Reproduced on Fedora 44 x86_64 against libvirt daemon and libs 12.0.0 with libvirt-python 12.5.0
+in the project venv. A dir-pool overlay volume — the shape `render_volume_xml` produces — reads
+back as:
 
 ```xml
 <volume type='file'>
-  <name>verify.raw</name>
-  <key>/pool/target/verify.raw</key>
+  <name>overlay.qcow2</name>
+  <key>/pool/target/overlay.qcow2</key>
   <capacity unit='bytes'>1048576</capacity>
-  <allocation unit='bytes'>1048576</allocation>
-  <physical unit='bytes'>1048576</physical>
+  <allocation unit='bytes'>200704</allocation>
+  <physical unit='bytes'>196616</physical>
   <target>
-    <path>/pool/target/verify.raw</path>
-    <format type='raw'/>
+    <path>/pool/target/overlay.qcow2</path>
+    <format type='qcow2'/>
     <permissions>
       <mode>0600</mode>
       <owner>1000</owner>
@@ -70,17 +73,36 @@ Reproduced against libvirt 12.0.0 / libvirt-python 12.0.0 on x86_64. A dir-pool 
       <label>unconfined_u:object_r:user_tmp_t:s0</label>
     </permissions>
     <timestamps>
-      <atime>1788387700.839537862</atime>
-      <mtime>1788387700.839448004</mtime>
-      <ctime>1788387700.839448004</ctime>
+      <atime>1788388647.584020998</atime>
+      <mtime>1788388647.583170806</mtime>
+      <ctime>1788388647.583980117</ctime>
       <btime>0</btime>
     </timestamps>
   </target>
+  <backingStore>
+    <path>/pool/target/base.qcow2</path>
+    <format type='qcow2'/>
+    <permissions>...</permissions>
+    <timestamps>...</timestamps>
+  </backingStore>
 </volume>
 ```
 
-A submitted `<metadata>` child and a submitted `<bogusElement>` child are accepted by
-`virStorageVolCreateXML` and appear nowhere in that readback.
+Facts this pins, all observed in that run:
+
+- A submitted `<metadata>` child, a submitted `<bogusElement>` child, and a submitted
+  `kdive='owned'` attribute on `<name>` are accepted by `virStorageVolCreateXML` and appear nowhere
+  in the readback.
+- The submitted document carried no root `type` attribute; libvirt supplies `type='file'`.
+- `backingStore` is present only when the submitted document carried one. The base volume, created
+  without it, reads back the same six top-level children minus `backingStore`.
+- `allocation`, `physical`, `permissions`, and `timestamps` are host facts. `allocation` (200704)
+  and `physical` (196616) differ from `capacity` (1048576) and from each other, and
+  `info()` returns `[0, 1048576, 200704]` — so `info()[2]` is the allocation. The double renders
+  these as **placeholders**, not derivations: `0` for allocation and physical with the capacity's
+  unit, `0600`/`0`/`0`/empty for the permission children, `0` for every timestamp.
+- `label` carries the file's security label. It is present on this SELinux host and is not
+  universal, so the live proof excludes it from exact comparison (Task 4).
 
 ## Task 1: model the storage double
 
@@ -100,6 +122,8 @@ class VolumeState:
     capacity_unit: str
     format_type: str
     path: str
+    backing_path: str | None
+    backing_format: str | None
 
 class FakeStorageVolume:
     def __init__(self, state: VolumeState, pool: FakeStoragePool) -> None: ...
@@ -132,26 +156,40 @@ Steps:
    - `test_readback_drops_unknown_elements`: submit `<bogusElement>zzz</bogusElement>`; assert
      neither `bogusElement` nor `zzz` appears in the readback.
    - `test_readback_is_not_the_submitted_document`: assert `volume.XMLDesc(0) != submitted`.
-   - `test_readback_renders_the_modelled_top_level_tags`: parse the readback; assert the child tag
-     tuple equals `("name", "key", "capacity", "allocation", "physical", "target")`.
+   - `test_readback_renders_the_modelled_top_level_tags`: submit a backed overlay; parse the
+     readback; assert the child tag tuple equals
+     `("name", "key", "capacity", "allocation", "physical", "target", "backingStore")`.
+   - `test_readback_omits_backing_store_when_none_was_submitted`: submit a document with no
+     `<backingStore>`; assert the child tag tuple equals
+     `("name", "key", "capacity", "allocation", "physical", "target")` and that `backingStore`
+     appears nowhere in the readback.
    - `test_readback_renders_the_modelled_target_tags`: assert the `target` child tag tuple equals
      `("path", "format", "permissions", "timestamps")`, that `permissions` children are
      `("mode", "owner", "group", "label")`, and that `timestamps` children are
      `("atime", "mtime", "ctime", "btime")`.
+   - `test_readback_renders_the_modelled_backing_store_tags`: assert the `backingStore` child tag
+     tuple equals `("path", "format", "permissions", "timestamps")`, with the same `permissions`
+     and `timestamps` child tuples as `target`.
    - `test_readback_retains_submitted_fields`: assert root `type`, `name` text, `capacity` text and
      its `unit` attribute, and `target/format@type` equal what was submitted.
+   - `test_readback_retains_the_submitted_backing_store`: assert `backingStore/path` text and
+     `backingStore/format@type` equal what was submitted.
    - `test_readback_derives_key_and_path_from_the_pool`: build the pool with
      `target_path="/pool/target"`, create `disk.qcow2`, assert `key` text, `target/path` text,
      `volume.key()`, and `volume.path()` all equal `/pool/target/disk.qcow2`.
-   - `test_readback_derives_allocation_and_physical_from_capacity`: assert both equal the submitted
-     capacity and both carry the submitted unit.
+   - `test_readback_renders_allocation_and_physical_as_placeholders`: assert both texts are `"0"`
+     and both carry the submitted capacity's unit. Real libvirt fills them from the file on disk
+     (observed: allocation 200704, physical 196616 against capacity 1048576), so the double states
+     a placeholder rather than a plausible-looking wrong derivation.
    - `test_readback_applies_defaults_for_absent_input`: submit only `<volume><name>x</name></volume>`;
      assert root `type` is `file`, `target/format@type` is `raw`, `capacity` text is `0` with unit
      `bytes`.
    - `test_readback_drops_attributes_libvirt_does_not_keep`: submit `<name kdive='owned'>x</name>`
-     and a root `kdive='owned'` attribute; assert neither appears in the readback.
-   - `test_info_reports_capacity_and_allocation`: assert `volume.info()[1]` and `[2]` equal the
-     submitted capacity.
+     and a root `kdive='owned'` attribute; assert neither appears in the readback. Grounded by the
+     probe under *The modelled set*, which observed both dropped by real libvirt.
+   - `test_info_reports_capacity_and_placeholder_allocation`: assert `len(volume.info()) == 3`,
+     `volume.info()[1]` equals the submitted capacity, and `volume.info()[2]` is `0`. Do not assert
+     `info()[2] == capacity`: real libvirt answers `info()[2]` with the allocation.
    - `test_lookup_returns_the_created_volume`: assert `pool.storageVolLookupByName("disk.qcow2")`
      is the object `createXML` returned, and `pool.listVolumes() == ["disk.qcow2"]`.
    - `test_lookup_raises_no_storage_vol_for_an_unknown_name`: assert
@@ -163,14 +201,17 @@ Steps:
 2. Run `uv run python -m pytest tests/providers/remote_libvirt/test_fakes_storage.py -q`.
    Expect a collection error: `ImportError: cannot import name 'FakeStoragePool'`.
 3. Add `VolumeState`, `FakeStorageVolume`, and `FakeStoragePool` to `fakes.py` with the interface
-   above. `createXML` parses with `xml.etree.ElementTree.fromstring`, reads only `./name`,
-   `./capacity` and its `unit`, the root `type` attribute, and `./target/format` and its `type`
-   attribute, and builds a `VolumeState`; the volume's `path` is `f"{pool_target_path}/{name}"`.
-   `XMLDesc` renders the modelled document from that state alone, with `mode` `0600`, `owner` and
-   `group` `0`, `label` the empty string, and every timestamp `0`. Add `# noqa: N802` on
-   `XMLDesc`, `createXML`, `storageVolLookupByName`, and `listVolumes`, matching the file's
-   existing libvirt-binding methods. Update the module docstring to say the storage double models
-   the readback rather than echoing the request, and cite #2164.
+   above. `createXML` parses with `xml.etree.ElementTree.fromstring` and reads only `./name`,
+   `./capacity` and its `unit`, the root `type` attribute, `./target/format` and its `type`
+   attribute, and `./backingStore/path` with `./backingStore/format`'s `type` attribute, then
+   builds a `VolumeState`; the volume's `path` is `f"{pool_target_path}/{name}"`.
+   `XMLDesc` renders the modelled document from that state alone, with `allocation` and `physical`
+   `0` carrying the capacity's unit, `mode` `0600`, `owner` and `group` `0`, `label` the empty
+   string, and every timestamp `0`. It renders the `backingStore` branch only when
+   `state.backing_path` is not `None`, matching libvirt. Add `# noqa: N802` on `XMLDesc`,
+   `createXML`, `storageVolLookupByName`, and `listVolumes`, matching the file's existing
+   libvirt-binding methods. Update the module docstring to say the storage double models the
+   readback rather than echoing the request, and cite #2164.
 4. Run `uv run python -m pytest tests/providers/remote_libvirt/test_fakes_storage.py -q`.
    Expect every test to pass.
 5. Run `just lint` and `just type`. Expect both to exit 0.
@@ -179,30 +220,38 @@ Steps:
 Acceptance criteria:
 
 - `XMLDesc` output contains no substring taken from an unmodelled part of the submitted document.
-- The readback's top-level and `target` child tag tuples equal the modelled set above.
+- The readback's top-level, `target`, and `backingStore` child tag tuples equal the modelled set
+  above, and no `backingStore` is rendered when none was submitted.
 - `fakes.py` retains no reference to the submitted document except `created_xml`.
 
 ## Task 2: prove the double fails when it echoes
 
-Files: none changed. This is a controlled fault against Task 1's committed state.
+Files: none changed. This is a controlled fault against Task 1's committed state. Run the two
+faults **in this order** — the second must run against the restored double, so the restore comes
+between them.
 
 Steps:
 
-1. Edit `FakeStorageVolume.XMLDesc` in the working tree to `return self._submitted` after
-   temporarily retaining the submitted document on the state.
+1. In the working tree, add a `submitted: str` field to `VolumeState`, set it in `createXML`, and
+   make `FakeStorageVolume.XMLDesc` return `self._state.submitted`. `VolumeState` is
+   `@dataclass(frozen=True, slots=True)`, so this is a field addition and not a one-line edit to
+   `XMLDesc`.
 2. Run `uv run python -m pytest tests/providers/remote_libvirt/test_fakes_storage.py -q`. Expect
    red on at least `test_readback_drops_submitted_metadata_element`,
    `test_readback_drops_unknown_elements`, `test_readback_is_not_the_submitted_document`, and
-   `test_readback_renders_the_modelled_top_level_tags`.
-3. Write a throwaway test in the same file that creates a volume whose XML carries run ownership in
-   a `<metadata>` child and asserts the ownership is readable from `XMLDesc`. Run it against the
-   committed double and expect red — that is the pattern that shipped green on #2129's branch.
-4. `git restore tests/providers/remote_libvirt/fakes.py` and delete the throwaway test. Re-run the
-   file and expect green.
-5. Record the observed red output in the run report. Nothing is committed by this task.
+   `test_readback_renders_the_modelled_top_level_tags`. Record the failure output.
+3. `git restore tests/providers/remote_libvirt/fakes.py`. Re-run the file and expect green — the
+   committed double is back.
+4. Add a throwaway test to the file that creates a volume whose XML carries run ownership in a
+   `<metadata>` child and asserts the ownership is readable back out of `XMLDesc`. Run it against
+   the restored double and expect red: that is the pattern that shipped green on #2129's branch,
+   and its failure is what proves the discard is modelled. Record the failure output.
+5. Delete the throwaway test. Re-run the file and expect green.
+6. Record both observed reds in the run report. Nothing is committed by this task, and
+   `git status --short` must be clean when it ends.
 
-Acceptance criteria: both faults were observed red and both were reverted, with the file green
-afterwards.
+Acceptance criteria: both faults were observed red, each against the state the step names, both
+were reverted, and the file is green with a clean tree afterwards.
 
 ## Task 3: add the live_vm storage-double gate
 
@@ -223,45 +272,68 @@ def require_live_vm_storage_double(default_uri: str = "qemu:///session") -> Stor
 ```
 
 It consumes, from the same module: `EnvResolution`, `LiveVmEnvState`, `LIBVIRT_URI_ENV`
-(`"KDIVE_LIBVIRT_URI"`), and `_resolved_uri(default_uri: str) -> str`.
+(`"KDIVE_LIBVIRT_URI"`), `_resolved_uri(default_uri: str) -> str`, and
+`_is_local_session_uri(uri: str) -> bool` — all present in `tests/live_vm/__init__.py` today at
+lines 30, 52, 118, 126, and 130.
+
+The resolver runs three checks in order, and each failure carries its own reason string:
+
+1. The resolved URI must satisfy `_is_local_session_uri`. A non-session URI is `MISCONFIGURED`
+   whether or not it answers: this family's pool target is a client-side `tmp_path`, so the
+   comparison is meaningless in system mode.
+2. `libvirt.open(uri)` must succeed.
+3. `conn.listStoragePools()` on the open connection must succeed — the proof needs the storage
+   driver, which modular libvirt packages separately from the qemu driver, so a host that answers
+   `open` can still have no storage backend.
+
+A `libvirt.libvirtError` from check 2 or 3 is `ABSENT` when `LIBVIRT_URI_ENV` is unset and
+`MISCONFIGURED` when it is set. The connection is closed in a `finally` on every path.
 
 Steps:
 
 1. Add to `tests/live_vm/test_gates.py` the failing tests below, importing the three new names.
-   Each monkeypatches `libvirt.open` on the `tests.live_vm` module namespace.
+   Each monkeypatches `libvirt.open` with `monkeypatch.setattr(libvirt, "open", ...)`.
    - `test_storage_double_absent_when_no_session_daemon`: `KDIVE_LIBVIRT_URI` unset,
      `libvirt.open` raising `libvirt.libvirtError`; assert the resolution state is
      `LiveVmEnvState.ABSENT` and the reason names `qemu:///session`.
-   - `test_storage_double_misconfigured_when_declared_uri_does_not_answer`: `KDIVE_LIBVIRT_URI`
-     set to `qemu:///system`, `libvirt.open` raising; assert `LiveVmEnvState.MISCONFIGURED` and
-     that the reason names `KDIVE_LIBVIRT_URI`.
-   - `test_storage_double_available_closes_its_probe`: `libvirt.open` returning a recording
-     double; assert the state is `AVAILABLE`, the contract URI is `qemu:///session`, and the probe
+   - `test_storage_double_absent_when_the_storage_driver_is_missing`: `KDIVE_LIBVIRT_URI` unset,
+     `libvirt.open` returning a double whose `listStoragePools` raises `libvirt.libvirtError`;
+     assert `LiveVmEnvState.ABSENT`, that the reason names the storage driver, and that the probe
      connection was closed.
-   - `test_storage_double_available_honors_libvirt_uri_override`: assert the contract URI is the
-     override.
-   - `test_storage_double_skips_when_absent`: assert `pytest.raises(Exception)` under
-     `pytest.skip`'s own outcome, matching how `test_bzimage_skips_when_absent` is written in this
-     file.
+   - `test_storage_double_misconfigured_when_declared_uri_does_not_answer`: `KDIVE_LIBVIRT_URI`
+     set to `qemu+unix:///session?socket=/nonexistent/sock`, `libvirt.open` raising; assert
+     `LiveVmEnvState.MISCONFIGURED` and that the reason names `KDIVE_LIBVIRT_URI`.
+   - `test_storage_double_misconfigured_when_override_moves_off_a_local_session`:
+     `KDIVE_LIBVIRT_URI` set to `qemu:///system`; assert `LiveVmEnvState.MISCONFIGURED`, that the
+     reason names a local session URI, and that `libvirt.open` was never called.
+   - `test_storage_double_available_closes_its_probe`: `libvirt.open` returning a recording
+     double; assert the state is `AVAILABLE`, the contract URI is `qemu:///session`,
+     `listStoragePools` was called, and the probe connection was closed.
+   - `test_storage_double_available_honors_libvirt_uri_override`: set `KDIVE_LIBVIRT_URI` to
+     `qemu+unix:///session?socket=/run/user/1000/libvirt/virtqemud-sock`; assert the contract URI
+     is that override.
+   - `test_storage_double_skips_when_absent`: assert `pytest.skip` fires, matching how
+     `test_bzimage_skips_when_absent` is written in this file.
    - `test_storage_double_fails_loud_when_misconfigured`: the same shape against the fail path.
 2. Run `uv run python -m pytest tests/live_vm/test_gates.py -q`. Expect an ImportError for
    `require_live_vm_storage_double`.
 3. Add `StorageDoubleContract`, `resolve_storage_double_contract`, and
    `require_live_vm_storage_double` to `tests/live_vm/__init__.py`, beside the existing families
    and in the same order the file uses (contracts, then resolvers, then gates). Import `libvirt` at
-   module scope. The resolver opens `_resolved_uri(default_uri)`, closes the connection in a
-   `finally`, and returns `AVAILABLE`; on `libvirt.libvirtError` it returns `ABSENT` when
-   `LIBVIRT_URI_ENV` is unset and `MISCONFIGURED` when it is set. Extend the module docstring's
-   skip-versus-fail paragraph to cover the probe.
+   module scope. Implement the three checks above. Extend the module docstring's skip-versus-fail
+   paragraph to cover the local-session requirement and the storage-driver probe.
 4. Run `uv run python -m pytest tests/live_vm/test_gates.py -q`. Expect every test to pass.
 5. Run `just lint` and `just type`. Expect both to exit 0.
 6. Commit: `test(live-vm): add the storage-double fidelity gate`.
 
 Acceptance criteria:
 
-- On this host with no `KDIVE_LIBVIRT_URI` and no session daemon, the gate skips.
+- With no `KDIVE_LIBVIRT_URI` and no session daemon, the gate skips.
 - With `KDIVE_LIBVIRT_URI` set to a URI that does not answer, the gate fails loud.
-- The probe connection is closed on both the success and failure paths.
+- With `KDIVE_LIBVIRT_URI` set to a non-session URI, the gate fails loud without opening anything.
+- A host that answers `open` but has no storage driver takes the same skip/fail split, not an error
+  inside the test body.
+- The probe connection is closed on the success and both failure paths.
 
 ## Task 4: prove the double against real libvirt
 
@@ -276,30 +348,55 @@ Steps:
 
 1. Write the module with `pytestmark = [pytest.mark.live_vm]` and one test,
    `test_double_and_libvirt_agree_on_the_dir_pool_volume_readback(tmp_path)`:
-   - `contract = require_live_vm_storage_double()`; `conn = libvirt.open(contract.libvirt_uri)`.
-   - Define a `dir` pool named with a `uuid4().hex` suffix over `str(tmp_path)`, `pool.create(0)`.
-   - Build one volume document string carrying `<metadata>` and `<bogusElement>` children, a
-     `<capacity unit='bytes'>1048576</capacity>`, and `<target><format type='raw'/></target>`.
-   - `real = pool.createXML(document, 0).XMLDesc(0)`, where `pool` is the started dir pool.
-   - `fake = FakeStoragePool(target_path=str(tmp_path)).createXML(document).XMLDesc(0)`.
-   - Parse both. Assert equal root tags, equal root `type` attributes, equal top-level child tag
-     tuples, and equal `target` child tag tuples.
-   - Assert `metadata` and `bogusElement` appear in neither readback, by tag search over every
-     element and by substring over both strings.
-   - `finally`: delete each volume the pool lists, `pool.destroy()`, `pool.undefine()`,
-     `conn.close()`, each guarded so an already-absent object does not mask the real failure.
+   - `contract = require_live_vm_storage_double()`.
+   - Bind `conn = None` and `pool = None` **before** the `try`, so a failure in
+     `storagePoolDefineXML` cannot make the `finally` raise `UnboundLocalError` over the libvirt
+     error that explains it.
+   - Inside the `try`: `conn = libvirt.open(contract.libvirt_uri)`; define a `dir` pool named with
+     a `uuid4().hex` suffix over `str(tmp_path)`; `pool.create(0)`.
+   - Build two volume document strings. `base_document` is
+     `<volume><name>base.qcow2</name><capacity unit='bytes'>1048576</capacity>`
+     `<target><format type='qcow2'/></target></volume>` — no `backingStore`. `overlay_document` is
+     the shape `render_volume_xml` produces (`<name>`, `<capacity>`, `<target><format
+     type='qcow2'/></target>`, `<backingStore><path>…</path><format type='qcow2'/></backingStore>`
+     pointing at the base volume's `path()`), plus a `<metadata><owner>run-1</owner></metadata>`
+     child, a `<bogusElement>zzz</bogusElement>` child, and a `kdive='owned'` attribute on
+     `<name>`. Neither document carries a root `type` attribute.
+   - `real_base = pool.createXML(base_document, 0)`; then build `overlay_document` from
+     `real_base.path()`; then `real = pool.createXML(overlay_document, 0).XMLDesc(0)` and
+     `real_base_desc = real_base.XMLDesc(0)`.
+   - `fake_pool = FakeStoragePool(target_path=str(tmp_path))`;
+     `fake_base_desc = fake_pool.createXML(base_document).XMLDesc(0)`;
+     `fake = fake_pool.createXML(overlay_document).XMLDesc(0)`.
+   - Parse all four. For each pair (base with base, overlay with overlay) assert equal root tags,
+     equal root `type` attributes, and equal top-level child tag tuples — which is also what
+     distinguishes the two volumes, since only the overlay carries `backingStore`.
+   - For `target` on both pairs, and for `backingStore` on the overlay pair, assert equal child tag
+     tuples and equal `timestamps` child tag tuples. For `permissions`, compare the child tag sets
+     with `label` removed from both, and additionally assert the real set is a subset of the
+     double's. `label` carries the file's security label, so a runner without SELinux emits three
+     children where an SELinux host emits four; comparing it exactly would make a portable proof
+     host-specific.
+   - Assert `metadata`, `bogusElement`, and the `kdive` attribute appear in none of the four
+     readbacks, by tag and attribute search over every element and by substring over the strings.
+   - `finally`: skip each of `pool` and `conn` that is still `None`; otherwise delete each volume
+     the pool lists, then `pool.destroy()`, `pool.undefine()`, `conn.close()`, each guarded so an
+     already-absent object does not mask the real failure.
 2. Run `uv run python -m pytest tests/live_vm/test_libvirt_storage_double_fidelity.py -q -m live_vm`.
    On this host a session daemon answers, so expect one passing test; on a host without one expect
    one skip and no error.
 3. Run `uv run python -m pytest tests/live_vm/test_family_markers.py -q`. Expect it to pass — the
    new module carries the bare `live_vm` marker and no family sub-marker.
-4. Run `just lint` and `just type`. Expect both to exit 0.
-5. Commit: `test(live-vm): compare the storage double with a real libvirt readback`.
+4. Confirm the host is clean: `virsh -c qemu:///session pool-list --all` names no
+   `kdive-fidelity-*` pool.
+5. Run `just lint` and `just type`. Expect both to exit 0.
+6. Commit: `test(live-vm): compare the storage double with a real libvirt readback`.
 
 Acceptance criteria:
 
-- The test passes against the local session daemon.
-- The test skips, and does not error, when `libvirt.open` cannot reach a daemon.
+- The test passes against the local session daemon, on both the base and the overlay pair.
+- The test skips, and does not error, when the gate's probe cannot reach a daemon or a storage
+  driver.
 - The pool and its volumes are gone from the host after the run.
 
 ## Task 5: guardrails
