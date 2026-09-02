@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET  # noqa: S405 - test-owned XML
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+import libvirt
 import pytest
 from pydantic import ValidationError
 
@@ -29,6 +31,7 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     MAX_DEFINITION_BYTES,
     RemoteExternalBootDefinition,
+    activate_definition,
     boot_projection_identity,
     prepare_target_definition,
     preserved_definition_identity,
@@ -433,3 +436,178 @@ def test_definition_surfaces_unparseable_xml_as_validation_error() -> None:
     payload["source_xml"] = "<domain>"
     with pytest.raises(ValidationError):
         RemoteExternalBootDefinition.model_validate(payload)
+
+
+class _FakeDomain:
+    """Models libvirt: it stores what it was defined with and regenerates on read.
+
+    A double that echoed its input verbatim would let a byte comparison pass here and fail
+    against a real libvirt, which is exactly the defect the digest comparison exists to prevent.
+    """
+
+    def __init__(self, xml: str, *, active: bool) -> None:
+        self._xml = xml
+        self._active = active
+        self.calls: list[str] = []
+        self.defined: list[str] = []
+        self.create_error: BaseException | None = None
+        self.xmldesc_error: BaseException | None = None
+
+    def isActive(self) -> int:  # noqa: N802 - libvirt binding name
+        self.calls.append("isActive")
+        return 1 if self._active else 0
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt binding name
+        self.calls.append("XMLDesc")
+        if self.xmldesc_error is not None:
+            raise self.xmldesc_error
+        root = ET.fromstring(self._xml)  # noqa: S314 - test-owned XML
+        ET.indent(root, space="    ")
+        return ET.tostring(root, encoding="unicode")
+
+    def create(self) -> int:
+        self.calls.append("create")
+        if self.create_error is not None:
+            raise self.create_error
+        self._active = True
+        return 0
+
+    def _replace(self, xml: str) -> None:
+        self._xml = xml
+
+
+class _FakeConn:
+    def __init__(self, domain: _FakeDomain | None, *, lookup_error: BaseException | None = None):
+        self._domain = domain
+        self._lookup_error = lookup_error
+        self.define_error: BaseException | None = None
+        # What the domain reads back as after a define, when that must differ from what was
+        # written — the broken fixed-point case.
+        self.readback_xml: str | None = None
+        self.calls: list[str] = []
+
+    def lookupByName(self, name: str) -> _FakeDomain:  # noqa: N802 - libvirt binding name
+        self.calls.append(f"lookupByName:{name}")
+        if self._lookup_error is not None:
+            raise self._lookup_error
+        assert self._domain is not None
+        return self._domain
+
+    def defineXML(self, xml: str) -> _FakeDomain:  # noqa: N802 - libvirt binding name
+        self.calls.append("defineXML")
+        if self.define_error is not None:
+            raise self.define_error
+        assert self._domain is not None
+        self._domain.defined.append(xml)
+        self._domain._replace(self.readback_xml if self.readback_xml is not None else xml)
+        return self._domain
+
+
+def _libvirt_error(code: int) -> libvirt.libvirtError:
+    error = libvirt.libvirtError("boom")
+    error.err = (code, 0, "boom", 0, "", "", "", 0, 0)
+    return error
+
+
+_OTHER_XML = '<domain><name>kdive-other</name><os><type arch="x86_64">hvm</type></os></domain>'
+
+
+@pytest.mark.parametrize(
+    ("which", "active", "defines", "creates"),
+    [
+        ("source", False, 1, 1),
+        ("source", True, 0, 0),
+        ("target", False, 0, 1),
+        ("target", True, 0, 0),
+        ("other", False, 0, 0),
+        ("other", True, 0, 0),
+    ],
+    ids=[
+        "source-inactive-writes",
+        "source-active-conflicts",
+        "target-inactive-starts",
+        "target-active-is-a-noop",
+        "other-inactive-conflicts",
+        "other-active-conflicts",
+    ],
+)
+def test_activation_matrix(which: str, active: bool, defines: int, creates: int) -> None:
+    definition = _prepare()
+    observed = {
+        "source": definition.source_xml,
+        "target": definition.target_xml,
+        "other": _OTHER_XML,
+    }[which]
+    domain = _FakeDomain(observed, active=active)
+    conn = _FakeConn(domain)
+    expected_conflict = which == "other" or (which == "source" and active)
+    if expected_conflict:
+        with pytest.raises(CategorizedError) as caught:
+            activate_definition(conn, definition)
+        assert caught.value.category is ErrorCategory.CONFLICT
+        assert caught.value.details["system_id"] == str(_SYSTEM_ID)
+        assert "<domain" not in str(caught.value.details)
+    else:
+        activate_definition(conn, definition)
+    assert len(domain.defined) == defines
+    assert domain.calls.count("create") == creates
+    if defines:
+        assert domain.defined[0] == definition.target_xml
+
+
+def test_activation_conflicts_when_the_readback_matches_neither_pair() -> None:
+    definition = _prepare()
+    domain = _FakeDomain(definition.source_xml, active=False)
+    conn = _FakeConn(domain)
+    conn.readback_xml = _OTHER_XML
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(conn, definition)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "readback"
+    assert domain.calls.count("create") == 0
+
+
+def test_activation_conflicts_when_the_start_fails_after_a_successful_define() -> None:
+    definition = _prepare()
+    domain = _FakeDomain(definition.source_xml, active=False)
+    domain.create_error = _libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(_FakeConn(domain), definition)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "start"
+    assert caught.value.terminal is False
+    assert len(domain.defined) == 1
+
+
+def test_activation_reports_a_missing_domain_as_not_found() -> None:
+    conn = _FakeConn(None, lookup_error=_libvirt_error(libvirt.VIR_ERR_NO_DOMAIN))
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(conn, _prepare())
+    assert caught.value.category is ErrorCategory.NOT_FOUND
+
+
+def test_activation_reports_another_lookup_error_as_infrastructure_failure() -> None:
+    conn = _FakeConn(None, lookup_error=_libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR))
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(conn, _prepare())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_activation_reports_an_xml_rejection_as_conflict() -> None:
+    definition = _prepare()
+    domain = _FakeDomain(definition.source_xml, active=False)
+    conn = _FakeConn(domain)
+    conn.define_error = _libvirt_error(libvirt.VIR_ERR_XML_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(conn, definition)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert domain.calls.count("create") == 0
+
+
+def test_activation_reports_an_xmldesc_failure_as_infrastructure_failure() -> None:
+    definition = _prepare()
+    domain = _FakeDomain(definition.source_xml, active=False)
+    domain.xmldesc_error = _libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(_FakeConn(domain), definition)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

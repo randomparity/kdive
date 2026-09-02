@@ -15,9 +15,10 @@ import hashlib
 import json
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
-from typing import Annotated, Self
+from typing import Annotated, Protocol, Self
 from uuid import UUID
 
+import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,6 +37,7 @@ from kdive.providers.shared.libvirt_xml import (
     register_kdive_namespace,
     register_qemu_namespace,
 )
+from kdive.providers.shared.runtime_paths import domain_name_for
 
 _BOOT_FIELDS = ("kernel", "initrd", "cmdline")
 _PRESERVED_PREFIX = b"kdive-libvirt-preserved-v1"
@@ -372,3 +374,152 @@ def prepare_target_definition(
         expected_running=materialization.kernel_observation,
         expected_cmdline=plan.cmdline,
     )
+
+
+_XML_REJECTION_CODES = frozenset(
+    {libvirt.VIR_ERR_XML_ERROR, libvirt.VIR_ERR_XML_DETAIL, libvirt.VIR_ERR_CONFIG_UNSUPPORTED}
+)
+
+
+class ActivationDomain(Protocol):
+    """The libvirt domain surface activation uses."""
+
+    def isActive(self) -> int: ...  # noqa: N802 - binding name
+
+    def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802 - binding name
+
+    def create(self) -> int: ...
+
+
+class ActivationConn(Protocol):
+    """The libvirt connection surface activation uses."""
+
+    def lookupByName(self, name: str) -> ActivationDomain: ...  # noqa: N802 - binding name
+
+    def defineXML(self, xml: str) -> ActivationDomain: ...  # noqa: N802 - binding name
+
+
+def _activation_conflict(
+    reason: str, *, definition: RemoteExternalBootDefinition, **extra: object
+) -> CategorizedError:
+    details: dict[str, object] = {
+        "system_id": definition.binding.system_id,
+        "run_id": definition.binding.run_id,
+        "activation_id": definition.binding.activation_id,
+    }
+    details.update(extra)
+    return CategorizedError(
+        f"remote-libvirt external-boot activation refused: {reason}",
+        category=ErrorCategory.CONFLICT,
+        details=details,
+    )
+
+
+def _classify_libvirt(
+    exc: libvirt.libvirtError, *, definition: RemoteExternalBootDefinition, operation: str
+) -> CategorizedError:
+    code = exc.get_error_code()
+    if code in _XML_REJECTION_CODES:
+        # libvirt refusing this definition shape is permanent; re-dispatching would burn the
+        # readiness deadline on a write that can never land.
+        return _activation_conflict(
+            f"libvirt rejected the definition during {operation}",
+            definition=definition,
+            phase=operation,
+        )
+    return CategorizedError(
+        f"remote-libvirt external-boot {operation} failed",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"system_id": definition.binding.system_id, "libvirt_error_code": code},
+    )
+
+
+def _observed_state(
+    domain: ActivationDomain, definition: RemoteExternalBootDefinition
+) -> tuple[str, str, str]:
+    """Classify the inactive definition by digest, never by bytes."""
+    try:
+        observed = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    except libvirt.libvirtError as exc:
+        raise _classify_libvirt(exc, definition=definition, operation="read") from exc
+    preserved = preserved_definition_identity(observed)
+    boot = boot_projection_identity(observed)
+    if preserved == definition.source_definition and boot == definition.source_boot:
+        return "source", preserved, boot
+    if preserved == definition.target_definition and boot == definition.target_boot:
+        return "target", preserved, boot
+    return "other", preserved, boot
+
+
+def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefinition) -> None:
+    """Compare-and-set the System's persistent definition to the external-boot target.
+
+    Requires the domain inactive with the recorded source definition, defines the target, verifies
+    the readback, then starts it. Comparison is ADR-0583's two-part digest pair, never raw bytes:
+    ``defineXML`` parses and ``XMLDesc`` regenerates, so the bytes handed to libvirt are not the
+    bytes it returns.
+
+    Idempotent on the achieved post-state — an already-target, already-running domain returns
+    without a write, so a retry after a lost response converges instead of redefining.
+
+    ADR-0583's pre-write gate also requires proof of current exclusive mutation authority
+    immediately before this write. That proof is #2140's; this function takes the connection its
+    caller already fenced and performs the state half of the gate.
+    """
+    domain_name = domain_name_for(UUID(definition.binding.system_id))
+    try:
+        domain = conn.lookupByName(domain_name)
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            raise CategorizedError(
+                "remote-libvirt external-boot domain does not exist",
+                category=ErrorCategory.NOT_FOUND,
+                details={"system_id": definition.binding.system_id, "domain": domain_name},
+            ) from exc
+        raise _classify_libvirt(exc, definition=definition, operation="lookup") from exc
+
+    active = bool(domain.isActive())
+    which, preserved, boot = _observed_state(domain, definition)
+    if which == "other" or (which == "source" and active):
+        raise _activation_conflict(
+            "the observed definition and power are not an admitted combination",
+            definition=definition,
+            observed_definition=preserved,
+            observed_boot=boot,
+            active=active,
+        )
+    if which == "target":
+        if active:
+            return
+        _start(domain, definition)
+        return
+
+    try:
+        conn.defineXML(definition.target_xml)
+    except libvirt.libvirtError as exc:
+        raise _classify_libvirt(exc, definition=definition, operation="define") from exc
+    after, preserved, boot = _observed_state(domain, definition)
+    if after != "target":
+        raise _activation_conflict(
+            "the defined target did not read back as the target definition",
+            definition=definition,
+            phase="readback",
+            observed_definition=preserved,
+            observed_boot=boot,
+        )
+    _start(domain, definition)
+
+
+def _start(domain: ActivationDomain, definition: RemoteExternalBootDefinition) -> None:
+    try:
+        domain.create()
+    except libvirt.libvirtError as exc:
+        # The persistent definition now names the external kernel while the guest is not running
+        # it, so the caller enters recovery rather than retrying a half-applied write. CONFLICT is
+        # already non-retryable, so no terminal flag is needed.
+        raise _activation_conflict(
+            "the target definition was written but the domain did not start",
+            definition=definition,
+            phase="start",
+            libvirt_error_code=exc.get_error_code(),
+        ) from exc
