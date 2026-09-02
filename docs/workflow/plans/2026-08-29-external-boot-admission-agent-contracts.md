@@ -193,7 +193,9 @@ subclass this module owns:
 class ExternalBootDenied(CategorizedError):
     """A matrix denial, carrying the next actions `details` cannot carry."""
 
-    def __init__(self, message: str, *, details: dict[str, object], next_actions: list[str]) -> None:
+    def __init__(
+        self, message: str, *, details: dict[str, object], next_actions: list[str]
+    ) -> None:
         super().__init__(message, category=ErrorCategory.CONFLICT, details=details, terminal=True)
         self.next_actions = next_actions
 ```
