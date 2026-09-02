@@ -12,11 +12,14 @@ Neither does any other accepted decision: ADR-0188 §4 describes the in-guest co
 `qemu-guest-agent`, the family helpers, and `curl`/`tar` under systemd, and stops there.
 
 **How that observation is taken is #2110's design, not merged code.** Its activation design spawns
-`/usr/bin/uname` and `/usr/bin/cat` through a `guest-exec` allowlist keyed on absolute paths. No
-such call exists in `src/` at the time of this decision, and #2110's own spec records the
-two-program allowlist as a residual it chose, with a single purpose-built helper as the live
-alternative. This record binds to those two paths because that is the design the platform is
-building toward.
+`/usr/bin/uname` and `/usr/bin/cat` through a `guest-exec` allowlist keyed on absolute paths; `rg`
+over this repository outside `docs/` finds neither path, so nothing merged reads them yet. #2110
+considered and **rejected** the obvious alternative — an `observe` subcommand on the in-guest
+`kdive-install-kernel` helper — because that helper ships in the base image, so it would reach only
+re-imaged guests and an existing System would fail identity proof for a deployment reason. What
+#2110 records as a residual is narrower: that the allowlist names two general-purpose binaries
+rather than one purpose-built helper. So the two paths are a settled choice on an unmerged branch,
+not an open one.
 
 #2160 asked whether `bare-kdive-remote-base` can satisfy the observation. Its scratch recipe passes
 `--setopt=install_weak_deps=False`, names `busybox`, and never names `coreutils` on either the dnf
@@ -40,12 +43,16 @@ System — so a rule scoped to the scratch entry would leave the other three una
 We will require every image in `kdive_image_catalog` to carry `/usr/bin/uname` and `/usr/bin/cat`
 as executable files, and hold the build to it rather than assume it.
 
-1. **Every catalog image carries a POSIX `uname` and `cat` at those two absolute paths**, alongside
-   the `qemu-guest-agent`, family helpers, and `curl`/`tar` that ADR-0188 §4 already requires. The
-   paths are part of the contract, not just the programs: the allowlist is keyed on absolute paths,
-   so an image exposing the applets only at `/usr/sbin/busybox` fails the proof while appearing to
-   have `uname` and `cat`. `bare-kdive-remote-base` is the entry that surfaced this, but the
-   constraint binds every entry and was written down nowhere before this record.
+1. **Every catalog image carries, as executable files at the absolute paths the external-boot
+   identity proof spawns, the programs that proof runs** — currently `/usr/bin/uname` and
+   `/usr/bin/cat` per #2110 — alongside the `qemu-guest-agent`, family helpers, and `curl`/`tar`
+   that ADR-0188 §4 already requires. The general obligation is the contract; the two literals are
+   the instance it has today. The *paths* are part of it, not just the programs: the allowlist is
+   keyed on absolute paths, so an image exposing the applets only at `/usr/sbin/busybox` fails the
+   proof while appearing to have `uname` and `cat`. `bare-kdive-remote-base` is the entry that
+   surfaced this, but the constraint binds every entry and was written down nowhere before this
+   record. Stating it generally means a change to #2110's chosen programs updates the enforcement
+   task, not this decision.
 
    **This does not reopen ADR-0188 §4.** ADR-0481 reserved §4's userland *composition* — whether
    busybox is the userland — for "its own decision taken with a build host in hand", and no such
@@ -87,14 +94,15 @@ as executable files, and hold the build to it rather than assume it.
 - This record binds to two paths #2110's design chose and has not merged. If #2110 lands naming a
   different program, the build gate verifies paths nothing reads, and this record must be superseded
   rather than quietly reinterpreted.
-- **The residual is uncovered, and accepted as such.** For an image staged before this decision, one
-  staged and never rebuilt, or one built outside `guest_base_image`, nothing checks the contract.
-  #2160's Non-goal paragraph describes a #2110 exit-127 mitigation covering that case; #2110's
-  design disclaims it. That seam never uses a shell — `guest-exec` spawns the program directly — so
-  a missing program fails the spawn and surfaces as a retryable `TRANSPORT_FAILURE` that retries to
-  the readiness deadline, with the same signature as an unreachable agent. #2110's spec says so
-  outright: "it is not a mitigation either, and this design claims none." So such an image degrades
-  to an indistinguishable retry-until-deadline, and this decision does not change that.
+- **The residual is uncovered.** For an image staged before this decision, one staged and never
+  rebuilt, or one built outside `guest_base_image`, nothing checks the contract. #2160's Non-goal
+  paragraph describes a #2110 exit-127 mitigation covering that case; #2110's design disclaims it.
+  That seam never uses a shell — `guest-exec` spawns the program directly — so a missing program
+  fails the spawn and surfaces as a retryable `TRANSPORT_FAILURE` that retries to the readiness
+  deadline, with the same signature as an unreachable agent. #2110's spec says so outright: "it is
+  not a mitigation either, and this design claims none." #2160's Correction 2 draws the consequence
+  this record adopts: build-time and stage-time verification are the only real defence. This
+  decision supplies the build-time half.
 - A build host now fails loudly and early on an image it would previously have staged — the
   intended trade against one `READINESS_FAILURE` per Run at the readiness deadline.
 - The scratch path stays `UNVALIDATED`. Nothing here is confirmed against a built scratch image: no
