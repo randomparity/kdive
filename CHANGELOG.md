@@ -192,6 +192,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compose bounded guest recovery
 - Wire exact boot recovery
 - Wire external boot cleanup
+- Expose bounded authority head inventory
+- Host authenticated dormant boundary
+- Provision dormant authority endpoint
+- Supervise external boot authority
 
 ### Changed
 
@@ -1071,6 +1075,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden adapter design
 - Plan external boot adapter
 - Clarify adapter session scope
+- Design host deployment boundary
+- Resolve host deployment review
+- Define executable readiness proof
+- Settle authority host review exception
+- Add dormant authenticated authority host
+- Validate authority listener before readiness
+- Revalidate authority transport health
+- Regenerate authority settings
+- Reconcile authority implementation size
 
 ### Fixed
 
@@ -1736,6 +1749,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Serialize find0 teardown ownership
 - Use errno for find0 cancellation
 - Honor libvirt QMP correlation
+- Harden host restart readiness
+- Pin authority proof interpreter
+- Accept clean authority pre-state
+- Address authority bundle directly
+- Clone authority proof bundles
+- Validate systemd credential projections
+- Expose authority credential sources
+- Inherit authority client socket group
+- Refresh fixed libvirt group access
+- Accept mutual TLS rejection close
+- Observe authority ACL restart
+- Detect authority socket ACL drift
+- Report idempotent authority teardown
+- Bound host readiness validation
+- Make authority host lifecycle-safe
+- Create authority login without argv secret
+- Retain authority group facts
+- Wait for the replacement boot
+- Validate effective database privileges
+- Isolate authority upgrade restart
+- Validate complete database authority
+- Bound transport JSON nesting
+- Revalidate host access boundary
+- Clean up authority failure paths
 
 ### Security
 
