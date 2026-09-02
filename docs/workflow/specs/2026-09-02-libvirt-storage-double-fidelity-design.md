@@ -66,7 +66,7 @@ The submitted overlay document carried a `<metadata>` child, a `<bogusElement>` 
   - `unit=''` is accepted the same way.
   - Suffix matching is **case-insensitive**: `k`, `kib`, `Kib`, `KIB` all give 1024, and `b` and
     `Bytes` both give 1.
-  - The table runs past `GB`: `b`/`bytes` = 1, `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576,
+  - The table runs past `GB`: `b`/`byte`/`bytes` = 1, `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576,
     `MB` = 1000000, `G`/`GiB` = 2^30, `GB` = 10^9, `T`/`TiB` = 2^40, `TB` = 10^12, `P`/`PiB` = 2^50,
     `PB` = 10^15, `E`/`EiB` = 2^60, `EB` = 10^18. The suffixes from `T` up parse — a
     `<capacity unit='T'>1</capacity>` fails with `VIR_ERR_SYSTEM_ERROR` (code 38) because a 1 TiB
@@ -155,10 +155,29 @@ are rendered, which is what the live-tier comparison checks. `info()` returns
 `[0, capacity, allocation]`, so `info()[1]` is the one element a caller can rely on;
 `src/kdive/providers/remote_libvirt/lifecycle/storage.py` reads exactly that.
 
-**Rejected**, matching libvirt's own refusals: a document with no `<capacity>` element raises
-`VIR_ERR_XML_ERROR`, and a `capacity/@unit` that is present, non-empty, and outside the suffix table
-raises `VIR_ERR_INVALID_ARG`. Nothing else is rejected — in particular an *absent* unit is accepted,
-not refused, and the double must not confuse the two. A double that accepts an input the platform refuses is over-permissive in
+**Rejected**, matching libvirt's own refusals. All five were observed on this host:
+
+| Input | Error | Code |
+|---|---|---|
+| a name already present in the pool | `VIR_ERR_STORAGE_VOL_EXIST` | 90 |
+| no `<name>` element, or one with empty text | `VIR_ERR_XML_ERROR` | 27 |
+| no `<capacity>` element | `VIR_ERR_XML_ERROR` | 27 |
+| `<capacity>` text that is not a non-negative integer | `VIR_ERR_XML_ERROR` | 27 |
+| a present, non-empty `capacity/@unit` outside the suffix table | `VIR_ERR_INVALID_ARG` | 8 |
+
+An *absent* or empty `unit` is accepted, not refused, and the double must not confuse the two.
+
+The duplicate-name refusal is the one with a production consumer:
+`src/kdive/providers/remote_libvirt/lifecycle/storage.py` guards `ensure_named_overlay` with an
+existence check precisely because a duplicate create fails, and maps the libvirt error to
+`PROVISIONING_FAILURE`. A double whose name-keyed map silently replaces an existing entry makes
+that guard and that error path untestable — which is the third form of echoing the *Problem*
+section names, and the reason a name-keyed dict is not on its own a model.
+
+**This set is what the double models, not a claim that libvirt refuses nothing else.** libvirt's
+storage-volume parser has refusals no proof here exercises. What the design owes is that every
+refusal it *does* model matches the platform and that the ones it omits are omissions rather than
+silent acceptances of things a migrating test would rely on. A double that accepts an input the platform refuses is over-permissive in
 the same direction as one that echoes — a migrated test would build a capacity-less volume, watch
 the double hand back a well-formed readback, and ship a provider path that raises in production.
 
@@ -216,6 +235,16 @@ dropping out of a green run with no trace but a skip count nobody diffs. So a mo
 keys its latch by JWKS URI. Keying by URI rather than latching a bare boolean is what lets the
 gate's own unit tests vary `KDIVE_LIBVIRT_URI`, and ADR-0580's consequence binds those tests too:
 a test that fabricates a verdict puts the real one back, on entry **and** on exit.
+
+**What the latch holds is the probe outcome, not the resolution.** `require_issuer` latches
+`_ISSUER_REACHABLE: dict[str, bool]`, and the distinction is load-bearing rather than cosmetic:
+the resolution carries the ABSENT-versus-MISCONFIGURED split, and that split is decided by whether
+`KDIVE_LIBVIRT_URI` is *set*, which is not part of the key. `_resolved_uri` returns the same string
+for an unset variable defaulting to `qemu:///session` and for one explicitly set to
+`qemu:///session`, so latching the whole resolution would let a skip latched under the unset case
+be served back under the set case — turning a mis-provisioned runner into a skip, which is the one
+outcome the module's discipline exists to prevent. So the latch is `dict[str, bool]` keyed by
+resolved URI, and the ABSENT/MISCONFIGURED choice is made from `LIBVIRT_URI_ENV` on every call.
 
 The available side latches as hard as the unavailable side, which is the consequence worth naming:
 once a session has latched "this URI answers", a daemon that dies mid-run reddens the fidelity test
@@ -276,7 +305,17 @@ and 10 all fail with it.
 Marked `live_vm`, behind `require_live_vm_storage_double()`. It defines and starts a `dir` pool
 over `tmp_path` and creates two volumes through the real `createXML`: a base, and an overlay backed
 by it whose document also carries a `<metadata>` child, a `<bogusElement>` child, and an unknown
-attribute. The overlay document is the shape `render_volume_xml` produces, so the comparison
+attribute.
+
+**The base document deliberately submits a non-default value for every platform-determined field
+the comparison checks** — root `type='block'`, `<capacity unit='KiB'>1024</capacity>`, and
+`<permissions><mode>0640</mode></permissions>`. Without that the comparison is tautological: the
+overlay comes from `render_volume_xml`, which submits no `type`, no `unit`, and no `permissions`,
+so every compared field would carry libvirt's default on both sides and an echoing double would
+agree by accident. Observed: libvirt reads those three back as `type='file'`,
+`<capacity unit='bytes'>1048576</capacity>`, and mode `0640`, so a double that echoed the input
+renders `block`, `KiB`, and — if it dropped the submitted mode — `0600`, and each of the three
+assertions fails. A comparison that cannot fail is not a proof. The overlay document is the shape `render_volume_xml` produces, so the comparison
 exercises the input the provider actually submits rather than a hand-written raw volume — a proof
 run on a capacity-only volume would pass while the double silently dropped `backingStore`.
 

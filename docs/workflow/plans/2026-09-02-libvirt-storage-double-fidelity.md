@@ -39,11 +39,11 @@ Design: `docs/workflow/specs/2026-09-02-libvirt-storage-double-fidelity-design.m
 - `just check-mermaid` needs `npm ci` run once in `.github/scripts/mermaid-check/` in a fresh
   worktree (known gap #2156).
 
-Expected implementation size: 700–900 changed lines (M) — derived from the file map below: the two
-double classes with their suffix table, rejection paths, and `backingStore` branch (~180 lines);
-the unit proof's twenty-five tests, several parametrised (~280); the gate with its three-check
-resolver, ADR-0580 latch, and contract (~80); its twelve unit tests plus the latch fixture (~140);
-and the live-tier proof over a base and a renderer-built overlay (~120).
+Expected implementation size: 780–980 changed lines (M) — derived from the file map below: the two
+double classes with their suffix table, five refusal paths, and `backingStore` branch (~200 lines);
+the unit proof's twenty-eight tests, several parametrised (~310); the gate with its three-check
+resolver, ADR-0580 latch, and contract (~85); its thirteen unit tests plus the latch fixture
+(~155); and the live-tier proof over a base and a renderer-built overlay (~125).
 
 ## File map
 
@@ -140,8 +140,8 @@ Interfaces this task defines, relied on by Tasks 3 and 4:
 ```python
 # Keys are lower-cased; lookup lower-cases the submitted suffix. An absent or empty unit
 # means bytes and never reaches this table.
-CAPACITY_SUFFIXES: dict[str, int]   # b/bytes=1, k/kib=1024, kb=1000, m/mib=1048576, mb=1000000,
-                                    # g/gib=2**30, gb=10**9, t/tib=2**40, tb=10**12,
+CAPACITY_SUFFIXES: dict[str, int]   # b/byte/bytes=1, k/kib=1024, kb=1000, m/mib=1048576,
+                                    # mb=1000000, g/gib=2**30, gb=10**9, t/tib=2**40, tb=10**12,
                                     # p/pib=2**50, pb=10**15, e/eib=2**60, eb=10**18
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +230,16 @@ Steps:
    - `test_create_rejects_an_unknown_capacity_unit`: parametrised over `'bogusUnit'` and `' K'`
      (leading space); assert `libvirt.VIR_ERR_INVALID_ARG`. Do **not** parametrise an absent or
      empty unit into this test: libvirt accepts both.
+   - `test_create_rejects_a_duplicate_volume_name`: create `dup.raw`, then submit the same document
+     again; assert `libvirt.VIR_ERR_STORAGE_VOL_EXIST` (code 90) and that the first volume is still
+     the one `storageVolLookupByName` returns. Real libvirt raises
+     `storage volume 'dup.raw' exists already`; `ensure_named_overlay` in
+     `src/kdive/providers/remote_libvirt/lifecycle/storage.py` guards against it and maps the error
+     to `PROVISIONING_FAILURE`, so a double that silently replaces makes that path untestable.
+   - `test_create_rejects_a_missing_or_empty_name`: parametrised over `<volume><capacity …/></volume>`
+     and `<volume><name></name><capacity …/></volume>`; assert `libvirt.VIR_ERR_XML_ERROR`.
+   - `test_create_rejects_malformed_capacity_text`: parametrised over `'abc'` and `'-1'`; assert
+     `libvirt.VIR_ERR_XML_ERROR` (real libvirt: `XML error: malformed capacity element`).
    - `test_readback_derives_key_and_path_from_the_pool`: build the pool with
      `target_path="/pool/target"`, create `disk.qcow2`, assert `key` text, `target/path` text,
      `volume.key()`, and `volume.path()` all equal `/pool/target/disk.qcow2`.
@@ -264,11 +274,14 @@ Steps:
    above. `createXML` parses with `xml.etree.ElementTree.fromstring` and reads only `./name`,
    `./capacity` and its `unit`, `./target/format`'s `type` attribute, `./target/permissions/mode`,
    and `./backingStore/path` with `./backingStore/format`'s `type` attribute. It raises
-   `libvirt_error(libvirt.VIR_ERR_XML_ERROR)` when the `./capacity` element is absent, and
-   `libvirt_error(libvirt.VIR_ERR_INVALID_ARG)` when its `unit` attribute is present, non-empty,
-   and — after lower-casing — outside `CAPACITY_SUFFIXES`. An absent or empty `unit` means bytes
-   and is never an error. Otherwise it converts the value to bytes through that table. It does
-   **not** read the root `type`
+   `libvirt_error(...)` for each of the five modelled refusals in the spec's table:
+   `VIR_ERR_STORAGE_VOL_EXIST` for a name already in the volume map;
+   `VIR_ERR_XML_ERROR` for an absent or empty `./name`, an absent `./capacity` element, or
+   `./capacity` text that is not a non-negative integer; and `VIR_ERR_INVALID_ARG` for a `unit`
+   attribute that is present, non-empty, and — after lower-casing — outside `CAPACITY_SUFFIXES`.
+   An absent or empty `unit` means bytes and is never an error. Every refusal happens before the
+   volume map is touched, so a rejected create leaves the pool unchanged. Otherwise it converts the
+   value to bytes through that table. It does **not** read the root `type`
    attribute — libvirt overrides it. The volume's `path` is `f"{pool_target_path}/{name}"`.
    `XMLDesc` renders the modelled document from that state alone: root `type='file'`, `capacity`
    with `unit='bytes'`, `allocation` and `physical` `0` with `unit='bytes'`, the retained `mode`,
@@ -356,14 +369,24 @@ A `libvirt.libvirtError` from check 2 or 3 is `ABSENT` when `LIBVIRT_URI_ENV` is
 `MISCONFIGURED` when it is set. The connection is closed in a `finally` on every path.
 
 **Checks 2 and 3 run once per process and latch, per ADR-0580** (accepted 2026-08-25, no
-supersession banner). A module-level `_STORAGE_DOUBLE_PROBE: dict[str, EnvResolution[StorageDoubleContract]]`
-in `tests/live_vm/__init__.py` is keyed by the resolved URI: the first call for a URI probes, every
-later call returns the stored resolution without touching libvirt, and both directions latch.
-Keying by URI mirrors `require_issuer()`, which keys its latch by JWKS URI; a bare boolean would
-not survive the gate's own tests varying `KDIVE_LIBVIRT_URI`. Check 1 (`_is_local_session_uri`) is
-pure and runs every call, before the latch is consulted. ADR-0580's consequence binds the tests:
-`test_gates.py` gets an autouse fixture that saves and clears the latch on entry and restores the
-saved value on exit, so a fabricated verdict never leaks into the rest of the session.
+supersession banner). A module-level `_STORAGE_DOUBLE_PROBE: dict[str, bool]` in
+`tests/live_vm/__init__.py` is keyed by the resolved URI and holds **the probe outcome only**: the
+first call for a URI probes, every later call reads the latched boolean without touching libvirt,
+and both directions latch. This is literally the shape of `_ISSUER_REACHABLE: dict[str, bool]` in
+`tests/integration/live_stack/conftest.py:44`.
+
+Latching the whole `EnvResolution` would be a defect, not a shortcut. The resolution carries the
+ABSENT-versus-MISCONFIGURED split, which is decided by whether `LIBVIRT_URI_ENV` is *set* — and
+that is not part of the key, because `_resolved_uri` returns the same string for an unset variable
+defaulting to `qemu:///session` and for one explicitly set to `qemu:///session`. A skip latched
+under the unset case would then be served back under the set case, turning a mis-provisioned runner
+into a skip. So `resolve_storage_double_contract` reads `LIBVIRT_URI_ENV` on **every** call and
+chooses ABSENT or MISCONFIGURED from the latched boolean.
+
+Check 1 (`_is_local_session_uri`) is pure and runs every call, before the latch is consulted.
+ADR-0580's consequence binds the tests: `test_gates.py` gets an autouse fixture that saves and
+clears the latch on entry and restores the saved mapping on exit, so a fabricated verdict never
+leaks into the rest of the session.
 
 Steps:
 
@@ -399,6 +422,12 @@ Steps:
    - `test_storage_double_latch_is_keyed_by_uri`: resolve for `qemu:///session`, then set
      `KDIVE_LIBVIRT_URI` to the published-socket form and resolve again; assert `open` ran twice
      and the second contract carries the override URI.
+   - `test_storage_double_latched_probe_still_honours_the_env_split`: with `libvirt.open` raising
+     and `KDIVE_LIBVIRT_URI` unset, resolve for `qemu:///session` and assert `ABSENT`; then set
+     `KDIVE_LIBVIRT_URI="qemu:///session"` — the same resolved URI, so the latch hits — and resolve
+     again; assert `MISCONFIGURED`, and that `open` still ran only once. This is what fails if the
+     latch stores the whole `EnvResolution` instead of the probe outcome, and it is the case that
+     would turn a mis-provisioned runner into a skip.
    - `test_storage_double_accepts_the_published_socket_uri_shape`: assert `_is_local_session_uri`
      is `True` for `qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock` and
      for the `libvirt-sock` sibling — the two values `scripts/live-stack/libvirt-uri.sh` publishes
@@ -429,6 +458,8 @@ Acceptance criteria:
   reach and still errors in the test body; that limit is stated in the spec, not fixed here.
 - The probe runs once per process per URI and latches both directions (ADR-0580), and
   `test_gates.py` restores the latch on entry and exit.
+- The latch holds the probe outcome only, so a latched failure still routes to ABSENT or
+  MISCONFIGURED according to whether `KDIVE_LIBVIRT_URI` is set at the time of the call.
 - The two published-socket URI shapes `live.yml` exports pass check 1.
 - The probe connection is closed on the success and both failure paths.
 
@@ -452,8 +483,14 @@ Steps:
    - Inside the `try`: `conn = libvirt.open(contract.libvirt_uri)`; define a `dir` pool named with
      a `uuid4().hex` suffix over `str(tmp_path)`; `pool.create(0)`.
    - Build `base_document` =
-     `<volume><name>base.qcow2</name><capacity unit='bytes'>1048576</capacity>`
-     `<target><format type='qcow2'/></target></volume>` — no `backingStore`, no root `type`.
+     `<volume type='block'><name>base.qcow2</name><capacity unit='KiB'>1024</capacity>`
+     `<target><format type='qcow2'/><permissions><mode>0640</mode></permissions></target></volume>`
+     — no `backingStore`. Every platform-determined field the comparison checks carries a
+     **non-default** value here on purpose: the overlay comes from `render_volume_xml`, which
+     submits no `type`, no `unit`, and no `permissions`, so without this document each compared
+     field would carry libvirt's default on both sides and an echoing double would agree by
+     accident. Observed readback: `type='file'`, `<capacity unit='bytes'>1048576</capacity>`,
+     mode `0640`.
    - `real_base = pool.createXML(base_document, 0)`.
    - **Now** build `overlay_document` by calling the production renderer:
      `render_volume_xml("overlay.qcow2", capacity_bytes=1048576, backing_path=real_base.path())`
@@ -481,7 +518,8 @@ Steps:
    - On each pair assert the **platform-determined values** are equal: `capacity` text and its
      `unit` attribute, `target/format/@type`, and `target/permissions/mode`. These are fixed by
      libvirt's rules, not the host, so they are identical on every runner — and a tag-only
-     comparison would pass a double that echoed a submitted `unit='KiB'` straight back. Do not
+     comparison would pass a double that echoed a submitted `unit='KiB'` straight back. The base
+     pair is the discriminating one, because it is the document that submits non-defaults. Do not
      compare `key`, `target/path`, `allocation`, `physical`, `timestamps`, or permissions'
      `owner`/`group`/`label`: those are host facts.
    - Assert none of the four parsed readbacks contains an element tagged `metadata` or
