@@ -88,6 +88,8 @@ def test_external_boot_authority_unit_is_isolated_and_supervised() -> None:
     for directive in (
         "Type=notify",
         "NotifyAccess=main",
+        "After=systemd-tmpfiles-setup.service",
+        "Wants=systemd-tmpfiles-setup.service",
         "User=kdive-provider-authority",
         "Group=kdive-provider-authority",
         "EnvironmentFile=/etc/kdive/provider-authority.env",
@@ -102,6 +104,7 @@ def test_external_boot_authority_unit_is_isolated_and_supervised() -> None:
         "-m kdive external-boot-authority-host",
         "Restart=on-failure",
         "RestartSec=5s",
+        "WatchdogSec=90s",
         "NoNewPrivileges=yes",
         "ProtectSystem=strict",
         "ProtectHome=yes",

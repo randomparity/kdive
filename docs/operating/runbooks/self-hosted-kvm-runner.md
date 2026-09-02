@@ -163,15 +163,36 @@ existing `kdive-live-libvirt` and `kvm` access, and external-boot capability adv
 disabled until #2140 binds and proves the replacement adapter. Do not route a live test or worker
 through the authority request socket while that hold applies.
 
-After provisioning or a restart, run the one-shot readiness probe as its owner. Substitute the
-provisioned authority instance for `<instance>`; the command uses the source credential profile and
-does not print credential contents.
+The normal runner play leaves this dormant boundary disabled. To install it, prepare a protected
+mode-`0600` vars file on the control host, set `live_vm_host_authority_enabled: true`, and provide
+all seven source paths: the authority database DSN, server key and certificate, server CA, worker
+client CA, and health-client certificate and key. Each source must itself be a mode-`0400` or
+mode-`0600` regular file. The database LOGIN named by
+`live_vm_host_authority_database_login` must already exist with only the
+`kdive_provider_authority` membership installed by migration 0125. Then run:
+
+```sh
+ansible-playbook playbooks/runner.yml --limit <host> \
+  --extra-vars @/protected/path/authority-host.yml \
+  -e github_runner_registration_token=<token>
+```
+
+The play validates the complete source contract on the control host before any runner-host role
+mutates the machine. Do not put credential contents in command-line extra vars. Transient proof
+variables are only for the issue-owned clean-host carrier; routine provisioning leaves
+`live_vm_host_authority_proof_enabled` false.
+
+After an opted-in provision or a restart, run the one-shot readiness probe as its owner. Substitute
+the provisioned authority instance for `<instance>`; the command uses the source credential profile
+and does not print credential contents.
 
 ```sh
 sudo -u kdive-provider-authority env \
   CREDENTIALS_DIRECTORY=/etc/kdive/credentials/provider-authority \
   KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE=<instance> \
   KDIVE_EXTERNAL_BOOT_AUTHORITY_UID="$(id -u kdive-provider-authority)" \
+  KDIVE_EXTERNAL_BOOT_AUTHORITY_GID="$(id -g kdive-provider-authority)" \
+  KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID="$(getent group kdive-provider-authority-client | cut -d: -f3)" \
   KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR=/var/lib/kdive/provider-authority/journal \
   KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock \
   KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock \
@@ -195,6 +216,19 @@ restoration, so retain the lane files for operator inspection. For request-socke
 failures, verify the authority client group can traverse the setgid request directory and that the
 socket owner, group, and mode match the provisioned contract; do not use a fixed worker credential
 as a health client.
+
+To retire an opted-in authority host, put `authority_database_admin_dsn` and any non-default LOGIN
+name in a protected vars file, then run the explicit teardown twice to prove convergence:
+
+```sh
+ansible-playbook playbooks/authority_host_teardown.yml --limit <host> \
+  --extra-vars @/protected/path/authority-teardown.yml
+```
+
+Teardown fails before changing the host when the administrative DSN is absent. It stops both
+services, rejects remaining authority processes, revokes and verifies the database LOGIN, and
+removes the installed runtime. It deliberately retains the credential and journal directories for
+operator inspection; remove them only after confirming no later #2140 deployment owns them.
 
 ## ppc64le runner (drop-in)
 

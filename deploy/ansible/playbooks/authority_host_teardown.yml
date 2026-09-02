@@ -15,18 +15,56 @@
     fixed_worker_uri: >-
       qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock
   tasks:
-    - name: Stop and disable the external-boot authority service
-      ansible.builtin.systemd_service:
-        name: kdive-external-boot-authority.service
-        enabled: false
-        state: stopped
-      failed_when: false
+    - name: Require the authority database administrative DSN
+      ansible.builtin.assert:
+        that: authority_database_admin_dsn | length > 0
+        fail_msg: >-
+          authority_database_admin_dsn is required before teardown so the authority LOGIN
+          cannot remain usable after host artifacts are removed.
+        quiet: true
+      no_log: true
 
     - name: Look up the external-boot authority account for teardown
       ansible.builtin.getent:
         database: passwd
         key: "{{ authority_account }}"
         fail_key: false
+
+    - name: Inspect the external-boot authority system unit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - show
+          - --property=LoadState
+          - --value
+          - kdive-external-boot-authority.service
+      register: authority_system_unit_load_state
+      changed_when: false
+
+    - name: Inspect the dormant authority user unit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - --user
+          - show
+          - --property=LoadState
+          - --value
+          - kdive-libvirtd-external-boot-authority.service
+      environment:
+        XDG_RUNTIME_DIR: >-
+          /run/user/{{ ansible_facts.getent_passwd[authority_account][1] }}
+      become: true
+      become_user: "{{ authority_account }}"
+      register: authority_user_unit_load_state
+      changed_when: false
+      when: authority_account in ansible_facts.getent_passwd
+
+    - name: Stop and disable the external-boot authority service
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        enabled: false
+        state: stopped
+      when: authority_system_unit_load_state.stdout != 'not-found'
 
     - name: Stop and disable the dormant authority endpoint
       ansible.builtin.systemd_service:
@@ -39,8 +77,60 @@
           /run/user/{{ ansible_facts.getent_passwd[authority_account][1] }}
       become: true
       become_user: "{{ authority_account }}"
+      when:
+        - authority_account in ansible_facts.getent_passwd
+        - authority_user_unit_load_state.stdout != 'not-found'
+
+    - name: Inspect the stopped external-boot authority system unit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - is-active
+          - kdive-external-boot-authority.service
+      register: authority_system_unit_active_state
+      changed_when: false
+      failed_when: authority_system_unit_active_state.rc not in [0, 3, 4]
+
+    - name: Inspect the stopped dormant authority user unit
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - --user
+          - is-active
+          - kdive-libvirtd-external-boot-authority.service
+      environment:
+        XDG_RUNTIME_DIR: >-
+          /run/user/{{ ansible_facts.getent_passwd[authority_account][1] }}
+      become: true
+      become_user: "{{ authority_account }}"
+      register: authority_user_unit_active_state
+      changed_when: false
+      failed_when: authority_user_unit_active_state.rc not in [0, 3, 4]
       when: authority_account in ansible_facts.getent_passwd
-      failed_when: false
+
+    - name: Inspect authority-owned processes after service stop
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/pgrep
+          - --uid
+          - "{{ authority_account }}"
+          - --full
+          - kdive.*external-boot-authority|libvirtd.*provider-authority
+      register: authority_owned_processes
+      changed_when: false
+      failed_when: authority_owned_processes.rc not in [0, 1]
+      when: authority_account in ansible_facts.getent_passwd
+
+    - name: Assert authority services and processes are inactive
+      ansible.builtin.assert:
+        that:
+          - authority_system_unit_active_state.rc != 0
+          - >-
+            authority_account not in ansible_facts.getent_passwd
+            or authority_user_unit_active_state.rc != 0
+          - >-
+            authority_account not in ansible_facts.getent_passwd
+            or authority_owned_processes.rc == 1
 
     - name: Remove authority unit and endpoint artifacts
       ansible.builtin.file:
@@ -48,14 +138,27 @@
         state: absent
       loop:
         - /etc/systemd/system/kdive-external-boot-authority.service
+        - /etc/tmpfiles.d/kdive-provider-authority.conf
         - /etc/kdive/provider-authority.env
         - /etc/kdive/libvirtd-external-boot-authority.conf
         - "{{ authority_state }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service"
         - "{{ authority_runtime }}"
+        - "{{ authority_install }}"
 
     - name: Reload systemd after authority unit removal
       ansible.builtin.systemd_service:
         daemon_reload: true
+
+    - name: Reload the authority user manager after unit removal
+      ansible.builtin.systemd_service:
+        scope: user
+        daemon_reload: true
+      environment:
+        XDG_RUNTIME_DIR: >-
+          /run/user/{{ ansible_facts.getent_passwd[authority_account][1] }}
+      become: true
+      become_user: "{{ authority_account }}"
+      when: authority_account in ansible_facts.getent_passwd
 
     - name: Revoke the authority database LOGIN
       ansible.builtin.command:
@@ -81,12 +184,41 @@
         AUTHORITY_LOGIN: "{{ authority_database_login }}"
       become: true
       become_user: postgres
-      when:
-        - authority_database_admin_dsn | length > 0
       no_log: true
       register: authority_database_login_revocation
       changed_when: >-
         authority_database_login_revocation.stdout == "login-revoked"
+
+    - name: Read the authority database LOGIN state after revocation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import os
+            from psycopg import connect
+
+            with connect(os.environ["AUTHORITY_ADMIN_DSN"]) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s",
+                        (os.environ["AUTHORITY_LOGIN"],),
+                    )
+                    row = cursor.fetchone()
+                    print("missing" if row is None else str(row[0]).lower())
+      environment:
+        AUTHORITY_ADMIN_DSN: "{{ authority_database_admin_dsn }}"
+        AUTHORITY_LOGIN: "{{ authority_database_login }}"
+      become: true
+      become_user: postgres
+      no_log: true
+      register: authority_database_login_state
+      changed_when: false
+
+    - name: Assert the authority database LOGIN is revoked
+      ansible.builtin.assert:
+        that: authority_database_login_state.stdout == 'false'
+        fail_msg: the authority database LOGIN must exist with LOGIN disabled after teardown
 
     - name: Remove transient proof identity and material
       block:
@@ -125,9 +257,11 @@
         path: "{{ item }}"
       loop:
         - /etc/systemd/system/kdive-external-boot-authority.service
+        - /etc/tmpfiles.d/kdive-provider-authority.conf
         - /etc/kdive/provider-authority.env
         - /etc/kdive/libvirtd-external-boot-authority.conf
         - "{{ authority_runtime }}"
+        - "{{ authority_install }}"
       register: removed_authority_artifacts
 
     - name: Assert authority units and endpoint artifacts are absent

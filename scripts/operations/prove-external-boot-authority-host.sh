@@ -20,6 +20,11 @@ root=$(git rev-parse --show-toplevel)
   echo "refusing proof: the local revision has uncommitted or untracked files" >&2
   exit 2
 }
+initial_revision=$(git -C "$root" rev-parse "$revision^")
+[[ $initial_revision =~ ^[0-9a-f]{40}$ ]] || {
+  echo "refusing proof: exact HEAD has no installable parent revision" >&2
+  exit 2
+}
 
 tag="kdive-2150-$revision"
 remote_root="/var/tmp/$tag"
@@ -87,16 +92,17 @@ ssh -o BatchMode=yes "$target" sudo -n install -d -o dave -g dave -m 0755 "$remo
 scp -q "$bundle" "$target:$remote_root/kdive.bundle"
 
 ssh -o BatchMode=yes "$target" bash -s -- \
-  "$remote_root" "$remote_install" "$revision" "$database" "$database_login" \
+  "$remote_root" "$remote_install" "$revision" "$initial_revision" "$database" "$database_login" \
   "$authority_instance" "$proof_incarnation" <<'REMOTE_PROOF'
 set -euo pipefail
 remote_root=$1
 remote_install=$2
 revision=$3
-database=$4
-database_login=$5
-authority_instance=$6
-proof_incarnation=$7
+initial_revision=$4
+database=$5
+database_login=$6
+authority_instance=$7
+proof_incarnation=$8
 source_root="$remote_root/source"
 secrets="$remote_root/secrets"
 ansible="uv run --with ansible-core==2.21.1 ansible-playbook"
@@ -140,11 +146,30 @@ sudo -n -u postgres env \
 database_password=$(openssl rand -hex 24)
 worker_credential=$(openssl rand -hex 32)
 worker_hash=$(printf %s "$worker_credential" | sha256sum | cut -d' ' -f1)
-sudo -n -u postgres psql --set=login="$database_login" \
-  --set=password="$database_password" --dbname="$database" <<'SQL'
-CREATE ROLE :"login" LOGIN PASSWORD :'password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
-GRANT kdive_provider_authority TO :"login";
-SQL
+printf '%s' "$database_password" | sudo -n -u postgres env \
+  AUTHORITY_DATABASE="$database" AUTHORITY_LOGIN="$database_login" \
+  python3 -c '
+import os
+import sys
+
+from psycopg import connect, sql
+
+password = sys.stdin.read()
+with connect(dbname=os.environ["AUTHORITY_DATABASE"]) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                "CREATE ROLE {} LOGIN PASSWORD %s NOSUPERUSER NOCREATEDB "
+                "NOCREATEROLE NOREPLICATION"
+            ).format(sql.Identifier(os.environ["AUTHORITY_LOGIN"])),
+            (password,),
+        )
+        cursor.execute(
+            sql.SQL("GRANT kdive_provider_authority TO {}").format(
+                sql.Identifier(os.environ["AUTHORITY_LOGIN"])
+            )
+        )
+'
 sudo -n -u postgres psql --set=incarnation="$proof_incarnation" \
   --set=credential_hash="$worker_hash" --dbname="$database" <<'SQL'
 INSERT INTO worker_incarnations (
@@ -222,7 +247,8 @@ install -m 0600 /dev/null "$remote_root/vars.yml"
 cat >"$remote_root/vars.yml" <<EOF
 live_vm_venv: $remote_install
 live_vm_repo_url: $remote_root/kdive.bundle
-live_vm_repo_version: $revision
+live_vm_repo_version: $initial_revision
+live_vm_host_authority_enabled: true
 live_vm_host_authority_instance: $authority_instance
 live_vm_host_authority_database_name: $database
 live_vm_host_authority_database_login: $database_login
@@ -234,7 +260,7 @@ live_vm_host_authority_server_ca_source: $secrets/ca.pem
 live_vm_host_authority_worker_client_ca_source: $secrets/ca.pem
 live_vm_host_authority_health_client_certificate_source: $secrets/health-client.pem
 live_vm_host_authority_health_client_key_source: $secrets/health-client.key
-live_vm_host_authority_proof_enabled: true
+live_vm_host_authority_proof_enabled: false
 live_vm_host_authority_proof_incarnation: $proof_incarnation
 live_vm_host_authority_proof_client_certificate: $secrets/proof-client.pem
 live_vm_host_authority_proof_client_key: $secrets/proof-client.key
@@ -242,11 +268,152 @@ live_vm_host_authority_proof_worker_credential: $secrets/worker-credential
 live_vm_host_authority_proof_request: $secrets/request.json
 EOF
 
-echo "provision: installing exact revision $revision"
+echo "provision: installing exact predecessor revision $initial_revision"
 $ansible -i inventory proof.yml --extra-vars @vars.yml
 installed=$(sudo -n cat /opt/kdive-provider-authority/revision)
-[[ $installed == "$revision" ]]
+[[ $installed == "$initial_revision" ]]
+[[ $(sudo -n -u github-runner git -C "$remote_install" rev-parse HEAD) == "$initial_revision" ]]
+
+sudo -n systemctl is-active --quiet kdive-external-boot-authority.service
+sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user is-active --quiet kdive-libvirtd-external-boot-authority.service
+sudo -n systemctl show --property=MainPID --value \
+  kdive-external-boot-authority.service >"$remote_root/pre-reboot-authority.pid"
+sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user show --property=MainPID --value \
+  kdive-libvirtd-external-boot-authority.service >"$remote_root/pre-reboot-provider.pid"
+cat /proc/sys/kernel/random/boot_id >"$remote_root/pre-reboot.boot-id"
+
+echo "reboot: scheduling exact-proof carrier restart"
+sudo -n systemd-run --quiet --unit="kdive-2150-reboot-${revision:0:12}" \
+  --on-active=5s /usr/bin/systemctl reboot
+REMOTE_PROOF
+
+echo "reboot: waiting for carrier to leave the old boot"
+carrier_went_down=0
+for _attempt in $(seq 1 60); do
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=2 "$target" true 2>/dev/null; then
+    carrier_went_down=1
+    break
+  fi
+  sleep 2
+done
+[[ $carrier_went_down -eq 1 ]] || {
+  echo "reboot proof failed: carrier never left the old boot" >&2
+  exit 4
+}
+
+echo "reboot: waiting for carrier to return"
+carrier_returned=0
+for _attempt in $(seq 1 60); do
+  if ssh -o BatchMode=yes -o ConnectTimeout=3 "$target" true 2>/dev/null; then
+    carrier_returned=1
+    break
+  fi
+  sleep 3
+done
+[[ $carrier_returned -eq 1 ]] || {
+  echo "reboot proof failed: carrier did not return" >&2
+  exit 4
+}
+
+ssh -o BatchMode=yes "$target" bash -s -- \
+  "$remote_root" "$remote_install" "$revision" "$initial_revision" "$database" "$database_login" \
+  "$authority_instance" "$proof_incarnation" <<'REMOTE_POST_REBOOT'
+set -euo pipefail
+remote_root=$1
+remote_install=$2
+revision=$3
+initial_revision=$4
+database=$5
+database_login=$6
+authority_instance=$7
+proof_incarnation=$8
+source_root="$remote_root/source"
+ansible="uv run --with ansible-core==2.21.1 ansible-playbook"
+cd "$remote_root"
+
+echo "reboot: validating boot-persistent authority services"
+[[ $(cat /proc/sys/kernel/random/boot_id) != $(cat "$remote_root/pre-reboot.boot-id") ]]
+services_ready=0
+for _attempt in $(seq 1 30); do
+  if sudo -n systemctl is-active --quiet kdive-external-boot-authority.service \
+    && sudo -n -u kdive-provider-authority env \
+      XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+      systemctl --user is-active --quiet kdive-libvirtd-external-boot-authority.service; then
+    services_ready=1
+    break
+  fi
+  sleep 2
+done
+[[ $services_ready -eq 1 ]]
+sudo -n systemctl is-active --quiet kdive-external-boot-authority.service
+sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user is-active --quiet kdive-libvirtd-external-boot-authority.service
+[[ $(sudo -n systemctl show --property=MainPID --value \
+  kdive-external-boot-authority.service) != $(cat "$remote_root/pre-reboot-authority.pid") ]]
+[[ $(sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user show --property=MainPID --value \
+  kdive-libvirtd-external-boot-authority.service) \
+  != $(cat "$remote_root/pre-reboot-provider.pid") ]]
+[[ $(sudo -n stat -c '%a:%U:%G' /run/kdive/provider-authority) \
+  == 710:kdive-provider-authority:kdive-provider-authority-client ]]
+[[ $(sudo -n stat -c '%a:%U:%G' /run/kdive/provider-authority/request) \
+  == 2750:kdive-provider-authority:kdive-provider-authority-client ]]
+[[ $(sudo -n stat -c '%a:%U:%G' /run/kdive/provider-authority/libvirt) \
+  == 700:kdive-provider-authority:kdive-provider-authority ]]
+
+sed \
+  -e "s/live_vm_repo_version: $initial_revision/live_vm_repo_version: $revision/" \
+  -e 's/live_vm_host_authority_proof_enabled: false/live_vm_host_authority_proof_enabled: true/' \
+  "$remote_root/vars.yml" >"$remote_root/vars-upgrade.yml"
+chmod 0600 "$remote_root/vars-upgrade.yml"
+
+pre_upgrade_authority_pid=$(sudo -n systemctl show --property=MainPID --value \
+  kdive-external-boot-authority.service)
+pre_upgrade_provider_pid=$(sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user show --property=MainPID --value \
+  kdive-libvirtd-external-boot-authority.service)
+sudo -n sh -c \
+  'printf "# proof-only upgrade drift\\n" >>/etc/kdive/libvirtd-external-boot-authority.conf'
+
+echo "upgrade: installing exact revision $revision"
+$ansible -i inventory proof.yml --extra-vars @vars-upgrade.yml
+[[ $(sudo -n cat /opt/kdive-provider-authority/revision) == "$revision" ]]
 [[ $(sudo -n -u github-runner git -C "$remote_install" rev-parse HEAD) == "$revision" ]]
+[[ $(sudo -n systemctl show --property=MainPID --value \
+  kdive-external-boot-authority.service) != "$pre_upgrade_authority_pid" ]]
+[[ $(sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user show --property=MainPID --value \
+  kdive-libvirtd-external-boot-authority.service) != "$pre_upgrade_provider_pid" ]]
+
+sed \
+  's/live_vm_host_authority_proof_enabled: true/live_vm_host_authority_proof_enabled: false/' \
+  "$remote_root/vars-upgrade.yml" >"$remote_root/vars-converged.yml"
+chmod 0600 "$remote_root/vars-converged.yml"
+pre_converged_authority_pid=$(sudo -n systemctl show --property=MainPID --value \
+  kdive-external-boot-authority.service)
+pre_converged_provider_pid=$(sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user show --property=MainPID --value \
+  kdive-libvirtd-external-boot-authority.service)
+
+echo "converged: rerunning the exact revision $revision"
+$ansible -i inventory proof.yml --extra-vars @vars-converged.yml | tee "$remote_root/converged.log"
+grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0' \
+  "$remote_root/converged.log"
+[[ $(sudo -n systemctl show --property=MainPID --value \
+  kdive-external-boot-authority.service) == "$pre_converged_authority_pid" ]]
+[[ $(sudo -n -u kdive-provider-authority env \
+  XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
+  systemctl --user show --property=MainPID --value \
+  kdive-libvirtd-external-boot-authority.service) == "$pre_converged_provider_pid" ]]
 
 run_teardown() {
   $ansible -i inventory "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
@@ -254,6 +421,7 @@ run_teardown() {
     --extra-vars "authority_database_login=$database_login"
   sudo -n test ! -e /etc/systemd/system/kdive-external-boot-authority.service
   sudo -n test ! -e /run/kdive/provider-authority
+  sudo -n test ! -e /opt/kdive-provider-authority
   sudo -n test -d /etc/kdive/credentials/provider-authority
   sudo -n test -d /var/lib/kdive/provider-authority/journal
   ! getent passwd kdive-authority-2150-proof >/dev/null
@@ -271,4 +439,4 @@ run_teardown
 sudo -n rm -rf -- "/opt/kdive-provider-authority" "$remote_install"
 sudo -n rm -rf -- "$remote_root"
 echo "proof complete: exact revision $revision; retained credentials journal and inert database"
-REMOTE_PROOF
+REMOTE_POST_REBOOT

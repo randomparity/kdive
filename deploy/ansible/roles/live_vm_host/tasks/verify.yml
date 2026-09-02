@@ -116,6 +116,7 @@
     live_vm_host_authority_client_group not in live_vm_host_authority_group_result.stdout.split()
     or live_vm_host_worker_libvirt_group in live_vm_host_authority_group_result.stdout.split()
     or 'kvm' in live_vm_host_authority_group_result.stdout.split()
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert every worker keeps only its own primary group
   ansible.builtin.command: "id -gn {{ item }}"
@@ -336,6 +337,7 @@
     - /run/kdive/provider-authority/request
     - /run/kdive/provider-authority/libvirt
   register: live_vm_host_authority_protected_path_results
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert authority protected path ownership
   ansible.builtin.assert:
@@ -360,11 +362,13 @@
         and item.stat.gr_name == live_vm_host_authority_client_group
         )
   loop: "{{ live_vm_host_authority_protected_path_results.results }}"
+  when: live_vm_host_authority_enabled | bool
 
 - name: Inspect the authority libvirt configuration
   ansible.builtin.stat:
     path: /etc/kdive/libvirtd-external-boot-authority.conf
   register: live_vm_host_authority_libvirt_config
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert the authority libvirt configuration is protected
   ansible.builtin.assert:
@@ -376,12 +380,14 @@
         live_vm_host_authority_libvirt_config.stat.gr_name
         == live_vm_host_authority_account
       - live_vm_host_authority_libvirt_config.stat.mode == '0640'
+  when: live_vm_host_authority_enabled | bool
 
 - name: Verify the dormant authority session libvirtd process is live
   ansible.builtin.command: >-
     pgrep --uid {{ live_vm_host_authority_account }} --exact libvirtd
     --pidfile /run/kdive/provider-authority/libvirt/libvirtd.pid
   changed_when: false
+  when: live_vm_host_authority_enabled | bool
 
 - name: Verify the authority session-libvirtd user unit syntax
   ansible.builtin.command: >-
@@ -389,12 +395,14 @@
     {{ live_vm_host_authority_home
     }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
   changed_when: false
+  when: live_vm_host_authority_enabled | bool
 
 - name: Inspect the dormant authority session libvirt socket
   ansible.builtin.stat:
     path: /run/kdive/provider-authority/libvirt/libvirt-sock
     follow: false
   register: live_vm_host_authority_libvirt_socket
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert the dormant authority endpoint is distinct and reachable
   ansible.builtin.assert:
@@ -405,6 +413,7 @@
       - live_vm_host_authority_libvirt_socket.stat.pw_name == live_vm_host_authority_account
       - live_vm_host_authority_libvirt_socket.stat.gr_name == live_vm_host_authority_account
       - live_vm_host_authority_libvirt_socket.stat.mode == '0700'
+  when: live_vm_host_authority_enabled | bool
 
 - name: Verify the authority can use only its dormant provider endpoint
   ansible.builtin.command: "virsh -c {{ live_vm_host_authority_libvirt_uri }} list --name"
@@ -413,6 +422,7 @@
   register: live_vm_host_authority_domains
   changed_when: false
   failed_when: live_vm_host_authority_domains.stdout | trim | length > 0
+  when: live_vm_host_authority_enabled | bool
 
 - name: Prove fixed workers and the reconciler cannot traverse authority paths
   ansible.builtin.command: "/usr/bin/test ! -x {{ item.1 }}"
@@ -424,6 +434,7 @@
   loop_control:
     label: "{{ item.0 }} -> {{ item.1 }}"
   changed_when: false
+  when: live_vm_host_authority_enabled | bool
 
 - name: Prove fixed workers and the reconciler cannot access the authority mutation socket
   ansible.builtin.command: >-
@@ -432,6 +443,7 @@
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts + ['kdive'] }}"
   changed_when: false
+  when: live_vm_host_authority_enabled | bool
 
 - name: Prove fixed workers and the reconciler cannot read the authority provider config
   ansible.builtin.command: >-
@@ -440,6 +452,7 @@
   become_user: "{{ item }}"
   loop: "{{ live_vm_host_worker_accounts + ['kdive'] }}"
   changed_when: false
+  when: live_vm_host_authority_enabled | bool
 
 - name: Prove fixed workers and the reconciler cannot access authority provider objects
   ansible.builtin.command: "virsh -c {{ live_vm_host_authority_libvirt_uri }} list"
@@ -449,6 +462,7 @@
   register: live_vm_host_authority_denied_virsh_results
   changed_when: false
   failed_when: live_vm_host_authority_denied_virsh_results.rc == 0
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert the authority service is ready
   ansible.builtin.systemd_service:
@@ -459,6 +473,7 @@
   failed_when: >-
     live_vm_host_authority_service.status.ActiveState != 'active'
     or live_vm_host_authority_service.status.SubState != 'running'
+  when: live_vm_host_authority_enabled | bool
 
 - name: Inspect the installed authority credentials
   ansible.builtin.stat:
@@ -473,6 +488,7 @@
     - health-client-certificate
     - health-client-key
   register: live_vm_host_authority_credential_results
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert the authority credential boundary
   ansible.builtin.assert:
@@ -483,16 +499,19 @@
       - item.stat.gr_name == live_vm_host_authority_account
       - item.stat.mode == '0400'
   loop: "{{ live_vm_host_authority_credential_results.results }}"
+  when: live_vm_host_authority_enabled | bool
 
 - name: Read the installed authority revision
   ansible.builtin.slurp:
     path: "{{ live_vm_host_authority_runtime_install }}/revision"
   register: live_vm_host_authority_revision
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert the installed authority revision is exact
   ansible.builtin.assert:
     that:
       - (live_vm_host_authority_revision.content | b64decode | trim) == live_vm_host_checkout.after
+  when: live_vm_host_authority_enabled | bool
 
 - name: Assert the authority database LOGIN is least privilege
   ansible.builtin.command: >-
@@ -502,15 +521,20 @@
     CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
     KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
     KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_GID: "{{ live_vm_host_authority_gid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID: "{{ live_vm_host_authority_client_gid }}"
     KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
     KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
     KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
   become: true
   become_user: "{{ live_vm_host_authority_account }}"
   changed_when: false
+  when: live_vm_host_authority_enabled | bool
 
 - name: Prove authority service restart restores readiness
-  when: live_vm_host_authority_proof_enabled | bool
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_proof_enabled | bool
   block:
     - name: Restart the external-boot authority service
       ansible.builtin.systemd_service:
@@ -525,6 +549,8 @@
         CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
         KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
         KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_GID: "{{ live_vm_host_authority_gid }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID: "{{ live_vm_host_authority_client_gid }}"
         KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
         KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
         KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
@@ -533,7 +559,9 @@
       changed_when: false
 
 - name: Prove journal restoration gates authority readiness
-  when: live_vm_host_authority_proof_enabled | bool
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_proof_enabled | bool
   block:
     - name: Create a proof-only unexpected journal lane
       ansible.builtin.file:
@@ -551,6 +579,8 @@
         CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
         KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
         KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_GID: "{{ live_vm_host_authority_gid }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID: "{{ live_vm_host_authority_client_gid }}"
         KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
         KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
         KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
@@ -566,7 +596,9 @@
         state: absent
 
 - name: Prove authority readiness retracts on credential and ACL drift
-  when: live_vm_host_authority_proof_enabled | bool
+  when:
+    - live_vm_host_authority_enabled | bool
+    - live_vm_host_authority_proof_enabled | bool
   block:
     - name: Record the authority restart count before ACL drift
       ansible.builtin.systemd_service:

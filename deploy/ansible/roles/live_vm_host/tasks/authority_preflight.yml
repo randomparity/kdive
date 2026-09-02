@@ -1,0 +1,70 @@
+---
+- name: Validate external-boot authority inputs before host mutation
+  when: live_vm_host_authority_enabled | bool
+  block:
+    - name: Require the complete external-boot authority source contract
+      ansible.builtin.assert:
+        that:
+          - item | length > 0
+        fail_msg: >-
+          Authority installation is enabled, but its complete database and TLS source contract
+          was not supplied. Provide the protected authority vars file described in the runner
+          runbook before provisioning.
+        quiet: true
+      loop:
+        - "{{ live_vm_host_authority_database_dsn_source }}"
+        - "{{ live_vm_host_authority_server_key_source }}"
+        - "{{ live_vm_host_authority_server_certificate_source }}"
+        - "{{ live_vm_host_authority_server_ca_source }}"
+        - "{{ live_vm_host_authority_worker_client_ca_source }}"
+        - "{{ live_vm_host_authority_health_client_certificate_source }}"
+        - "{{ live_vm_host_authority_health_client_key_source }}"
+      no_log: true
+
+    - name: Inspect external-boot authority sources on the control host
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop:
+        - "{{ live_vm_host_authority_database_dsn_source }}"
+        - "{{ live_vm_host_authority_server_key_source }}"
+        - "{{ live_vm_host_authority_server_certificate_source }}"
+        - "{{ live_vm_host_authority_server_ca_source }}"
+        - "{{ live_vm_host_authority_worker_client_ca_source }}"
+        - "{{ live_vm_host_authority_health_client_certificate_source }}"
+        - "{{ live_vm_host_authority_health_client_key_source }}"
+      delegate_to: localhost
+      become: false
+      register: live_vm_host_authority_source_preflight
+      no_log: true
+
+    - name: Require protected regular external-boot authority source files
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isreg
+          - not item.stat.islnk
+          - item.stat.mode in ['0400', '0600']
+        fail_msg: >-
+          Every authority source must be a mode-0400 or mode-0600 regular file on the control
+          host. No runner-host changes were made.
+        quiet: true
+      loop: "{{ live_vm_host_authority_source_preflight.results }}"
+      no_log: true
+
+    - name: Require complete transient proof inputs when proof is enabled
+      ansible.builtin.assert:
+        that:
+          - item | length > 0
+        fail_msg: >-
+          The transient authority proof requires its administrative DSN, client material,
+          worker credential, and request before provisioning starts.
+        quiet: true
+      loop:
+        - "{{ live_vm_host_authority_database_admin_dsn }}"
+        - "{{ live_vm_host_authority_proof_client_certificate }}"
+        - "{{ live_vm_host_authority_proof_client_key }}"
+        - "{{ live_vm_host_authority_proof_worker_credential }}"
+        - "{{ live_vm_host_authority_proof_request }}"
+      when: live_vm_host_authority_proof_enabled | bool
+      no_log: true

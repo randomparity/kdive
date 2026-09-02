@@ -3,6 +3,11 @@
   hosts: live_vm_runners
   become: true
   gather_facts: true
+  pre_tasks:
+    - name: Validate dormant authority inputs before any runner-host mutation
+      ansible.builtin.include_role:
+        name: live_vm_host
+        tasks_from: authority_preflight.yml
   roles:
     - libvirt_stack
     - libvirt_pool_net

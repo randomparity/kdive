@@ -2,7 +2,9 @@
 Description=KDIVE dormant external-boot provider authority
 Documentation=https://github.com/randomparity/kdive
 After=network-online.target
+After=systemd-tmpfiles-setup.service
 Wants=network-online.target
+Wants=systemd-tmpfiles-setup.service
 
 [Service]
 Type=notify
@@ -20,6 +22,7 @@ LoadCredential=health-client-key:/etc/kdive/credentials/provider-authority/healt
 ExecStart=/opt/kdive-provider-authority/.venv/bin/python -m kdive external-boot-authority-host
 Restart=on-failure
 RestartSec=5s
+WatchdogSec=90s
 TimeoutStartSec=90s
 NoNewPrivileges=yes
 ProtectSystem=strict

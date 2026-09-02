@@ -79,6 +79,7 @@ live_vm_host_worker_fixture_files:
 
 # Dormant provider-host authority boundary (ADR-0584). This endpoint is separate from the
 # fixed-worker provider contract above; #2140 owns any later adapter binding or worker cutover.
+live_vm_host_authority_enabled: false
 live_vm_host_authority_account: kdive-provider-authority
 live_vm_host_authority_client_group: kdive-provider-authority-client
 live_vm_host_authority_runtime_root: /run/kdive/provider-authority
