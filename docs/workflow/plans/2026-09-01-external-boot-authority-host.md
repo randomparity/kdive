@@ -21,7 +21,7 @@ Tech stack: Python 3.14, asyncio/psycopg, systemd, Ansible, pytest.
 - Guardrails: focused tests while iterating; `just lint`; whole-tree `just type`; relevant
   `prek` hooks; `just ci` before delivery.
 
-Expected implementation size: 900–1,300 changed lines (L) — derived from migration 0125, the host
+Expected implementation size: 7,000–8,000 changed lines (L) — derived from migration 0125, the host
 runtime and bounded transport wrapper, CLI wiring, systemd artifacts, Ansible
 provisioning/verification, tests, and diagnostics.
 
