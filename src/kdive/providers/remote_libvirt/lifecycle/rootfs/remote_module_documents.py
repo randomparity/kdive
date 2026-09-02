@@ -7,8 +7,10 @@ appliance writes results and checkpoints with the ``json.dumps`` default of ``en
 an encoding, separators, or framing. This reader requires unescaped UTF-8, matching the sibling
 contract in ``kdive.providers.ports.external_boot``, and reports an ASCII-escaped document as that
 specific mismatch rather than as a bare byte inequality. Only a non-ASCII value can tell the two
-apart, and only the volume key can carry one. Resolving it takes an ADR amendment binding both
-sides; until then neither form is silently accepted.
+encodings apart, and in the two documents that cross the appliance boundary only the volume key can
+carry one; the recovery reference's opaque provider references can carry one too, but never reach
+the appliance. Resolving it takes an ADR amendment binding both sides; until then neither form is
+silently accepted.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import hashlib
 import json
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from kdive.providers.ports.external_boot import (
     Digest,
@@ -109,12 +111,30 @@ class _RemoteModuleDocument(_ClosedValue):
         limit = _OPERATION_MAX_BYTES if cls is RemoteModuleOperationV1 else _DOCUMENT_MAX_BYTES
         if len(data) > limit:
             raise ValueError(f"remote module document exceeds {limit} bytes")
-        value = cls.model_validate_json(data)
+        try:
+            value = cls.model_validate_json(data)
+        except ValidationError as error:
+            # The bytes come off a volume the worker did not write, so the message names where
+            # validation failed and never what the document said. A location is itself input on
+            # an extra-field error -- the rejected key is the caller's own string -- so only
+            # known field names survive. `from None` drops the chained pydantic error, which
+            # carries the offending values.
+            known = set(cls.model_fields)
+            locations = sorted(
+                "{}:{}".format(
+                    ".".join(str(part) if str(part) in known else "?" for part in item["loc"]),
+                    item["type"],
+                )
+                for item in error.errors()
+            )
+            raise ValueError(
+                f"remote module document failed validation at {', '.join(locations)}"
+            ) from None
         if value.to_canonical_json() != data:
             if value._json(ensure_ascii=True) == data:
                 raise ValueError(
                     "remote module document is ASCII-escaped JSON; this reader requires "
-                    "unescaped UTF-8. The v1 encoding is unsettled — see the module docstring"
+                    "unescaped UTF-8. The v1 encoding is unsettled; see the module docstring"
                 )
             raise ValueError("remote module document is not canonical JSON")
         return value
@@ -147,7 +167,9 @@ def identity_for(document: _RemoteModuleDocument) -> str:
 
 def _closed_volume_key(value: str) -> str:
     # The same rule set OpaqueProviderRef._opaque applies in the sibling port: one fence, not a
-    # subset of it, because a consumer reaches both through the same recovery reference.
+    # subset of it, because a consumer reaches both through the same recovery reference. It is a
+    # copy rather than a call because the port exports no predicate; a rule added there is owed
+    # here too, and the test asserting both reject the same keys is what says so.
     value = _nfc(value)
     if (
         value.startswith("/")
@@ -237,6 +259,15 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
             return "absent"
         return None
 
+    @property
+    def is_identity_complete(self) -> bool:
+        """Whether every identity field is present, which is what ``validate_for`` can compare.
+
+        A caller that must not accept an identity-absent early-failure result for its own attempt
+        checks this first; ``validate_for`` has nothing to compare on that shape and says so.
+        """
+        return all(getattr(self, field) is not None for field in _IDENTITY_FIELDS)
+
     @model_validator(mode="after")
     def _result_shape_is_exact(self) -> Self:
         identity_presence = [getattr(self, field) is not None for field in _IDENTITY_FIELDS]
@@ -308,7 +339,7 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
         for any operation. The appliance writes that shape when it fails before reading the
         operation document, and binding it to an attempt comes from the scratch-volume
         reference it was read through, never from this method. A caller that needs the
-        stronger guarantee checks the result is identity-complete before trusting it.
+        stronger guarantee checks ``is_identity_complete`` before trusting it.
         """
         allowed_phases = (
             {"accepted", "captured", "staging-intent", "replacement-ready", "installed"}

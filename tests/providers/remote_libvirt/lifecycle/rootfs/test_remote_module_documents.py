@@ -610,3 +610,76 @@ def test_every_model_accepted_result_is_accepted_by_the_appliance_schema() -> No
     # Every narrowing must land on a failure; a narrowed success would be a real divergence.
     assert narrowed != []
     assert {shape["status"] for shape in narrowed} == {"failure"}
+
+
+def test_rejected_documents_do_not_echo_appliance_controlled_content() -> None:
+    forged = json.dumps(
+        {**_result(), "root_volume_key": "root-1\nFORGED LOG LINE", "smuggled": "secret-value"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    with pytest.raises(ValueError) as raised:
+        RemoteModuleResultV1.from_canonical_json(forged)
+
+    message = str(raised.value)
+    assert "smuggled" not in message
+    assert "secret-value" not in message
+    assert "FORGED LOG LINE" not in message
+    assert "\n" not in message
+    # `from None` cannot unset __context__, but it suppresses it, which is what traceback
+    # rendering and logging.exception honour.
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+
+
+def test_is_identity_complete_separates_the_two_result_shapes() -> None:
+    complete = RemoteModuleResultV1.model_validate(_result())
+    early_failure = RemoteModuleResultV1.model_validate(
+        {
+            "protocol": "remote-module-result-v1",
+            "status": "failure",
+            "phase": "accepted",
+            "error_code": "INVALID_DOCUMENT",
+        }
+    )
+
+    assert complete.is_identity_complete
+    assert not early_failure.is_identity_complete
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, "present"),
+        (
+            {
+                "phase": "restored",
+                "capture_manifest": None,
+                "capture_absent": True,
+                "entry_count": None,
+                "content_bytes": None,
+            },
+            "absent",
+        ),
+    ],
+)
+def test_capture_state_normalizes_the_two_capture_forms(
+    changes: dict[str, object], expected: str
+) -> None:
+    document = {key: value for key, value in _result(**changes).items() if value is not None}
+
+    assert RemoteModuleResultV1.model_validate(document).capture_state == expected
+
+
+def test_capture_state_is_absent_on_a_result_that_carries_no_capture() -> None:
+    early_failure = RemoteModuleResultV1.model_validate(
+        {
+            "protocol": "remote-module-result-v1",
+            "status": "failure",
+            "phase": "accepted",
+            "error_code": "INVALID_DOCUMENT",
+        }
+    )
+
+    assert early_failure.capture_state is None
