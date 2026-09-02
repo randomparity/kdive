@@ -24,6 +24,25 @@ The branch's `Pool.createXML` double stored the submitted volume XML and returne
 volume read it straight back out. libvirt does not persist that element. A double that echoes its
 input asserts nothing about what the platform keeps, and the green gate was the finding.
 
+**Echoing is the visible form of a wider defect: a double that agrees with its input instead of
+with the platform.** Verbatim echo is only its most obvious shape. Retaining a field the platform
+*overrides* is the same defect wearing a modelled-looking coat — a document declaring `type='block'`
+reads back `type='file'`, and `<capacity unit='KiB'>1024</capacity>` reads back
+`<capacity unit='bytes'>1048576</capacity>`, so a double that hands either input straight back is
+echoing under another name and a migrated test built on it is green and wrong. Accepting an input
+the platform *rejects* is the third shape. The classification under *Field derivation* exists to
+make each field's shape decidable rather than assumed.
+
+**And the blind spot is not confined to this module.** A fidelity double only earns its cost if the
+test drives the real entry point; a test that asserts against a convenient intermediate makes the
+double's fidelity unobservable, however faithful the double is. #2163 found that shape elsewhere in
+this provider: a schema cross-check validated already-parsed JSON rather than driving the
+appliance's own reader, so a framing defect that cannot work in production sat under the same green
+15,304-test suite. `tests/providers/remote_libvirt/fakes.py` is where this issue's work lands, not
+the boundary of the problem. That is why the live-tier proof below drives the real
+`virStorageVolCreateXML` and the real `XMLDesc` rather than comparing the double against a recorded
+string: a transcription can only be checked by the thing it transcribes.
+
 ## Platform evidence
 
 Reproduced on this host on 2026-09-02: Fedora 44 x86_64, libvirt daemon and libs 12.0.0,
@@ -95,8 +114,10 @@ request, which is a separate question from what the platform keeps.
 
 ### Field derivation
 
-Every field falls into exactly one of four classes, and getting the class wrong is the same defect
-as echoing: a retained field libvirt actually overrides is an echo by another name.
+Every field falls into exactly one of four classes. Getting the class wrong is not a lesser defect
+than echoing — it is echoing, in the shape *Problem* names: a field classed retained that libvirt
+actually overrides hands the input straight back, and a field classed defaulted that libvirt
+rejects accepts an input the platform refuses.
 
 **Retained** from the submitted document: `name`, `target/format@type`, `target/permissions/mode`,
 and — when the document carries a `<backingStore>` — that branch's `path` and `format@type`. Absent
