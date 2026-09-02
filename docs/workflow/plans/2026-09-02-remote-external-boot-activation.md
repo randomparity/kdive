@@ -378,7 +378,9 @@ def test_projection_replaces_rather_than_duplicates_existing_boot_fields() -> No
 
 
 def test_projection_creates_the_os_element_when_the_source_has_none() -> None:
-    projected = render_target_xml("<domain><name>d</name></domain>", kernel="k", initrd=None, cmdline="c")
+    projected = render_target_xml(
+        "<domain><name>d</name></domain>", kernel="k", initrd=None, cmdline="c"
+    )
     assert "<os><kernel>k</kernel><cmdline>c</cmdline></os>" in projected
 
 
@@ -474,12 +476,18 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
 @pytest.mark.parametrize(
     ("mutate", "rule"),
     [
-        (lambda xml: render_target_xml(xml, kernel="k", initrd=None, cmdline="c"), "boot-projection"),
+        (
+            lambda xml: render_target_xml(xml, kernel="k", initrd=None, cmdline="c"),
+            "boot-projection",
+        ),
         (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
         (lambda xml: xml.replace('pool="kdive"', 'pool="other"'), "boot-disk"),
         (lambda xml: xml.replace('dev="vda"', 'dev="sda"'), "boot-disk"),
         (lambda xml: xml.replace('type="qcow2"', 'type="raw"'), "boot-disk"),
-        (lambda xml: xml.replace('<boot dev="hd" />', '<boot dev="hd" /><boot dev="network" />'), "boot-selection"),
+        (
+            lambda xml: xml.replace('<boot dev="hd" />', '<boot dev="hd" /><boot dev="network" />'),
+            "boot-selection",
+        ),
         (lambda xml: xml.replace("<os>", '<os firmware="efi">'), "firmware"),
         (lambda xml: xml.replace("<os>", "<os><loader>/x</loader>"), "firmware"),
     ],
@@ -528,24 +536,34 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
     """
     root = parse_domain_xml(domain_xml)
     if boot_projection_identity(domain_xml) != _ALL_NULL_BOOT_PROJECTION:
-        raise _conflict("it already carries external-boot fields", system_id=system_id, rule="boot-projection")
+        raise _conflict(
+            "it already carries external-boot fields", system_id=system_id, rule="boot-projection"
+        )
     recorded = root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
     if recorded != str(system_id):
-        raise _conflict("its kdive metadata names another System", system_id=system_id, rule="system-metadata")
+        raise _conflict(
+            "its kdive metadata names another System", system_id=system_id, rule="system-metadata"
+        )
     disks = root.findall("./devices/disk[@device='disk']")
     expected_volume = overlay_volume_name(system_id)
     if len(disks) != 1 or not _is_expected_overlay(disks[0], pool=pool, volume=expected_volume):
-        raise _conflict("its boot disk is not the System overlay volume", system_id=system_id, rule="boot-disk")
+        raise _conflict(
+            "its boot disk is not the System overlay volume", system_id=system_id, rule="boot-disk"
+        )
     os_element = root.find("os")
     boots = os_element.findall("boot") if os_element is not None else []
     if len(boots) != 1 or boots[0].get("dev") != "hd":
-        raise _conflict("disk boot is not its only boot selection", system_id=system_id, rule="boot-selection")
+        raise _conflict(
+            "disk boot is not its only boot selection", system_id=system_id, rule="boot-selection"
+        )
     if os_element is not None and (
         os_element.get("firmware") is not None
         or os_element.find("loader") is not None
         or os_element.find("nvram") is not None
     ):
-        raise _conflict("it carries loader, firmware, or NVRAM fields", system_id=system_id, rule="firmware")
+        raise _conflict(
+            "it carries loader, firmware, or NVRAM fields", system_id=system_id, rule="firmware"
+        )
 
 
 def _is_expected_overlay(disk: ET.Element, *, pool: str, volume: str) -> bool:
