@@ -1085,6 +1085,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regenerate authority settings
 - Reconcile authority implementation size
 - Distinguish pipes from redirects in gate invocation
+- Decide the durable ownership channel for remote module volumes
+- Key module volume retention on obligation, not attempt liveness
+- Separate the reap obligation from the mutation obligation
+- Make the second-channel removal ordering a hard gate
 
 ### Fixed
 
