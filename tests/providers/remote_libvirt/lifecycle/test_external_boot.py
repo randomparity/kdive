@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     boot_projection_identity,
     preserved_definition_identity,
     render_target_xml,
+    require_disk_grub_source,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name, render_domain_xml
 
@@ -151,3 +153,45 @@ def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(
     with pytest.raises(CategorizedError) as caught:
         render_target_xml(source, kernel="k", initrd=None, cmdline="c")
     assert caught.value.category is category
+
+
+def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
+    require_disk_grub_source(_source_xml(), system_id=_SYSTEM_ID, pool="kdive")
+
+
+@pytest.mark.parametrize(
+    ("mutate", "rule"),
+    [
+        (
+            lambda xml: render_target_xml(xml, kernel="k", initrd=None, cmdline="c"),
+            "boot-projection",
+        ),
+        (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
+        (lambda xml: xml.replace('pool="kdive"', 'pool="other"'), "boot-disk"),
+        (lambda xml: xml.replace('dev="vda"', 'dev="sda"'), "boot-disk"),
+        (lambda xml: xml.replace('type="qcow2"', 'type="raw"'), "boot-disk"),
+        (
+            lambda xml: xml.replace('<boot dev="hd" />', '<boot dev="hd" /><boot dev="network" />'),
+            "boot-selection",
+        ),
+        (lambda xml: xml.replace("<os>", '<os firmware="efi">'), "firmware"),
+        (lambda xml: xml.replace("<os>", "<os><loader>/x</loader>"), "firmware"),
+    ],
+    ids=[
+        "external-boot-fields",
+        "other-system",
+        "wrong-pool",
+        "wrong-target-dev",
+        "wrong-driver-type",
+        "extra-boot-selection",
+        "firmware-attribute",
+        "loader-child",
+    ],
+)
+def test_admission_rejects_a_source_that_is_not_the_owned_baseline(
+    mutate: Callable[[str], str], rule: str
+) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        require_disk_grub_source(mutate(_source_xml()), system_id=_SYSTEM_ID, pool="kdive")
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == rule

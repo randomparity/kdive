@@ -15,12 +15,15 @@ import hashlib
 import json
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
+from uuid import UUID
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
 from kdive.providers.shared.libvirt_xml import (
+    KDIVE_METADATA_NS,
     register_kdive_namespace,
     register_qemu_namespace,
 )
@@ -125,3 +128,83 @@ def boot_projection_identity(domain_xml: str) -> str:
     value["schema"] = "libvirt-boot-projection-v1"
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return _digest(_BOOT_PROJECTION_PREFIX, payload)
+
+
+_ALL_NULL_BOOT_PROJECTION = _digest(
+    _BOOT_PROJECTION_PREFIX,
+    json.dumps(
+        {"cmdline": None, "initrd": None, "kernel": None, "schema": "libvirt-boot-projection-v1"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode(),
+)
+
+
+def _conflict(reason: str, *, system_id: UUID, rule: str) -> CategorizedError:
+    return CategorizedError(
+        f"remote-libvirt external-boot source is not the owned disk/GRUB baseline: {reason}",
+        category=ErrorCategory.CONFLICT,
+        details={"system_id": str(system_id), "rule": rule},
+    )
+
+
+def _is_expected_overlay(disk: ET.Element, *, pool: str, volume: str) -> bool:
+    source = disk.find("source")
+    driver = disk.find("driver")
+    target = disk.find("target")
+    return (
+        source is not None
+        and driver is not None
+        and target is not None
+        and source.get("pool") == pool
+        and source.get("volume") == volume
+        and driver.get("type") == "qcow2"
+        and target.get("dev") == "vda"
+        and target.get("bus") == "virtio"
+    )
+
+
+def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> None:
+    """Prove an inactive definition is this System's owned disk/GRUB baseline (ADR-0583).
+
+    Raises ``CONFLICT`` on the first failed rule, with the rule name in ``details``. A source
+    already carrying external-boot fields fails the first rule: ADR-0583 admits one only while a
+    matching durable activation row owns it, and that row is #2116/#2120 state this module cannot
+    read, so the conflict is raised for its caller to resolve.
+
+    ``domain_xml`` must be ``XMLDesc(VIR_DOMAIN_XML_INACTIVE)`` output; ADR-0583 makes live XML
+    inadmissible as an identity input. That precondition is the caller's and is not enforced here.
+    """
+    root = parse_domain_xml(domain_xml)
+    if boot_projection_identity(domain_xml) != _ALL_NULL_BOOT_PROJECTION:
+        raise _conflict(
+            "it already carries external-boot fields", system_id=system_id, rule="boot-projection"
+        )
+    recorded = root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
+    if recorded != str(system_id):
+        raise _conflict(
+            "its kdive metadata names another System", system_id=system_id, rule="system-metadata"
+        )
+    disks = root.findall("./devices/disk[@device='disk']")
+    expected_volume = overlay_volume_name(system_id)
+    if len(disks) != 1 or not _is_expected_overlay(disks[0], pool=pool, volume=expected_volume):
+        raise _conflict(
+            "its boot disk is not the System overlay volume", system_id=system_id, rule="boot-disk"
+        )
+    os_element = root.find("os")
+    boots = os_element.findall("boot") if os_element is not None else []
+    if len(boots) != 1 or boots[0].get("dev") != "hd":
+        raise _conflict(
+            "disk boot is not its only boot selection",
+            system_id=system_id,
+            rule="boot-selection",
+        )
+    if os_element is not None and (
+        os_element.get("firmware") is not None
+        or os_element.find("loader") is not None
+        or os_element.find("nvram") is not None
+    ):
+        raise _conflict(
+            "it carries loader, firmware, or NVRAM fields", system_id=system_id, rule="firmware"
+        )
