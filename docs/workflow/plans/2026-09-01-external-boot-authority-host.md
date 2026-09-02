@@ -33,16 +33,19 @@ Files:
 
 Interfaces:
 
-- SQL `list_external_boot_authority_journal_heads(text)` returns only authority instance, System,
-  sequence, digest, phase, authority, generation, and operation identity for the supplied instance.
+- SQL `list_external_boot_authority_journal_heads(text, integer)` returns only authority instance,
+  System, sequence, digest, phase, authority, generation, and operation identity for the supplied
+  instance, limited to maximum + 1 rows.
 - `list_journal_heads(conn, authority_instance: str) -> tuple[JournalHead, ...]` is Task 2's exact
   inventory input.
 
 Verification:
 
 - Mode: focused-test. Contract: only `kdive_provider_authority` can execute the security-definer
-  inventory, runtime roles have no table access, results are instance-scoped and bounded, and no
-  lifecycle write is possible. Red observation: migration 0125 is absent. Green command:
+  inventory; 0125 grants no new direct table access; results are instance-filtered and limited to
+  maximum + 1 rows; and no lifecycle write is possible. The shared role-wide visibility is the
+  same accepted scope as its existing binding SELECTs. Red observation: migration 0125 is absent.
+  Green command:
   `uv run python -m pytest tests/db/test_external_boot_authority_head_inventory_migration.py -q`.
 
 Steps:
@@ -71,7 +74,7 @@ Interfaces:
 - `check_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` validates identity,
   protected paths, journal restoration, database role shape, and provider socket access.
 - `run_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` performs the same check,
-  repeats it at the configured bounded interval, and exits on drift.
+  sends `READY=1`, repeats every 30 seconds, then sends `STOPPING=1` and exits on drift.
 - CLI handlers expose `external-boot-authority-host` and
   `check-external-boot-authority-host`; Task 3's unit and Ansible probe rely on those names.
 
@@ -87,6 +90,9 @@ Verification:
 - Mode: focused-test. Contract: the database inventory and local lanes are a bijection, exact heads
   match, and periodic socket/ACL/role/journal drift exits the service. Cases:
   `test_host_rejects_missing_or_extra_lane` and `test_host_exits_when_boundary_drifts`; same command.
+- Mode: focused-test. Contract: readiness is absent during an initial slow/failing check, appears
+  only after success, and is retracted before drift exit. Case `test_host_notifies_readiness_state`;
+  same focused command.
 
 Steps:
 
@@ -153,7 +159,8 @@ Files:
 
 Interfaces:
 
-- The systemd unit runs `/opt/kdive-provider-authority/.venv/bin/python -m kdive
+- The `Type=notify`, `NotifyAccess=main` systemd unit runs
+  `/opt/kdive-provider-authority/.venv/bin/python -m kdive
   external-boot-authority-host`, loads `database-dsn` and `service-credential` through
   `LoadCredential=`, uses `User=kdive-provider-authority`, and hardens filesystem/network access.
 - Ansible installs the venv, root/authority-owned credentials, journal and runtime directories,
@@ -168,10 +175,13 @@ Verification:
   every positive and negative readiness proof. Case
   `test_ansible_installs_authority_in_clean_host_order`; red observation is missing declarations;
   green command is `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py -q`.
-- Mode: focused-test. Contract: the authorized clean Ubuntu carrier executes provisioning from a
-  clean KDIVE state, starts/restarts both services, verifies access denial, and injects drift that
-  retracts readiness. Carrier: `dave@ub26-big.dev.pdx.drc.nz`; expected green command is the scoped
-  playbook/proof command recorded in the runbook and first-run evidence.
+- Mode: focused-test. Contract: `scripts/operations/prove-external-boot-authority-host.sh` packages
+  the exact local HEAD, installs it in a SHA-named proof directory on the authorized clean Ubuntu
+  carrier, bootstraps a peer-authenticated local PostgreSQL database and real `kdive` denial
+  identity, passes the immutable SHA as `live_vm_repo_version`, asserts the installed revision,
+  starts/restarts both services, verifies denial, injects drift, and observes readiness retract.
+  Carrier: `dave@ub26-big.dev.pdx.drc.nz`; green command:
+  `scripts/operations/prove-external-boot-authority-host.sh dave@ub26-big.dev.pdx.drc.nz $(git rev-parse HEAD)`.
 
 Steps:
 
@@ -180,8 +190,10 @@ Steps:
 3. Add authority identity, directories, credentials, venv installation, unit install/start, and
    readiness verification to Ansible in dependency order.
 4. Run both focused deployment files and `just lint-ansible`; expect green.
-5. Resolve exact pre-existing remote targets read-only, execute clean-host provisioning and every
-   positive/negative/drift proof, then clean only proof-owned KDIVE development artifacts.
+5. Write the runbook and proof script before execution. Resolve exact pre-existing remote targets
+   read-only, execute the exact clean-host command, verify the installed revision equals the
+   supplied full SHA, retain bounded evidence, then clean only SHA-named/proof-labeled artifacts
+   created by this command.
 6. Commit as `feat(deploy): supervise external boot authority`.
 
 Acceptance: clean provisioning fails before completion if service recovery, database least
@@ -226,5 +238,6 @@ adapter or lifecycle orchestration enters the diff.
 ## Final verification
 
 Run `just lint`, `just type`, focused deployment/provider/adversarial tests, `prek run` on the
-staged file set, and `just ci`. All must exit zero before delivery. The rollback is a git revert;
-retain authority journals and credentials for operator-controlled cleanup.
+staged file set, the exact clean-host proof, and `just ci`. All must exit zero before delivery.
+Rollback disables the dormant unit/endpoint and credential but leaves forward-only migration 0125
+applied and inert; retain authority journals and credentials for operator-controlled cleanup.

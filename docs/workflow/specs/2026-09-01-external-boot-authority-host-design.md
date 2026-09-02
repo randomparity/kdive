@@ -33,8 +33,9 @@ composition tests continue to prove that `external_boot_authority_v1` is absent.
 
 - `external-boot-authority-host` loads only systemd credentials and fixed configuration, checks
   the local journal and access boundary, verifies its database session is a member of only the
-  least-privilege `kdive_provider_authority` role, and repeats the full check on a fixed interval.
-  Any drift exits the process so process liveness retracts readiness and systemd restarts it.
+  least-privilege `kdive_provider_authority` role, sends systemd `READY=1` only after the first
+  complete check, and repeats the full check every 30 seconds. Any drift sends `STOPPING=1` and
+  exits, so readiness retracts before systemd restarts the process.
 - `check-external-boot-authority-host` runs the same checks once and emits one bounded,
   secret-free readiness result for Ansible and operators.
 
@@ -67,13 +68,15 @@ adapters, prove mutation exclusivity, and only then advertise capability or reti
 
 ### Database authority
 
-Migrations 0122 and 0123 already create `kdive_provider_authority`, revoke direct table access,
-and grant only the binding-resolution, acknowledgement, and journal-head functions accepted by
-ADR-0584. Migration 0125 adds one security-definer inventory function: it authenticates the
-calling role, accepts one configured authority instance, and returns only the bounded lane identity
-and exact trusted-head fields needed for restoration. It grants execution only to
-`kdive_provider_authority`; no direct table access or lifecycle write is added. Provisioning
-installs a login DSN whose role is a member of that existing role. The readiness probe checks role
+Migrations 0122 and 0123 already create `kdive_provider_authority` and grant the accepted read-only
+binding and acknowledgement access plus journal-head functions. That shared capability role is
+intentionally authority-role-wide, not tenant- or instance-confidential. Migration 0125 adds one
+security-definer inventory function: it authenticates role membership, accepts one configured
+authority instance plus a maximum row count, and returns at most maximum + 1 bounded lane identities
+and trusted-head fields. The extra row is an over-limit signal; readiness fails closed above the
+configured ceiling of 4096 retained lanes. It grants execution only to
+`kdive_provider_authority`; no new direct table access or lifecycle write is added. Provisioning
+installs a LOGIN DSN whose role is a member of that existing role. The readiness probe checks role
 shape and never prints the DSN.
 
 ### Readiness
@@ -91,9 +94,10 @@ The one-shot and long-running probes fail closed unless all of these hold:
    credentials, journal, helper, or mutation socket paths; and
 7. the existing fixed-worker provider/KVM path remains usable and unchanged.
 
-The runtime writes no durable readiness override. It repeats every check at the configured bounded
-interval and exits on any drift; #2140 must also call the same check immediately before enabling an
-adapter or admitting its first request. Journal restoration is therefore a prerequisite: any
+The runtime writes no durable readiness override. Its `Type=notify` unit stays activating until the
+first complete check succeeds. It repeats every check every 30 seconds and sends `STOPPING=1` before
+exiting on drift; #2140 must also call the same check immediately before enabling an adapter or
+admitting its first request. Journal restoration is therefore a prerequisite: any
 corrupt, foreign, missing, extra, longer, or valid-prefix-truncated lane fails the inventory/local
 bijection or trusted-head comparison before readiness.
 
@@ -115,8 +119,9 @@ credential is added. The existing fixed-worker endpoint is unchanged.
   configuration only from root-owned files and systemd credential descriptors.
 - A local platform administrator remains trusted, matching ADR-0584. Root can bypass filesystem
   ACLs and is explicitly outside this boundary.
-- A stale authority process cannot claim readiness from a cached stamp: startup and every periodic
-  interval reconstruct journal, database, provider, and access evidence, then exit on drift.
+- A stale authority process cannot claim readiness from a cached stamp: systemd publishes ready
+  only after startup reconstructs all evidence; every 30-second interval repeats it and retracts
+  readiness before exit on drift.
 - A malicious or replaced path component cannot redirect privileged writes: provisioning and the
   runtime reject symlinked or foreign-owned protected paths.
 
@@ -138,9 +143,12 @@ lifecycle state. Those are either accepted exclusions or owned by #2140/#2118.
   failures, and bounded diagnostics.
 - Structural deployment tests prove account/session separation, installed modes, systemd
   supervision, credential delivery, and absence of worker/reconciler authority-endpoint access.
-- The authorized Ubuntu 26.04 x86_64 carrier executes the role from a clean KDIVE state, starts and
-  restarts both endpoints, runs positive/negative readiness probes, injects drift, and verifies
-  readiness retracts. Native provider behavior remains the later #2151/#2152 proof.
+- The authorized Ubuntu 26.04 x86_64 carrier receives an archive of the exact local HEAD into a
+  SHA-named proof directory, asserts the installed revision equals that SHA, bootstraps a local
+  peer-authenticated PostgreSQL database and `kdive-provider-authority` LOGIN, executes the role
+  from a clean KDIVE state, starts/restarts both endpoints, runs positive/negative readiness probes,
+  injects drift, and verifies readiness retracts. The role creates the real `kdive` reconciler
+  service identity before its denial probe. Native provider behavior remains #2151/#2152 work.
 - Provider-neutral adversarial tests explicitly cover unresolved calls across takeover/restart,
   valid-prefix journal loss, independent lane heads, and stale provider/core writes.
 - Existing composition tests continue to prove capability advertisement is disabled.
@@ -148,8 +156,10 @@ lifecycle state. Those are either accepted exclusions or owned by #2140/#2118.
 
 ## Rollback
 
-Reverting removes the dormant authority unit and migration function while leaving the current
-fixed-worker provider path untouched. Because provider capability advertisement remains disabled,
-rollback has no active external-boot operation to migrate. Journal and credential directories are
-retained rather than deleted; an operator may inspect or remove them only after confirming no later
-#2140 deployment uses them.
+Reverting disables/removes the dormant authority unit and endpoint and revokes or rotates its LOGIN
+credential while leaving the current fixed-worker provider path untouched. Migration 0125 is
+forward-only and remains applied but inert; removing its function or grant would require an
+authorized later migration. Because provider capability advertisement remains disabled, rollback
+has no active external-boot operation to migrate. Journal and credential directories are retained
+rather than deleted; an operator may inspect or remove them only after confirming no later #2140
+deployment uses them.
