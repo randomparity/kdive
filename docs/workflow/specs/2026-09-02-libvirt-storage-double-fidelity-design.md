@@ -58,10 +58,23 @@ The submitted overlay document carried a `<metadata>` child, a `<bogusElement>` 
 - The readback root is `<volume type='file'>`. libvirt does not merely supply a missing `type`, it
   **overrides** a submitted one: a document declaring `type='block'` still reads back `type='file'`
   from a dir pool, because the type comes from the pool backend.
-- `capacity` is **normalised to bytes**. A submitted `unit='KiB'` value of 1024 reads back as
-  `unit='bytes'` 1048576. The observed suffix table is `bytes`/`B` = 1, `K`/`KiB` = 1024,
-  `KB` = 1000, `M`/`MiB` = 1048576, `MB` = 1000000, `G`/`GiB` = 1073741824, `GB` = 1000000000; an
-  unknown suffix is rejected with `VIR_ERR_INVALID_ARG` (code 8).
+- `capacity` is **normalised to bytes**, and the rule is more permissive than a transcribed table:
+  - A `<capacity>` with **no `unit` attribute** is accepted and reads back `unit='bytes'`. This is
+    the case that matters most, because `render_volume_xml` emits exactly that — `ET.SubElement(volume,
+    "capacity").text = str(capacity_bytes)`, no attribute. A double that rejected an absent unit
+    would refuse the provider's own document.
+  - `unit=''` is accepted the same way.
+  - Suffix matching is **case-insensitive**: `k`, `kib`, `Kib`, `KIB` all give 1024, and `b` and
+    `Bytes` both give 1.
+  - The table runs past `GB`: `b`/`bytes` = 1, `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576,
+    `MB` = 1000000, `G`/`GiB` = 2^30, `GB` = 10^9, `T`/`TiB` = 2^40, `TB` = 10^12, `P`/`PiB` = 2^50,
+    `PB` = 10^15, `E`/`EiB` = 2^60, `EB` = 10^18. The suffixes from `T` up parse — a
+    `<capacity unit='T'>1</capacity>` fails with `VIR_ERR_SYSTEM_ERROR` (code 38) because a 1 TiB
+    file will not fit on the probe filesystem, which is a create failure after a successful parse,
+    not a parse refusal.
+  - Only a suffix outside that set is refused, with `VIR_ERR_INVALID_ARG` (code 8): `' K'` (leading
+    space) and `'bogusUnit'` both take that path, and code 8 versus code 38 is what distinguishes a
+    parse refusal from a create failure.
 - A document carrying no `<capacity>` is **rejected**, not defaulted:
   `libvirtError: XML error: missing capacity element`, `VIR_ERR_XML_ERROR` (code 27). A document
   carrying no `<target>` is accepted and reads back a full `target` with `format type='raw'`.
@@ -127,7 +140,8 @@ input takes a stated default: `target/format@type` to `raw`, `mode` to `0600`, a
 **Derived**, matching libvirt: `key` and `target/path` are the pool target path joined with the
 name. The root `type` attribute is always `file` — the dir-pool backend decides it, and a submitted
 `type='block'` is overridden. `capacity` always renders `unit='bytes'` with the submitted value
-converted through the suffix table observed under *Platform evidence*.
+converted through the suffix table observed under *Platform evidence*, matched
+case-insensitively, with an absent or empty `unit` meaning bytes.
 
 **Placeholders, not derivations**: `allocation`, `physical`, `permissions/owner`,
 `permissions/group`, `permissions/label`, and every `timestamps` child. Real libvirt fills these
@@ -141,9 +155,10 @@ are rendered, which is what the live-tier comparison checks. `info()` returns
 `[0, capacity, allocation]`, so `info()[1]` is the one element a caller can rely on;
 `src/kdive/providers/remote_libvirt/lifecycle/storage.py` reads exactly that.
 
-**Rejected**, matching libvirt's own refusals: a document with no `<capacity>` raises
-`VIR_ERR_XML_ERROR`, and a `capacity/@unit` outside the observed suffix table raises
-`VIR_ERR_INVALID_ARG`. A double that accepts an input the platform refuses is over-permissive in
+**Rejected**, matching libvirt's own refusals: a document with no `<capacity>` element raises
+`VIR_ERR_XML_ERROR`, and a `capacity/@unit` that is present, non-empty, and outside the suffix table
+raises `VIR_ERR_INVALID_ARG`. Nothing else is rejected — in particular an *absent* unit is accepted,
+not refused, and the double must not confuse the two. A double that accepts an input the platform refuses is over-permissive in
 the same direction as one that echoes — a migrated test would build a capacity-less volume, watch
 the double hand back a well-formed readback, and ship a provider path that raises in production.
 
@@ -189,6 +204,38 @@ Two checks stand in front of that, in order:
 Only `libvirt.libvirtError` is treated as a failed probe. Any other exception is a defect in the
 test environment and propagates. The probe connection is closed on both paths.
 
+**The probe latches, once per process, per resolved URI — ADR-0580 governs this and it is not
+optional.** That record is accepted and unsuperseded, and its decision is that a skip gate probing
+a live resource probes it once per process and reuses the verdict, latching in both directions.
+It was written about `docker_available()` pinging a daemon and `require_issuer()` fetching JWKS,
+both under xdist load, and its reasoning transfers without modification: a `libvirt.open` against a
+unix socket on a host busy running the suite that gate belongs to can be slow, and a gate meant to
+answer "this host has no session daemon" would instead answer "this connect was slow" — a test
+dropping out of a green run with no trace but a skip count nobody diffs. So a module-level dict in
+`tests/live_vm/__init__.py` holds the verdict keyed by resolved URI, exactly as `require_issuer()`
+keys its latch by JWKS URI. Keying by URI rather than latching a bare boolean is what lets the
+gate's own unit tests vary `KDIVE_LIBVIRT_URI`, and ADR-0580's consequence binds those tests too:
+a test that fabricates a verdict puts the real one back, on entry **and** on exit.
+
+The available side latches as hard as the unavailable side, which is the consequence worth naming:
+once a session has latched "this URI answers", a daemon that dies mid-run reddens the fidelity test
+instead of quietly skipping it.
+
+**On the CI live job there is no skip path, by design.** `.github/workflows/live.yml` exports
+`KDIVE_LIBVIRT_URI` from `load_published_libvirt_uri()` before running
+`pytest -m "live_vm and not live_vm_tcg"`, so the variable is always set there — which routes a
+failed probe to the loud failure rather than the skip. That is the correct behaviour on a job that
+has just stood the daemon up: a published socket that does not answer is a mis-provisioned runner,
+not an absent environment. The skip path serves a developer host with the variable unset. Both
+published URIs are `qemu+unix:///session?socket=…` and satisfy `_is_local_session_uri`, so check 1
+admits them; this was verified locally against
+`qemu+unix:///session?socket=/run/user/1000/libvirt/virtqemud-sock`, which is the same shape.
+
+One honest limit on check 2: `listStoragePools()` returns `[]` rather than raising when the driver
+is present with no pools, so the probe catches a storage driver that *errors*, not one that is
+merely silent, and a host that lists pools but cannot define one still errors inside the test body.
+No cheap probe short of running the proof would catch that.
+
 The gate returns a URI rather than the open connection. A resolver that handed back a live
 connection would put its lifetime in the caller's hands across a `pytest.skip`, and would not fit
 the pure `EnvResolution[T]` shape the other five families share; the second open costs nothing in
@@ -233,6 +280,14 @@ attribute. The overlay document is the shape `render_volume_xml` produces, so th
 exercises the input the provider actually submits rather than a hand-written raw volume — a proof
 run on a capacity-only volume would pass while the double silently dropped `backingStore`.
 
+The overlay document is built by calling the production renderer,
+`render_volume_xml(name, capacity_bytes=…, backing_path=real_base.path())`, and appending the
+`<metadata>`, `<bogusElement>`, and unknown-attribute noise to its output. Hand-writing that string
+is what let the capacity model diverge in the first place: the renderer emits `<capacity>` with no
+`unit` attribute, and a design that only ever tested hand-written documents carrying an explicit
+unit never noticed. Driving the real producer is the same rule the *Problem* section states for
+entry points, applied to the input side.
+
 Both documents are fed to `FakeStoragePool.createXML`, and each pair of readbacks is compared on:
 
 - the root tag and its `type` attribute,
@@ -245,6 +300,8 @@ Both documents are fed to `FakeStoragePool.createXML`, and each pair of readback
   **unstripped** sets. `label` carries the file's security label, so a runner without SELinux emits
   three children where this host emits four; only `label` needs to be optional, and the subset leg
   on the full sets is what keeps the direction from going the permissive way.
+- the platform-determined values: `capacity`'s text and its `unit` attribute,
+  `target/format@type`, and `target/permissions/mode`.
 
 It then asserts none of the readbacks contains an element tagged `metadata` or `bogusElement`, or
 any element carrying the submitted unknown attribute key — by walking the parsed trees, not by
@@ -254,9 +311,15 @@ temp root happens to contain one of those tokens fails a test where the double a
 perfectly. The submitted payload *values* (`run-1`, `zzz`) are checked by substring, because those
 cannot appear in a path libvirt generates.
 
-It compares tag structure, not values: `path`, `allocation`, `physical`, `permissions`, and
-`timestamps` values are host facts a double cannot and should not reproduce, while the tag set is
-the fidelity claim the unit proof rests on.
+It compares tag structure **plus the platform-determined values** — `capacity`'s text and its
+`unit`, `target/format@type`, and `target/permissions/mode`. Those are fixed by libvirt's own rules
+rather than by the host, so they are identical on every runner, and they are exactly the class the
+*Problem* section calls the wider defect: a value the platform determines is where a double most
+easily agrees with its input instead of the platform. A tag-only comparison would pass a double
+that echoed `unit='KiB'` straight back.
+
+It deliberately excludes `key`, `path`, `allocation`, `physical`, `timestamps`, and `permissions`'
+`owner`, `group`, and `label`. Those are host facts a double cannot and should not reproduce.
 
 `conn` and `pool` are bound to `None` before the `try`, and teardown skips whichever is still
 `None`. Otherwise a failure in `storagePoolDefineXML` leaves `pool` unbound and the `finally`
@@ -323,6 +386,24 @@ to fail that way is not modelling the discard.
   `"kdive" in XMLDesc(0)` was `True` against a readback carrying no such attribute. `tmp_path`
   honours `TMPDIR` and `--basetemp`, so the substring form is a false-red waiting for the wrong
   runner. Structural absence over the parsed tree has no such failure mode.
+- **Transcribe the capacity suffix table from one probe and reject anything outside it.** verified:
+  a `<capacity>` with no `unit` attribute is accepted and reads back `unit='bytes'`, and
+  `render_volume_xml` (`src/kdive/providers/remote_libvirt/lifecycle/xml.py:59`) emits exactly
+  that — so a table-only model refuses the provider's own document. Matching is also
+  case-insensitive (`k`, `kib`, `KIB` → 1024) and the table runs to `EiB`. The rule is what has to
+  be modelled, not one probe's output.
+- **Build the proofs' volume documents by hand.** verified: the hand-written documents in the
+  earlier draft all carried an explicit `unit`, which is why the absent-unit case went unnoticed
+  through two review passes. Calling `render_volume_xml` makes the proof's input the provider's
+  real output.
+- **Probe the gate's URI on every call.** verified: ADR-0580 is accepted (2026-08-25), carries no
+  supersession banner, and decides that a skip gate probing a live resource probes once per process
+  and latches both directions. A per-call `libvirt.open` under xdist load is the exact shape
+  #2074 recorded — a slow connect indistinguishable from an absent daemon, dropping a test from a
+  green run.
+- **Latch a bare boolean rather than keying by URI.** judgment: the gate's own unit tests vary
+  `KDIVE_LIBVIRT_URI`, and `require_issuer()` already keys its latch by JWKS URI for the same
+  reason.
 - **Let the gate accept any `KDIVE_LIBVIRT_URI`.** verified: `tests/live_vm/__init__.py:12-13`
   records that variable as the shared override for every local family, and the throwaway and
   provisioned families default to `qemu:///system`. judgment: the proof's pool target is a
