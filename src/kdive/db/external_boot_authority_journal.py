@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import SecretStr
 
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
@@ -16,6 +18,9 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     canonical_record_bytes,
 )
+
+if TYPE_CHECKING:
+    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]
 
@@ -102,6 +107,10 @@ class JournalHead:
     operation_identity: str
     pending_takeover: PendingTakeover | None
     suspended_operation: SuspendedOperation | None
+
+
+class AuthorityPeerAuthenticationError(RuntimeError):
+    """A credential did not identify an active fence-protocol-4 worker."""
 
 
 def _binding(row: dict[str, Any] | None) -> AuthorityBinding | None:
@@ -247,6 +256,53 @@ async def read_journal_head(
     row["pending_takeover"] = _pending(row["pending_takeover"])
     row["suspended_operation"] = _suspended(row["suspended_operation"])
     return JournalHead(**row)
+
+
+async def list_journal_heads(
+    conn: AsyncConnection, authority_instance: str
+) -> tuple[JournalHead, ...]:
+    """List the fixed bounded inventory for one authority instance."""
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(
+            "SELECT * FROM public.list_external_boot_authority_journal_heads(%s)",
+            (_bounded(authority_instance),),
+        )
+        rows = await cursor.fetchall()
+    return tuple(
+        JournalHead(
+            authority_instance=_bounded(row["authority_instance"]),
+            system_id=_uuid(row["system_id"]),
+            sequence=_positive(row["sequence"]),
+            digest=_bounded(row["digest"]),
+            phase=JournalPhase(row["phase"]),
+            authority_id=_uuid(row["authority_id"]),
+            generation=_positive(row["generation"]),
+            operation_identity=_bounded(row["operation_identity"]),
+            pending_takeover=None,
+            suspended_operation=None,
+        )
+        for row in rows
+    )
+
+
+async def authenticate_authority_peer(
+    conn: AsyncConnection, credential: SecretStr
+) -> AuthenticatedPeer:
+    """Authenticate one active peer without sending its raw credential to SQL."""
+    credential_hash = hashlib.sha256(credential.get_secret_value().encode("utf-8")).digest()
+    async with conn.cursor() as cursor:
+        await cursor.execute(
+            "SELECT peer_incarnation_id FROM public.authenticate_external_boot_authority_peer(%s)",
+            (credential_hash,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        raise AuthorityPeerAuthenticationError(
+            "worker credential does not identify an active fence-protocol-4 incarnation"
+        )
+    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+
+    return AuthenticatedPeer(incarnation_id=_bounded(row[0], 512))
 
 
 async def advance_journal_head(
