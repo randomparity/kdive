@@ -425,8 +425,10 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
 
 Raises `CategorizedError(ErrorCategory.CONFLICT)` on the first failed rule, with
 `details={"system_id": str(system_id), "rule": <rule name>}`. Returns `None` on success. The six
-rule names are `boot-projection`, `system-metadata`, `boot-disk`, `boot-selection`, `firmware`, and
-`live-xml`.
+five rule names are `boot-projection`, `system-metadata`, `boot-disk`, `boot-selection`, and
+`firmware`. There is deliberately no live-XML rule: libvirt persists operator-set user aliases in
+the inactive definition, so refusing any `<alias>` would reject a legitimate baseline, and live XML
+is caught one step later when its preserved digest fails to match `source_definition`.
 
 ### Steps
 
@@ -459,7 +461,6 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         (lambda xml: xml.replace('<boot dev="hd" />', '<boot dev="hd" /><boot dev="network" />'), "boot-selection"),
         (lambda xml: xml.replace("<os>", '<os firmware="efi">'), "firmware"),
         (lambda xml: xml.replace("<os>", "<os><loader>/x</loader>"), "firmware"),
-        (lambda xml: xml.replace("<target dev=\"vda\"", "<alias name=\"virtio-disk0\" /><target dev=\"vda\"", 1), "live-xml"),
     ],
 )
 def test_admission_rejects_a_source_that_is_not_the_owned_baseline(
@@ -524,11 +525,6 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
         or os_element.find("nvram") is not None
     ):
         raise _conflict("it carries loader, firmware, or NVRAM fields", system_id=system_id, rule="firmware")
-    if root.find("./devices/*/alias") is not None:
-        # libvirt emits device aliases in live XML and omits them from inactive XML, so this
-        # refuses the likeliest form of passing XMLDesc(0) on a running domain. ADR-0583 requires
-        # an inactive definition; nothing here can prove inactivity, but this names the mistake.
-        raise _conflict("it carries live-only device aliases", system_id=system_id, rule="live-xml")
 
 
 def _is_expected_overlay(disk: ET.Element, *, pool: str, volume: str) -> bool:
@@ -608,7 +604,9 @@ def prepare_target_definition(
 ### Steps
 
 1. Append the failing tests: a happy path asserting every field; ownership mismatch between
-   `binding` and `plan.ownership`; mismatch between `binding` and `materialization.ownership`;
+   `binding` and `plan.ownership` on `system_id`, and again on `run_id`; mismatch between `binding`
+   and `materialization.ownership` on each of the same two fields; a `build_generation` and an
+   `activation_id` that differ, proving they are **not** compared;
    `materialization.plan_identity != plan.identity`; an `initrd_path` supplied when the plan has no
    initrd and the reverse; each rejected artifact-path shape (empty, non-NFC, relative, over 1024
    bytes, containing NUL, containing a `..` segment), asserting `CONFLICT` and
@@ -648,7 +646,11 @@ def prepare_target_definition(
 
    `prepare_target_definition` validates in this order, each failure raising
    `CategorizedError(ErrorCategory.CONFLICT)` with a `rule` detail: ownership agreement between
-   `binding`, `plan.ownership`, and `materialization.ownership` (`rule="ownership"`);
+   `binding`, `plan.ownership`, and `materialization.ownership` (`rule="ownership"`) — the three
+   models have three shapes and forbid extra fields, so none is ever `==` another; compare
+   `system_id` across all three and `run_id` across all three, and do not compare `activation_id`
+   or `build_generation`, which have no counterpart. `require_disk_grub_source` needs
+   `UUID(binding.system_id)`, as `domain_name_for` does;
    `materialization.plan_identity == plan.identity` (`rule="plan-identity"`); initrd presence
    (`rule="initrd-presence"`) — `initrd_path` must be supplied exactly when `plan.initrd is not
    None` and `materialization.artifacts.initrd is not None`, and a disagreement among the three
@@ -660,7 +662,8 @@ def prepare_target_definition(
 
    State in the docstring that `source_xml` must be `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` output per
    ADR-0583 ("Live XML is never an identity input"), that the caller owns that precondition, and
-   that admission rule `live-xml` refuses only its likeliest violation.
+   that it is not enforced here — `activate_definition` refuses live XML on the digest comparison
+   before any write.
 
 4. Run the test file. Expect every test to pass.
 
@@ -727,9 +730,10 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
 
    Plus four cases:
 
-   - a define that does not read back as the target raises `CONFLICT` after the define;
+   - a define that does not read back as the target raises `CONFLICT` after the define, carrying
+     `details["phase"] == "readback"` and both observed digests;
    - `create()` raising `libvirt.libvirtError` after a successful `defineXML` raises `CONFLICT`
-     with `caught.value.terminal is True` and both observed digests in `details`;
+     carrying `details["phase"] == "start"` and both observed digests;
    - a lookup raising `libvirt.libvirtError` with `VIR_ERR_NO_DOMAIN` raises `NOT_FOUND`;
    - a lookup raising `libvirt.libvirtError` with another code raises `INFRASTRUCTURE_FAILURE`;
    - `defineXML` raising `libvirt.libvirtError` with `VIR_ERR_XML_ERROR` raises `CONFLICT` with no
@@ -765,9 +769,11 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
    Every conflict carries
    `details={"system_id": …, "run_id": …, "activation_id": …, "observed_definition": <preserved
    digest>, "observed_boot": <boot projection digest>, "active": <bool>}` — digests, never XML
-   bytes. The define-succeeded/start-failed conflict adds `"phase": "start"` and sets
-   `terminal=True`, because the persistent definition now names the external kernel while the guest
-   is not running it and a retry cannot undo that. Document in the docstring that ADR-0583's
+   bytes. The define-succeeded/start-failed conflict adds `"phase": "start"` and the readback
+   conflict adds `"phase": "readback"`; neither sets `terminal`, because `CONFLICT` is already
+   non-retryable and the flag exists only for otherwise-retryable categories (`errors.py:170-172`).
+   The `readback` phase is the signal that the fixed-point premise broke rather than that a real
+   third state exists, and #2121's live tier is the first place that can happen. Document in the docstring that ADR-0583's
    pre-write authority gate is the caller's obligation (#2140) and that this function performs the
    state half of the gate.
 
@@ -782,8 +788,9 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
 - Only the two admitted cells write; the other four record no `defineXML` and no `create`.
 - Re-running against an already-active target domain is a no-op that raises nothing.
 - The matrix passes against a double that reserializes, so no byte comparison can satisfy it.
-- A start that fails after a successful define is `CONFLICT` with `terminal is True`, not a
-  retryable infrastructure failure.
+- A start that fails after a successful define is `CONFLICT` carrying `"phase": "start"`, not a
+  retryable infrastructure failure, and sets no `terminal` flag.
+- A readback matching neither pair is `CONFLICT` carrying `"phase": "readback"`.
 - A missing domain is `NOT_FOUND`, not `INFRASTRUCTURE_FAILURE`.
 - A libvirt XML-rejection code is `CONFLICT`, not a retryable `INFRASTRUCTURE_FAILURE`.
 - No conflict detail contains domain XML.
@@ -852,6 +859,8 @@ proof on.
    `argv` it was not configured with — so a test states exactly what the guest returned and an
    unexpected call cannot pass silently. Cases:
 
+   - a `domain` whose `name()` is another System's, asserting `CONFLICT` with
+     `details["rule"] == "domain-binding"` and that `run` was never called;
    - a happy path asserting the four exact argv lists `[UNAME_PROGRAM, "-r"]`,
      `[UNAME_PROGRAM, "-m"]`, `[CAT_PROGRAM, PROC_CMDLINE_PATH]`, `[CAT_PROGRAM,
      KERNEL_NOTES_PATH]`, and the returned `RemoteGuestIdentity` including its `cmdline` bytes;
@@ -864,7 +873,6 @@ proof on.
    - `/proc/cmdline` differing by one byte; with no trailing newline; with two trailing newlines
      (only one is stripped, so it must fail);
    - a non-zero exit from each of the four commands in turn;
-   - an exit status of 127 asserting `CONFIGURATION_ERROR` naming the missing program;
    - a captured stream longer than `MAX_GUEST_READ_BYTES`;
    - a `CategorizedError(TRANSPORT_FAILURE)` raised by `run`, propagating unchanged.
 
@@ -876,15 +884,18 @@ proof on.
 
 3. Implement:
 
-   - `_guest_read(agent_exec, domain, argv, *, what) -> bytes` runs one command. Exit status 127
-     raises `CONFIGURATION_ERROR` naming `argv[0]` — the agent could not find the program, which is
-     a deployment fault, not a guest lie, and is the case a busybox scratch image would hit. Any
-     other non-zero `exit_status` raises `READINESS_FAILURE` with `terminal=True` and
+   - `_guest_read(agent_exec, domain, argv, *, what) -> bytes` runs one command. A non-zero
+     `exit_status` raises `READINESS_FAILURE` with `terminal=True` and
      `details={"read": what, "exit_status": …}` — a running guest that cannot report its own kernel
      has failed identity proof, not suffered a transport fault. A `stdout` longer than
      `MAX_GUEST_READ_BYTES` raises `READINESS_FAILURE`. `CategorizedError` from
      `GuestAgentExec.run` propagates unchanged: it already carries `TRANSPORT_FAILURE`,
      `CONFIGURATION_ERROR`, or `INFRASTRUCTURE_FAILURE` from `classify_agent_libvirt_error`.
+   - Before the first read, require `domain.name()` to equal
+     `domain_name_for(UUID(definition.binding.system_id))`, else raise `CONFLICT` with
+     `rule="domain-binding"`. Nothing the function compares would catch a mis-passed handle:
+     `expected_running` and `expected_cmdline` are per-plan, so a sibling System in the same Run
+     booting the same kernel satisfies every later comparison.
    - Run `[UNAME_PROGRAM, "-r"]` and `[UNAME_PROGRAM, "-m"]` as **two** reads, each yielding one
      field. Not a combined `uname -r -m`: `uname` prints every requested field on one
      space-separated line (`uname -r -m | od -c` emits `<release> <machine>\n`), so a combined read
@@ -928,10 +939,10 @@ proof on.
   stays retryable.
 - No observed guest byte reaches an error message or `details` payload; the `/proc/cmdline` bytes
   leave only as the returned `RemoteGuestIdentity.cmdline`, which ADR-0583 requires.
-- A read whose program is absent (exit 127) fails `CONFIGURATION_ERROR`, not `READINESS_FAILURE`.
 - Malformed kernel notes fail `READINESS_FAILURE`, never `BUILD_FAILURE`.
 - Only `/usr/bin/uname` and `/usr/bin/cat` are allowlisted, and only the four exact argv lists in
   step 3 are ever run.
+- A domain handle naming another System raises `CONFLICT` before any guest read.
 
 ---
 

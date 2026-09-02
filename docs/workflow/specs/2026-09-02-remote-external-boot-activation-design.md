@@ -140,11 +140,6 @@ ADR-0583's remote source admission, checked in this order and raising
 4. `<os>` carries exactly one `<boot>`, with `dev="hd"`.
 5. `<os>` carries no `firmware` attribute and no `<loader>` or `<nvram>` child, matching what remote
    provisioning renders.
-6. No `<devices>` descendant carries an `<alias>` child. libvirt emits device aliases in live XML and
-   not in inactive XML, so this is the cheapest refusal of a caller that passed `XMLDesc(0)` on a
-   running domain. It does not prove inactivity — nothing available to this function can — it turns
-   the most likely form of that mistake into a named `CONFLICT` instead of a definition that can
-   never be activated.
 
 A source carrying external-boot fields fails check 1 rather than being captured. ADR-0583 admits
 such a source only while a matching durable activation row owns it, and that row is #2116/#2120
@@ -178,17 +173,28 @@ a module-tree component state, and the module tree is #2129's. #2120 composes th
 
 ### `prepare_target_definition(source_xml, *, plan, materialization, binding, pool, kernel_path, initrd_path) -> RemoteExternalBootDefinition`
 
-Pure. Validates that `binding` matches `materialization.ownership` and `plan.ownership`, that
-`materialization.plan_identity == plan.identity`, and that the materialization carries a kernel
-reference (and an initrd reference exactly when the plan carries an initrd). Admits the source, then
+Pure. Validates ownership, `materialization.plan_identity == plan.identity`, and that the
+materialization carries a kernel reference (and an initrd reference exactly when the plan carries an
+initrd).
+
+Ownership agreement is field-wise, not equality: the three values have three different shapes —
+`ExternalBootActivationBinding` is `(system_id, run_id, activation_id)`, `PlanOwnership` is
+`(system_id, run_id, build_generation)`, and `ActivationOwnership` is `(system_id, run_id)` — and
+all three forbid extra fields, so no two are ever `==`. They agree when
+`binding.system_id == plan.ownership.system_id == materialization.ownership.system_id` and
+`binding.run_id == plan.ownership.run_id == materialization.ownership.run_id`. `activation_id` and
+`build_generation` have no counterpart on the other side and are not compared. Admits the source, then
 renders the target from `kernel_path`, `initrd_path`, and `plan.cmdline`.
 
 `source_xml` must be `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` output. ADR-0583 makes this normative —
-"Live XML is never an identity input" — and a caller passing live XML would otherwise mint a
-definition whose digests describe bytes libvirt will never return, so every later activation would
-raise `CONFLICT` against a domain that looks like a third state. That is a stated precondition the
-caller owns, and admission rule 6 below refuses the cheapest live-only marker rather than leaving it
-purely to memory.
+"Live XML is never an identity input" — and a caller passing live XML would mint a definition whose
+digests describe bytes libvirt will never return. It is a stated precondition the caller owns, and
+it is deliberately not enforced here. An earlier draft added an admission rule refusing any
+`<alias>` element as a live-only marker; it was cut because the premise was unsourced and wrong in
+at least one direction — libvirt persists operator-set user aliases in the inactive definition, so
+the rule would refuse a legitimate baseline — and because live XML is already caught one step later,
+where its preserved digest fails to match `source_definition` and `activate_definition` raises
+`CONFLICT` before any write.
 
 The kernel and initrd paths written into the XML are resolved by the caller from the opaque
 references #2109 minted, because ADR-0583 forbids a provider path crossing the shared seam and this
@@ -204,6 +210,15 @@ tokenizing, quoting, normalization, or shell.
 
 `RemoteGuestIdentity` is a small frozen value carrying `running: RunningKernelObservation` and
 `cmdline: bytes` — the newline-stripped `/proc/cmdline` ADR-0583 requires the observation to return.
+
+Before the first read it requires `domain.name()` to equal
+`domain_name_for(UUID(definition.binding.system_id))`, raising `CONFLICT` with
+`rule="domain-binding"` otherwise. Every other operation here derives its subject rather than
+accepting it — `activate_definition` looks the domain up by that same name, and admission derives
+the overlay volume for the same reason — and this is the one operation whose whole purpose is
+proving the right guest booted the right kernel. Nothing it compares would catch a mis-passed
+handle: `expected_running` and `expected_cmdline` are per-plan, not per-System, so a sibling System
+in the same Run booting the same finalized kernel would satisfy every comparison.
 
 It reads four facts from the running guest through `GuestAgentExec`, the seam the rest of the remote
 provider already drives the guest with, constructed here with the two-program allowlist
@@ -224,10 +239,16 @@ field on **one** space-separated line — `uname -r -m` emits `<release> <machin
   proof and has no vmlinux involved.
 
 A non-zero exit is `READINESS_FAILURE`: the guest is running, and a kernel that cannot produce its
-own release or notes has failed identity proof rather than suffered a transport fault. Exit status
-127 is the one exception — the agent could not find the program, which is a deployment fault, not a
-guest lie, and raises `CONFIGURATION_ERROR` naming the missing binary. Each captured stream is
-capped at 65536 bytes.
+own release or notes has failed identity proof rather than suffered a transport fault. Each captured
+stream is capped at 65536 bytes.
+
+There is deliberately no special case for a program the image does not carry. Exit 127 is a shell
+convention and this seam never uses a shell: `guest-exec` spawns the program directly, and
+`_exit_status` (`guest/agent.py:163-185`) derives a status only from the agent's `exitcode` or from
+`128 + signal`. A missing program fails the spawn itself, which surfaces through
+`classify_agent_libvirt_error` as a retryable `TRANSPORT_FAILURE` and retries to the caller's
+readiness deadline. That is the signature every other `guest-exec` caller in this provider already
+has, so it is not a regression — but it is not a mitigation either, and this design claims none.
 
 `READINESS_FAILURE` is retryable by category, so every identity failure is raised with
 `terminal=True`. Without it a guest that booted the wrong kernel would be re-dispatched to observe
@@ -266,9 +287,10 @@ the three cloud and virt-builder catalog images but are **not** established for
 `deploy/ansible/roles/guest_base_image/tasks/build_scratch.yml` installs with
 `--setopt=install_weak_deps=False` (`:24`) and names `busybox` (`:28`) but never `coreutils` —
 not on the dnf path and not in the Debian `--include` at `:48` — and the file carries an
-UNVALIDATED marker at `:8`. The exit-127 rule above is what turns that into an
-actionable `CONFIGURATION_ERROR` instead of a terminal identity failure, and a follow-up carries
-whether that image should be in the external-boot catalog at all.
+UNVALIDATED marker at `:8`. On such an image the identity proof would fail as a retryable
+`TRANSPORT_FAILURE` and burn the readiness deadline, with no signature distinguishing it from an
+unreachable agent. This design neither fixes that nor pretends to: whether that image is admissible
+for external-boot Runs is #2160's question, and `deploy/` is outside this change's surface.
 
 ADR-0584 exempts read-only observation from mutation authority, so no fence is required for this
 path.
@@ -296,7 +318,9 @@ survivable and was measured — indentation is stripped before canonicalization,
 children is benign because the three boot fields are removed before the digest is taken. The fixed
 point itself is the one behavior no in-process double can prove, because only a real libvirt
 regenerates. #2121's live tier is where it is first exercised, and a first failure there should be
-read as this premise breaking rather than as a genuine conflict.
+read as this premise breaking rather than as a genuine conflict. To make that legible, the readback
+conflict carries `"phase": "readback"` alongside both observed digests, so a broken fixed point is
+distinguishable from a real third state by its payload rather than by inference.
 
 Every other combination of observed definition and power performs no write and raises `CONFLICT`
 with the observed digests and power in `details`, which is ADR-0583's `recovery_conflict` signal for
@@ -304,8 +328,10 @@ its caller.
 
 A define that succeeds and a start that fails is its own state, not an infrastructure fault: the
 persistent definition now names the external kernel while the guest is not running it, so it raises
-`CONFLICT` with `terminal=True` and the observed digests retained, so the caller enters recovery
-rather than retrying a half-applied write. The interleaving that produces it — another actor
+`CONFLICT` carrying `"phase": "start"` and the observed digests, and the caller enters recovery
+rather than retrying a half-applied write. No `terminal` flag: `CONFLICT` is already non-retryable
+(`errors.py:126`), and the flag is documented (`errors.py:170-172`) as escalating a failure in an
+otherwise retryable category. The interleaving that produces it — another actor
 starting the domain between the power check and `create()` — is the stale-actor case #2140's fence
 owns; this function's job is to fail closed when it happens rather than to prevent it.
 
@@ -341,11 +367,12 @@ would re-dispatch a job to re-observe the same wrong guest until its deadline ex
 | Source is not this System's owned disk/GRUB baseline | `CONFLICT` | no | stop |
 | Observed definition or power is not an admitted combination | `CONFLICT` | no | stop |
 | Target defined, start failed | `CONFLICT` | no | stop |
+| Target defined, readback matches neither pair | `CONFLICT` | no | stop |
 | `defineXML` or `XMLDesc` rejects the XML (`VIR_ERR_XML_ERROR`, `VIR_ERR_XML_DETAIL`, `VIR_ERR_CONFIG_UNSUPPORTED`) | `CONFLICT` | no | stop |
 | Running kernel or command line differs from the plan | `READINESS_FAILURE` | **yes** | stop |
 | A guest read exits non-zero or returns unparseable output | `READINESS_FAILURE` | **yes** | stop |
-| A guest read exits 127 — the program is absent from the image | `CONFIGURATION_ERROR` | no | stop |
 | Domain does not exist | `NOT_FOUND` | no | stop |
+| Observed domain handle is not this binding's System | `CONFLICT` | no | stop |
 | Guest agent unreachable or not answering | `TRANSPORT_FAILURE` | no | retry |
 | Malformed agent reply, or any other libvirt error | `INFRASTRUCTURE_FAILURE` | no | retry |
 
@@ -429,7 +456,7 @@ source; malformed XML; a DTD/entity payload; a non-`domain` root; `initrd=None` 
 element.
 
 **Source admission.** One passing case and one failing case per numbered rule, each asserting
-`CONFLICT` and that no XML was produced. Rule 6's case is a source carrying a device `<alias>`.
+`CONFLICT` and that no XML was produced.
 
 **Definition value.** Ownership mismatch between binding, plan, and materialization; a
 materialization whose initrd presence disagrees with the plan's; each rejected artifact-path shape;
@@ -450,8 +477,7 @@ asserting `NOT_FOUND`; a lookup raising another libvirt code asserting `INFRASTR
 `RemoteGuestIdentity`; a wrong release; a wrong build ID; a wrong architecture; an architecture the
 shared contract does not name; a `uname -r` reply carrying a space, proving the single-line shape is
 handled and a two-field parse would have been wrong; a command line differing by one byte; a command
-line with no trailing newline and one with two; a non-zero exit from each of the four reads; an exit
-of 127 asserting `CONFIGURATION_ERROR`; an oversized capture; empty and malformed ELF notes
+line with no trailing newline and one with two; a non-zero exit from each of the four reads; an oversized capture; empty and malformed ELF notes
 asserting `READINESS_FAILURE` rather than the `BUILD_FAILURE` `parse_gnu_build_id` raises; a
 malformed agent reply; an unreachable agent. Each asserts the category above, each identity case
 asserts `terminal is True`, and each failing identity case asserts that no guest bytes appear in
