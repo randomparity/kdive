@@ -2,8 +2,8 @@
 
 Goal: install and prove the ADR-0584 provider-host authority boundary without enabling provider
 capability advertisement. The existing provider-neutral service and database roles remain the
-authority semantics; this change adds the host runtime, systemd/Ansible ownership boundary,
-readiness checks, and deployment/adversarial proof.
+authority semantics; this change adds the dormant authenticated request host, systemd/Ansible
+ownership boundary, readiness checks, and deployment/adversarial proof.
 
 Tech stack: Python 3.14, asyncio/psycopg, systemd, Ansible, pytest.
 
@@ -14,15 +14,18 @@ Tech stack: Python 3.14, asyncio/psycopg, systemd, Ansible, pytest.
 - Provider adapters and capability advertisement remain owned by #2140.
 - Migration `0125` is the only assigned migration and supplies the bounded trusted-head inventory.
 - Preserve current fixed-worker provider/KVM access until #2140 replaces it atomically.
+- Host bounded TLS 1.3 mutual authentication over an ACL-isolated Unix stream, but reject all
+  provider requests before service/adapter dispatch until #2140 supplies concrete adapters.
 - Lifecycle orchestration remains owned by #2118.
 - Never expose credentials, DSNs, provider output, or journal bytes in diagnostics.
 - Guardrails: focused tests while iterating; `just lint`; whole-tree `just type`; relevant
   `prek` hooks; `just ci` before delivery.
 
-Expected implementation size: 650–950 changed lines (L) — derived from migration 0125, one runtime
-module, CLI wiring, systemd artifacts, Ansible provisioning/verification, tests, and diagnostics.
+Expected implementation size: 900–1,300 changed lines (L) — derived from migration 0125, the host
+runtime and bounded transport wrapper, CLI wiring, systemd artifacts, Ansible
+provisioning/verification, tests, and diagnostics.
 
-## Task 1: Add the least-privilege trusted-head inventory
+## Task 1: Add least-privilege head inventory and peer authentication
 
 Files:
 
@@ -36,36 +39,45 @@ Interfaces:
 - SQL `list_external_boot_authority_journal_heads(text)` returns only authority instance, System,
   sequence, digest, phase, authority, generation, and operation identity for the supplied instance,
   with a trust-boundary `LIMIT 4097`; row 4097 signals the fixed 4096-lane ceiling was exceeded.
+- SQL `authenticate_external_boot_authority_peer(bytea)` accepts only a 32-byte credential hash and
+  returns only the matching active fence-protocol-4 worker incarnation identifier.
 - `list_journal_heads(conn, authority_instance: str) -> tuple[JournalHead, ...]` is Task 2's exact
   inventory input.
+- `authenticate_authority_peer(conn, credential: SecretStr) -> AuthenticatedPeer` hashes the
+  credential before SQL and exposes no raw credential or worker row.
 
 Verification:
 
 - Mode: focused-test. Contract: only `kdive_provider_authority` can execute the security-definer
-  inventory; 0125 grants no new direct table access; results are instance-filtered and limited to
-  4097 rows; and no lifecycle write is possible. The shared role-wide visibility is the
+  inventory and authenticate an active worker credential; 0125 grants no new direct table access;
+  results are instance-filtered and limited to 4097 rows; peer authentication returns only an
+  incarnation identifier; and no lifecycle write is possible. The shared role-wide visibility is the
   same accepted scope as its existing binding SELECTs. Red observation: migration 0125 is absent.
   Green command:
   `uv run python -m pytest tests/db/test_external_boot_authority_head_inventory_migration.py -q`.
 
 Steps:
 
-1. Add migration privilege, isolation, empty, multi-instance, and 4096/4097-boundary tests and
-   confirm they fail because 0125 is absent.
+1. Add migration privilege, isolation, empty, multi-instance, 4096/4097-boundary, invalid-hash,
+   inactive-worker, wrong-fence-protocol, and valid-worker tests; confirm they fail because 0125 is
+   absent.
 2. Add migration 0125 and the typed repository reader; run the focused command and expect green.
 3. Regenerate/update migration inventory assertions and run the migration-order guard.
 4. Commit as `feat(db): expose bounded authority head inventory`.
 
-Acceptance: the authority can discover a trusted head whose local lane is absent without direct
-table access or unrelated tenant/lifecycle data.
+Acceptance: the authority can discover a trusted head whose local lane is absent and derive an
+authenticated peer only from a valid active worker credential, without direct table access or
+unrelated tenant/lifecycle data.
 
 ## Task 2: Add the fail-closed host readiness runtime
 
 Files:
 
 - Create `src/kdive/providers/external_boot_authority/host.py`.
+- Create `src/kdive/providers/external_boot_authority/transport.py`.
 - Modify `src/kdive/__main__.py`.
 - Create `tests/providers/external_boot_authority/test_host.py`.
+- Create `tests/providers/external_boot_authority/test_transport.py`.
 
 Interfaces:
 
@@ -73,10 +85,17 @@ Interfaces:
   configuration and systemd credential-directory paths.
 - `check_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` validates identity,
   protected paths, journal restoration, database role shape, and provider socket access.
+- `serve_authority_transport(config, authenticate_peer, service=None)` binds the configured Unix
+  stream with TLS 1.3, requires a client certificate, bounds one length-prefixed closed envelope,
+  authenticates its worker credential through Task 1, and rejects with `provider-not-configured`
+  while `service` is absent.
+- Closed response envelopes return either one existing acknowledgement/observation model or one
+  bounded transport/service error category; the server closes after one request/response pair.
 - `run_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` performs the same check,
-  sends `READY=1`, repeats every 30 seconds, then sends `STOPPING=1` and exits on drift.
+  starts the request listener, sends `READY=1`, repeats every 30 seconds, then sends `STOPPING=1`
+  and exits on drift.
 - CLI handlers expose `external-boot-authority-host` and
-  `check-external-boot-authority-host`; Task 3's unit and Ansible probe rely on those names.
+  `check-external-boot-authority-host`; Task 4's unit and Ansible probe rely on those names.
 
 Verification:
 
@@ -93,21 +112,34 @@ Verification:
 - Mode: focused-test. Contract: readiness is absent during an initial slow/failing check, appears
   only after success, and is retracted before drift exit. Case `test_host_notifies_readiness_state`;
   same focused command.
+- Mode: focused-test. Contract: the Unix stream requires TLS 1.3 client authentication and bounded
+  canonical framing; invalid certificates fail before request bytes are read, invalid lengths and
+  envelopes are rejected without allocation or secret disclosure, and an invalid worker credential
+  never constructs `AuthenticatedPeer`. Cases `test_transport_requires_mutual_tls`,
+  `test_transport_rejects_oversize_before_read`, and
+  `test_transport_authenticates_incarnation_before_dispatch`; green command:
+  `uv run python -m pytest tests/providers/external_boot_authority/test_transport.py -q`.
+- Mode: focused-test. Contract: a valid proof client and active incarnation receive only
+  `provider-not-configured`, and no `ExternalBootAuthorityService` or adapter method runs. Case
+  `test_dormant_transport_refuses_before_provider_dispatch`; same transport command.
 
 Steps:
 
 1. Add the focused tests and run the command; expect collection/import failure.
 2. Implement the immutable config and filesystem checks using `os.open`/`stat` without following
    symlinks; run the focused command and expect filesystem cases green.
-3. Implement the async psycopg role/function checks and bounded error type; run the focused command
-   and expect all host tests green.
-4. Wire the two CLI commands and add parser tests; run the focused command plus the existing CLI
+3. Implement the closed envelope, four-byte length bound, TLS contexts, credential redaction, and
+   dormant dispatcher using only the standard library and existing protocol models; run the
+   transport command and expect green.
+4. Implement the async psycopg role/function checks and bounded error type; run both focused files
+   and expect green.
+5. Wire the two CLI commands and add parser tests; run the focused commands plus the existing CLI
    parser tests and expect green.
-5. Commit as `feat(authority): add fail-closed host readiness`.
+6. Commit as `feat(authority): host authenticated dormant boundary`.
 
 Acceptance: no caller-selected path or provider definition crosses the boundary; a failed check
 exits non-zero with only component/reason; startup and periodic checks detect complete-lane loss and
-post-start drift.
+post-start drift; and a mutually authenticated request cannot reach provider code before #2140.
 
 ## Task 3: Provision a distinct dormant authority endpoint
 
@@ -123,6 +155,8 @@ Interfaces:
 
 - `live_vm_host_authority_account` names the owner of a separate session libvirtd under
   `/run/kdive/provider-authority/libvirt`.
+- `live_vm_host_authority_client_group` alone traverses the separate authority request-socket
+  parent; existing worker and reconciler identities are not members.
 - Existing worker accounts, groups, unit, URI, and KVM access remain byte-for-byte unchanged.
 - Task 4's authority service config points only to the distinct authority socket.
 
@@ -164,9 +198,14 @@ Interfaces:
 - The `Type=notify`, `NotifyAccess=main` systemd unit runs
   `/opt/kdive-provider-authority/.venv/bin/python -m kdive
   external-boot-authority-host`, loads `database-dsn` and `service-credential` through
-  `LoadCredential=`, uses `User=kdive-provider-authority`, and hardens filesystem/network access.
+  `LoadCredential=` together with the server certificate and worker-client CA, uses
+  `User=kdive-provider-authority`, and hardens filesystem/network access. `service-credential` is
+  the TLS server private key rather than an unused sentinel.
 - Ansible installs the venv, root/authority-owned credentials, journal and runtime directories,
-  unit, configuration, and readiness probe in clean-host order.
+  request-client group, unit, configuration, and readiness probe in clean-host order. Production
+  workers receive no client material; provisioning creates a transient proof identity and
+  short-lived client certificate, proves the complete authentication path, then removes both and
+  retires the proof worker incarnation.
 
 Verification:
 
@@ -182,7 +221,9 @@ Verification:
   directory on the authorized clean Ubuntu carrier, bootstraps a peer-authenticated local
   PostgreSQL database and real `kdive` denial identity, overrides `live_vm_repo_url` with the bundle
   and `live_vm_repo_version` with the immutable full SHA, asserts the installed revision,
-  starts/restarts both services, verifies denial, injects drift, and observes readiness retract.
+  creates a proof-only CA/server/client chain and active worker-incarnation credential,
+  starts/restarts both services, verifies server/client/worker authentication and dormant dispatch
+  denial, injects drift, and observes readiness retract.
   Carrier: `dave@ub26-big.dev.pdx.drc.nz`; green command:
   `scripts/operations/prove-external-boot-authority-host.sh dave@ub26-big.dev.pdx.drc.nz $(git rev-parse HEAD)`.
 
@@ -190,15 +231,16 @@ Steps:
 
 1. Add the unit and provisioning structural tests and confirm the expected red failures.
 2. Add the systemd unit and example configuration.
-3. Add authority identity, directories, credentials, venv installation, unit install/start, and
-   readiness verification to Ansible in dependency order.
+3. Add authority identity, client group, directories, TLS/database credentials, venv installation,
+   unit install/start, and readiness verification to Ansible in dependency order.
 4. Run both focused deployment files and `just lint-ansible`; expect green.
 5. Write the runbook, proof script, and idempotent teardown play before execution. Resolve exact
    pre-existing remote targets read-only; deploy from the transferred Git bundle with both source
    overrides; verify the installed revision equals the supplied full SHA; then run the teardown
    twice and prove both passes leave the dormant units/endpoint absent, LOGIN revoked, retained
-   journal/credential state intact, and the existing worker provider path usable. Retain bounded
-   evidence and clean only SHA-named/proof-labeled artifacts created by this command.
+   journal/credential state intact, proof identity/material absent, and the existing worker provider
+   path usable. Retain bounded evidence and clean only SHA-named/proof-labeled artifacts created by
+   this command.
 6. Commit as `feat(deploy): supervise external boot authority`.
 
 Acceptance: clean provisioning fails before completion if service recovery, database least
@@ -217,7 +259,8 @@ Interfaces:
 - Provider-neutral tests use existing `_service`, controllable adapter, and repository doubles; no
   provider adapter is added.
 - Runbooks name the one-shot readiness command, bounded failure components, journal restoration,
-  group/socket inspection, and the explicit capability-advertisement hold.
+  mutual-TLS/request-socket diagnosis, group/socket inspection, and the explicit
+  capability-advertisement hold.
 
 Verification:
 
