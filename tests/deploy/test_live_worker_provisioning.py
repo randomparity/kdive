@@ -267,6 +267,33 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "PGDATABASE:" not in tasks
 
 
+def test_authority_teardown_reports_login_revocation_only_on_transition() -> None:
+    document: object = yaml.safe_load(_text(AUTHORITY_TEARDOWN))
+    assert isinstance(document, list)
+    play = cast(dict[str, object], document[0])
+    tasks = cast(list[object], play["tasks"])
+    revoke = cast(
+        dict[str, object],
+        next(
+            task
+            for task in tasks
+            if isinstance(task, dict) and task.get("name") == "Revoke the authority database LOGIN"
+        ),
+    )
+
+    assert revoke["register"] == "authority_database_login_revocation"
+    assert revoke["changed_when"] == (
+        'authority_database_login_revocation.stdout == "login-revoked"'
+    )
+    assert revoke["no_log"] is True
+    command = cast(dict[str, object], revoke["ansible.builtin.command"])
+    argv = cast(list[object], command["argv"])
+    script = argv[-1]
+    assert isinstance(script, str)
+    assert "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s" in script
+    assert 'print("login-revoked")' in script
+
+
 def test_ansible_uses_declarative_account_and_file_modules() -> None:
     tasks = _text(MAIN_TASKS)
     for module in (

@@ -69,9 +69,13 @@
             login = os.environ["AUTHORITY_LOGIN"]
             with connect(os.environ["AUTHORITY_ADMIN_DSN"]) as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (login,))
-                    if cursor.fetchone() is not None:
+                    cursor.execute(
+                        "SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (login,)
+                    )
+                    row = cursor.fetchone()
+                    if row is not None and row[0]:
                         cursor.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(login)))
+                        print("login-revoked")
       environment:
         AUTHORITY_ADMIN_DSN: "{{ authority_database_admin_dsn }}"
         AUTHORITY_LOGIN: "{{ authority_database_login }}"
@@ -80,7 +84,9 @@
       when:
         - authority_database_admin_dsn | length > 0
       no_log: true
-      changed_when: true
+      register: authority_database_login_revocation
+      changed_when: >-
+        authority_database_login_revocation.stdout == "login-revoked"
 
     - name: Remove transient proof identity and material
       block:
