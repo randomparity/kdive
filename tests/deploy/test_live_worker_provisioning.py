@@ -266,12 +266,16 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "teardown pass 1" in proof
     assert "teardown pass 2" in proof
     assert "reboot: validating boot-persistent authority services" in proof
+    assert "provision: installing exact revision $revision" in proof
+    assert "live_vm_repo_version: $revision" in proof
     assert "upgrade: installing exact revision" in proof
     assert "proof: exercising authority failure boundaries" in proof
     assert "converged: rerunning the exact revision" in proof
     assert "authority_inputs_digest" in proof
     assert "converged: unrelated changed task groups" in proof
     assert "changed=0" not in proof
+    assert '--extra-vars "live_vm_host_authority_enabled=true"' in proof
+    assert "cleanup_remote_proof" in proof
     assert proof.index("upgrade: installing exact revision") < proof.index(
         "proof: exercising authority failure boundaries"
     )
@@ -293,6 +297,7 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
         "Assert the authority database LOGIN is revoked",
         "Assert authority services and processes are inactive",
         "Remove transient proof identity and material",
+        "Retire the transient proof worker incarnation",
         "Assert authority units and endpoint artifacts are absent",
         "Assert retained authority evidence remains",
         "Verify the fixed-worker provider path remains usable",
@@ -300,6 +305,19 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
         assert evidence in teardown
     assert "failed_when: false" not in teardown
     assert '"{{ authority_install }}"' in teardown
+
+    journal_drift = verify[
+        verify.index("- name: Prove journal restoration gates authority readiness") : verify.index(
+            "- name: Prove authority readiness retracts on credential and ACL drift"
+        )
+    ]
+    access_drift = verify[
+        verify.index(
+            "- name: Prove authority readiness retracts on credential and ACL drift"
+        ) : verify.index("- name: Create root-owned permission-probe markers for every slot")
+    ]
+    assert "  always:" in journal_drift
+    assert "  always:" in access_drift
 
     assert "from psycopg import connect" in tasks
     assert "PGDATABASE:" not in tasks

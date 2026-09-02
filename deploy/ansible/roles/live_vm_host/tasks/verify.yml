@@ -590,6 +590,7 @@
       changed_when: false
       failed_when: live_vm_host_authority_bad_journal_probe.rc == 0
 
+  always:
     - name: Remove the proof-only unexpected journal lane
       ansible.builtin.file:
         path: /var/lib/kdive/provider-authority/journal/not-a-system
@@ -634,19 +635,6 @@
             live_vm_host_authority_acl_drift_state.status.NRestarts | int
             > live_vm_host_authority_acl_drift_baseline.status.NRestarts | int
 
-    - name: Stop the authority restart loop after ACL drift
-      ansible.builtin.systemd_service:
-        name: kdive-external-boot-authority.service
-        state: stopped
-
-    - name: Restore the request-directory ACL
-      ansible.builtin.file:
-        path: /run/kdive/provider-authority/request
-        state: directory
-        owner: "{{ live_vm_host_authority_account }}"
-        group: "{{ live_vm_host_authority_client_group }}"
-        mode: "2750"
-
     - name: Save the valid proof server certificate
       ansible.builtin.copy:
         src: "{{ live_vm_host_authority_credentials_dir }}/server-certificate"
@@ -683,6 +671,25 @@
         that:
           - live_vm_host_authority_tls_drift_state.status.ActiveState != 'active'
 
+  always:
+    - name: Stop the authority restart loop after drift proof
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        state: stopped
+
+    - name: Restore the request-directory ACL
+      ansible.builtin.file:
+        path: /run/kdive/provider-authority/request
+        state: directory
+        owner: "{{ live_vm_host_authority_account }}"
+        group: "{{ live_vm_host_authority_client_group }}"
+        mode: "2750"
+
+    - name: Inspect the proof server certificate backup
+      ansible.builtin.stat:
+        path: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
+      register: live_vm_host_authority_certificate_backup
+
     - name: Restore the valid proof server certificate
       ansible.builtin.copy:
         src: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
@@ -691,6 +698,7 @@
         owner: "{{ live_vm_host_authority_account }}"
         group: "{{ live_vm_host_authority_account }}"
         mode: "0400"
+      when: live_vm_host_authority_certificate_backup.stat.exists
 
     - name: Remove the proof server certificate backup
       ansible.builtin.file:

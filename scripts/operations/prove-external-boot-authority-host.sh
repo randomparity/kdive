@@ -20,8 +20,8 @@ root=$(git rev-parse --show-toplevel)
   echo "refusing proof: the local revision has uncommitted or untracked files" >&2
   exit 2
 }
-initial_revision=$(git -C "$root" rev-parse "$revision^")
-[[ $initial_revision =~ ^[0-9a-f]{40}$ ]] || {
+predecessor_revision=$(git -C "$root" rev-parse "$revision^")
+[[ $predecessor_revision =~ ^[0-9a-f]{40}$ ]] || {
   echo "refusing proof: exact HEAD has no installable parent revision" >&2
   exit 2
 }
@@ -35,10 +35,52 @@ authority_instance="authority-2150-${revision:0:12}"
 proof_incarnation="kdive-authority-2150-${revision:0:12}"
 
 scratch=$(mktemp -d)
+proof_remote_state_created=0
 cleanup() {
+  local original_status=$?
+  trap - EXIT
+  if [[ $proof_remote_state_created -eq 1 ]]; then
+    cleanup_remote_proof || echo "warning: remote proof cleanup did not converge" >&2
+  fi
   rm -rf -- "$scratch"
+  exit "$original_status"
 }
 trap cleanup EXIT
+
+cleanup_remote_proof() {
+  local carrier_ready=0
+  for _attempt in $(seq 1 20); do
+    if ssh -o BatchMode=yes -o ConnectTimeout=3 "$target" true 2>/dev/null; then
+      carrier_ready=1
+      break
+    fi
+    sleep 3
+  done
+  [[ $carrier_ready -eq 1 ]] || return 1
+  ssh -o BatchMode=yes "$target" bash -s -- \
+    "$remote_root" "$remote_install" "$database" "$database_login" \
+    "$proof_incarnation" <<'REMOTE_CLEANUP'
+set -u
+remote_root=$1
+remote_install=$2
+database=$3
+database_login=$4
+proof_incarnation=$5
+source_root="$remote_root/source"
+cleanup_status=0
+if [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml \
+  && -f $remote_root/inventory ]]; then
+  cd "$remote_root"
+  uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
+    "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
+    --extra-vars "authority_database_admin_dsn=postgresql:///$database?host=/var/run/postgresql" \
+    --extra-vars "authority_database_login=$database_login" \
+    --extra-vars "authority_proof_incarnation=$proof_incarnation" || cleanup_status=$?
+fi
+sudo -n rm -rf -- "$remote_install" "$remote_root" || cleanup_status=$?
+exit "$cleanup_status"
+REMOTE_CLEANUP
+}
 bundle="$scratch/kdive.bundle"
 (cd "$root" && git bundle create "$bundle" HEAD)
 git bundle verify "$bundle"
@@ -89,16 +131,17 @@ REMOTE_PRESTATE
 
 echo "source: transferring exact Git bundle"
 ssh -o BatchMode=yes "$target" sudo -n install -d -o dave -g dave -m 0755 "$remote_root"
+proof_remote_state_created=1
 scp -q "$bundle" "$target:$remote_root/kdive.bundle"
 
 ssh -o BatchMode=yes "$target" bash -s -- \
-  "$remote_root" "$remote_install" "$revision" "$initial_revision" "$database" "$database_login" \
+  "$remote_root" "$remote_install" "$revision" "$predecessor_revision" "$database" "$database_login" \
   "$authority_instance" "$proof_incarnation" <<'REMOTE_PROOF'
 set -euo pipefail
 remote_root=$1
 remote_install=$2
 revision=$3
-initial_revision=$4
+predecessor_revision=$4
 database=$5
 database_login=$6
 authority_instance=$7
@@ -133,7 +176,8 @@ EOF
 
 echo "prerequisites: installing through the live_vm_host role"
 cd "$remote_root"
-$ansible -i inventory proof.yml --tags authority_prerequisites
+$ansible -i inventory proof.yml --tags authority_prerequisites \
+  --extra-vars "live_vm_host_authority_enabled=true"
 
 sudo -n -u postgres createdb "$database"
 sudo -n install -d -o postgres -g postgres -m 0700 "$remote_root/migrate"
@@ -249,7 +293,7 @@ install -m 0600 /dev/null "$remote_root/vars.yml"
 cat >"$remote_root/vars.yml" <<EOF
 live_vm_venv: $remote_install
 live_vm_repo_url: $remote_root/kdive.bundle
-live_vm_repo_version: $initial_revision
+live_vm_repo_version: $revision
 live_vm_host_authority_enabled: true
 live_vm_host_authority_instance: $authority_instance
 live_vm_host_authority_database_name: $database
@@ -270,11 +314,11 @@ live_vm_host_authority_proof_worker_credential: $secrets/worker-credential
 live_vm_host_authority_proof_request: $secrets/request.json
 EOF
 
-echo "provision: installing exact predecessor revision $initial_revision"
+echo "provision: installing exact revision $revision into clean authority state"
 $ansible -i inventory proof.yml --extra-vars @vars.yml
 installed=$(sudo -n cat /opt/kdive-provider-authority/revision)
-[[ $installed == "$initial_revision" ]]
-[[ $(sudo -n -u github-runner git -C "$remote_install" rev-parse HEAD) == "$initial_revision" ]]
+[[ $installed == "$revision" ]]
+[[ $(sudo -n -u github-runner git -C "$remote_install" rev-parse HEAD) == "$revision" ]]
 
 sudo -n systemctl is-active --quiet kdive-external-boot-authority.service
 sudo -n -u kdive-provider-authority env \
@@ -327,13 +371,13 @@ done
 }
 
 ssh -o BatchMode=yes "$target" bash -s -- \
-  "$remote_root" "$remote_install" "$revision" "$initial_revision" "$database" "$database_login" \
+  "$remote_root" "$remote_install" "$revision" "$predecessor_revision" "$database" "$database_login" \
   "$authority_instance" "$proof_incarnation" <<'REMOTE_POST_REBOOT'
 set -euo pipefail
 remote_root=$1
 remote_install=$2
 revision=$3
-initial_revision=$4
+predecessor_revision=$4
 database=$5
 database_login=$6
 authority_instance=$7
@@ -375,9 +419,15 @@ sudo -n -u kdive-provider-authority env \
   == 700:kdive-provider-authority:kdive-provider-authority ]]
 
 sed \
-  -e "s/live_vm_repo_version: $initial_revision/live_vm_repo_version: $revision/" \
-  "$remote_root/vars.yml" >"$remote_root/vars-upgrade.yml"
-chmod 0600 "$remote_root/vars-upgrade.yml"
+  -e "s/live_vm_repo_version: $revision/live_vm_repo_version: $predecessor_revision/" \
+  "$remote_root/vars.yml" >"$remote_root/vars-predecessor.yml"
+chmod 0600 "$remote_root/vars-predecessor.yml"
+
+echo "upgrade: preparing exact predecessor revision $predecessor_revision"
+$ansible -i inventory proof.yml --extra-vars @vars-predecessor.yml
+[[ $(sudo -n cat /opt/kdive-provider-authority/revision) == "$predecessor_revision" ]]
+[[ $(sudo -n -u github-runner git -C "$remote_install" rev-parse HEAD) \
+  == "$predecessor_revision" ]]
 
 pre_upgrade_authority_pid=$(sudo -n systemctl show --property=MainPID --value \
   kdive-external-boot-authority.service)
@@ -389,7 +439,7 @@ sudo -n sh -c \
   'printf "# proof-only upgrade drift\\n" >>/etc/kdive/libvirtd-external-boot-authority.conf'
 
 echo "upgrade: installing exact revision $revision"
-$ansible -i inventory proof.yml --extra-vars @vars-upgrade.yml
+$ansible -i inventory proof.yml --extra-vars @vars.yml
 [[ $(sudo -n cat /opt/kdive-provider-authority/revision) == "$revision" ]]
 [[ $(sudo -n -u github-runner git -C "$remote_install" rev-parse HEAD) == "$revision" ]]
 [[ $(sudo -n systemctl show --property=MainPID --value \
@@ -401,7 +451,7 @@ $ansible -i inventory proof.yml --extra-vars @vars-upgrade.yml
 
 sed \
   's/live_vm_host_authority_proof_enabled: false/live_vm_host_authority_proof_enabled: true/' \
-  "$remote_root/vars-upgrade.yml" >"$remote_root/vars-proof.yml"
+  "$remote_root/vars.yml" >"$remote_root/vars-proof.yml"
 chmod 0600 "$remote_root/vars-proof.yml"
 echo "proof: exercising authority failure boundaries after isolated upgrade restart"
 $ansible -i inventory proof.yml --extra-vars @vars-proof.yml
@@ -433,7 +483,7 @@ pre_converged_provider_pid=$(sudo -n -u kdive-provider-authority env \
   kdive-libvirtd-external-boot-authority.service)
 
 echo "converged: rerunning the exact revision $revision"
-$ansible -i inventory proof.yml --extra-vars @vars-upgrade.yml | tee "$remote_root/converged.log"
+$ansible -i inventory proof.yml --extra-vars @vars.yml | tee "$remote_root/converged.log"
 grep -Eq '^localhost +: ok=[0-9]+ +changed=[0-9]+ +unreachable=0 +failed=0' \
   "$remote_root/converged.log"
 awk '
@@ -482,7 +532,8 @@ diff -u "$remote_root/expected-converged-changed-tasks.log" \
 run_teardown() {
   $ansible -i inventory "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
     --extra-vars "authority_database_admin_dsn=postgresql:///$database?host=/var/run/postgresql" \
-    --extra-vars "authority_database_login=$database_login"
+    --extra-vars "authority_database_login=$database_login" \
+    --extra-vars "authority_proof_incarnation=$proof_incarnation"
   sudo -n test ! -e /etc/systemd/system/kdive-external-boot-authority.service
   sudo -n test ! -e /run/kdive/provider-authority
   sudo -n test ! -e /opt/kdive-provider-authority
@@ -504,3 +555,4 @@ sudo -n rm -rf -- "/opt/kdive-provider-authority" "$remote_install"
 sudo -n rm -rf -- "$remote_root"
 echo "proof complete: exact revision $revision; retained credentials journal and inert database"
 REMOTE_POST_REBOOT
+proof_remote_state_created=0

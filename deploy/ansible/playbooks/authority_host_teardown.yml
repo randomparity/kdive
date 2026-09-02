@@ -12,6 +12,7 @@
     authority_install: /opt/kdive-provider-authority
     authority_database_login: kdive_authority_host
     authority_database_admin_dsn: ""
+    authority_proof_incarnation: ""
     fixed_worker_uri: >-
       qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock
   tasks:
@@ -219,6 +220,50 @@
       ansible.builtin.assert:
         that: authority_database_login_state.stdout == 'false'
         fail_msg: the authority database LOGIN must exist with LOGIN disabled after teardown
+
+    - name: Retire the transient proof worker incarnation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import os
+            from psycopg import connect
+
+            with connect(os.environ["AUTHORITY_ADMIN_DSN"]) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT state FROM worker_incarnations WHERE incarnation=%s",
+                        (os.environ["PROOF_INCARNATION"],),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        print("missing")
+                    elif row[0] == "terminated":
+                        print("terminated")
+                    else:
+                        cursor.execute(
+                            """UPDATE worker_incarnations
+                                  SET state='terminated', terminated_at=clock_timestamp(),
+                                      outcome='killed'
+                                WHERE incarnation=%s""",
+                            (os.environ["PROOF_INCARNATION"],),
+                        )
+                        print("incarnation-retired")
+      environment:
+        AUTHORITY_ADMIN_DSN: "{{ authority_database_admin_dsn }}"
+        PROOF_INCARNATION: "{{ authority_proof_incarnation }}"
+      become: true
+      become_user: postgres
+      no_log: true
+      register: authority_proof_incarnation_retirement
+      changed_when: authority_proof_incarnation_retirement.stdout == 'incarnation-retired'
+      when: authority_proof_incarnation | length > 0
+
+    - name: Assert the transient proof worker incarnation is inert
+      ansible.builtin.assert:
+        that: authority_proof_incarnation_retirement.stdout in ['missing', 'terminated', 'incarnation-retired']
+      when: authority_proof_incarnation | length > 0
 
     - name: Remove transient proof identity and material
       block:
