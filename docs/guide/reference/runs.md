@@ -46,7 +46,9 @@ force-recycled boot. Absent `force`, a fresh boot of an already-booted Run needs
 
 `implemented`
 
-Cancel a non-terminal run, freeing its system without a teardown.
+Cancel a non-terminal run, freeing its system without a teardown. Refused with
+`conflict` while an uncleaned external-boot activation restricts that system — the
+denial names the activation and the action that clears it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

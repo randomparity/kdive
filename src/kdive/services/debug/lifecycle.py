@@ -174,11 +174,8 @@ async def detach_locked(
     connector: Connector,
 ) -> DetachedSession | DebugSessionRejected:
     """Detach one live/attach DebugSession under the per-System lock."""
-    # ``run_id`` is selected for the admission guard's owning-Run comparison, not for the detach
-    # itself (ADR-0583).
     select_q: LiteralString = (
-        "SELECT state, transport_handle, project, run_id FROM debug_sessions "
-        "WHERE id = %s FOR UPDATE"
+        "SELECT state, transport_handle, project FROM debug_sessions WHERE id = %s FOR UPDATE"
     )
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -200,12 +197,11 @@ async def detach_locked(
             return DetachedSession(session_id=session_id, project=row["project"])
         # Guards the detach itself, after the already-detached no-op returns: a terminal session
         # has no attachment left to reverse, so an activation must not un-idempotent a retry.
+        # No `run_id`: `DEBUG_DETACH` carries no owning-Run fence, because the release refuses on
+        # any live session of the System whichever Run owns it. See
+        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md
         await check_external_boot_admission(
-            conn,
-            system_id,
-            ExternalBootOperation.DEBUG_DETACH,
-            project=row["project"],
-            run_id=row["run_id"],
+            conn, system_id, ExternalBootOperation.DEBUG_DETACH, project=row["project"]
         )
         await close_transport(connector, row["transport_handle"])
         await DEBUG_SESSIONS.update_state(conn, session_id, DebugSessionState.DETACHED)

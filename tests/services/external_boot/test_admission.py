@@ -44,9 +44,12 @@ _ADMITTING_STATES: dict[ExternalBootOperation, frozenset[ExternalBootActivationS
     _OP.CAPTURE_VMCORE: _ACTIVE_ONLY,
     _OP.CAPTURE_TRAFFIC: _ACTIVE_ONLY,
     _OP.DEBUG_ATTACH: _ACTIVE_ONLY,
-    # Every restricting state, like teardown: a detach reverses an attach the matrix admitted,
-    # so denying it outside `active` would strand a live session and leak its transport. Still
-    # owning-Run scoped, so only the Run holding the activation may detach.
+    # Every restricting state, like teardown, and for any Run: a detach reverses an attach the
+    # matrix admitted, so denying it would strand a live session and leak its transport — and the
+    # release refuses on any live session of the System regardless of owning Run, so an
+    # owning-Run fence here would wedge a session nobody could clear. Both departures from
+    # ADR-0583:348-351 are recorded in
+    # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md
     _OP.DEBUG_DETACH: _EVERY_RESTRICTED_STATE,
 }
 
@@ -71,7 +74,6 @@ _OWNING_RUN_SCOPED = frozenset(
         _OP.CAPTURE_VMCORE,
         _OP.CAPTURE_TRAFFIC,
         _OP.DEBUG_ATTACH,
-        _OP.DEBUG_DETACH,
     }
 )
 
@@ -124,6 +126,9 @@ def _denial(
     with pytest.raises(ExternalBootDenied) as raised:
         _check(system_id, operation)
     assert raised.value.details == {
+        # Every other refusal this surface raises carries a `reason`; the matrix denial matches
+        # the convention, and the value is a bounded scalar `safe_error_details` passes through.
+        "reason": admission_module.DENIAL_REASON,
         "activation_id": str(activation.id),
         "activation_state": state.value,
         "owning_run_id": str(run_id),
@@ -240,13 +245,18 @@ def test_the_owning_run_may_detach_in_every_restricting_state(
     assert _detach_check(monkeypatch, state, None) is None
 
 
-@pytest.mark.parametrize("state", _NON_ACTIVE_RESTRICTING)
-def test_a_different_run_is_still_denied_a_detach_in_every_restricting_state(
+@pytest.mark.parametrize("state", list(_STATE))
+def test_a_different_run_may_also_detach_in_every_restricting_state(
     monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
 ) -> None:
-    """The owning-Run fence survives the widening: only the activation's Run may detach."""
-    with pytest.raises(ExternalBootDenied):
-        _detach_check(monkeypatch, state, uuid4())
+    """Detach carries no owning-Run fence.
+
+    See docs/debt/0006-external-boot-detach-departs-from-adr-0583.md.
+    The release refuses on any live session of the System regardless of owning Run, so fencing
+    the detach to the activation's Run would wedge a foreign session no caller could clear.
+    ``DEBUG_ATTACH`` keeps its fence; the table test above covers that.
+    """
+    assert _detach_check(monkeypatch, state, uuid4()) is None
 
 
 def test_get_restricting_for_system_sees_only_uncleaned_activations(
@@ -312,7 +322,11 @@ _GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
 _UNGUARDED_TOOLS: dict[str, str] = {
     "accounting.set_budget": "accounting state; touches no System",
     "accounting.set_quota": "accounting state; touches no System",
-    "allocations.release": "the Allocation wind-down after teardown, which the matrix admits",
+    "allocations.release": (
+        "unguarded: the release path reads no System and takes no teardown precondition, so "
+        "the matrix is not consulted on the Allocation wind-down; the gap is recorded in "
+        "docs/debt/0007-allocation-release-bypasses-the-external-boot-matrix.md"
+    ),
     "allocations.renew": "extends a lease; changes nothing about the guest",
     "allocations.request": "grants capacity before any System exists",
     "artifacts.create_investigation_upload": "mints an upload slot; touches no System",

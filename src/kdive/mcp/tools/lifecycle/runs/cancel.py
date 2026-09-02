@@ -30,6 +30,7 @@ from kdive.services.external_boot import (
 )
 
 _TERMINAL_JOB = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
+_TERMINAL_RUN = frozenset({RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELED})
 _NEXT_ACTIONS = ["runs.create"]
 
 
@@ -39,9 +40,12 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
     Under the per-Run lock, transition a ``created``/``running`` Run to ``canceled`` and
     best-effort cancel its in-flight build job. A retried cancel on an already-``canceled``
     Run is an idempotent success no-op; a ``succeeded``/``failed`` Run returns ``conflict``
-    (it is never relabeled). A bound Run's cancel frees the System for a new ``runs.create``
-    with no ``systems.teardown``; an unbound Run (ADR-0169, ``system_id IS NULL``) has no System
-    to free and cancel touches none, so it works the same way.
+    (it is never relabeled). Both are decided before the external-boot check, so a retry keeps
+    its envelope. A bound Run's cancel frees the System for a new ``runs.create`` with no
+    ``systems.teardown``, except while an uncleaned external-boot activation restricts that
+    System (ADR-0583): the cancel is then denied with ``conflict``, because the System it would
+    free is not free. An unbound Run (ADR-0169, ``system_id IS NULL``) has no System to free,
+    cancel touches none, and no activation can restrict it.
 
     Args:
         pool: The connection pool.
@@ -81,6 +85,13 @@ async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -
                 advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)
             )
         await locks.enter_async_context(advisory_xact_lock(conn, LockScope.RUN, run.id))
+        locked = await RUNS.get(conn, run.id)
+        prior = locked.state if locked is not None else run.state
+        if prior in _TERMINAL_RUN:
+            return await _terminal_response(conn, run)
+        # After the terminal-state return, so a retried cancel keeps its documented idempotent
+        # success (or its ``conflict``): a cancel with nothing left to transition frees no System
+        # either way, so denying it protects nothing. Only a cancel about to transition is guarded.
         if run.system_id is not None:
             try:
                 await check_external_boot_admission(
@@ -88,8 +99,6 @@ async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -
                 )
             except ExternalBootDenied as exc:
                 return _external_boot_denial(str(run.id), exc, ctx)
-        locked = await RUNS.get(conn, run.id)
-        prior = locked.state if locked is not None else run.state
         try:
             canceled = await RUNS.update_state(conn, run.id, RunState.CANCELED)
         except IllegalTransition:

@@ -410,7 +410,9 @@ def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_cancel(
         run_id: Annotated[str, Field(description="The non-terminal Run to cancel.")],
     ) -> ToolResponse:
-        """Cancel a non-terminal run, freeing its system without a teardown."""
+        """Cancel a non-terminal run, freeing its system without a teardown. Refused with
+        `conflict` while an uncleaned external-boot activation restricts that system — the
+        denial names the activation and the action that clears it."""
         return await _cancel_run(pool, current_context(), run_id)
 
 

@@ -172,8 +172,9 @@ async def check_external_boot_admission(
 
 `check_external_boot_admission` returns `None` both when no activation restricts the System and when
 the operation is admitted against a live activation, and raises `ExternalBootDenied` otherwise. Its
-`details` carry exactly the three scalar keys
-`{"activation_id": str, "activation_state": str, "owning_run_id": str}` and nothing else.
+`details` carry exactly four scalar keys — `{"reason": "external_boot_restricted",
+"activation_id": str, "activation_state": str, "owning_run_id": str}` — and nothing else. The
+`reason` matches the convention every other refusal in this change sets.
 
 It is a guard, not a lookup: it returns no value. An earlier draft returned an `ExternalBootBinding`
 carrying the activation identity "for the later execution mechanism", but that mechanism belongs to
@@ -243,8 +244,11 @@ Admitted operations by state, and nothing else is admitted:
 `DEBUG_DETACH` sits beside `SYSTEM_TEARDOWN` in every row because it is the reversal of an attach
 the matrix itself admitted. Denying it once the activation leaves `active` would leave the session
 row `live` and its provider transport open with nothing the agent can call to close it, and that
-stranded session then blocks the release on `debug_session_active`. It stays in
-`_OWNING_RUN_SCOPED`, so another Run's detach is still denied.
+stranded session then blocks the release on `debug_session_active`. It is also **not** in
+`_OWNING_RUN_SCOPED`: that refusal is System-wide, so fencing the detach to the activation's Run
+would leave a session owned by another Run of the System blocking the release with no caller able
+to clear it. Both departures from ADR-0583:348-351 are recorded in
+`docs/debt/0006-external-boot-detach-departs-from-adr-0583.md`, owned by #2118.
 
 `RUN_CREATE`, `RUN_BIND`, `RUN_CANCEL`, `RUN_INSTALL`, `RUN_BOOT`, `SYSTEM_POWER`,
 `SYSTEM_REPROVISION`, `SYSTEM_SNAPSHOT`, `SYSTEM_SYSRQ`, and `SYSTEM_AUTHORIZE_SSH_KEY` appear in no
@@ -263,12 +267,13 @@ the denial is what makes the existing promise honest. It is System-scoped, not o
 cancelling any Run must not orphan another Run's activation.
 
 A second frozenset, `_OWNING_RUN_SCOPED`, holds `EXTERNAL_BOOT_RELEASE`, `CAPTURE_VMCORE`,
-`CAPTURE_TRAFFIC`, `DEBUG_ATTACH`, and `DEBUG_DETACH`. An operation in that set is admitted only when
+`CAPTURE_TRAFFIC`, and `DEBUG_ATTACH`. An operation in that set is admitted only when
 the caller's `run_id` equals the activation's `run_id`; a different or absent `run_id` is a denial.
-`SYSTEM_TEARDOWN`, `SYSTEM_WATCH_CRASH`, `RUN_CANCEL`, and `EXTERNAL_BOOT_RESOLVE_CONFLICT` are not
-in it: ADR-0583 scopes teardown and conflict resolution to the System, `control.watch_for_crash`
-carries only a `system_id` (the same shape as `FORCE_CRASH` below), and `RUN_CANCEL` must deny
-regardless of which Run is being cancelled.
+`SYSTEM_TEARDOWN`, `SYSTEM_WATCH_CRASH`, `RUN_CANCEL`, `DEBUG_DETACH`, and
+`EXTERNAL_BOOT_RESOLVE_CONFLICT` are not in it: ADR-0583 scopes teardown and conflict resolution to
+the System, `control.watch_for_crash` carries only a `system_id` (the same shape as `FORCE_CRASH`
+below), `RUN_CANCEL` must deny regardless of which Run is being cancelled, and `DEBUG_DETACH` is
+unfenced for the reason above.
 
 **`FORCE_CRASH` is a stated residual, not an oversight.** ADR-0583:351 lists force-crash among the
 `active`-admitted operations under an "owning-Run" modifier, but `control.force_crash` carries only a
@@ -363,22 +368,24 @@ Sites that already hold `LockScope.SYSTEM` gain only a guard call inside the exi
 | `mcp/tools/lifecycle/systems/admin.py:_reprovision_locked` (lock at :129-133) | `SYSTEM_REPROVISION` | `None` |
 | `mcp/tools/lifecycle/systems/snapshot.py:snapshot_system` (lock at :184-188), `restore_system` (:258-262), `delete_snapshot` (:382-386) | `SYSTEM_SNAPSHOT` | `None` |
 | `services/debug/lifecycle.py:insert_session_locked` (lock at :95) | `DEBUG_ATTACH` | `request.run.id` |
-| `services/debug/lifecycle.py:detach_locked` (lock at :172) | `DEBUG_DETACH` | the session's Run id |
+| `services/debug/lifecycle.py:detach_locked` (lock at :172) | `DEBUG_DETACH` | `None` |
 
 `_teardown_locked` calls the guard for symmetry and for its returned binding; `SYSTEM_TEARDOWN` is
 admitted in every state, so the call can only ever return, never raise.
 
-`detach_locked` is the one site that must widen a query to obtain its `run_id`: its `SELECT` at
-:169-171 fetches `state, transport_handle, project` and no `run_id`, so `DEBUG_DETACH`'s owning-Run
-comparison has nothing to compare. Add `run_id` to that select list; it is a column on
-`debug_sessions` the row already has.
+`detach_locked` passes no `run_id`. Its `SELECT` at :169-171 fetches `state, transport_handle,
+project`, and `DEBUG_DETACH` needs no owning-Run comparison, so the select list is unchanged.
 
 Sites that must acquire `LockScope.SYSTEM` first. The two `runs/steps.py` sites already hold locks
 that come **after** `SYSTEM` in the total order, so the new lock goes at the head of the existing
 `async with`. The four `control/registrar.py` sites and `_fetch_vmcore` hold **no** advisory lock
 today — the survey confirmed `control/registrar.py` imports no `LockScope` at all — so each gains a
-new `conn.transaction()` plus one `SYSTEM` lock around its guard and its existing
-`keyed_mutation(...)` call:
+new `conn.transaction()` plus one `SYSTEM` lock around its existing `keyed_mutation(...)` call, with
+the guard placed **inside** the `do_work` closure that call invokes. `keyed_mutation` resolves a
+stored envelope before it runs `do_work`, so that placement is what keeps a replayed idempotency key
+returning the prior envelope while a fresh enqueue is still decided by the matrix — the same rule
+the two `runs/steps.py` sites apply behind their `_in_flight_job` lookup. A denial envelope returned
+from `do_work` carries an `error_category`, so `keyed_mutation` returns it without recording it:
 
 - `mcp/tools/lifecycle/runs/steps.py:_restage_and_enqueue_install` (the locked body `install_run`
   delegates to via `keyed_mutation` at :115-122) — the existing block at :181-185 is
@@ -403,9 +410,10 @@ no conditional acquisition is needed. Narrow it for the type checker with a loca
 `system_id = run.system_id` plus an `assert`-free early return rather than `AsyncExitStack`; the
 conditional-lock machinery an earlier draft called for has no condition left to test.
 
-- `mcp/tools/lifecycle/control/registrar.py:power_system` (:103-162) — wrap the guard call and the
+- `mcp/tools/lifecycle/control/registrar.py:power_system` (:103-162) — wrap the
   existing `keyed_mutation(...)` at :155-162 in `conn.transaction(), advisory_xact_lock(conn,
-  LockScope.SYSTEM, uid)`, calling the guard with `SYSTEM_POWER` and `run_id=None`.
+  LockScope.SYSTEM, uid)` and call the guard at the head of its `_enqueue` closure, with
+  `SYSTEM_POWER` and `run_id=None`.
 - `mcp/tools/lifecycle/control/registrar.py:force_crash_system` (:210-260) — same wrapping, calling
   the guard with `FORCE_CRASH` and `run_id=None`. `FORCE_CRASH` is not owning-Run scoped, so it is
   admitted in `active` and denied in every other restricted state.
@@ -413,14 +421,14 @@ conditional-lock machinery an earlier draft called for has no condition left to 
   calling the guard with `SYSTEM_SYSRQ` and `run_id=None`. `SYSTEM_SYSRQ` is in no admitted row, so
   any restricting activation denies it.
 - `mcp/tools/lifecycle/control/registrar.py:_capture_traffic` (:436-518, the handler behind
-  `control.capture_traffic`) — wrap its guard and `keyed_mutation(...)` in `conn.transaction(),
+  `control.capture_traffic`) — wrap `keyed_mutation(...)` in `conn.transaction(),
   advisory_xact_lock(conn, LockScope.SYSTEM, system.id)`, using the `system` already fetched at :462
-  after the unbound-Run check at :456-461, and call the guard with `CAPTURE_TRAFFIC` and
-  `run_id=uid`.
-- `mcp/tools/lifecycle/vmcore/handlers.py:_fetch_vmcore` (:195-294) — wrap its guard and the
+  after the unbound-Run check at :456-461, and call the guard inside `_enqueue` with
+  `CAPTURE_TRAFFIC` and `run_id=uid`.
+- `mcp/tools/lifecycle/vmcore/handlers.py:_fetch_vmcore` (:195-294) — wrap the
   `keyed_mutation(...)` at :287-294 in `conn.transaction(), advisory_xact_lock(conn,
-  LockScope.SYSTEM, system.id)`, using the `system` fetched at :229, and call the guard with
-  `CAPTURE_VMCORE` and `run_id=uid`.
+  LockScope.SYSTEM, system.id)`, using the `system` fetched at :229, and call the guard inside
+  `_enqueue` with `CAPTURE_VMCORE` and `run_id=uid`.
 
 Three further sites the 2026-09-02 scope audit found outside the set the earlier draft called
 complete:
@@ -443,7 +451,10 @@ complete:
   return, and its docstring states an unbound Run is a supported case. This is the one site where the
   lock really is conditional, so use `contextlib.AsyncExitStack` here, following
   `src/kdive/mcp/tools/catalog/artifacts/uploads.py:775-782`. Call the guard with `RUN_CANCEL` and
-  `run_id=None`, skipping both lock and guard for an unbound Run.
+  `run_id=None`, skipping both lock and guard for an unbound Run — and call it **after** the locked
+  re-read has returned the already-terminal Run's own envelope, so a retried cancel keeps its
+  idempotent success (or its `conflict`) rather than the matrix denial. A cancel with nothing left
+  to transition frees no System either way, so only a cancel about to transition is guarded.
 
 `systems.check_ssh_reachable` (`ssh_access.py:157`) is deliberately **not** guarded: it registers
 `read_only()`, requires only `VIEWER`, and enqueues a banner-only liveness probe that mutates
@@ -638,7 +649,8 @@ reason is correct here because there is one missing thing — the external-boot 
    **No activation at all needs its own branch here.** Task 1's guard returns `None` for an
    unrestricted System — it must, because every other call site needs an absent activation to admit
    ordinary work — and its denial details are exactly
-   `{activation_id, activation_state, owning_run_id}`, none of which exist when there is no row. So
+   `{reason, activation_id, activation_state, owning_run_id}`, three of which do not exist when
+   there is no row. So
    the guard cannot express "nothing to release". Read the restricting activation directly under the
    same lock (`get_restricting_for_system`) before calling the guard, and when it is `None` return
    `CONFLICT` with `data={"reason": "no_active_activation"}` and

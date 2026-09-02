@@ -3365,7 +3365,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="runs.cancel",
         read_only=False,
         destructive=False,
-        help="Cancel a non-terminal run, freeing its system without a teardown.",
+        help="Cancel a non-terminal run, freeing its system without a teardown. Refused with",
         unwrap_request=False,
         flags=(
             GeneratedFlag(

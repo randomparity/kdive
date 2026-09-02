@@ -152,6 +152,14 @@ async def power_system(
             dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_POWER, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.POWER,
@@ -165,12 +173,6 @@ async def power_system(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
-                try:
-                    await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_POWER, project=system.project
-                    )
-                except ExternalBootDenied as exc:
-                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -256,6 +258,18 @@ async def force_crash_system(
                 return _config_error(system_id, data={"current_status": system.state.value})
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                #
+                # ADR-0583's owning-Run modifier on force-crash is unenforced here — this handler
+                # carries no caller Run; the bound is the admin role plus the ADR-0130 gate. See
+                # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.FORCE_CRASH,
@@ -273,12 +287,6 @@ async def force_crash_system(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
-                try:
-                    await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
-                    )
-                except ExternalBootDenied as exc:
-                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -332,6 +340,14 @@ async def diagnostic_sysrq_system(
             dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_SYSRQ, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.DIAGNOSTIC_SYSRQ,
@@ -345,12 +361,6 @@ async def diagnostic_sysrq_system(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
-                try:
-                    await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_SYSRQ, project=system.project
-                    )
-                except ExternalBootDenied as exc:
-                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -412,6 +422,18 @@ async def watch_for_crash_system(
                 # new reproducer batch) in place — without it a canceled watch would
                 # wedge the stable slot forever and brick re-issue (the watch is
                 # contributor-cancelable).
+                #
+                # The guard sits inside the closure, so `keyed_mutation`'s replay lookup runs
+                # first and only a fresh enqueue is guarded: an activation must not un-idempotent
+                # a retry. ADR-0583's owning-Run modifier is unenforced here — this handler
+                # carries no caller Run. The record below covers `SYSTEM_WATCH_CRASH` too. See
+                # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.WATCH_FOR_CRASH,
@@ -426,12 +448,6 @@ async def watch_for_crash_system(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
-                try:
-                    await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project
-                    )
-                except ExternalBootDenied as exc:
-                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -542,6 +558,18 @@ async def _capture_traffic(
             dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn,
+                        system.id,
+                        ExternalBootOperation.CAPTURE_TRAFFIC,
+                        project=run.project,
+                        run_id=uid,
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(run_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.CAPTURE_TRAFFIC,
@@ -561,16 +589,6 @@ async def _capture_traffic(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
-                try:
-                    await check_external_boot_admission(
-                        conn,
-                        system.id,
-                        ExternalBootOperation.CAPTURE_TRAFFIC,
-                        project=run.project,
-                        run_id=uid,
-                    )
-                except ExternalBootDenied as exc:
-                    return _external_boot_denial(run_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,

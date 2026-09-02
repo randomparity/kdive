@@ -71,7 +71,10 @@ class ExternalBootDenied(CategorizedError):
 # Admitted in every restricting state. Teardown is the escape hatch out of a stuck activation;
 # `DEBUG_DETACH` is the reversal of an attach the matrix itself admitted, so denying it would
 # strand a `live` session and leave its provider transport open with no agent-reachable way to
-# close it (#2117 review H1). It stays owning-Run scoped, so only the owning Run may detach.
+# close it (#2117 review H1). It is also absent from `_OWNING_RUN_SCOPED`, because the release
+# refuses on any live session of the System regardless of owning Run: fencing the detach to the
+# activation's Run would wedge a session no caller could clear. Both departures from
+# ADR-0583:348-351 are recorded in docs/debt/0006-external-boot-detach-departs-from-adr-0583.md.
 _ALWAYS_ADMITTED = frozenset(
     {ExternalBootOperation.SYSTEM_TEARDOWN, ExternalBootOperation.DEBUG_DETACH}
 )
@@ -99,14 +102,16 @@ _ADMITTED: Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]
 }
 
 # Admitted only for the Run that owns the activation. Teardown and conflict resolution are
-# System-scoped by ADR-0583, and `SYSTEM_WATCH_CRASH` and `FORCE_CRASH` carry no caller Run.
+# System-scoped by ADR-0583. `SYSTEM_WATCH_CRASH` and `FORCE_CRASH` are absent because their
+# handlers carry no caller Run to fence against — ADR-0583 asks for that modifier and this
+# matrix does not enforce it; the open deferral is
+# docs/debt/0004-force-crash-owning-run-modifier-unenforced.md, owned by #2118.
 _OWNING_RUN_SCOPED = frozenset(
     {
         ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
         ExternalBootOperation.CAPTURE_VMCORE,
         ExternalBootOperation.CAPTURE_TRAFFIC,
         ExternalBootOperation.DEBUG_ATTACH,
-        ExternalBootOperation.DEBUG_DETACH,
     }
 )
 
@@ -115,6 +120,11 @@ _STATE_NEXT_ACTION: Mapping[ExternalBootActivationState, str] = {
     ExternalBootActivationState.RECOVERY_CONFLICT: "systems.teardown",
     ExternalBootActivationState.RECOVERY_FAILED: "systems.teardown",
 }
+
+# The `data.reason` every matrix denial carries, matching the convention the recovery contracts
+# set (`no_active_activation`, `system_job_active`, `debug_session_active`, ...). A bounded
+# scalar, so `safe_error_details` passes it through and it can label bounded telemetry.
+DENIAL_REASON = "external_boot_restricted"
 
 _REPOSITORY = ExternalBootActivationRepository()
 
@@ -148,6 +158,7 @@ async def check_external_boot_admission(
         f"{operation.value} is denied while external-boot activation {activation.id} "
         f"holds System {system_id} in {activation.state.value}",
         details={
+            "reason": DENIAL_REASON,
             "activation_id": str(activation.id),
             "activation_state": activation.state.value,
             "owning_run_id": str(activation.run_id),
@@ -157,4 +168,9 @@ async def check_external_boot_admission(
     )
 
 
-__all__ = ["ExternalBootDenied", "ExternalBootOperation", "check_external_boot_admission"]
+__all__ = [
+    "DENIAL_REASON",
+    "ExternalBootDenied",
+    "ExternalBootOperation",
+    "check_external_boot_admission",
+]

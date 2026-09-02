@@ -7,7 +7,6 @@ from typing import Any, cast
 from uuid import UUID
 
 import psycopg
-import pytest
 
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import (
@@ -20,7 +19,6 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
 from kdive.services.debug.lifecycle import detach_locked
-from kdive.services.external_boot import ExternalBootDenied
 from tests.reconciler.conftest import connect, seed_debug_session, seed_run, seed_system
 from tests.services.external_boot.conftest import seed_activation
 
@@ -105,7 +103,7 @@ def test_detach_audit_event_captures_force_crash_transition(migrated_url: str) -
 
 
 class _InertConnector:
-    """Records closes; a denied detach must not reach it."""
+    """Records the transport handles a detach closes."""
 
     def __init__(self) -> None:
         self.closed: list[str] = []
@@ -114,10 +112,17 @@ class _InertConnector:
         self.closed.append(str(handle))
 
 
-def test_detach_locked_is_denied_for_a_session_run_that_does_not_own_the_activation(
+def test_detach_locked_is_admitted_for_a_session_run_that_does_not_own_the_activation(
     migrated_url: str,
 ) -> None:
-    """ADR-0583: ``debug_detach`` is owning-Run scoped, and the guard precedes the transition."""
+    """``debug_detach`` carries no owning-Run fence.
+
+    See docs/debt/0006-external-boot-detach-departs-from-adr-0583.md.
+
+    ``runs.release_external_boot`` refuses on any live session of the System regardless of owning
+    Run, so a foreign session fenced out of detach would block the release with no caller able to
+    clear it. The detach closes the transport and lands the row ``detached``.
+    """
 
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -138,12 +143,10 @@ def test_detach_locked_is_denied_for_a_session_run_that_does_not_own_the_activat
             principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.ADMIN}
         )
 
-        with pytest.raises(ExternalBootDenied) as denied:
-            await detach_locked(conn, ctx, session_id, system_id, cast(Any, connector))
+        await detach_locked(conn, ctx, session_id, system_id, cast(Any, connector))
 
-        assert denied.value.next_actions == ["runs.get", "runs.release_external_boot"]
-        assert connector.closed == []
-        assert await _session_state(conn, session_id) == DebugSessionState.LIVE.value
+        assert connector.closed == ["handle-1"]
+        assert await _session_state(conn, session_id) == DebugSessionState.DETACHED.value
         await conn.close()
 
     asyncio.run(_run())

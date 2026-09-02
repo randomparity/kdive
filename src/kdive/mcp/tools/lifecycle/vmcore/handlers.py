@@ -282,6 +282,18 @@ async def _fetch_vmcore(
                     return _kdump_capability_refusal(run_id, capability=capability)
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn,
+                        system.id,
+                        ExternalBootOperation.CAPTURE_VMCORE,
+                        project=run.project,
+                        run_id=uid,
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(run_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.CAPTURE_VMCORE,
@@ -295,16 +307,6 @@ async def _fetch_vmcore(
             # above, so this block defers to the request's own commit and holds the SYSTEM lock
             # until then. Nothing follows it in this handler, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
-                try:
-                    await check_external_boot_admission(
-                        conn,
-                        system.id,
-                        ExternalBootOperation.CAPTURE_VMCORE,
-                        project=run.project,
-                        run_id=uid,
-                    )
-                except ExternalBootDenied as exc:
-                    return _external_boot_denial(run_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,

@@ -48,13 +48,16 @@ day. The refutations stand as recorded facts; what changed is what this issue bu
 They are kept here because they are the reason the three contracts are non-executing, and they are
 not visible from the migrations alone.
 
-**1. Nothing in `src/` creates or transitions an external-boot activation.** `rg -n
-'external_boot_activations' src/ --type py` matches only the repository module itself;
-`ExternalBootActivationRepository` has zero importers outside `tests/`. Every one of its transition
-methods — `create`, `transition`, `begin_recovery_attempt`, `finish_recovery_attempt`,
-`record_conflict`, `release_reservation`, `mark_cleanup_complete` — is called from no production
-code path. The table, the migrations, and the repository are installed; the lifecycle that drives
-them is not.
+**1. Nothing in `src/` creates or transitions an external-boot activation.** On the base this
+design was written against, `rg -n 'external_boot_activations' src/ --type py` matched only the
+repository module itself and `ExternalBootActivationRepository` had no importer outside `tests/`.
+This change adds two — `services/external_boot/admission.py` and
+`mcp/tools/external_boot/recovery_requests.py` — and both reach only the one read method,
+`get_restricting_for_system`. The conclusion is unchanged: every transition method — `create`,
+`transition`, `begin_recovery_attempt`, `finish_recovery_attempt`, `record_conflict`,
+`release_reservation`, `mark_cleanup_complete` — is still called from no production code path, and
+`tests/services/external_boot/test_recovery_requests.py` gates that for the contracts module. The
+table, the migrations, and the repository are installed; the lifecycle that drives them is not.
 
 **2. The server cannot allocate external-boot mutation authority.**
 `allocate_external_boot_authority` (`0122_external_boot_authority.sql:322`) opens with
@@ -108,17 +111,21 @@ had exactly one caller, and that caller is gone.
 the repository supplies that lookup. The decision accepts unrestricted work when no activation is
 present or a terminal activation is cleaned. `preparing`, `prepared`, `activating`, `recovering`,
 `recovery_conflict`, `recovery_failed`, and uncleaned terminal states admit only activation
-continuation, reconciliation, conflict resolution, teardown, and the owning Run's debug detach.
+continuation, reconciliation, conflict resolution, teardown, and debug detach.
 `active` additionally admits owning-Run debug attach, traffic capture, force crash, crash watch, and
 vmcore capture; it rejects another Run and generic lifecycle, power, snapshot, or install work.
 Observation stays on the existing read-only seams.
 
-Detach is admitted in every restricting state, not only `active`, because it is the reversal of an
-attach the matrix itself admitted. Denying it once the activation leaves `active` would leave the
-session row `live` and its gdbstub/drgn transport open on the provider host, with no action the
-agent holding the session can reach — and that stranded session then blocks the release, which
-refuses on `debug_session_active`. It stays owning-Run scoped, so only the activation's Run may
-detach.
+Detach is admitted in every restricting state, not only `active`, and for any Run — the one
+operation the matrix admits with neither fence. It is the reversal of an attach the matrix itself
+admitted. Denying it once the activation leaves `active` would leave the session row `live` and its
+gdbstub/drgn transport open on the provider host, with no action the agent holding the session can
+reach — and that stranded session then blocks the release, which refuses on `debug_session_active`.
+Dropping the owning-Run fence closes the same hole across Runs: that refusal is System-wide by
+design (`active_session_ids_for_system` joins on `runs.system_id`), so a session owned by another
+Run of the System would otherwise block the release and be detachable by nobody. `DEBUG_ATTACH`
+keeps both fences. Both departures from ADR-0583:348-351 are recorded in
+`docs/debt/0006-external-boot-detach-departs-from-adr-0583.md`, owned by #2118.
 
 The guard is a guard and returns nothing: `-> None` on admission, raising `ExternalBootDenied`
 otherwise. An earlier draft returned an `ExternalBootBinding` carrying the activation identity and
@@ -126,9 +133,11 @@ authority binding "for the later execution mechanism", but that mechanism is #21
 this branch consumes one, so the dataclass was scaffolding for work this issue excludes. #2118
 introduces it with its first consumer.
 
-A denial is `ErrorCategory.CONFLICT`, carries only the authorized activation id/state and owning Run
-id, and suggests `runs.get`; `active` also suggests `runs.release_external_boot`, while
-`recovery_conflict` and `recovery_failed` suggest `systems.teardown`.
+A denial is `ErrorCategory.CONFLICT`, carries only a fixed `reason` of `external_boot_restricted`
+plus the authorized activation id/state and owning Run id, and suggests `runs.get`; `active` also
+suggests `runs.release_external_boot`, while `recovery_conflict` and `recovery_failed` suggest
+`systems.teardown`. The `reason` is what the three recovery contracts set on every refusal they
+raise, so an agent branching on `data.reason` reads the matrix denial the same way.
 
 Those actions ride the envelope's own `suggested_next_actions` field, never
 `CategorizedError.details`. `ToolResponse.failure_from_error` passes `exc.details` through
@@ -246,8 +255,8 @@ there to withhold:
    **A System with no activation is a denial for these two operations, and the guard cannot express
    that.** `check_external_boot_admission` returns `None` for an unrestricted System — that is what
    every reverse-admission call site needs, since an absent activation must admit ordinary work — and
-   its denial carries `{activation_id, activation_state, owning_run_id}`, none of which exist when
-   there is no row. So the guard returning `None` is not success here: `request_release` and
+   its denial carries `{reason, activation_id, activation_state, owning_run_id}`, three of which do
+   not exist when there is no row. So the guard returning `None` is not success here: `request_release` and
    `resolve_conflict` each convert it into their own `CONFLICT`, with
    `data={"reason": "no_active_activation"}` and `data={"reason": "no_recovery_conflict"}`
    respectively, and `suggested_next_actions=["runs.get"]`. Without this the two tools would report

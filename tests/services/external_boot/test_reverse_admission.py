@@ -330,6 +330,131 @@ _READY_DENIED: dict[str, Callable[[_Restricted], Awaitable[ToolResponse]]] = {
 }
 
 
+async def _power_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+) -> ToolResponse:
+    return await power_system(pool, _ctx(), system_id=system_id, action="off", idempotency_key=key)
+
+
+async def _force_crash_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+) -> ToolResponse:
+    return await force_crash_system(
+        pool, _ctx(), system_id=system_id, resolver=_resolver(), idempotency_key=key
+    )
+
+
+async def _sysrq_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+) -> ToolResponse:
+    return await diagnostic_sysrq_system(
+        pool,
+        _ctx(),
+        system_id=system_id,
+        command="show_memory",
+        resolver=_resolver(),
+        idempotency_key=key,
+    )
+
+
+async def _watch_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+) -> ToolResponse:
+    return await watch_for_crash_system(
+        pool,
+        _ctx(),
+        system_id=system_id,
+        deadline_s=5.0,
+        resolver=_resolver(),
+        idempotency_key=key,
+    )
+
+
+async def _capture_traffic_keyed(
+    pool: AsyncConnectionPool, _system: str, run_id: str, key: str
+) -> ToolResponse:
+    return await capture_traffic_system(
+        pool,
+        _ctx(),
+        resolver=_resolver(),
+        run_id=run_id,
+        duration_s=5,
+        max_bytes=1048576,
+        snaplen=128,
+        capture_filter=None,
+        idempotency_key=key,
+    )
+
+
+async def _vmcore_keyed(
+    pool: AsyncConnectionPool, _system: str, run_id: str, key: str
+) -> ToolResponse:
+    handlers = VmcoreHandlers(_resolver(), SecretRegistry())
+    return await handlers.fetch_vmcore(
+        pool, _ctx(), run_id=run_id, method="host_dump", idempotency_key=key
+    )
+
+
+async def _crash_the_system(pool: AsyncConnectionPool, system_id: str) -> None:
+    await _set_system_state(pool, system_id, SystemState.CRASHED)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayCase:
+    """A ``keyed_mutation`` tool, a state that denies it, and how to invoke it with a key."""
+
+    state: ExternalBootActivationState
+    invoke: Callable[[AsyncConnectionPool, str, str, str], Awaitable[ToolResponse]]
+    prepare: Callable[[AsyncConnectionPool, str], Awaitable[None]] | None = None
+
+
+# `force_crash`, `watch_for_crash`, `capture_traffic` and `vmcore.fetch` are admitted in
+# `active`, so their denial needs a state that is not — `recovery_conflict` denies all six.
+_REPLAY_CASES: dict[str, _ReplayCase] = {
+    "control.capture_traffic": _ReplayCase(_STATE.RECOVERY_CONFLICT, _capture_traffic_keyed),
+    "control.diagnostic_sysrq": _ReplayCase(_STATE.ACTIVE, _sysrq_keyed),
+    "control.force_crash": _ReplayCase(_STATE.RECOVERY_CONFLICT, _force_crash_keyed),
+    "control.power": _ReplayCase(_STATE.ACTIVE, _power_keyed),
+    "control.watch_for_crash": _ReplayCase(_STATE.RECOVERY_CONFLICT, _watch_keyed),
+    "vmcore.fetch": _ReplayCase(_STATE.RECOVERY_CONFLICT, _vmcore_keyed, _crash_the_system),
+}
+
+
+@pytest.mark.parametrize("tool", sorted(_REPLAY_CASES))
+def test_a_keyed_mutation_admitted_before_the_activation_still_replays(
+    migrated_url: str, seeded_activation: SeedActivation, tool: str
+) -> None:
+    """The guard sits inside ``do_work``, behind ``keyed_mutation``'s replay lookup.
+
+    A repeated idempotency key must return the stored envelope of work that was already
+    committed — the caller stored the key precisely so it could recover the job id it lost —
+    while a *fresh* key on the same restricted System is still denied. The install and boot
+    steps carry the same rule; these six are the ``keyed_mutation`` sites.
+    """
+    case = _REPLAY_CASES[tool]
+
+    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            if case.prepare is not None:
+                await case.prepare(conn_pool, system_id)
+            key = f"replay-{uuid4()}"
+            first = await case.invoke(conn_pool, system_id, run_id, key)
+            await _restrict(conn_pool, seeded_activation, system_id, run_id, case.state)
+            replay = await case.invoke(conn_pool, system_id, run_id, key)
+            fresh = await case.invoke(conn_pool, system_id, run_id, f"replay-{uuid4()}")
+            return first, replay, fresh
+
+    first, replay, fresh = asyncio.run(_run())
+    assert first.status == "queued", first.model_dump()
+    assert replay.error_category is None, replay.model_dump()
+    assert replay.model_dump() == first.model_dump()
+    denied_actions = (
+        _CONFLICT_ACTIONS if case.state is _STATE.RECOVERY_CONFLICT else _ACTIVE_ACTIONS
+    )
+    _assert_denied(fresh, denied_actions)
+
+
 @pytest.mark.parametrize("operation", sorted(_READY_DENIED))
 def test_a_restricting_activation_denies_every_reverse_operation(
     migrated_url: str, seeded_activation: SeedActivation, operation: str
@@ -444,7 +569,7 @@ def test_vmcore_capture_is_admitted_for_the_owning_run_and_denied_for_another(
     _assert_denied(foreign, _ACTIVE_ACTIONS)
 
 
-def test_debug_attach_and_detach_are_denied_for_a_run_that_does_not_own_the_activation(
+def test_debug_attach_is_denied_for_a_run_that_does_not_own_the_activation(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
     async def _run() -> None:
@@ -510,6 +635,109 @@ def test_debug_attach_is_admitted_for_the_run_that_owns_the_activation(
                 assert isinstance(detached, debug_lifecycle.DetachedSession)
 
     asyncio.run(_run())
+
+
+def test_a_non_owning_run_may_detach_in_a_restricting_state(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """Detach is admitted whichever Run owns the session.
+
+    See docs/debt/0006-external-boot-detach-departs-from-adr-0583.md.
+
+    ``runs.release_external_boot`` refuses on any live DebugSession of the System, regardless of
+    owning Run. Fencing the detach to the activation's Run would leave a session owned by another
+    Run of that System blocking the release with no caller able to clear it.
+    """
+
+    async def _run() -> object:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, owning_run = await _ready_system_with_run(conn_pool)
+            investigation_id = await runs_support.seed_investigation(conn_pool)
+            other_run = await _insert_run(
+                conn_pool,
+                investigation_id=UUID(investigation_id),
+                system_id=system_id,
+                state=RunState.SUCCEEDED,
+            )
+            connector = _FakeConnector()
+            async with conn_pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(other_run))
+                system = await SYSTEMS.get(conn, UUID(system_id))
+                assert run is not None and system is not None
+                admitted = await debug_lifecycle.insert_session_locked(
+                    conn,
+                    _ctx(),
+                    debug_lifecycle.AttachRequest(
+                        run=run,
+                        system=system,
+                        session_id=uuid4(),
+                        transport="gdbstub",
+                        connector=cast(Any, connector),
+                    ),
+                    TransportHandle("handle-1"),
+                )
+                assert isinstance(admitted, debug_lifecycle.AttachAdmitted)
+            # Owned by a different Run than the session, and in a state that admits nothing but
+            # teardown and detach.
+            await _restrict(
+                conn_pool, seeded_activation, system_id, owning_run, _STATE.RECOVERY_CONFLICT
+            )
+            async with conn_pool.connection() as conn:
+                return await debug_lifecycle.detach_locked(
+                    conn, _ctx(), admitted.session_id, UUID(system_id), cast(Any, connector)
+                )
+
+    assert isinstance(asyncio.run(_run()), debug_lifecycle.DetachedSession)
+
+
+def test_an_already_terminal_cancel_keeps_its_envelope_under_a_restricting_activation(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """``runs.cancel`` runs the guard only when the cancel has something to transition.
+
+    A retried cancel of an already-``canceled`` Run keeps its idempotent success and a
+    ``succeeded`` Run keeps its ``conflict``: neither frees the System, so denying them protects
+    nothing. A cancel that would actually transition is still denied.
+    """
+
+    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse, ToolResponse]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, owning_run = await _ready_system_with_run(conn_pool)
+            investigation_id = UUID(await runs_support.seed_investigation(conn_pool))
+            canceled = await _insert_run(
+                conn_pool,
+                investigation_id=investigation_id,
+                system_id=system_id,
+                state=RunState.CREATED,
+            )
+            first = await cancel_run(conn_pool, _ctx(), canceled)
+            succeeded = await _insert_run(
+                conn_pool,
+                investigation_id=investigation_id,
+                system_id=system_id,
+                state=RunState.SUCCEEDED,
+            )
+            await _restrict(conn_pool, seeded_activation, system_id, owning_run, _STATE.ACTIVE)
+            live = await _insert_run(
+                conn_pool,
+                investigation_id=investigation_id,
+                system_id=system_id,
+                state=RunState.CREATED,
+            )
+            return (
+                first,
+                await cancel_run(conn_pool, _ctx(), canceled),
+                await cancel_run(conn_pool, _ctx(), succeeded),
+                await cancel_run(conn_pool, _ctx(), live),
+            )
+
+    first, retry, terminal, denied = asyncio.run(_run())
+    assert first.status == "canceled", first.model_dump()
+    assert retry.error_category is None, retry.model_dump()
+    assert retry.status == "canceled"
+    assert terminal.error_category == "conflict", terminal.model_dump()
+    assert terminal.data["current_status"] == "succeeded"
+    _assert_denied(denied, _ACTIVE_ACTIONS)
 
 
 async def _boot_jobs(pool: AsyncConnectionPool, run_id: str) -> int:
