@@ -484,3 +484,129 @@ def test_recovery_reference_rejects_unknown_version_and_free_form_fields() -> No
     document["credentials"] = {"token": "secret"}
     with pytest.raises(ValidationError):
         RemoteModuleRecoveryRefV1.model_validate(document)
+
+
+def test_success_cannot_report_the_accepted_phase() -> None:
+    document = {
+        key: value
+        for key, value in _result(phase="accepted").items()
+        if key not in {"installed_manifest", "capture_manifest", "entry_count", "content_bytes"}
+    }
+
+    with pytest.raises(ValidationError, match="accepted phase"):
+        RemoteModuleResultV1.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "a\\..\\..\\etc\\passwd",
+        "a/./b",
+        "a//b",
+        "a/",
+        ".",
+        "/var/lib/libvirt/images/root",
+        "a/../b",
+    ],
+)
+def test_volume_key_applies_the_same_fence_as_the_sibling_opaque_reference(key: str) -> None:
+    with pytest.raises(ValidationError):
+        RemoteModuleOperationV1.model_validate(
+            _operation(root_volume={"key": key, "identity": DIGESTS["c"]})
+        )
+    with pytest.raises(ValueError):
+        OpaqueProviderRef(ref=key)
+
+
+def test_ascii_escaped_json_is_named_as_an_encoding_mismatch_not_a_bare_inequality() -> None:
+    key = "rüt-1"
+    result = RemoteModuleResultV1.model_validate(_result(root_volume_key=key))
+    escaped = json.dumps(
+        json.loads(result.to_canonical_json()), sort_keys=True, separators=(",", ":")
+    ).encode()
+
+    assert escaped != result.to_canonical_json()
+    with pytest.raises(ValueError, match="ASCII-escaped"):
+        RemoteModuleResultV1.from_canonical_json(escaped)
+    with pytest.raises(ValueError, match="ASCII-escaped"):
+        RemoteModuleResultV1.from_wire_bytes(escaped + b"\n")
+
+
+def _result_shape_space() -> list[dict[str, object]]:
+    identity = {
+        "system_id": SYSTEM_ID,
+        "run_id": RUN_ID,
+        "plan_identity": DIGESTS["a"],
+        "operation_nonce": NONCE,
+        "appliance_image_digest": DIGESTS["e"],
+        "release": "6.12.0-kdive",
+        "root_volume_key": "root-1",
+        "root_volume_identity": DIGESTS["c"],
+        "source_manifest": DIGESTS["d"],
+    }
+    phases = [
+        "accepted",
+        "captured",
+        "staging-intent",
+        "replacement-ready",
+        "installed",
+        "restore-ready",
+        "restored",
+    ]
+    captures: list[dict[str, object]] = [
+        {},
+        {"capture_manifest": DIGESTS["b"]},
+        {"capture_absent": True},
+        {"capture_manifest": DIGESTS["b"], "capture_absent": True},
+    ]
+    counts: list[dict[str, object]] = [{}, {"entry_count": 12, "content_bytes": 4096}]
+    installed: list[dict[str, object]] = [{}, {"installed_manifest": DIGESTS["f"]}]
+    shapes = []
+    for status, error_code in (
+        ("success", None),
+        ("failure", "INVALID_DOCUMENT"),
+        ("failure", "RECOVERY_CONFLICT"),
+    ):
+        for has_identity in (True, False):
+            for phase in phases:
+                for capture in captures:
+                    for count in counts:
+                        for install in installed:
+                            shape: dict[str, object] = {
+                                "protocol": "remote-module-result-v1",
+                                "status": status,
+                                "phase": phase,
+                            }
+                            if error_code is not None:
+                                shape["error_code"] = error_code
+                            if has_identity:
+                                shape.update(identity)
+                            shape.update(capture)
+                            shape.update(count)
+                            shape.update(install)
+                            shapes.append(shape)
+    return shapes
+
+
+def test_every_model_accepted_result_is_accepted_by_the_appliance_schema() -> None:
+    """The model is the provider-side reader; the schema on main is the contract it answers to."""
+    validator = Draft202012Validator(json.loads((APPLIANCE / "result-v1.schema.json").read_text()))
+    divergences = []
+    narrowed = []
+    for shape in _result_shape_space():
+        try:
+            model = RemoteModuleResultV1.model_validate(shape)
+        except ValidationError:
+            if validator.is_valid(shape):
+                narrowed.append(shape)
+            continue
+        if list(validator.iter_errors(json.loads(model.to_canonical_json()))):
+            divergences.append(shape)
+
+    assert divergences == []
+    # The model is deliberately stricter than the schema's `else` branch, which constrains
+    # nothing but error_code: it holds failures to the same phase/evidence table as successes,
+    # so it can only read back evidence the appliance's own checkpoint writer can produce.
+    # Every narrowing must land on a failure; a narrowed success would be a real divergence.
+    assert narrowed != []
+    assert {shape["status"] for shape in narrowed} == {"failure"}

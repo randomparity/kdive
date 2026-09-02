@@ -1,4 +1,15 @@
-"""Closed provider-private documents for remote module recovery (ADR-0585)."""
+"""Closed provider-private documents for remote module recovery (ADR-0585).
+
+The v1 JSON encoding is not fully settled, and this module deliberately does not settle it. The
+appliance writes results and checkpoints with the ``json.dumps`` default of ``ensure_ascii=True``
+(``deploy/remote_module_appliance/appliance.py``, ``_write_json``) and hashes manifest bytes with
+``ensure_ascii=False`` in the same file, and ADR-0585 calls the result canonical without defining
+an encoding, separators, or framing. This reader requires unescaped UTF-8, matching the sibling
+contract in ``kdive.providers.ports.external_boot``, and reports an ASCII-escaped document as that
+specific mismatch rather than as a bare byte inequality. Only a non-ASCII value can tell the two
+apart, and only the volume key can carry one. Resolving it takes an ADR amendment binding both
+sides; until then neither form is silently accepted.
+"""
 
 from __future__ import annotations
 
@@ -76,18 +87,21 @@ class _RemoteModuleDocument(_ClosedValue):
 
     protocol: str
 
+    def _json(self, *, ensure_ascii: bool) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json", exclude_none=True),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=ensure_ascii,
+        ).encode()
+
     def to_canonical_json(self) -> bytes:
         """Return compact sorted UTF-8 JSON without a trailing newline.
 
         This is the unframed identity form: the bytes ``identity_for`` digests. Bytes written
         to or read from an appliance volume carry one framing newline; use the wire pair below.
         """
-        return json.dumps(
-            self.model_dump(mode="json", exclude_none=True),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode()
+        return self._json(ensure_ascii=False)
 
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
@@ -97,6 +111,11 @@ class _RemoteModuleDocument(_ClosedValue):
             raise ValueError(f"remote module document exceeds {limit} bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
+            if value._json(ensure_ascii=True) == data:
+                raise ValueError(
+                    "remote module document is ASCII-escaped JSON; this reader requires "
+                    "unescaped UTF-8. The v1 encoding is unsettled — see the module docstring"
+                )
             raise ValueError("remote module document is not canonical JSON")
         return value
 
@@ -127,12 +146,14 @@ def identity_for(document: _RemoteModuleDocument) -> str:
 
 
 def _closed_volume_key(value: str) -> str:
+    # The same rule set OpaqueProviderRef._opaque applies in the sibling port: one fence, not a
+    # subset of it, because a consumer reaches both through the same recovery reference.
     value = _nfc(value)
     if (
-        not value.isprintable()
-        or value.startswith(("/", "\\"))
-        or ".." in value.split("/")
-        or any(character in value for character in ("\0", ":", "@"))
+        value.startswith("/")
+        or any(segment in {"", ".", ".."} for segment in value.split("/"))
+        or not value.isprintable()
+        or any(character in value for character in ("\\", ":", "@"))
     ):
         raise ValueError("volume key must be an opaque provider value")
     return value
@@ -245,6 +266,10 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
 
         if self.error_code is not None or not complete_identity:
             raise ValueError("success requires complete identity and no error_code")
+        if self.phase == "accepted":
+            # The result schema's success branch is a oneOf over the six later phases: nothing
+            # durable exists yet at "accepted", so it can only ever describe a failure.
+            raise ValueError("success cannot report the accepted phase")
         if not self._phase_evidence_is_compatible():
             raise ValueError("success phase and evidence are inconsistent")
         return self
@@ -336,7 +361,14 @@ class RemoteModuleRecoveryRefV1(_RemoteModuleDocument):
 
     @staticmethod
     def identity_for_authority(authority: OpaqueProviderRef) -> str:
-        """Derive a non-reversible fence without persisting mutation authority."""
+        """Bind the reference to one authority reference so a mismatch is detected.
+
+        The digest is not a secret and does not need to be: ADR-0584 holds that possessing an
+        authority reference is not authority, and the references this repository mints are
+        structured enough to enumerate. What the digest buys is that the recovery reference
+        cannot be re-presented under a different authority without ``validate_authority``
+        noticing, while the reference itself stays out of durable storage.
+        """
         return (
             "sha256:"
             + hashlib.sha256(
