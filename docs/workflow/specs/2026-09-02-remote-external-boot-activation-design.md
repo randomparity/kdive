@@ -4,7 +4,7 @@ Issue: [#2110](https://github.com/randomparity/kdive/issues/2110) — part of ep
 [#2105](https://github.com/randomparity/kdive/issues/2105), decomposition entry 13.
 
 Governing decisions: [ADR-0583](../../adr/0583-external-run-boot-uses-prepared-recovery-points.md)
-(the provider-neutral external Run-boot contract, normative and incorporated without variation),
+(the provider-neutral external Run-boot contract, normative here and varied nowhere in this design),
 [ADR-0584](../../adr/0584-provider-host-authority-fences-external-boot-mutations.md) (mutation
 fencing), [ADR-0585](../../adr/0585-remote-offline-module-restoration-appliance.md) (offline module
 restoration), [ADR-0080](../../adr/0080-remote-provisioning-disk-image-profile.md) (remote domain shape),
@@ -64,6 +64,7 @@ definition layer    prepare_target_definition(source_xml, plan, materialization,
                             |
 operation layer     activate_definition(conn, definition)
                     observe_guest_identity(agent_exec, domain, definition)
+                        -> RemoteGuestIdentity   (running observation + /proc/cmdline bytes)
 ```
 
 The pure layer takes strings and returns strings. The definition layer takes a source XML string
@@ -88,11 +89,17 @@ Signatures in this section are the contract; the implementation plan repeats the
    is a retryable `TRANSPORT_FAILURE`, and #2118's job owns the readiness deadline and the retry
    that constitutes the wait, exactly as it owns every other deadline on this lane.
 
-ADR-0583 assigns the `/proc/cmdline` comparison to core. It is performed inside the provider here
-and its bytes are deliberately not returned, because the command line a hostile guest reports is
-untrusted content that must not reach a shared value, a response envelope, or a transcript. What
-crosses the seam is the `RunningKernelObservation` the shared contract already defines, plus a
-failure naming which field differed.
+ADR-0583 requires the guest observation to return the newline-stripped `/proc/cmdline` bytes and
+core to compare them. That assignment is kept. `observe_guest_identity` returns a
+`RemoteGuestIdentity` carrying the `RunningKernelObservation` and those bytes, and #2118 performs
+the comparison the ADR gives it. The provider also compares them itself and fails closed, because
+an activation that proceeds on an unchecked command line is wrong whatever core does later; the
+provider check is a guard, not a replacement, and returning the bytes is what lets core detect a
+provider that skipped it.
+
+The bytes are guest-controlled, so they are bounded on read, never persisted by this module, and
+never placed in an error message, a `details` payload, or a transcript. A failure names which field
+differed and nothing more.
 
 ## Components
 
@@ -133,6 +140,11 @@ ADR-0583's remote source admission, checked in this order and raising
 4. `<os>` carries exactly one `<boot>`, with `dev="hd"`.
 5. `<os>` carries no `firmware` attribute and no `<loader>` or `<nvram>` child, matching what remote
    provisioning renders.
+6. No `<devices>` descendant carries an `<alias>` child. libvirt emits device aliases in live XML and
+   not in inactive XML, so this is the cheapest refusal of a caller that passed `XMLDesc(0)` on a
+   running domain. It does not prove inactivity — nothing available to this function can — it turns
+   the most likely form of that mistake into a named `CONFLICT` instead of a definition that can
+   never be activated.
 
 A source carrying external-boot fields fails check 1 rather than being captured. ADR-0583 admits
 such a source only while a matching durable activation row owns it, and that row is #2116/#2120
@@ -146,9 +158,13 @@ A closed frozen pydantic value (`extra="forbid"`, canonical JSON) carrying: `bin
 require both XMLs NFC and both digest pairs to recompute from their recorded XML, so a tampered
 record cannot present digests that do not describe its own bytes.
 
-Both XML fields are bounded at 65536 bytes — the same cap the shared ports module applies to a
-canonical value, and the same cap the guest reads use. This value reaches durable storage in #2120's
-recovery point, and an unbounded field there would let one malfunctioning or hostile remote host
+Both XML fields are bounded at 65536 **bytes** — the same unit and the same number the shared ports
+module applies to a canonical value (`ports/external_boot.py:26,44` measures `len(data)` over
+`bytes`). Pydantic's `max_length` on a `str` counts characters, so the bound is a field validator
+over `len(value.encode())`, not `Field(max_length=…)`. This value reaches durable storage behind
+#2120's recovery point — the shared `RecoveryPoint` carries only an `OpaqueProviderRef` and two
+`ProviderStateIdentity` digests, so the definition itself lives in a provider-local store that
+reference names — and an unbounded field there would let one malfunctioning or hostile remote host
 write an arbitrarily large row.
 
 The recompute validators call the parsing layer, which raises `CategorizedError`. Pydantic v2
@@ -167,6 +183,13 @@ Pure. Validates that `binding` matches `materialization.ownership` and `plan.own
 reference (and an initrd reference exactly when the plan carries an initrd). Admits the source, then
 renders the target from `kernel_path`, `initrd_path`, and `plan.cmdline`.
 
+`source_xml` must be `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` output. ADR-0583 makes this normative —
+"Live XML is never an identity input" — and a caller passing live XML would otherwise mint a
+definition whose digests describe bytes libvirt will never return, so every later activation would
+raise `CONFLICT` against a domain that looks like a third state. That is a stated precondition the
+caller owns, and admission rule 6 below refuses the cheapest live-only marker rather than leaving it
+purely to memory.
+
 The kernel and initrd paths written into the XML are resolved by the caller from the opaque
 references #2109 minted, because ADR-0583 forbids a provider path crossing the shared seam and this
 module never learns the host's pool directory. They are host filesystem paths libvirt hands QEMU, so
@@ -177,22 +200,34 @@ a trusted caller's value, not a substitute for the caller's own resolution.
 Nothing is re-derived: `cmdline` is `plan.cmdline` verbatim, passed to libvirt as one string with no
 tokenizing, quoting, normalization, or shell.
 
-### `observe_guest_identity(agent_exec, domain, definition) -> RunningKernelObservation`
+### `observe_guest_identity(agent_exec, domain, definition) -> RemoteGuestIdentity`
 
-Reads three facts from the running guest through `GuestAgentExec`, the seam the rest of the remote
+`RemoteGuestIdentity` is a small frozen value carrying `running: RunningKernelObservation` and
+`cmdline: bytes` — the newline-stripped `/proc/cmdline` ADR-0583 requires the observation to return.
+
+It reads four facts from the running guest through `GuestAgentExec`, the seam the rest of the remote
 provider already drives the guest with, constructed here with the two-program allowlist
-`{"/usr/bin/uname", "/usr/bin/cat"}`:
+`{"/usr/bin/uname", "/usr/bin/cat"}`. Four reads, not three, because `uname` prints every requested
+field on **one** space-separated line — `uname -r -m` emits `<release> <machine>\n`, verified with
+`uname -r -m | od -c` on GNU coreutils 9.10 — and a release containing a space fails the shared
+`KernelRelease` pattern. Reading each field on its own keeps the parse unambiguous:
 
-- `/usr/bin/uname -r -m` returns the kernel release and the machine architecture on two lines.
+- `/usr/bin/uname -r` returns the kernel release, one line.
+- `/usr/bin/uname -m` returns the machine architecture, one line.
 - `/usr/bin/cat /proc/cmdline` returns the saved command line. Exactly one trailing newline is
   removed; the remaining bytes must equal `definition.expected_cmdline` encoded UTF-8, byte for
   byte.
 - `/usr/bin/cat /sys/kernel/notes` returns the running kernel's ELF notes, parsed by the existing
-  `kdive.build_artifacts.validation.parse_gnu_build_id`.
+  `kdive.build_artifacts.validation.parse_gnu_build_id` — which raises
+  `CategorizedError(BUILD_FAILURE)`, not `ValueError`, and is re-raised here as
+  `READINESS_FAILURE`, because a running guest with unreadable kernel notes has failed identity
+  proof and has no vmlinux involved.
 
-A non-zero exit from any of the three is `READINESS_FAILURE`: the guest is running, and a kernel
-that cannot produce its own release or notes has failed identity proof rather than suffered a
-transport fault. Each captured stream is capped at 65536 bytes.
+A non-zero exit is `READINESS_FAILURE`: the guest is running, and a kernel that cannot produce its
+own release or notes has failed identity proof rather than suffered a transport fault. Exit status
+127 is the one exception — the agent could not find the program, which is a deployment fault, not a
+guest lie, and raises `CONFIGURATION_ERROR` naming the missing binary. Each captured stream is
+capped at 65536 bytes.
 
 `READINESS_FAILURE` is retryable by category, so every identity failure is raised with
 `terminal=True`. Without it a guest that booted the wrong kernel would be re-dispatched to observe
@@ -200,21 +235,38 @@ the same wrong guest until the deadline expired, which is the one condition this
 stop. A transport failure or an agent that is not answering raises `TRANSPORT_FAILURE` with no
 terminal flag, which stays retryable so the caller's readiness deadline is the wait.
 
-Chosen over two alternatives, both of which are the same shape of cost — a provisioning change
-this issue would then own. The `guest-file-open` / `guest-file-read` / `guest-file-close` RPCs read
-the two files without exec, but the guest images do not permit them: verified at
-`deploy/ansible/roles/guest_base_image/tasks/build_one.yml:142-173`, which adds exactly
-`guest-exec,guest-exec-status` to the RHEL-family `--allow-rpcs` allowlist and nothing else, so the
-first call would return "Command guest-file-open has been disabled" as a retryable transport
-failure on every provisioned System. Adding an `observe` subcommand to the in-guest
-`kdive-install-kernel` helper would be one round trip, but the helper ships in the base image
-(`deploy/remote-libvirt-guest-helpers/kdive-install-kernel`), so it reaches only re-imaged guests
-and an existing System would fail identity proof for a deployment reason. The chosen route needs no
-provisioning change at all: `guest-exec` is already allowlisted, and `uname` and `cat` are in every
-supported base image. Its residual is that the worker-side program allowlist for this one operation
-names two general-purpose binaries rather than one purpose-built helper — the worker composes the
-whole argv and the guest supplies none of it, so the widening is in what may be run, not in who
-chooses it.
+Chosen over two alternatives, both of which would make this issue own a provisioning change.
+
+**The `guest-file-open` / `guest-file-read` / `guest-file-close` RPCs**, which read the two files
+without exec. Rejected: their availability is unknown and partly unfavourable, and adopting them
+would mean owning the allowlist. `deploy/ansible/roles/guest_base_image/tasks/build_one.yml:158-171`
+runs `sed -i 's/--allow-rpcs=/--allow-rpcs=guest-exec,guest-exec-status,/'`, which *prepends* to
+whatever allowlist the image ships and only when `/etc/sysconfig/qemu-ga` exists; the task's own
+comment at `:147` records that Debian-family images ship no such file and are therefore unfiltered.
+So the repository records that `guest-exec` is permitted everywhere and records nothing at all about
+`guest-file-open` on the RHEL-family images. Where a RHEL-family allowlist does omit it, the guest
+returns "Command guest-file-open has been disabled", which `classify_agent_libvirt_error`
+(`guest/agent.py:106-115`) maps to `CONFIGURATION_ERROR` — a permanent failure, not a transient one.
+Building the proof on an RPC whose availability the repository does not record, when a recorded-
+available one exists, is the trade this rejects.
+
+**An `observe` subcommand on the in-guest `kdive-install-kernel` helper**, one round trip. Rejected:
+the helper ships in the base image (`deploy/remote-libvirt-guest-helpers/kdive-install-kernel`), so
+it reaches only re-imaged guests and an existing System would fail identity proof for a deployment
+reason.
+
+The chosen route needs no provisioning change: `guest-exec` is already permitted on every image the
+catalog builds. Two residuals, both stated rather than argued away. First, the worker-side program
+allowlist for this one operation names two general-purpose binaries rather than one purpose-built
+helper — the worker composes the whole argv and the guest supplies none of it, so the widening is in
+what may be run, not in who chooses it. Second, `/usr/bin/uname` and `/usr/bin/cat` are present in
+the three cloud and virt-builder catalog images but are **not** established for
+`bare-kdive-remote-base`, a busybox scratch image
+(`deploy/ansible/inventory/group_vars/all.yml:53-91`, `build_scratch.yml:17-38`) that installs
+busybox with `--setopt=install_weak_deps=False`, never names `coreutils`, and is already marked
+UNVALIDATED at `build_scratch.yml:8-10`. The exit-127 rule above is what turns that into an
+actionable `CONFIGURATION_ERROR` instead of a terminal identity failure, and a follow-up carries
+whether that image should be in the external-boot catalog at all.
 
 ADR-0584 exempts read-only observation from mutation authority, so no fence is required for this
 path.
@@ -229,10 +281,20 @@ re-reads the inactive definition and requires it to match `definition.target_def
 
 The comparison is ADR-0583's two-part digest comparison, not a byte comparison. libvirt does not
 store and return the bytes it was handed: `defineXML` parses into its own model and `XMLDesc`
-regenerates, with its own indentation, attribute quoting, `<os>` child order, and content it adds on
-define. `preserved_definition_identity` and `boot_projection_identity` exist because the ADR requires
-identity to survive exactly that, and local-libvirt compares the same pair. `source_xml` and
-`target_xml` remain the bytes to define and the bytes to hand #2120 — never comparands.
+regenerates with its own indentation and `<os>` child order. `preserved_definition_identity` and
+`boot_projection_identity` exist because the ADR requires identity to survive exactly that, and
+local-libvirt compares the same pair. `source_xml` and `target_xml` remain the bytes to define and
+the bytes to hand #2120 — never comparands.
+
+The post-define readback rests on one premise worth naming, because the digest excludes nothing but
+the three boot fields and so would not survive libvirt *adding* content on define: `source_xml` is
+itself `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` output, so libvirt has already added whatever it adds, and
+redefining that same definition plus three boot fields is a fixed point. Reserialization is
+survivable and was measured — indentation is stripped before canonicalization, and reordering `<os>`
+children is benign because the three boot fields are removed before the digest is taken. The fixed
+point itself is the one behavior no in-process double can prove, because only a real libvirt
+regenerates. #2121's live tier is where it is first exercised, and a first failure there should be
+read as this premise breaking rather than as a genuine conflict.
 
 Every other combination of observed definition and power performs no write and raises `CONFLICT`
 with the observed digests and power in `details`, which is ADR-0583's `recovery_conflict` signal for
@@ -245,8 +307,13 @@ rather than retrying a half-applied write. The interleaving that produces it —
 starting the domain between the power check and `create()` — is the stale-actor case #2140's fence
 owns; this function's job is to fail closed when it happens rather than to prevent it.
 
-A domain lookup failing with `VIR_ERR_NO_DOMAIN` raises `NOT_FOUND`, matching
-`lifecycle/provisioning.py:544-548`; any other libvirt error is `INFRASTRUCTURE_FAILURE`.
+A domain lookup failing with `VIR_ERR_NO_DOMAIN` raises `NOT_FOUND`, taking the code-branch shape of
+`lifecycle/provisioning.py:544-548` (which returns `None` there because absence is its achieved
+post-state; here it is a failure). A `defineXML` or `XMLDesc` raising with an XML-rejection code —
+`VIR_ERR_XML_ERROR`, `VIR_ERR_XML_DETAIL`, or `VIR_ERR_CONFIG_UNSUPPORTED` — raises `CONFLICT`,
+because libvirt refusing this definition shape is permanent and re-dispatching it would burn the
+readiness deadline on a write that can never land. Any other libvirt error at any of the three call
+sites is `INFRASTRUCTURE_FAILURE`, which stays retryable.
 
 Idempotence: an already-target, already-running domain is the achieved post-state and returns
 without a write, so a retried attempt after a lost response converges instead of redefining. An
@@ -272,11 +339,13 @@ would re-dispatch a job to re-observe the same wrong guest until its deadline ex
 | Source is not this System's owned disk/GRUB baseline | `CONFLICT` | no | stop |
 | Observed definition or power is not an admitted combination | `CONFLICT` | no | stop |
 | Target defined, start failed | `CONFLICT` | no | stop |
+| `defineXML` or `XMLDesc` rejects the XML (`VIR_ERR_XML_ERROR`, `VIR_ERR_XML_DETAIL`, `VIR_ERR_CONFIG_UNSUPPORTED`) | `CONFLICT` | no | stop |
 | Running kernel or command line differs from the plan | `READINESS_FAILURE` | **yes** | stop |
 | A guest read exits non-zero or returns unparseable output | `READINESS_FAILURE` | **yes** | stop |
+| A guest read exits 127 — the program is absent from the image | `CONFIGURATION_ERROR` | no | stop |
 | Domain does not exist | `NOT_FOUND` | no | stop |
 | Guest agent unreachable or not answering | `TRANSPORT_FAILURE` | no | retry |
-| Malformed agent reply | `INFRASTRUCTURE_FAILURE` | no | retry |
+| Malformed agent reply, or any other libvirt error | `INFRASTRUCTURE_FAILURE` | no | retry |
 
 No path logs guest bytes verbatim. `details` carries digests, the domain name, the System id, and
 bounded observed values that are already provider-internal identifiers.
@@ -312,8 +381,12 @@ Boundary 1. Every guest-supplied value is treated as an assertion to be checked,
 be recorded. The architecture must be one of the shared contract's two literals; the release must
 match the shared `KernelRelease` pattern; the build ID must parse out of well-formed ELF notes and
 match the shared hex pattern; the command line must equal the plan's bytes exactly. Each captured
-stream is bounded at 65536 bytes, so a guest cannot exhaust worker memory by presenting an enormous
-`/proc/cmdline`. A guest that lies fails identity proof, which is the intended outcome: the
+stream is rejected above 65536 bytes, so no oversized guest value is compared, returned, or
+recorded. That check runs after `GuestAgentExec` has already materialized the reply, so it is not
+what bounds worker allocation — the guest agent's own `guest-exec` output cap and libvirt's maximum
+agent reply size are, and they are outside this design. Naming the right layer matters because a
+later change to the agent seam could remove the real bound with no threat model showing a
+regression. A guest that lies fails identity proof, which is the intended outcome: the
 observation exists to detect exactly that. Failure details carry digests and identifiers, not guest
 bytes, so a hostile command line cannot be reflected into a transcript. No guest value is
 interpolated into a command, path, URL, or template — the three argv vectors are literals.
@@ -354,27 +427,33 @@ source; malformed XML; a DTD/entity payload; a non-`domain` root; `initrd=None` 
 element.
 
 **Source admission.** One passing case and one failing case per numbered rule, each asserting
-`CONFLICT` and that no XML was produced.
+`CONFLICT` and that no XML was produced. Rule 6's case is a source carrying a device `<alias>`.
 
 **Definition value.** Ownership mismatch between binding, plan, and materialization; a
 materialization whose initrd presence disagrees with the plan's; each rejected artifact-path shape;
-canonical-JSON round trip; a digest that does not recompute from its recorded XML; an XML field over
-the byte cap; and `source_xml` that does not parse, asserting `ValidationError` rather than a bare
-`CategorizedError`.
+canonical-JSON round trip; a digest that does not recompute from its recorded XML; and `source_xml`
+that does not parse, asserting `ValidationError` rather than a bare `CategorizedError`. The byte
+cap gets a multibyte case: XML under 65536 characters and over 65536 bytes must be rejected, which a
+character-counting `max_length` would let through.
 
 **Activation matrix.** Every combination of observed definition in `{source, target, other}` and
 power in `{inactive, active}`: the two admitted cells act, the rest raise `CONFLICT` with no
 `defineXML` and no `create` recorded on the double. Plus a `create()` that raises after a successful
 `defineXML`, asserting `CONFLICT` with `terminal is True`; a lookup raising `VIR_ERR_NO_DOMAIN`
-asserting `NOT_FOUND`; and a lookup raising another libvirt code asserting
-`INFRASTRUCTURE_FAILURE`.
+asserting `NOT_FOUND`; a lookup raising another libvirt code asserting `INFRASTRUCTURE_FAILURE`; a
+`defineXML` raising `VIR_ERR_XML_ERROR` asserting `CONFLICT` with no `create` recorded; and an
+`XMLDesc` raising `VIR_ERR_OPERATION_INVALID` asserting `INFRASTRUCTURE_FAILURE`.
 
-**Observation.** A happy path; a wrong release; a wrong build ID; a wrong architecture; an
-architecture the shared contract does not name; a command line differing by one byte; a command line
-with no trailing newline and one with two; a `uname` reply with too few lines; a non-zero exit from
-each of the three reads; an oversized capture; empty and malformed ELF notes; a malformed agent
-reply; an unreachable agent. Each asserts the category above, each identity case asserts
-`terminal is True`, and each failing identity case asserts that no guest bytes appear in `details`.
+**Observation.** A happy path asserting the four exact argv lists and the returned
+`RemoteGuestIdentity`; a wrong release; a wrong build ID; a wrong architecture; an architecture the
+shared contract does not name; a `uname -r` reply carrying a space, proving the single-line shape is
+handled and a two-field parse would have been wrong; a command line differing by one byte; a command
+line with no trailing newline and one with two; a non-zero exit from each of the four reads; an exit
+of 127 asserting `CONFIGURATION_ERROR`; an oversized capture; empty and malformed ELF notes
+asserting `READINESS_FAILURE` rather than the `BUILD_FAILURE` `parse_gnu_build_id` raises; a
+malformed agent reply; an unreachable agent. Each asserts the category above, each identity case
+asserts `terminal is True`, and each failing identity case asserts that no guest bytes appear in
+`details`.
 
 Doubles model libvirt and the agent as they behave, not as permissive echoes. The domain double
 **reparses and reserializes** the XML it was defined with before returning it from `XMLDesc`, with

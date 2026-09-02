@@ -36,7 +36,9 @@ These bind every task.
 - Conventional Commits 1.0.0, imperative, subject at most 72 characters.
 - Error taxonomy: pick the most specific existing `kdive.domain.errors.ErrorCategory` value. Never
   invent a string. The values this change uses are `CONFLICT`, `NOT_FOUND`, `READINESS_FAILURE`,
-  `INFRASTRUCTURE_FAILURE`, `TRANSPORT_FAILURE`, and `CONFIGURATION_ERROR`.
+  `INFRASTRUCTURE_FAILURE`, `TRANSPORT_FAILURE`, and `CONFIGURATION_ERROR`. `BUILD_FAILURE` must
+  never escape this module: `parse_gnu_build_id` raises it, and this module re-raises as
+  `READINESS_FAILURE`.
 - `READINESS_FAILURE` is **retryable** by category (`src/kdive/domain/errors.py:109`). Every
   identity-proof failure must therefore be raised as
   `CategorizedError(..., category=ErrorCategory.READINESS_FAILURE, terminal=True)`. `CONFLICT`
@@ -97,7 +99,7 @@ Each was checked to exist with the signature assumed here.
 | `AgentExecResult` | same file, `:135` | `NamedTuple(exit_status: int, stdout: bytes, stderr: bytes)` |
 | `AgentCommand` | same file, `:130` | `Callable[[GuestDomain, str, int, int], str]` |
 | `GuestDomain` | same file, `:32` | Protocol with `def name(self) -> str` |
-| `parse_gnu_build_id` | `src/kdive/build_artifacts/validation.py:310` | `(notes: bytes) -> str`, lowercase hex |
+| `parse_gnu_build_id` | `src/kdive/build_artifacts/validation.py:310` | `(notes: bytes) -> str`, lowercase hex; raises `CategorizedError(BUILD_FAILURE)` via `_build_failure` (`:331`, `:1342`) — **not** `ValueError` |
 | `CategorizedError`, `ErrorCategory` | `src/kdive/domain/errors.py:146` | `CategorizedError(message, *, category, details=None, terminal=False)` |
 
 Test fixtures borrowed: `tests/providers/remote_libvirt/lifecycle/test_provisioning.py` builds a
@@ -422,7 +424,9 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
 ```
 
 Raises `CategorizedError(ErrorCategory.CONFLICT)` on the first failed rule, with
-`details={"system_id": str(system_id), "rule": <rule name>}`. Returns `None` on success.
+`details={"system_id": str(system_id), "rule": <rule name>}`. Returns `None` on success. The six
+rule names are `boot-projection`, `system-metadata`, `boot-disk`, `boot-selection`, `firmware`, and
+`live-xml`.
 
 ### Steps
 
@@ -455,6 +459,7 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         (lambda xml: xml.replace('<boot dev="hd" />', '<boot dev="hd" /><boot dev="network" />'), "boot-selection"),
         (lambda xml: xml.replace("<os>", '<os firmware="efi">'), "firmware"),
         (lambda xml: xml.replace("<os>", "<os><loader>/x</loader>"), "firmware"),
+        (lambda xml: xml.replace("<target dev=\"vda\"", "<alias name=\"virtio-disk0\" /><target dev=\"vda\"", 1), "live-xml"),
     ],
 )
 def test_admission_rejects_a_source_that_is_not_the_owned_baseline(
@@ -519,6 +524,11 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
         or os_element.find("nvram") is not None
     ):
         raise _conflict("it carries loader, firmware, or NVRAM fields", system_id=system_id, rule="firmware")
+    if root.find("./devices/*/alias") is not None:
+        # libvirt emits device aliases in live XML and omits them from inactive XML, so this
+        # refuses the likeliest form of passing XMLDesc(0) on a running domain. ADR-0583 requires
+        # an inactive definition; nothing here can prove inactivity, but this names the mistake.
+        raise _conflict("it carries live-only device aliases", system_id=system_id, rule="live-xml")
 
 
 def _is_expected_overlay(disk: ET.Element, *, pool: str, volume: str) -> bool:
@@ -573,10 +583,10 @@ class RemoteExternalBootDefinition(BaseModel):
     binding: ExternalBootActivationBinding
     plan_identity: Digest
     materialization_identity: Digest
-    source_xml: Annotated[str, Field(min_length=1, max_length=MAX_DEFINITION_BYTES)]
+    source_xml: Annotated[str, Field(min_length=1)]
     source_definition: Digest
     source_boot: Digest
-    target_xml: Annotated[str, Field(min_length=1, max_length=MAX_DEFINITION_BYTES)]
+    target_xml: Annotated[str, Field(min_length=1)]
     target_definition: Digest
     target_boot: Digest
     expected_running: RunningKernelObservation
@@ -604,14 +614,29 @@ def prepare_target_definition(
    bytes, containing NUL, containing a `..` segment), asserting `CONFLICT` and
    `details["rule"] == "artifact-path"`; a model instance whose `target_definition` is edited to a
    wrong digest (construct via `model_validate` on a mutated dump) rejected with `ValidationError`;
-   an XML field over `MAX_DEFINITION_BYTES` rejected with `ValidationError`; and a `source_xml` that
-   does not parse, also asserting `ValidationError` rather than a bare `CategorizedError`. Build the
+   an XML field whose character count is under `MAX_DEFINITION_BYTES` but whose UTF-8 byte count is
+   over it, rejected with `ValidationError` — a character-counting bound would let this through; and
+   a `source_xml` that does not parse, also asserting `ValidationError` rather than a bare
+   `CategorizedError`. Build the
    plan and materialization with small module-level factory helpers rather than fixtures, so each
    test reads on its own.
 
 2. Run the test file. Expect `ImportError: cannot import name 'RemoteExternalBootDefinition'`.
 
-3. Implement. Set `MAX_DEFINITION_BYTES = 65_536` beside the other module constants.
+3. Implement. Set `MAX_DEFINITION_BYTES = 65_536` beside the other module constants and enforce it
+   with a field validator over `source_xml` and `target_xml`:
+
+   ```python
+   @field_validator("source_xml", "target_xml")
+   @classmethod
+   def _bounded_bytes(cls, value: str) -> str:
+       if len(value.encode()) > MAX_DEFINITION_BYTES:
+           raise ValueError("domain XML exceeds 65536 bytes")
+       return value
+   ```
+
+   Not `Field(max_length=…)`: pydantic counts **characters** there, so 65536 characters of
+   multibyte XML is up to 262144 bytes and the acceptance criterion below would be false.
 
    The model validator recomputes `preserved_definition_identity` and `boot_projection_identity`
    over `source_xml` and `target_xml` and requires the four recorded digests to equal them. Both of
@@ -633,6 +658,10 @@ def prepare_target_definition(
    `initrd_path`, and `plan.cmdline` verbatim, and sets
    `expected_running = materialization.kernel_observation` and `expected_cmdline = plan.cmdline`.
 
+   State in the docstring that `source_xml` must be `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` output per
+   ADR-0583 ("Live XML is never an identity input"), that the caller owns that precondition, and
+   that admission rule `live-xml` refuses only its likeliest violation.
+
 4. Run the test file. Expect every test to pass.
 
 5. Run `just format`, `just lint`, `just type`. Expect exit 0.
@@ -644,7 +673,7 @@ def prepare_target_definition(
 - The value round-trips through `model_dump_json` / `model_validate_json`.
 - A definition whose recorded digest does not recompute from its own XML cannot be constructed, and
   the failure is a `ValidationError` on every input including unparseable XML.
-- Both XML fields are bounded at 65536 bytes.
+- Both XML fields are bounded at 65536 UTF-8 bytes, proved by a multibyte case.
 - `expected_cmdline` is `plan.cmdline` with no tokenizing, quoting, or normalization.
 
 ---
@@ -702,7 +731,12 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
    - `create()` raising `libvirt.libvirtError` after a successful `defineXML` raises `CONFLICT`
      with `caught.value.terminal is True` and both observed digests in `details`;
    - a lookup raising `libvirt.libvirtError` with `VIR_ERR_NO_DOMAIN` raises `NOT_FOUND`;
-   - a lookup raising `libvirt.libvirtError` with another code raises `INFRASTRUCTURE_FAILURE`.
+   - a lookup raising `libvirt.libvirtError` with another code raises `INFRASTRUCTURE_FAILURE`;
+   - `defineXML` raising `libvirt.libvirtError` with `VIR_ERR_XML_ERROR` raises `CONFLICT` with no
+     `create` recorded — libvirt refusing this definition shape is permanent, and
+     `INFRASTRUCTURE_FAILURE` would re-dispatch a write that can never land;
+   - `XMLDesc` raising `libvirt.libvirtError` with `VIR_ERR_OPERATION_INVALID` raises
+     `INFRASTRUCTURE_FAILURE`.
 
    Assert in the happy-path case that the XML passed to `defineXML` is exactly
    `definition.target_xml` — the bytes are what is written even though they are not what is
@@ -714,8 +748,13 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
    `conn.lookupByName(domain_name_for(UUID(definition.binding.system_id)))`; the `UUID(...)` is
    required because `domain_name_for` takes a `UUID` and `binding.system_id` is a `str`. On
    `libvirt.libvirtError`, branch on `exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN` for
-   `NOT_FOUND` and raise `INFRASTRUCTURE_FAILURE` otherwise, as
-   `lifecycle/provisioning.py:544-548` does.
+   `NOT_FOUND` and raise `INFRASTRUCTURE_FAILURE` otherwise, taking the branch shape of
+   `lifecycle/provisioning.py:544-548` — that site returns `None` because absence is its achieved
+   post-state, whereas here it is a failure, so borrow the branch, not the outcome.
+
+   Wrap `defineXML` and both `XMLDesc` calls the same way: a `libvirt.libvirtError` whose code is in
+   `{libvirt.VIR_ERR_XML_ERROR, libvirt.VIR_ERR_XML_DETAIL, libvirt.VIR_ERR_CONFIG_UNSUPPORTED}`
+   raises `CONFLICT`; any other code raises `INFRASTRUCTURE_FAILURE`.
 
    Classify the observed state by digest, never by bytes: read
    `domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)` and compare
@@ -746,6 +785,7 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
 - A start that fails after a successful define is `CONFLICT` with `terminal is True`, not a
   retryable infrastructure failure.
 - A missing domain is `NOT_FOUND`, not `INFRASTRUCTURE_FAILURE`.
+- A libvirt XML-rejection code is `CONFLICT`, not a retryable `INFRASTRUCTURE_FAILURE`.
 - No conflict detail contains domain XML.
 
 ---
@@ -777,19 +817,33 @@ class _AgentRunner(Protocol):
     ) -> AgentExecResult: ...
 
 
+class RemoteGuestIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    running: RunningKernelObservation
+    cmdline: bytes
+
+
 def observe_guest_identity(
     agent_exec: _AgentRunner,
     domain: GuestDomain,
     definition: RemoteExternalBootDefinition,
-) -> RunningKernelObservation
+) -> RemoteGuestIdentity
 ```
+
+`cmdline` is the newline-stripped `/proc/cmdline` bytes. ADR-0583 requires the observation to return
+them and core to compare them, so they are returned even though this function also compares them
+itself and fails closed — the provider check is a guard, and returning the bytes is what lets #2118
+detect a provider that skipped it. They are never persisted or logged here.
 
 The caller builds `agent_exec` as
 `GuestAgentExec(agent_command=..., allowed_programs=OBSERVATION_PROGRAMS)`. Do **not** use the QEMU
-guest-agent `guest-file-open` / `guest-file-read` / `guest-file-close` RPCs: the guest images
-allowlist only `guest-exec` and `guest-exec-status`
-(`deploy/ansible/roles/guest_base_image/tasks/build_one.yml:142-173`), and `deploy/` is frozen for
-this change.
+guest-agent `guest-file-open` / `guest-file-read` / `guest-file-close` RPCs. What the repository
+records is that `guest-exec`/`guest-exec-status` are permitted everywhere:
+`deploy/ansible/roles/guest_base_image/tasks/build_one.yml:158-171` prepends them to whatever
+`--allow-rpcs` the image ships, and its comment at `:147` records that Debian-family images ship no
+filter at all. It records nothing about `guest-file-open` on the RHEL-family images, and `deploy/`
+is frozen for this change, so an RPC whose availability is unrecorded is not a base to build the
+proof on.
 
 ### Steps
 
@@ -798,15 +852,19 @@ this change.
    `argv` it was not configured with — so a test states exactly what the guest returned and an
    unexpected call cannot pass silently. Cases:
 
-   - a happy path returning the expected observation, asserting the three exact argv lists
-     `[UNAME_PROGRAM, "-r", "-m"]`, `[CAT_PROGRAM, PROC_CMDLINE_PATH]`,
-     `[CAT_PROGRAM, KERNEL_NOTES_PATH]`;
+   - a happy path asserting the four exact argv lists `[UNAME_PROGRAM, "-r"]`,
+     `[UNAME_PROGRAM, "-m"]`, `[CAT_PROGRAM, PROC_CMDLINE_PATH]`, `[CAT_PROGRAM,
+     KERNEL_NOTES_PATH]`, and the returned `RemoteGuestIdentity` including its `cmdline` bytes;
    - a wrong `uname -r` release; a wrong `uname -m` machine; a machine the shared contract does not
-     name; a `uname` stdout with one line instead of two;
-   - a wrong build ID; empty ELF notes; malformed ELF notes;
+     name; a `uname -r` stdout of `b"6.1.0 x86_64\n"` — the shape a combined `uname -r -m` would
+     have produced — asserting `READINESS_FAILURE`, so the suite bites if anyone recombines the two
+     reads;
+   - a wrong build ID; empty ELF notes; malformed ELF notes, each asserting `READINESS_FAILURE`
+     rather than the `BUILD_FAILURE` `parse_gnu_build_id` raises;
    - `/proc/cmdline` differing by one byte; with no trailing newline; with two trailing newlines
      (only one is stripped, so it must fail);
-   - a non-zero exit from each of the three commands in turn;
+   - a non-zero exit from each of the four commands in turn;
+   - an exit status of 127 asserting `CONFIGURATION_ERROR` naming the missing program;
    - a captured stream longer than `MAX_GUEST_READ_BYTES`;
    - a `CategorizedError(TRANSPORT_FAILURE)` raised by `run`, propagating unchanged.
 
@@ -818,24 +876,35 @@ this change.
 
 3. Implement:
 
-   - `_guest_read(agent_exec, domain, argv, *, what) -> bytes` runs one command. A non-zero
-     `exit_status` raises `READINESS_FAILURE` with `terminal=True` and `details={"read": what,
-     "exit_status": …}` — a running guest that cannot report its own kernel has failed identity
-     proof, not suffered a transport fault. A `stdout` longer than `MAX_GUEST_READ_BYTES` raises the
-     same category. `CategorizedError` from `GuestAgentExec.run` propagates unchanged: it already
-     carries `TRANSPORT_FAILURE`, `CONFIGURATION_ERROR`, or `INFRASTRUCTURE_FAILURE` from
-     `classify_agent_libvirt_error`.
-   - Run `[UNAME_PROGRAM, "-r", "-m"]`; split stdout on `b"\n"` and require exactly two non-empty
-     leading fields, else `READINESS_FAILURE`. Field 0 is the release, field 1 the machine.
+   - `_guest_read(agent_exec, domain, argv, *, what) -> bytes` runs one command. Exit status 127
+     raises `CONFIGURATION_ERROR` naming `argv[0]` — the agent could not find the program, which is
+     a deployment fault, not a guest lie, and is the case a busybox scratch image would hit. Any
+     other non-zero `exit_status` raises `READINESS_FAILURE` with `terminal=True` and
+     `details={"read": what, "exit_status": …}` — a running guest that cannot report its own kernel
+     has failed identity proof, not suffered a transport fault. A `stdout` longer than
+     `MAX_GUEST_READ_BYTES` raises `READINESS_FAILURE`. `CategorizedError` from
+     `GuestAgentExec.run` propagates unchanged: it already carries `TRANSPORT_FAILURE`,
+     `CONFIGURATION_ERROR`, or `INFRASTRUCTURE_FAILURE` from `classify_agent_libvirt_error`.
+   - Run `[UNAME_PROGRAM, "-r"]` and `[UNAME_PROGRAM, "-m"]` as **two** reads, each yielding one
+     field. Not a combined `uname -r -m`: `uname` prints every requested field on one
+     space-separated line (`uname -r -m | od -c` emits `<release> <machine>\n`), so a combined read
+     would either fail a two-line parse or produce a release containing a space, which fails the
+     shared `KernelRelease` pattern. Strip a single trailing `b"\n"` from each and require the
+     remainder to be non-empty, else `READINESS_FAILURE`.
    - Run `[CAT_PROGRAM, PROC_CMDLINE_PATH]`, remove exactly one trailing `b"\n"` if present, and
-     require the result to equal `definition.expected_cmdline.encode()`.
-   - Run `[CAT_PROGRAM, KERNEL_NOTES_PATH]` and call `parse_gnu_build_id`; a `ValueError` from it is
-     `READINESS_FAILURE`.
+     require the result to equal `definition.expected_cmdline.encode()`. Keep those bytes; they are
+     the `cmdline` field of the returned `RemoteGuestIdentity`.
+   - Run `[CAT_PROGRAM, KERNEL_NOTES_PATH]` and call `parse_gnu_build_id` inside
+     `try: … except CategorizedError as exc:`, re-raising as `READINESS_FAILURE` with
+     `terminal=True` and `details={"mismatch": "gnu_build_id"}`. It raises
+     `CategorizedError(BUILD_FAILURE)`, not `ValueError`, and `BUILD_FAILURE` would both escape this
+     module's taxonomy and report "vmlinux carries no GNU build-id note" for a running guest with no
+     vmlinux involved.
    - Build a `RunningKernelObservation` through its own validators, so an out-of-contract
      architecture, release, or build ID is rejected by the shared model; wrap the resulting
      `ValidationError` as `READINESS_FAILURE`.
    - Require the built observation to equal `definition.expected_running` exactly; otherwise
-     `READINESS_FAILURE`.
+     `READINESS_FAILURE`. Return `RemoteGuestIdentity(running=…, cmdline=…)`.
    - Every `READINESS_FAILURE` sets `terminal=True` and carries the System, Run, and activation ids
      plus a `mismatch` field naming which of `architecture`, `release`, `gnu_build_id`, or `cmdline`
      differed — never the observed value.
@@ -857,8 +926,11 @@ this change.
   same wrong guest to the deadline.
 - An unreachable or transiently failing agent fails `TRANSPORT_FAILURE` with no terminal flag, which
   stays retryable.
-- No observed guest byte reaches an error message or `details` payload.
-- Only `/usr/bin/uname` and `/usr/bin/cat` are allowlisted, and only the three exact argv lists in
+- No observed guest byte reaches an error message or `details` payload; the `/proc/cmdline` bytes
+  leave only as the returned `RemoteGuestIdentity.cmdline`, which ADR-0583 requires.
+- A read whose program is absent (exit 127) fails `CONFIGURATION_ERROR`, not `READINESS_FAILURE`.
+- Malformed kernel notes fail `READINESS_FAILURE`, never `BUILD_FAILURE`.
+- Only `/usr/bin/uname` and `/usr/bin/cat` are allowlisted, and only the four exact argv lists in
   step 3 are ever run.
 
 ---
