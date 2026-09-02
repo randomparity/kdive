@@ -320,10 +320,6 @@
 - name: Look up the external-boot authority groups
   ansible.builtin.getent:
     database: group
-    key: "{{ item }}"
-  loop:
-    - "{{ live_vm_host_authority_account }}"
-    - "{{ live_vm_host_authority_client_group }}"
   when: live_vm_host_authority_enabled | bool
 
 - name: Record the external-boot authority uid and home
