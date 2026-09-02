@@ -267,7 +267,14 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "teardown pass 2" in proof
     assert "reboot: validating boot-persistent authority services" in proof
     assert "upgrade: installing exact revision" in proof
+    assert "proof: exercising authority failure boundaries" in proof
     assert "converged: rerunning the exact revision" in proof
+    assert "authority_inputs_digest" in proof
+    assert "converged: unrelated changed task groups" in proof
+    assert "changed=0" not in proof
+    assert proof.index("upgrade: installing exact revision") < proof.index(
+        "proof: exercising authority failure boundaries"
+    )
     assert "--set=password=" not in proof
     assert "ub26-big.dev.pdx.drc.nz" not in proof
     assert "Clone the exact Git bundle for the venv" in tasks

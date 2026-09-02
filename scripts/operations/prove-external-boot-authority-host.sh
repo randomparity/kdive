@@ -376,7 +376,6 @@ sudo -n -u kdive-provider-authority env \
 
 sed \
   -e "s/live_vm_repo_version: $initial_revision/live_vm_repo_version: $revision/" \
-  -e 's/live_vm_host_authority_proof_enabled: false/live_vm_host_authority_proof_enabled: true/' \
   "$remote_root/vars.yml" >"$remote_root/vars-upgrade.yml"
 chmod 0600 "$remote_root/vars-upgrade.yml"
 
@@ -401,9 +400,31 @@ $ansible -i inventory proof.yml --extra-vars @vars-upgrade.yml
   kdive-libvirtd-external-boot-authority.service) != "$pre_upgrade_provider_pid" ]]
 
 sed \
-  's/live_vm_host_authority_proof_enabled: true/live_vm_host_authority_proof_enabled: false/' \
-  "$remote_root/vars-upgrade.yml" >"$remote_root/vars-converged.yml"
-chmod 0600 "$remote_root/vars-converged.yml"
+  's/live_vm_host_authority_proof_enabled: false/live_vm_host_authority_proof_enabled: true/' \
+  "$remote_root/vars-upgrade.yml" >"$remote_root/vars-proof.yml"
+chmod 0600 "$remote_root/vars-proof.yml"
+echo "proof: exercising authority failure boundaries after isolated upgrade restart"
+$ansible -i inventory proof.yml --extra-vars @vars-proof.yml
+
+authority_inputs_digest() {
+  sudo -n sha256sum \
+    /opt/kdive-provider-authority/revision \
+    /etc/tmpfiles.d/kdive-provider-authority.conf \
+    /etc/kdive/provider-authority.env \
+    /etc/kdive/libvirtd-external-boot-authority.conf \
+    /etc/systemd/system/kdive-external-boot-authority.service \
+    /var/lib/kdive/provider-authority/.config/systemd/user/kdive-libvirtd-external-boot-authority.service \
+    /etc/kdive/credentials/provider-authority/database-dsn \
+    /etc/kdive/credentials/provider-authority/service-credential \
+    /etc/kdive/credentials/provider-authority/server-certificate \
+    /etc/kdive/credentials/provider-authority/server-ca \
+    /etc/kdive/credentials/provider-authority/worker-client-ca \
+    /etc/kdive/credentials/provider-authority/health-client-certificate \
+    /etc/kdive/credentials/provider-authority/health-client-key \
+    | sha256sum | cut -d' ' -f1
+}
+
+pre_converged_authority_inputs=$(authority_inputs_digest)
 pre_converged_authority_pid=$(sudo -n systemctl show --property=MainPID --value \
   kdive-external-boot-authority.service)
 pre_converged_provider_pid=$(sudo -n -u kdive-provider-authority env \
@@ -412,15 +433,51 @@ pre_converged_provider_pid=$(sudo -n -u kdive-provider-authority env \
   kdive-libvirtd-external-boot-authority.service)
 
 echo "converged: rerunning the exact revision $revision"
-$ansible -i inventory proof.yml --extra-vars @vars-converged.yml | tee "$remote_root/converged.log"
-grep -Eq '^localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0' \
+$ansible -i inventory proof.yml --extra-vars @vars-upgrade.yml | tee "$remote_root/converged.log"
+grep -Eq '^localhost +: ok=[0-9]+ +changed=[0-9]+ +unreachable=0 +failed=0' \
   "$remote_root/converged.log"
+awk '
+  /^TASK / {
+    task = $0
+    sub(/^TASK \[.* : /, "", task)
+    sub(/\] \*\*\*$/, "", task)
+  }
+  /^changed:/ { print task }
+' "$remote_root/converged.log" | LC_ALL=C sort -u >"$remote_root/converged-changed-tasks.log"
+cat >"$remote_root/expected-converged-changed-tasks.log" <<'EXPECTED_CHANGED_TASKS'
+Create group-writable provider data directories
+Create root-owned permission-probe markers for every slot
+Create the staging directories owned by the service account
+Create worker-owned replacement candidates
+Lock the libvirt runtime child
+Lock the libvirt tuple child directory
+Lock the selected libvirt tuple hierarchy
+Lock the session-libvirt runtime root
+Remove the root-owned permission-probe markers
+Remove the worker-owned permission-probe candidates
+Restore the initial libvirt runtime child ownership
+Restore the initial session-libvirt runtime root ownership
+Restore the session-libvirt runtime hierarchy
+EXPECTED_CHANGED_TASKS
+LC_ALL=C sort -o "$remote_root/expected-converged-changed-tasks.log" \
+  "$remote_root/expected-converged-changed-tasks.log"
+echo "converged: unrelated changed task groups"
+sed 's/^/  - /' "$remote_root/converged-changed-tasks.log"
+diff -u "$remote_root/expected-converged-changed-tasks.log" \
+  "$remote_root/converged-changed-tasks.log"
+[[ $(authority_inputs_digest) == "$pre_converged_authority_inputs" ]]
 [[ $(sudo -n systemctl show --property=MainPID --value \
   kdive-external-boot-authority.service) == "$pre_converged_authority_pid" ]]
 [[ $(sudo -n -u kdive-provider-authority env \
   XDG_RUNTIME_DIR=/run/user/$(id -u kdive-provider-authority) \
   systemctl --user show --property=MainPID --value \
   kdive-libvirtd-external-boot-authority.service) == "$pre_converged_provider_pid" ]]
+[[ $(sudo -n stat -c '%a:%U:%G' /run/kdive/provider-authority) \
+  == 710:kdive-provider-authority:kdive-provider-authority-client ]]
+[[ $(sudo -n stat -c '%a:%U:%G' /run/kdive/provider-authority/request) \
+  == 2750:kdive-provider-authority:kdive-provider-authority-client ]]
+[[ $(sudo -n stat -c '%a:%U:%G' /run/kdive/provider-authority/libvirt) \
+  == 700:kdive-provider-authority:kdive-provider-authority ]]
 
 run_teardown() {
   $ansible -i inventory "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
