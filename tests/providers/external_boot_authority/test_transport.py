@@ -364,6 +364,38 @@ def test_transport_rejects_oversize_before_read() -> None:
     asyncio.run(run())
 
 
+def test_transport_rejects_deep_json_with_a_bounded_response(tmp_path: Path) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+        authenticated = False
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            nonlocal authenticated
+            authenticated = True
+            return AuthenticatedPeer("worker-a")
+
+        listener = await serve_authority_transport(config, authenticate)
+        await listener.start_serving()
+        try:
+            levels = 100_000
+            payload = (
+                b'{"credential":"x","operation":"execute-mutation","request":'
+                + b"[" * levels
+                + b"0"
+                + b"]" * levels
+                + b"}"
+            )
+            assert len(payload) < MAX_ENVELOPE_BYTES
+            response = json.loads(await _exchange(config, material, payload))
+            assert response == {"category": "invalid-request", "status": "error"}
+            assert authenticated is False
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
 def test_transport_authenticates_incarnation_before_dispatch(tmp_path: Path) -> None:
     async def run() -> None:
         material = _tls_material(tmp_path, "authority-a")

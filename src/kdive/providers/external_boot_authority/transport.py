@@ -40,6 +40,7 @@ MAX_CREDENTIAL_BYTES = 4_096
 SOCKET_MODE = 0o660
 SOCKET_DIRECTORY_MODE = 0o2750
 _TLS_TIMEOUT_SECONDS = 5.0
+_MAX_JSON_NESTING = 64
 
 type Operation = Literal["acknowledge-takeover", "execute-mutation"]
 type AuthenticatePeer = Callable[[SecretStr], Awaitable[AuthenticatedPeer]]
@@ -110,8 +111,32 @@ async def _write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
     await writer.drain()
 
 
+def _reject_excessive_json_nesting(payload: bytes) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in payload:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == ord("\\"):
+                escaped = True
+            elif byte == ord('"'):
+                in_string = False
+            continue
+        if byte == ord('"'):
+            in_string = True
+        elif byte in (ord("["), ord("{")):
+            depth += 1
+            if depth > _MAX_JSON_NESTING:
+                raise _TransportError("invalid-request")
+        elif byte in (ord("]"), ord("}")):
+            depth -= 1
+
+
 def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
     try:
+        _reject_excessive_json_nesting(payload)
         value = json.loads(payload)
         if not isinstance(value, dict) or set(value) != {"credential", "operation", "request"}:
             raise ValueError
@@ -134,7 +159,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             raise ValueError
         if operation == "execute-mutation" and not isinstance(request, AuthorityMutationRequestV1):
             raise ValueError
-    except TypeError, UnicodeError, ValueError, json.JSONDecodeError:
+    except RecursionError, TypeError, UnicodeError, ValueError, json.JSONDecodeError:
         raise _TransportError("invalid-request") from None
     return operation, request, SecretStr(credential)
 
