@@ -57,99 +57,32 @@ required paths, and its position preceding the task named
 
 ### Step 1 — Write the test first
 
-Create `tests/deploy/test_guest_base_image_external_boot_userland.py`:
+Create `tests/deploy/test_guest_base_image_external_boot_userland.py`. Its contract, in full — the
+module body is the durable artifact and is not transcribed here:
 
-```python
-"""The external-boot guest userland contract is declared and verified in the image build.
-
-External-boot identity proof spawns ``/usr/bin/uname`` and ``/usr/bin/cat`` in the guest by
-absolute path (ADR-0590). Neither the scratch build nor the verification task can run in CI —
-there is no scratch-capable host — so this locks the *declaration*: the installroots name the
-package that supplies those paths, and the role checks for them on each qcow2 it builds before
-staging it. A real build host is what turns that check into evidence.
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Any
-
-import yaml
-
-_ROLE = (
-    Path(__file__).resolve().parents[2]
-    / "deploy"
-    / "ansible"
-    / "roles"
-    / "guest_base_image"
-    / "tasks"
-)
-BUILD_SCRATCH = _ROLE / "build_scratch.yml"
-BUILD_ONE = _ROLE / "build_one.yml"
-
-REQUIRED_PROGRAMS = ("/usr/bin/uname", "/usr/bin/cat")
-VERIFY_TASK = "external-boot guest userland"
-STAGE_TASK = "Stage the finished image into the (root-owned) pool for {{ image.name }}"
-
-
-def _tasks(path: Path) -> list[dict[str, Any]]:
-    """Every task in an Ansible task file, parsed as YAML rather than matched as text."""
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _argv(task: dict[str, Any]) -> list[str]:
-    """The argv list of a command task, as strings."""
-    return [str(arg) for arg in task["ansible.builtin.command"]["argv"]]
-
-
-def _named(tasks: list[dict[str, Any]], fragment: str) -> dict[str, Any]:
-    """The single task whose name contains ``fragment``."""
-    matches = [t for t in tasks if fragment in t["name"]]
-    assert len(matches) == 1, f"expected one task naming {fragment!r}, got {len(matches)}"
-    return matches[0]
-
-
-def test_redhat_installroot_names_coreutils() -> None:
-    """The dnf installroot names coreutils, so /usr/bin/uname is not a transitive accident."""
-    argv = _argv(_named(_tasks(BUILD_SCRATCH), "RedHat-family rootfs"))
-    assert "coreutils" in argv
-    assert "busybox" in argv, "ADR-0590 keeps busybox; it adds coreutils beside it"
-
-
-def test_debian_installroot_names_coreutils() -> None:
-    """The debootstrap --include names coreutils for the same reason."""
-    argv = _argv(_named(_tasks(BUILD_SCRATCH), "Debian-family rootfs"))
-    include = next(arg for arg in argv if arg.startswith("--include="))
-    packages = include.removeprefix("--include=").split(",")
-    assert "coreutils" in packages
-    assert "busybox" in packages, "ADR-0590 keeps busybox; it adds coreutils beside it"
-
-
-def test_build_verifies_both_identity_proof_programs() -> None:
-    """The role checks each built qcow2 for both absolute paths the identity proof spawns."""
-    verify = _named(_tasks(BUILD_ONE), VERIFY_TASK)
-    command = " ".join(_argv(verify))
-    for program in REQUIRED_PROGRAMS:
-        assert program in command, f"{program} is not checked"
-    assert verify["changed_when"] is False, "the task asserts; it does not customize"
-
-
-def test_verification_precedes_staging() -> None:
-    """A non-conformant image must fail before it is copied into the pool.
-
-    Ordering is the whole enforcement: past the copy the volume is staged, and staged is what
-    ``remote_libvirt_facts`` turns into an ``[[image]]`` block a System can select.
-    """
-    names = [t["name"] for t in _tasks(BUILD_ONE) if "name" in t]
-    verify = next(i for i, n in enumerate(names) if VERIFY_TASK in n)
-    assert verify < names.index(STAGE_TASK)
-
-
-def test_verification_is_guarded_like_the_staging_copy() -> None:
-    """No build path is exempt, and the guard matches the copy that consumes the same qcow2."""
-    tasks = _tasks(BUILD_ONE)
-    assert _named(tasks, VERIFY_TASK)["when"] == _named(tasks, STAGE_TASK)["when"]
-```
+- **Module docstring** — states that identity proof spawns the two paths (ADR-0590), that neither
+  the scratch build nor the verification task can run in CI, and that this therefore locks the
+  *declaration* while a real build host supplies the evidence.
+- **Constants** — `BUILD_SCRATCH` and `BUILD_ONE` resolve from `Path(__file__).resolve().parents[2]`
+  through `deploy/ansible/roles/guest_base_image/tasks/`;
+  `REQUIRED_PROGRAMS = ("/usr/bin/uname", "/usr/bin/cat")`;
+  `VERIFY_TASK = "external-boot guest userland"`;
+  `STAGE_TASK = "Stage the finished image into the (root-owned) pool for {{ image.name }}"`.
+- **Helpers** — `_tasks(path) -> list[dict[str, Any]]` returns `yaml.safe_load` of the file, so
+  every assertion reads parsed structure rather than raw text; `_argv(task) -> list[str]` returns
+  `task["ansible.builtin.command"]["argv"]` as strings; `_named(tasks, fragment) -> dict[str, Any]`
+  asserts exactly one task's `name` contains `fragment` and returns it.
+- **`test_redhat_installroot_names_coreutils`** — the `RedHat-family rootfs` task's argv contains
+  `coreutils`, and still contains `busybox`.
+- **`test_debian_installroot_names_coreutils`** — the `Debian-family rootfs` task's `--include=`
+  argument, split on commas, contains `coreutils` and still contains `busybox`.
+- **`test_build_verifies_both_identity_proof_programs`** — the verification task's joined argv
+  contains both `REQUIRED_PROGRAMS`, and its `changed_when` is `False`.
+- **`test_verification_precedes_staging`** — the verification task's index in `build_one.yml`'s task
+  names is less than `STAGE_TASK`'s. Ordering is the whole enforcement: past the copy the volume is
+  staged, and staged is what `remote_libvirt_facts` turns into an `[[image]]` block.
+- **`test_verification_is_guarded_like_the_staging_copy`** — the two tasks' `when` values are equal,
+  so no build path is exempt.
 
 ### Step 2 — Confirm it fails
 
@@ -157,9 +90,10 @@ def test_verification_is_guarded_like_the_staging_copy() -> None:
 uv run python -m pytest tests/deploy/test_guest_base_image_external_boot_userland.py -q
 ```
 
-Expect **4 failed, 1 error**: two `AssertionError` from the missing `coreutils` entries, two from
-`_named` on the verification task not existing, and a `StopIteration` **error** (not a failure) from
-`test_verification_precedes_staging`, whose generator expression finds no matching task.
+Expect **5 failed**: two `AssertionError` from the missing `coreutils` entries, two from `_named` on
+the verification task not existing, and a `StopIteration` from `test_verification_precedes_staging`,
+whose generator expression finds no matching task — pytest reports an exception raised in a test
+body as a failure, not an error.
 
 ### Step 3 — Name `coreutils` on the RedHat bootstrap path
 
@@ -252,11 +186,14 @@ just lint; echo $?
 just type; echo $?
 just lint-ansible < /dev/null; echo $?
 just test-ansible < /dev/null; echo $?
+just ci > /tmp/ci-2160.log 2>&1 < /dev/null; echo $?
 ```
 
 Expect `0` from each. `run-guest-base-image-admission.sh` inside `test-ansible` must still report
 all six of its cases ok — this change does not touch the admission block, so any movement there is
-a regression.
+a regression. `just ci` is the gate the charter requires; it covers the new module under the full
+suite and the doc gates the two new documents touch, neither of which the four focused recipes
+reach.
 
 ### Step 10 — Acceptance criteria
 
@@ -266,8 +203,8 @@ a regression.
 - The diff touches `all.yml` and `deploy/ansible/README.md`, and both name ADR-0590 — the
   discoverability pointers ADR-0590 substitutes for a forward amendment note in ADR-0188 §4.
 - Five tests pass, each failing when its own subject is broken (Step 8).
-- `just lint`, `just type`, `just lint-ansible`, `just test-ansible`, `just adr-status-check` all
-  exit 0, and `git diff --name-only main...HEAD` names no sibling-owned path.
+- `just lint`, `just type`, `just lint-ansible`, `just test-ansible`, `just adr-status-check`, and
+  `just ci` all exit 0, and `git diff --name-only main...HEAD` names no sibling-owned path.
 
 ### Step 11 — Commit
 
