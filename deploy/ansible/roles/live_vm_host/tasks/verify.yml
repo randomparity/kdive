@@ -353,7 +353,10 @@
         '/run/kdive/provider-authority',
         '/run/kdive/provider-authority/request'
         ]
-        and item.stat.mode == '0710'
+        and (
+        (item.item == '/run/kdive/provider-authority' and item.stat.mode == '0710')
+        or (item.item == '/run/kdive/provider-authority/request' and item.stat.mode == '0750')
+        )
         and item.stat.gr_name == live_vm_host_authority_client_group
         )
   loop: "{{ live_vm_host_authority_protected_path_results.results }}"
@@ -446,6 +449,211 @@
   register: live_vm_host_authority_denied_virsh_results
   changed_when: false
   failed_when: live_vm_host_authority_denied_virsh_results.rc == 0
+
+- name: Assert the authority service is ready
+  ansible.builtin.systemd_service:
+    name: kdive-external-boot-authority.service
+  register: live_vm_host_authority_service
+  check_mode: true
+  changed_when: false
+  failed_when: >-
+    live_vm_host_authority_service.status.ActiveState != 'active'
+    or live_vm_host_authority_service.status.SubState != 'running'
+
+- name: Inspect the installed authority credentials
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_authority_credentials_dir }}/{{ item }}"
+    follow: false
+  loop:
+    - database-dsn
+    - service-credential
+    - server-certificate
+    - server-ca
+    - worker-client-ca
+    - health-client-certificate
+    - health-client-key
+  register: live_vm_host_authority_credential_results
+
+- name: Assert the authority credential boundary
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg
+      - not item.stat.islnk
+      - item.stat.pw_name == live_vm_host_authority_account
+      - item.stat.gr_name == live_vm_host_authority_account
+      - item.stat.mode == '0400'
+  loop: "{{ live_vm_host_authority_credential_results.results }}"
+
+- name: Read the installed authority revision
+  ansible.builtin.slurp:
+    path: "{{ live_vm_host_authority_runtime_install }}/revision"
+  register: live_vm_host_authority_revision
+
+- name: Assert the installed authority revision is exact
+  ansible.builtin.assert:
+    that:
+      - (live_vm_host_authority_revision.content | b64decode | trim) == live_vm_host_checkout.after
+
+- name: Assert the authority database LOGIN is least privilege
+  ansible.builtin.command: >-
+    {{ live_vm_host_authority_runtime_install }}/.venv/bin/python -m kdive
+    check-external-boot-authority-host
+  environment:
+    CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
+  become: true
+  become_user: "{{ live_vm_host_authority_account }}"
+  changed_when: false
+
+- name: Prove authority service restart restores readiness
+  when: live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Restart the external-boot authority service
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        state: restarted
+
+    - name: Recheck authority readiness after restart
+      ansible.builtin.command: >-
+        {{ live_vm_host_authority_runtime_install }}/.venv/bin/python -m kdive
+        check-external-boot-authority-host
+      environment:
+        CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
+      become: true
+      become_user: "{{ live_vm_host_authority_account }}"
+      changed_when: false
+
+- name: Prove journal restoration gates authority readiness
+  when: live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Create a proof-only unexpected journal lane
+      ansible.builtin.file:
+        path: /var/lib/kdive/provider-authority/journal/not-a-system
+        state: directory
+        owner: "{{ live_vm_host_authority_account }}"
+        group: "{{ live_vm_host_authority_account }}"
+        mode: "0700"
+
+    - name: Require the unexpected journal lane to fail readiness
+      ansible.builtin.command: >-
+        {{ live_vm_host_authority_runtime_install }}/.venv/bin/python -m kdive
+        check-external-boot-authority-host
+      environment:
+        CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
+        KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
+      become: true
+      become_user: "{{ live_vm_host_authority_account }}"
+      register: live_vm_host_authority_bad_journal_probe
+      changed_when: false
+      failed_when: live_vm_host_authority_bad_journal_probe.rc == 0
+
+    - name: Remove the proof-only unexpected journal lane
+      ansible.builtin.file:
+        path: /var/lib/kdive/provider-authority/journal/not-a-system
+        state: absent
+
+- name: Prove authority readiness retracts on credential and ACL drift
+  when: live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Inject proof-only request-directory ACL drift
+      ansible.builtin.file:
+        path: /run/kdive/provider-authority/request
+        state: directory
+        owner: "{{ live_vm_host_authority_account }}"
+        group: "{{ live_vm_host_authority_client_group }}"
+        mode: "0770"
+
+    - name: Wait for periodic readiness to observe ACL drift
+      ansible.builtin.wait_for:
+        timeout: 35
+
+    - name: Require authority readiness to retract on ACL drift
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+      register: live_vm_host_authority_acl_drift_state
+      check_mode: true
+      changed_when: false
+
+    - name: Assert ACL drift retracted authority readiness
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_authority_acl_drift_state.status.ActiveState != 'active'
+
+    - name: Restore the request-directory ACL
+      ansible.builtin.file:
+        path: /run/kdive/provider-authority/request
+        state: directory
+        owner: "{{ live_vm_host_authority_account }}"
+        group: "{{ live_vm_host_authority_client_group }}"
+        mode: "0750"
+
+    - name: Save the valid proof server certificate
+      ansible.builtin.copy:
+        src: "{{ live_vm_host_authority_credentials_dir }}/server-certificate"
+        dest: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0400"
+
+    - name: Inject proof-only TLS credential drift
+      ansible.builtin.copy:
+        dest: "{{ live_vm_host_authority_credentials_dir }}/server-certificate"
+        content: "invalid proof certificate\n"
+        owner: "{{ live_vm_host_authority_account }}"
+        group: "{{ live_vm_host_authority_account }}"
+        mode: "0400"
+
+    - name: Require TLS drift to prevent service readiness
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        state: restarted
+      register: live_vm_host_authority_tls_drift_restart
+      failed_when: false
+
+    - name: Inspect authority service after TLS drift
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+      register: live_vm_host_authority_tls_drift_state
+      check_mode: true
+      changed_when: false
+
+    - name: Assert TLS drift retracted authority readiness
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_authority_tls_drift_state.status.ActiveState != 'active'
+
+    - name: Restore the valid proof server certificate
+      ansible.builtin.copy:
+        src: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
+        dest: "{{ live_vm_host_authority_credentials_dir }}/server-certificate"
+        remote_src: true
+        owner: "{{ live_vm_host_authority_account }}"
+        group: "{{ live_vm_host_authority_account }}"
+        mode: "0400"
+
+    - name: Remove the proof server certificate backup
+      ansible.builtin.file:
+        path: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
+        state: absent
+
+    - name: Restore authority readiness after drift proofs
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        state: restarted
 
 - name: Create root-owned permission-probe markers for every slot
   ansible.builtin.copy:

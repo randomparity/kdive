@@ -20,6 +20,10 @@ MAIN_TASKS = ROLE / "tasks" / "main.yml"
 VERIFY_TASKS = ROLE / "tasks" / "verify.yml"
 DEFAULTS = ROLE / "defaults" / "main.yml"
 AUTHORITY_LIBVIRT_CONFIG = SYSTEMD / "libvirtd-external-boot-authority.conf"
+AUTHORITY_ENV = SYSTEMD / "provider-authority.env.example"
+AUTHORITY_SERVICE = SYSTEMD / "system" / "kdive-external-boot-authority.service"
+AUTHORITY_TEARDOWN = ROOT / "deploy" / "ansible" / "playbooks" / "authority_host_teardown.yml"
+AUTHORITY_PROOF = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
 
 
 def _text(path: Path) -> str:
@@ -176,6 +180,76 @@ def test_existing_worker_provider_contract_is_preserved() -> None:
     assert "Verify every worker can use the KVM device" in verify
     assert "live_vm_host_authority_client_group" in verify
     assert "or live_vm_host_authority_client_group in" in verify
+
+
+def test_ansible_installs_authority_in_clean_host_order() -> None:
+    tasks = _text(MAIN_TASKS)
+    verify = _text(VERIFY_TASKS)
+    defaults = _yaml(DEFAULTS)
+
+    assert AUTHORITY_SERVICE.is_file()
+    assert AUTHORITY_ENV.is_file()
+    assert AUTHORITY_TEARDOWN.is_file()
+    assert AUTHORITY_PROOF.is_file()
+    assert defaults["live_vm_host_authority_runtime_install"] == "/opt/kdive-provider-authority"
+    assert defaults["live_vm_host_authority_credentials_dir"] == (
+        "/etc/kdive/credentials/provider-authority"
+    )
+    assert defaults["live_vm_host_authority_database_login"] == "kdive_authority_host"
+
+    ordered = (
+        "Install external-boot authority prerequisites",
+        "Create the external-boot authority groups",
+        "Create the external-boot authority account",
+        "Create authority protected paths",
+        "Install KDIVE into the authority venv",
+        "Install external-boot authority credentials",
+        "Install the external-boot authority environment",
+        "Install the external-boot authority service unit",
+        "Start the dormant authority session libvirtd",
+        "Start the external-boot authority service",
+        "Run the one-shot authority readiness probe",
+        "Create the transient authority proof identity",
+        "Prove mutual TLS server client and worker authentication",
+        "Retire the transient authority proof worker incarnation",
+        "Remove the transient authority proof identity",
+    )
+    positions = [tasks.index(f"- name: {name}") for name in ordered]
+    assert positions == sorted(positions)
+
+    for evidence in (
+        "Assert the authority service is ready",
+        "Assert the authority database LOGIN is least privilege",
+        "Prove fixed workers and the reconciler cannot traverse authority paths",
+        "Verify existing worker provider path remains usable after authority endpoint",
+        "Prove authority service restart restores readiness",
+        "Prove authority readiness retracts on credential and ACL drift",
+        "Prove journal restoration gates authority readiness",
+    ):
+        assert evidence in verify
+
+    proof = _text(AUTHORITY_PROOF)
+    assert proof.startswith("#!/bin/bash\nset -euo pipefail\n")
+    assert "git bundle create" in proof
+    assert "live_vm_repo_url" in proof
+    assert "live_vm_repo_version" in proof
+    assert "git rev-parse HEAD" in proof
+    assert "authority_host_teardown.yml" in proof
+    assert "teardown pass 1" in proof
+    assert "teardown pass 2" in proof
+    assert "ub26-big.dev.pdx.drc.nz" not in proof
+
+    teardown = _text(AUTHORITY_TEARDOWN)
+    for evidence in (
+        "Stop and disable the external-boot authority service",
+        "Stop and disable the dormant authority endpoint",
+        "Revoke the authority database LOGIN",
+        "Remove transient proof identity and material",
+        "Assert authority units and endpoint artifacts are absent",
+        "Assert retained authority evidence remains",
+        "Verify the fixed-worker provider path remains usable",
+    ):
+        assert evidence in teardown
 
 
 def test_ansible_uses_declarative_account_and_file_modules() -> None:

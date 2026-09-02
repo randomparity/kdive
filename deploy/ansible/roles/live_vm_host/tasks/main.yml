@@ -9,6 +9,13 @@
       live_vm_host targets the Ubuntu 26.04 runner base (ADR-0387); this host is
       {{ ansible_distribution }} {{ ansible_distribution_version }}.
 
+- name: Install external-boot authority prerequisites
+  ansible.builtin.apt:
+    name: "{{ live_vm_host_authority_packages }}"
+    state: present
+    update_cache: true
+  tags: [authority_prerequisites]
+
 - name: Ensure the runner service account exists in kvm and libvirt
   ansible.builtin.user:
     name: "{{ github_runner_user }}"
@@ -23,6 +30,7 @@
     name: "{{ live_vm_host_packages }}"
     state: present
     update_cache: true
+  tags: [authority_prerequisites]
 
 - name: "Install Docker Engine + compose plugin (the self-hosted job's on-box stack, #1293)"
   # The self-hosted live_vm gate brings up the compose backends on the box via
@@ -395,10 +403,91 @@
       mode: "0700"
     - path: /run/kdive/provider-authority/request
       group: "{{ live_vm_host_authority_client_group }}"
-      mode: "0710"
+      mode: "0750"
     - path: /run/kdive/provider-authority/libvirt
       group: "{{ live_vm_host_authority_account }}"
       mode: "0700"
+
+- name: Validate external-boot authority credential sources
+  ansible.builtin.assert:
+    that:
+      - item | length > 0
+    fail_msg: >-
+      Every authority credential source must be supplied by trusted inventory before the
+      authority service can be installed.
+  loop:
+    - "{{ live_vm_host_authority_database_dsn_source }}"
+    - "{{ live_vm_host_authority_server_key_source }}"
+    - "{{ live_vm_host_authority_server_certificate_source }}"
+    - "{{ live_vm_host_authority_server_ca_source }}"
+    - "{{ live_vm_host_authority_worker_client_ca_source }}"
+    - "{{ live_vm_host_authority_health_client_certificate_source }}"
+    - "{{ live_vm_host_authority_health_client_key_source }}"
+  no_log: true
+
+- name: Create the external-boot authority venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} venv --python /usr/bin/python3
+      {{ live_vm_host_authority_runtime_install }}/.venv
+  args:
+    creates: "{{ live_vm_host_authority_runtime_install }}/.venv/bin/python"
+  register: live_vm_host_authority_venv
+
+- name: Install KDIVE into the authority venv
+  ansible.builtin.command:
+    cmd: >-
+      {{ live_vm_host_uv_bin }} pip install --python
+      {{ live_vm_host_authority_runtime_install }}/.venv/bin/python {{ live_vm_venv }}
+  when: live_vm_host_checkout is changed or live_vm_host_authority_venv is changed
+  changed_when: true
+
+- name: Record the installed external-boot authority revision
+  ansible.builtin.copy:
+    dest: "{{ live_vm_host_authority_runtime_install }}/revision"
+    content: "{{ live_vm_host_checkout.after }}\n"
+    owner: root
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0440"
+
+- name: Install external-boot authority credentials
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ live_vm_host_authority_credentials_dir }}/{{ item.name }}"
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0400"
+  loop:
+    - {name: database-dsn, source: "{{ live_vm_host_authority_database_dsn_source }}"}
+    - {name: service-credential, source: "{{ live_vm_host_authority_server_key_source }}"}
+    - {name: server-certificate, source: "{{ live_vm_host_authority_server_certificate_source }}"}
+    - {name: server-ca, source: "{{ live_vm_host_authority_server_ca_source }}"}
+    - {name: worker-client-ca, source: "{{ live_vm_host_authority_worker_client_ca_source }}"}
+    - {name: health-client-certificate, source: "{{ live_vm_host_authority_health_client_certificate_source }}"}
+    - {name: health-client-key, source: "{{ live_vm_host_authority_health_client_key_source }}"}
+  no_log: true
+
+- name: Install the external-boot authority environment
+  ansible.builtin.copy:
+    dest: "{{ live_vm_host_authority_environment }}"
+    content: |
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE={{ live_vm_host_authority_instance }}
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_UID={{ live_vm_host_authority_uid }}
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR=/var/lib/kdive/provider-authority/journal
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock
+      KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock
+    owner: root
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0640"
+
+- name: Install the external-boot authority service unit
+  ansible.builtin.copy:
+    src: "{{ live_vm_venv }}/deploy/systemd/system/kdive-external-boot-authority.service"
+    dest: /etc/systemd/system/kdive-external-boot-authority.service
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Create the protected session-libvirt socket namespaces
   block:
@@ -1099,6 +1188,143 @@
   become: true
   become_user: "{{ live_vm_host_authority_account }}"
 
+- name: Start the external-boot authority service
+  ansible.builtin.systemd_service:
+    name: kdive-external-boot-authority.service
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Run the one-shot authority readiness probe
+  ansible.builtin.command: >-
+    {{ live_vm_host_authority_runtime_install }}/.venv/bin/python -m kdive
+    check-external-boot-authority-host
+  environment:
+    CREDENTIALS_DIRECTORY: "{{ live_vm_host_authority_credentials_dir }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE: "{{ live_vm_host_authority_instance }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_UID: "{{ live_vm_host_authority_uid }}"
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR: /var/lib/kdive/provider-authority/journal
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET: /run/kdive/provider-authority/request/authority.sock
+    KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET: /run/kdive/provider-authority/libvirt/libvirt-sock
+  become: true
+  become_user: "{{ live_vm_host_authority_account }}"
+  changed_when: false
+
+- name: Create the transient authority proof identity
+  when: live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Create the transient authority proof primary group
+      ansible.builtin.group:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        system: true
+        state: present
+
+    - name: Create the transient authority proof account
+      ansible.builtin.user:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        system: true
+        create_home: false
+        home: /nonexistent
+        shell: /usr/sbin/nologin
+        group: "{{ live_vm_host_authority_proof_account }}"
+        groups: ["{{ live_vm_host_authority_client_group }}"]
+        append: false
+
+    - name: Create the transient authority proof directory
+      ansible.builtin.file:
+        path: "{{ live_vm_host_authority_runtime_root }}/proof"
+        state: directory
+        owner: "{{ live_vm_host_authority_proof_account }}"
+        group: "{{ live_vm_host_authority_proof_account }}"
+        mode: "0700"
+
+    - name: Install transient authority proof material
+      ansible.builtin.copy:
+        src: "{{ item.source }}"
+        dest: "{{ live_vm_host_authority_runtime_root }}/proof/{{ item.name }}"
+        owner: "{{ live_vm_host_authority_proof_account }}"
+        group: "{{ live_vm_host_authority_proof_account }}"
+        mode: "0400"
+      loop:
+        - {name: client-certificate, source: "{{ live_vm_host_authority_proof_client_certificate }}"}
+        - {name: client-key, source: "{{ live_vm_host_authority_proof_client_key }}"}
+        - {name: server-ca, source: "{{ live_vm_host_authority_server_ca_source }}"}
+        - {name: worker-credential, source: "{{ live_vm_host_authority_proof_worker_credential }}"}
+        - {name: request.json, source: "{{ live_vm_host_authority_proof_request }}"}
+      no_log: true
+
+    - name: Install the transient authority proof client
+      ansible.builtin.copy:
+        dest: "{{ live_vm_host_authority_runtime_root }}/proof/client.py"
+        owner: root
+        group: "{{ live_vm_host_authority_proof_account }}"
+        mode: "0550"
+        content: |
+          import asyncio
+          import json
+          import ssl
+          import sys
+          from pathlib import Path
+
+          from kdive.providers.external_boot_authority.transport import authority_server_name
+
+          ROOT = Path("/run/kdive/provider-authority/proof")
+
+          async def main() -> None:
+              mode = sys.argv[1]
+              context = ssl.create_default_context(
+                  ssl.Purpose.SERVER_AUTH,
+                  cafile=ROOT / "server-ca",
+              )
+              context.minimum_version = ssl.TLSVersion.TLSv1_3
+              context.maximum_version = ssl.TLSVersion.TLSv1_3
+              if mode != "no-certificate":
+                  context.load_cert_chain(ROOT / "client-certificate", ROOT / "client-key")
+              credential = (ROOT / "worker-credential").read_text().strip()
+              if mode == "bad-credential":
+                  credential += "-invalid"
+              request = json.loads((ROOT / "request.json").read_text())
+              envelope = json.dumps(
+                  {
+                      "credential": credential,
+                      "operation": "acknowledge-takeover",
+                      "request": request,
+                  },
+                  separators=(",", ":"),
+                  sort_keys=True,
+              ).encode()
+              reader, writer = await asyncio.open_unix_connection(
+                  "/run/kdive/provider-authority/request/authority.sock",
+                  ssl=context,
+                  server_hostname=authority_server_name("{{ live_vm_host_authority_instance }}"),
+              )
+              writer.write(len(envelope).to_bytes(4, "big") + envelope)
+              await writer.drain()
+              size = int.from_bytes(await reader.readexactly(4), "big")
+              response = json.loads(await reader.readexactly(size))
+              writer.close()
+              await writer.wait_closed()
+              expected = "unauthenticated" if mode == "bad-credential" else "provider-not-configured"
+              assert response == {"category": expected, "status": "error"}, response
+
+          try:
+              asyncio.run(main())
+          except (ConnectionError, OSError, ssl.SSLError):
+              if sys.argv[1] != "no-certificate":
+                  raise
+          else:
+              if sys.argv[1] == "no-certificate":
+                  raise SystemExit("server accepted a client without a certificate")
+
+    - name: Prove mutual TLS server client and worker authentication
+      ansible.builtin.command: >-
+        {{ live_vm_venv }}/.venv/bin/python
+        {{ live_vm_host_authority_runtime_root }}/proof/client.py {{ item }}
+      loop: [valid, bad-credential, no-certificate]
+      become: true
+      become_user: "{{ live_vm_host_authority_proof_account }}"
+      changed_when: false
+
 - name: Install the boot-persistent session libvirtd user unit
   ansible.builtin.copy:
     dest: "{{ ansible_facts.getent_passwd[github_runner_user][4] }}/.config/systemd/user/kdive-libvirtd-live.service"
@@ -1162,3 +1388,40 @@
 
 - name: Run the host-contract gate
   ansible.builtin.import_tasks: verify.yml
+
+- name: Retire the transient authority proof worker incarnation
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/psql
+      - --set
+      - "proof_incarnation={{ live_vm_host_authority_proof_incarnation }}"
+      - --command
+      - >-
+        UPDATE worker_incarnations SET state='terminated', terminated_at=clock_timestamp(),
+        outcome='killed' WHERE incarnation=:'proof_incarnation' AND state='active';
+  environment:
+    PGDATABASE: "{{ live_vm_host_authority_database_admin_dsn }}"
+  become: true
+  become_user: postgres
+  when: live_vm_host_authority_proof_enabled | bool
+  no_log: true
+  changed_when: true
+
+- name: Remove the transient authority proof identity and material
+  when: live_vm_host_authority_proof_enabled | bool
+  block:
+    - name: Remove transient authority proof material
+      ansible.builtin.file:
+        path: "{{ live_vm_host_authority_runtime_root }}/proof"
+        state: absent
+
+    - name: Remove the transient authority proof account
+      ansible.builtin.user:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        state: absent
+        remove: true
+
+    - name: Remove the transient authority proof primary group
+      ansible.builtin.group:
+        name: "{{ live_vm_host_authority_proof_account }}"
+        state: absent

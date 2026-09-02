@@ -81,6 +81,31 @@ live_vm_host_worker_fixture_files:
 live_vm_host_authority_account: kdive-provider-authority
 live_vm_host_authority_client_group: kdive-provider-authority-client
 live_vm_host_authority_runtime_root: /run/kdive/provider-authority
+live_vm_host_authority_runtime_install: /opt/kdive-provider-authority
+live_vm_host_authority_credentials_dir: /etc/kdive/credentials/provider-authority
+live_vm_host_authority_environment: /etc/kdive/provider-authority.env
+live_vm_host_authority_instance: "{{ inventory_hostname }}"
+live_vm_host_authority_database_login: kdive_authority_host
+live_vm_host_authority_database_name: kdive
+live_vm_host_authority_database_dsn_source: ""
+live_vm_host_authority_server_key_source: ""
+live_vm_host_authority_server_certificate_source: ""
+live_vm_host_authority_server_ca_source: ""
+live_vm_host_authority_worker_client_ca_source: ""
+live_vm_host_authority_health_client_certificate_source: ""
+live_vm_host_authority_health_client_key_source: ""
+live_vm_host_authority_proof_enabled: false
+live_vm_host_authority_proof_account: kdive-authority-2150-proof
+live_vm_host_authority_proof_incarnation: kdive-authority-2150-proof
+live_vm_host_authority_proof_client_certificate: ""
+live_vm_host_authority_proof_client_key: ""
+live_vm_host_authority_proof_worker_credential: ""
+live_vm_host_authority_proof_request: ""
+live_vm_host_authority_database_admin_dsn: ""
+live_vm_host_authority_packages:
+  - acl
+  - openssl
+  - postgresql
 live_vm_host_authority_libvirt_uri: >-
   qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock
 live_vm_host_authority_denied_paths:

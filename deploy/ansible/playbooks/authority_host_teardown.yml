@@ -1,0 +1,129 @@
+---
+- name: Retire the dormant external-boot authority host
+  hosts: live_vm_runners
+  become: true
+  gather_facts: false
+  vars:
+    authority_account: kdive-provider-authority
+    authority_proof_account: kdive-authority-2150-proof
+    authority_runtime: /run/kdive/provider-authority
+    authority_state: /var/lib/kdive/provider-authority
+    authority_credentials: /etc/kdive/credentials/provider-authority
+    authority_install: /opt/kdive-provider-authority
+    authority_database_login: kdive_authority_host
+    authority_database_admin_dsn: ""
+    fixed_worker_uri: >-
+      qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock
+  tasks:
+    - name: Stop and disable the external-boot authority service
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Look up the external-boot authority account for teardown
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ authority_account }}"
+        fail_key: false
+
+    - name: Stop and disable the dormant authority endpoint
+      ansible.builtin.systemd_service:
+        name: kdive-libvirtd-external-boot-authority.service
+        scope: user
+        enabled: false
+        state: stopped
+      environment:
+        XDG_RUNTIME_DIR: >-
+          /run/user/{{ ansible_facts.getent_passwd[authority_account][1] }}
+      become: true
+      become_user: "{{ authority_account }}"
+      when: authority_account in ansible_facts.getent_passwd
+      failed_when: false
+
+    - name: Remove authority unit and endpoint artifacts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/kdive-external-boot-authority.service
+        - /etc/kdive/provider-authority.env
+        - /etc/kdive/libvirtd-external-boot-authority.conf
+        - "{{ authority_state }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service"
+        - "{{ authority_runtime }}"
+
+    - name: Reload systemd after authority unit removal
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Revoke the authority database LOGIN
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/psql
+          - --set
+          - "authority_login={{ authority_database_login }}"
+          - --command
+          - ALTER ROLE :"authority_login" NOLOGIN
+      environment:
+        PGDATABASE: "{{ authority_database_admin_dsn }}"
+      become: true
+      become_user: postgres
+      when:
+        - authority_database_admin_dsn | length > 0
+      no_log: true
+      changed_when: true
+
+    - name: Remove transient proof identity and material
+      block:
+        - name: Remove transient proof material if the runtime was recreated
+          ansible.builtin.file:
+            path: "{{ authority_runtime }}/proof"
+            state: absent
+
+        - name: Remove the transient authority proof account
+          ansible.builtin.user:
+            name: "{{ authority_proof_account }}"
+            state: absent
+            remove: true
+
+        - name: Remove the transient authority proof group
+          ansible.builtin.group:
+            name: "{{ authority_proof_account }}"
+            state: absent
+
+    - name: Inspect retained authority evidence
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ authority_credentials }}"
+        - "{{ authority_state }}/journal"
+      register: retained_authority_evidence
+
+    - name: Assert retained authority evidence remains
+      ansible.builtin.assert:
+        that:
+          - item.stat.isdir
+      loop: "{{ retained_authority_evidence.results }}"
+
+    - name: Inspect removed authority endpoint artifacts
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/systemd/system/kdive-external-boot-authority.service
+        - /etc/kdive/provider-authority.env
+        - /etc/kdive/libvirtd-external-boot-authority.conf
+        - "{{ authority_runtime }}"
+      register: removed_authority_artifacts
+
+    - name: Assert authority units and endpoint artifacts are absent
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists
+      loop: "{{ removed_authority_artifacts.results }}"
+
+    - name: Verify the fixed-worker provider path remains usable
+      ansible.builtin.command: "virsh -c {{ fixed_worker_uri }} list"
+      become: true
+      become_user: kdive-worker-1
+      changed_when: false
