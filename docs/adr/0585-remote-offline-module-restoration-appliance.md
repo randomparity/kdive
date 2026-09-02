@@ -148,10 +148,14 @@ digest match" and "Reaper logic applies the same identity checks after worker de
 preceding section: this record never named the channel carrying those durable identities, and the
 libvirt storage-volume `<metadata>` element the implementation used does not persist. ADR-0588
 carries the owner tuple in the volume name instead, and requires the durable attempt row to be
-written before either volume is created, which qualifies "Core stores the result and the exact
-scratch-volume reference as part of the ADR-0583 recovery point before activation" under *Durable
-capture and identity* by putting one earlier durable write ahead of it. The appliance, isolation,
-retry, restoration, and teardown decisions here remain in force.
+written before any of an attempt's volumes are created, which qualifies "Core stores the result
+and the exact scratch-volume reference as part of the ADR-0583 recovery point before activation"
+under *Durable capture and identity* by putting one earlier durable write ahead of it. ADR-0588
+also states, rather than changes, what the preceding section requires of reaping: the set a sweep
+retains against is the set of un-discharged recovery obligations, so a scratch volume stays
+"retained until recovery or successful baseline commitment makes it unnecessary" even though its
+writing attempt has ended. The appliance, isolation, retry, restoration, and teardown decisions
+here remain in force.
 
 ## Consequences
 
