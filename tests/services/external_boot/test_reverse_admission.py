@@ -565,3 +565,48 @@ def test_a_boot_does_not_cross_a_restriction_committed_mid_flight(
     response, enqueued = asyncio.run(_run())
     _assert_denied(response, _ACTIVE_ACTIONS)
     assert enqueued == 0
+
+
+def test_an_install_admitted_before_the_activation_still_replays(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """Idempotent replay is how an agent polls its own in-flight step job.
+
+    The guard sits behind the ``get_by_dedup_key`` replay check, so a repeat ``runs.install``
+    for a job enqueued before the activation appeared gets that job back rather than a
+    ``conflict`` it can do nothing about.
+    """
+
+    async def _run() -> tuple[ToolResponse, ToolResponse]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            first = await runs_support.install(conn_pool, _ctx(), run_id)
+            await _restrict(conn_pool, seeded_activation, system_id, run_id, _STATE.ACTIVE)
+            return first, await runs_support.install(conn_pool, _ctx(), run_id)
+
+    first, replay = asyncio.run(_run())
+    assert first.status == "queued", first.model_dump()
+    assert replay.error_category is None, replay.model_dump()
+    assert replay.object_id == first.object_id
+
+
+def test_a_boot_admitted_before_the_activation_still_replays(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """The boot path carries the same replay fence, and marks the envelope ``replayed``."""
+
+    async def _run() -> tuple[ToolResponse, ToolResponse, int]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            await _mark_installed(conn_pool, run_id)
+            first = await boot_run(conn_pool, _ctx(), run_id)
+            await _restrict(conn_pool, seeded_activation, system_id, run_id, _STATE.ACTIVE)
+            replay = await boot_run(conn_pool, _ctx(), run_id)
+            return first, replay, await _boot_jobs(conn_pool, run_id)
+
+    first, replay, enqueued = asyncio.run(_run())
+    assert first.status == "queued", first.model_dump()
+    assert replay.error_category is None, replay.model_dump()
+    assert replay.object_id == first.object_id
+    assert replay.data["replayed"] is True
+    assert enqueued == 1

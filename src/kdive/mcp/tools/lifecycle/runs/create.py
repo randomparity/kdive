@@ -12,6 +12,7 @@ from pydantic import JsonValue
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import external_boot_denial
 from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -53,7 +54,7 @@ async def create_run(
                 available_target_kinds=resolver.registered_kinds(),
             )
         except ExternalBootDenied as exc:
-            return _external_boot_denial(request, exc)
+            return _external_boot_denial(request, exc, ctx)
         except RunCreateError as exc:
             return ToolResponse.failure_from_error(
                 exc.object_id,
@@ -110,7 +111,7 @@ async def _create_run_keyed(
             recorder=_record,
         )
     except ExternalBootDenied as exc:
-        return _external_boot_denial(request, exc)
+        return _external_boot_denial(request, exc, ctx)
     except RunCreateError as exc:
         return ToolResponse.failure_from_error(
             exc.object_id,
@@ -131,15 +132,16 @@ async def _create_run_keyed(
     return _created_response(result, server_time=await _build_server_time(pool, result))
 
 
-def _external_boot_denial(request: RunCreateRequest, exc: ExternalBootDenied) -> ToolResponse:
+def _external_boot_denial(
+    request: RunCreateRequest, exc: ExternalBootDenied, ctx: RequestContext
+) -> ToolResponse:
     """Render a `runs.create` denial against the target System (ADR-0583).
 
     Attributed to the System rather than a Run: the denial happens before any Run row exists,
-    and the System is the object the activation restricts.
+    and the System is the object the activation restricts. The project this frame does not hold
+    rides on the denial, so the breadcrumbs are RBAC-filtered like every other site's.
     """
-    return ToolResponse.failure_from_error(
-        str(request.system_id), exc, suggested_next_actions=exc.next_actions
-    )
+    return external_boot_denial(str(request.system_id), exc, ctx)
 
 
 def _vocab_for(exc: RunCreateError, resolver: ProviderResolver) -> dict[str, JsonValue] | None:

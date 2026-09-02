@@ -732,7 +732,7 @@ def test_no_activation_writing_name_is_reachable() -> None:
     assert sorted(reachable & _ACTIVATION_WRITING_NAMES) == []
 
 
-def test_the_import_closure_gate_bites() -> None:
+def test_the_name_gate_bites() -> None:
     """Canary: the gate runs over a clean module, so prove it still detects each name."""
     for name in sorted(_ACTIVATION_WRITING_NAMES):
         source = f"async def f(conn):\n    await _REPOSITORY.{name}(conn)\n"
@@ -740,6 +740,85 @@ def test_the_import_closure_gate_bites() -> None:
         assert called & _ACTIVATION_WRITING_NAMES == {name}
         imported = _reachable_names("", {name})
         assert imported & _ACTIVATION_WRITING_NAMES == {name}
+
+
+def _kdive_imports(source: str) -> set[str]:
+    """Every first-party name ``source`` imports, as ``module:name`` (``module:*`` for ``import``).
+
+    Names, not modules: ``kdive.services.external_boot`` is already imported, so a module-level
+    allow-list would wave through ``from kdive.services.external_boot import executor`` and the
+    delegate could then reach any writer without the writing name ever appearing here.
+    """
+    imports: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.update(
+                f"{alias.name}:*" for alias in node.names if alias.name.split(".")[0] == "kdive"
+            )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.split(".")[0] == "kdive":
+                imports.update(f"{module}:{alias.name}" for alias in node.names)
+    return imports
+
+
+# The reviewed first-party import closure of `recovery_requests`. Every entry is a name the
+# module reaches today; a new one has to be added here, which is where a reviewer sees that a
+# transition writer has come within reach.
+_ALLOWED_KDIVE_IMPORTS = frozenset(
+    {
+        "kdive.db.external_boot_activations:ExternalBootActivationRepository",
+        "kdive.db.locks:LockScope",
+        "kdive.db.locks:advisory_xact_lock",
+        "kdive.db.repositories:RUNS",
+        "kdive.db.repositories:SYSTEMS",
+        "kdive.domain.capacity.state:JobState",
+        "kdive.domain.errors:ErrorCategory",
+        "kdive.domain.external_boot_activation:Digest",
+        "kdive.domain.lifecycle.records:Run",
+        "kdive.log:bind_context",
+        "kdive.mcp.platform_auth:audit_platform_denial",
+        "kdive.mcp.responses:ToolResponse",
+        "kdive.mcp.tools:_docmeta",
+        "kdive.mcp.tools._common:as_uuid",
+        "kdive.mcp.tools._common:external_boot_denial",
+        "kdive.mcp.tools._common:invalid_uuid_error",
+        "kdive.security.authz.context:RequestContext",
+        "kdive.security.authz.rbac:AuthorizationError",
+        "kdive.security.authz.rbac:PlatformRole",
+        "kdive.security.authz.rbac:Role",
+        "kdive.security.authz.rbac:require_platform_role",
+        "kdive.security.authz.rbac:require_role",
+        "kdive.serialization:JsonValue",
+        "kdive.serialization:_MAX_ERROR_ENTRIES",
+        "kdive.services.debug.sessions:active_session_ids_for_system",
+        "kdive.services.external_boot:ExternalBootDenied",
+        "kdive.services.external_boot:ExternalBootOperation",
+        "kdive.services.external_boot:check_external_boot_admission",
+    }
+)
+
+
+def test_the_first_party_import_closure_is_the_reviewed_set() -> None:
+    """No tool commits a transition it cannot complete — held as a closure, not a name scan.
+
+    The name scan above is one level deep by construction, so it cannot see a write routed
+    through a first-party helper. Pinning the import set is the closure property that can: any
+    new ``kdive.*`` name this module reaches fails here until it is reviewed and listed.
+    """
+    assert _kdive_imports(inspect.getsource(recovery_requests)) == _ALLOWED_KDIVE_IMPORTS
+
+
+def test_the_import_closure_gate_bites() -> None:
+    """Canary: prove the closure detects the delegate-module escape the name scan misses."""
+    escape = "from kdive.services.external_boot import executor\n"
+    reached = _kdive_imports(escape)
+    assert reached - _ALLOWED_KDIVE_IMPORTS == {"kdive.services.external_boot:executor"}
+    assert _reachable_names(escape, set()) & _ACTIVATION_WRITING_NAMES == set()
+    assert _kdive_imports("import kdive.jobs.queue\n") - _ALLOWED_KDIVE_IMPORTS == {
+        "kdive.jobs.queue:*"
+    }
+    assert _kdive_imports("import os\nfrom collections import abc\n") == set()
 
 
 def test_no_service_changes_any_durable_row(migrated_url: str) -> None:

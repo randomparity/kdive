@@ -46,6 +46,12 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.external_boot.recovery_requests import (
+    MAX_OBJECT_IDENTITIES as _MAX_OBJECT_IDENTITIES,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    MAX_OBJECT_IDENTITY_LENGTH as _MAX_OBJECT_IDENTITY_LENGTH,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
     ORPHAN_STUB_DETAIL as _ORPHAN_STUB_DETAIL,
 )
 from kdive.mcp.tools.external_boot.recovery_requests import (
@@ -317,13 +323,14 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The System whose quarantined recovery objects to repair.")
         ],
         object_identities: Annotated[
-            list[str],
+            list[Annotated[str, Field(max_length=_MAX_OBJECT_IDENTITY_LENGTH)]],
             Field(
+                max_length=_MAX_OBJECT_IDENTITIES,
                 description=(
                     "The bounded list of quarantined recovery-object identities to repair; an "
                     "out-of-bounds list is refused with reason invalid_object_identities, whose "
                     "detail names the accepted range."
-                )
+                ),
             ),
         ],
         disposition: Annotated[
@@ -346,8 +353,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
         Requires platform_admin, and a denial is audited. The repair covers quarantined recovery
         objects rather than the activation itself, so it needs no admissible activation state
-        and reads none. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
-        with `systems.teardown`; `runs.get` reports the owning Run's state.
+        and reads none.
         """
         return await _resolve_recovery_orphan(
             pool,

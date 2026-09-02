@@ -25,6 +25,7 @@ from kdive.log import bind_context
 from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.providers.core.resolver import ProviderResolver
@@ -156,12 +157,13 @@ async def authorize_ssh_key(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_AUTHORIZE_SSH_KEY
+                        conn,
+                        uid,
+                        ExternalBootOperation.SYSTEM_AUTHORIZE_SSH_KEY,
+                        project=system.project,
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        system_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.AUTHORIZE_SSH_KEY,

@@ -108,10 +108,17 @@ had exactly one caller, and that caller is gone.
 the repository supplies that lookup. The decision accepts unrestricted work when no activation is
 present or a terminal activation is cleaned. `preparing`, `prepared`, `activating`, `recovering`,
 `recovery_conflict`, `recovery_failed`, and uncleaned terminal states admit only activation
-continuation, reconciliation, conflict resolution, and teardown. `active` additionally admits
-owning-Run debug attach/detach, traffic capture, force crash, crash watch, and vmcore capture; it
-rejects another Run and generic lifecycle, power, snapshot, or install work. Observation stays on the
-existing read-only seams.
+continuation, reconciliation, conflict resolution, teardown, and the owning Run's debug detach.
+`active` additionally admits owning-Run debug attach, traffic capture, force crash, crash watch, and
+vmcore capture; it rejects another Run and generic lifecycle, power, snapshot, or install work.
+Observation stays on the existing read-only seams.
+
+Detach is admitted in every restricting state, not only `active`, because it is the reversal of an
+attach the matrix itself admitted. Denying it once the activation leaves `active` would leave the
+session row `live` and its gdbstub/drgn transport open on the provider host, with no action the
+agent holding the session can reach — and that stranded session then blocks the release, which
+refuses on `debug_session_active`. It stays owning-Run scoped, so only the activation's Run may
+detach.
 
 The guard is a guard and returns nothing: `-> None` on admission, raising `ExternalBootDenied`
 otherwise. An earlier draft returned an `ExternalBootBinding` carrying the activation identity and
@@ -128,9 +135,16 @@ Those actions ride the envelope's own `suggested_next_actions` field, never
 `safe_error_details` (`src/kdive/serialization.py:96`), which reduces every key to a JSON scalar and
 drops non-scalars apart from three reserved list keys — so a list placed in `details` is silently
 discarded. The admission service therefore raises `ExternalBootDenied`, a `CategorizedError` subclass
-carrying the actions as an attribute, and each call site passes them through as
-`failure_from_error(..., suggested_next_actions=exc.next_actions)`. Binding the actions to the error
+carrying the actions as an attribute, and each call site renders them through the shared
+`mcp/tools/_common.py:external_boot_denial(object_id, exc, ctx)`. Binding the actions to the error
 that computed them is what keeps a call site from reporting one state's actions for another's denial.
+
+The render is not a pass-through: it drops the actions the caller cannot invoke, through the same
+`mcp/exposure.py:visible_next_actions` (ADR-0261) every other breadcrumb producer uses. Without it a
+project contributor denied on a `recovery_conflict` System is steered at `systems.teardown`, which
+the ADR-0148 exposure filter hides from it and `require_role` denies at call time. The filter needs
+a project, and two render frames — `runs.create`'s and `runs.bind`'s MCP adapters — hold none, so
+the guard takes a required `project` argument and stamps it on the denial alongside the actions.
 
 ### Reverse admission
 
@@ -250,8 +264,10 @@ state the matrix had already left.
 
 The amendment's hard rule is enforced structurally rather than by review: `recovery_requests.py`
 imports nothing that can transition an activation. `ExternalBootActivationRepository` reaches it only
-through `check_external_boot_admission`, which calls exactly one read method. A test asserts the
-module's import closure contains no name that writes.
+through `check_external_boot_admission`, which calls exactly one read method. One test asserts no
+activation-writing name is reachable in the module; a second pins its first-party import set to a
+reviewed allow-list, which is the closure property — a name scan alone cannot see a write routed
+through a new first-party helper.
 
 Release additionally reports the two blocking conditions ADR-0583 names, so the answer an agent gets
 is the answer it will get once the executor lands: `CONFLICT` with
@@ -321,6 +337,12 @@ no job envelope, no `activation_id` enrichment, and no `server_time`.
   a racing Run's install receives, because it is the same code path.
 - Active jobs or sessions block release with their own `reason` and identify only bounded object ids
   already authorized to the caller.
+- Release and cancel interlock. With an uncleaned activation the matrix denies `RUN_CANCEL`
+  System-wide, and `request_release` refuses on any queued or running job for the System — so the
+  two obvious moves are both closed and the only path out is `jobs.cancel` (deliberately unguarded,
+  because cancelling is de-escalation) and then the release. The `system_job_active` refusal names
+  `jobs.cancel` for exactly that reason; `jobs.wait` alone is a dead end for a job that will never
+  run.
 - An admissible request returns `configuration_error` with `reason=recovery_executor_unavailable`.
   None of the three ever reports success, and none writes.
 - No tool commits an activation transition. The `active -> recovering` door has no caller.
@@ -348,9 +370,11 @@ ADR-0584 states.
   membership disclosure, which is the existing convention at every lifecycle tool. Authorization runs
   **before** the admission read, so an unauthorized caller learns nothing about whether the System
   carries an activation.
-- Input bounding: bounded Pydantic fields reject malformed or oversized ids and digests before any
-  database read. The conflict operation and the repair disposition are closed literals, not free
-  text, and `object_identities` is length-bounded both per element and in list length.
+- Input bounding: the bounds are declared on the Pydantic fields — `max_length` on
+  `observed_identity`, and on `object_identities` both per element and in list length — so an
+  oversized value is rejected at the transport, before any database read. The handler re-checks the
+  same bounds, which keeps them enforced on the direct service path too. The conflict operation and
+  the repair disposition are closed literals, not free text.
 - Concurrency: the System advisory lock plus the partial unique index on uncleaned activations
   prevent two Runs from both passing admission at a guarded call site.
 - Response leakage: denial data is limited to the activation id, activation state, and owning Run id
@@ -363,9 +387,13 @@ ADR-0584 states.
 **Explicitly out of scope.** Provider execution, journal integrity, reconciliation, orphan deletion
 or adoption, and live-provider behavior are owned elsewhere and are not represented as completed
 behavior here. Authority-host deployment hardening is ADR-0584's and #2150's. Denial-of-service
-through repeated denied calls is bounded by the existing per-tool authorization path; each of the
-three new tools performs at most one indexed single-row read under a per-System lock and writes
-nothing, so it is a weaker amplifier than the lifecycle tools already exposed beside it.
+through repeated denied calls is bounded by the existing per-tool authorization path and writes
+nothing. Two of the three perform at most one indexed single-row read under the per-System lock.
+`request_release` also runs the blocking-job query, which is `LIMIT`-bounded to one error page: its
+`payload->>'system_id'` arm rides `jobs_payload_system_id_idx`, its `run_id` arm has no covering
+index and reaches `jobs` through a `runs` subquery served index-only by `runs_id_system_id_key`. So
+it is bounded work under the lock rather than a single-row read, and still a weaker amplifier than
+the lifecycle tools already exposed beside it.
 
 ## Verification
 
@@ -377,8 +405,11 @@ the truthful `recovery_executor_unavailable` response from each of the three too
 
 Two tests exist specifically to hold the amendment's hard rule:
 
-- an import-closure assertion that `mcp/tools/external_boot/recovery_requests.py` reaches no
-  activation-writing name, so a later edit that adds a transition fails a gate rather than shipping;
+- two static assertions over `mcp/tools/external_boot/recovery_requests.py`: that it reaches no
+  activation-writing name, and that its first-party import set equals a reviewed allow-list of
+  `module:name` pairs. The name scan alone is one level deep, so a write routed through a new
+  first-party helper would pass it; pinning the import set is the closure property that fails such
+  an edit at the gate rather than letting it ship;
 - a PostgreSQL assertion that calling all three tools against a seeded `active` activation leaves the
   activation row byte-identical, so the "no transition it cannot complete" rule is proven on the
   database rather than argued from the source.

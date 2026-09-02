@@ -201,9 +201,13 @@ class ExternalBootDenied(CategorizedError):
 ```
 
 `next_actions` is `["runs.get"]`, plus `"runs.release_external_boot"` for `ACTIVE`, plus
-`"systems.teardown"` for `RECOVERY_CONFLICT` and `RECOVERY_FAILED`. Every MCP call site passes it
-through unchanged: `ToolResponse.failure_from_error(object_id, exc,
-suggested_next_actions=exc.next_actions)`.
+`"systems.teardown"` for `RECOVERY_CONFLICT` and `RECOVERY_FAILED`. Every MCP call site renders it
+through one shared helper, `mcp/tools/_common.py:external_boot_denial(object_id, exc, ctx)`, which
+drops the actions the caller cannot invoke via `mcp/exposure.py:visible_next_actions` (ADR-0261) —
+otherwise a contributor denied on a `recovery_conflict` System is steered at `systems.teardown`,
+which the ADR-0148 exposure filter hides from it and `require_role` denies. That filter needs a
+project, and `runs.create`'s and `runs.bind`'s MCP adapters hold none, so the guard takes a required
+`project` argument and stamps it on the denial beside the actions.
 
 The actions travel on the error rather than through a `next_actions_for(state)` function every call
 site would have to call with the right state, because the call sites do not have the state — they
@@ -229,12 +233,18 @@ Admitted operations by state, and nothing else is admitted:
 
 | state | admitted operations |
 |---|---|
-| `preparing`, `prepared`, `activating`, `recovering` | `SYSTEM_TEARDOWN` |
-| `recovery_conflict` | `EXTERNAL_BOOT_RESOLVE_CONFLICT`, `SYSTEM_TEARDOWN` |
-| `recovery_failed` | `SYSTEM_TEARDOWN` |
+| `preparing`, `prepared`, `activating`, `recovering` | `SYSTEM_TEARDOWN`, `DEBUG_DETACH` |
+| `recovery_conflict` | `EXTERNAL_BOOT_RESOLVE_CONFLICT`, `SYSTEM_TEARDOWN`, `DEBUG_DETACH` |
+| `recovery_failed` | `SYSTEM_TEARDOWN`, `DEBUG_DETACH` |
 | `active` | `EXTERNAL_BOOT_RELEASE`, `SYSTEM_TEARDOWN`, `FORCE_CRASH`, `SYSTEM_WATCH_CRASH`, `CAPTURE_VMCORE`, `CAPTURE_TRAFFIC`, `DEBUG_ATTACH`, `DEBUG_DETACH` |
-| `recovered` / `abandoned` with `cleanup_complete=false` | `SYSTEM_TEARDOWN` |
+| `recovered` / `abandoned` with `cleanup_complete=false` | `SYSTEM_TEARDOWN`, `DEBUG_DETACH` |
 | no row, or terminal with `cleanup_complete=true` | every operation |
+
+`DEBUG_DETACH` sits beside `SYSTEM_TEARDOWN` in every row because it is the reversal of an attach
+the matrix itself admitted. Denying it once the activation leaves `active` would leave the session
+row `live` and its provider transport open with nothing the agent can call to close it, and that
+stranded session then blocks the release on `debug_session_active`. It stays in
+`_OWNING_RUN_SCOPED`, so another Run's detach is still denied.
 
 `RUN_CREATE`, `RUN_BIND`, `RUN_CANCEL`, `RUN_INSTALL`, `RUN_BOOT`, `SYSTEM_POWER`,
 `SYSTEM_REPROVISION`, `SYSTEM_SNAPSHOT`, `SYSTEM_SYSRQ`, and `SYSTEM_AUTHORIZE_SSH_KEY` appear in no
@@ -375,11 +385,17 @@ new `conn.transaction()` plus one `SYSTEM` lock around its guard and its existin
   `conn.transaction(), advisory_xact_lock(INVESTIGATION, run.investigation_id),
   advisory_xact_lock(RUN, run.id)`. Insert `advisory_xact_lock(conn, LockScope.SYSTEM,
   run.system_id)` as the first lock in that same `async with`. Call the guard with `RUN_INSTALL` and
-  `run_id=run.id` immediately after `locked_run` is re-read at :186 and before the
-  `queue.get_by_dedup_key` replay check.
+  `run_id=run.id` **after** the `queue.get_by_dedup_key` replay check has returned the existing
+  envelope for a queued or running install, and before anything that writes.
 - `mcp/tools/lifecycle/runs/steps.py:_enqueue_step` — the block at :443 is
   `conn.transaction(), advisory_xact_lock(RUN, run.id)`. Insert the `SYSTEM` lock first, then call
-  the guard with `RUN_BOOT` and `run_id=run.id`.
+  the guard with `RUN_BOOT` and `run_id=run.id`, likewise behind the same replay lookup (shared as
+  `_in_flight_job`) and ahead of `force`'s `delete_run_step`.
+
+Guarding behind the replay lookup, not in front of it, is what keeps idempotent replay working: it
+is the mechanism an agent polls with, so a repeat call for a step job enqueued and admitted *before*
+the activation appeared must return that job rather than a `conflict` the agent cannot act on. Only
+a fresh enqueue is decided by the matrix.
 
 Both are reached only after their caller has already returned `_not_bound(run_id)` for an unbound Run
 (`install_run` at :107-108, `boot_run` at :299-300), so `run.system_id` is non-`None` at the lock and
@@ -826,12 +842,15 @@ description):
 5. Run `just docs` to regenerate the tool reference, then `just docs-check` and
    `just doc-constants-check`; expect exit 0. If `doc-constants-check` reports a stale tool count,
    run its generator without `--check` and commit the regenerated file.
-6. Add the import-closure gate to `tests/services/external_boot/test_recovery_requests.py`: walk
+6. Add the static gates to `tests/services/external_boot/test_recovery_requests.py`. First, walk
    `kdive.mcp.tools.external_boot.recovery_requests`'s module-level names and assert none of
    `begin_recovery_attempt`, `finish_recovery_attempt`, `record_conflict`, `release_reservation`,
    `mark_cleanup_complete`, `transition`, `create`, `ExternalBootAuthorityMarkerV1`, or
-   `enqueue` is reachable from it. Static enforcement of the amendment's hard rule, beside Task 3
-   step 3's behavioral one. Run `just test-verbose tests/services/external_boot` and expect exit 0.
+   `enqueue` is reachable from it. That scan is one level deep, so add the closure it cannot
+   supply: assert the module's first-party imports equal a reviewed allow-list of `module:name`
+   pairs, which fails a write routed through a new `kdive.*` helper before any name scan has to
+   recognise the call. Static enforcement of the amendment's hard rule, beside Task 3 step 3's
+   behavioral one. Run `just test-verbose tests/services/external_boot` and expect exit 0.
 7. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
 
 Acceptance: the three tools are registered; their FastMCP schemas disclose that the executor is

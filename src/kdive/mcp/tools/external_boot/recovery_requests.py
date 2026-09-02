@@ -37,6 +37,7 @@ from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
@@ -68,17 +69,30 @@ ORPHAN_TOOL = "ops.resolve_recovery_orphan"
 SUPPORTED_RESOLUTION_OPERATION = "restore-recorded-source"
 SUPPORTED_DISPOSITIONS = frozenset({"delete", "adopt"})
 MAX_OBJECT_IDENTITIES = 64
-#: Per-identity character cap, matching the reservation model's ``store_identity`` bound.
-MAX_IDENTITY_LENGTH = 1024
+#: Per-object-identity character cap, matching the reservation model's ``store_identity`` bound.
+#: It bounds the orphan repair's references and nothing else — the conflict digest takes
+#: :data:`MAX_OBSERVED_IDENTITY_LENGTH`, so neither bound moves when the other does.
+MAX_OBJECT_IDENTITY_LENGTH = 1024
+#: The exact length of a ``Digest``: ``'sha256:'`` plus 64 lowercase hex characters. The schema
+#: bound on ``observed_identity``, so an oversized digest is rejected before any database read.
+MAX_OBSERVED_IDENTITY_LENGTH = len("sha256:") + 64
 
 _ACTIVE_JOB_STATES = [JobState.QUEUED.value, JobState.RUNNING.value]
 
 # System-scoped kinds carry the System in their payload; run-scoped kinds carry only a
-# `run_id`, so the Run join is what makes the refusal cover another Run's in-flight work.
+# `run_id`, so the Run lookup is what makes the refusal cover another Run's in-flight work.
+#
+# The `system_id` arm rides `jobs_payload_system_id_idx` (migration 0082), an unpartitioned
+# expression index on exactly `payload->>'system_id'`. The `run_id` arm has no index that covers
+# it — `jobs_live_install_run_id_idx` (migration 0101) is partial on `kind = 'install'` — so it
+# is a subquery rather than a join: the `runs` read is served index-only by
+# `runs_id_system_id_key (id, system_id)` (migration 0121) instead of hashing every Run, and the
+# `LIMIT` bounds what the scan materialises while this holds the System-wide advisory lock.
 _ACTIVE_JOBS_SQL: LiteralString = (
-    "SELECT j.id FROM jobs j LEFT JOIN runs r ON r.id::text = j.payload->>'run_id' "
-    "WHERE j.state = ANY(%s) AND (j.payload->>'system_id' = %s OR r.system_id = %s) "
-    "ORDER BY j.id"
+    "SELECT j.id FROM jobs j "
+    "WHERE j.state = ANY(%s) AND (j.payload->>'system_id' = %s "
+    "OR j.payload->>'run_id' IN (SELECT id::text FROM runs WHERE system_id = %s)) "
+    "ORDER BY j.id LIMIT %s"
 )
 
 _REPOSITORY = ExternalBootActivationRepository()
@@ -188,10 +202,6 @@ def _unresolved_system(system_id: str) -> ToolResponse:
     )
 
 
-def _denial(object_id: str, exc: ExternalBootDenied) -> ToolResponse:
-    return ToolResponse.failure_from_error(object_id, exc, suggested_next_actions=exc.next_actions)
-
-
 def _bounded_ids(key: str, values: list[str]) -> dict[str, JsonValue]:
     """Carry a refusal's blocking ids under ``key``, bounded to one page of them.
 
@@ -207,9 +217,14 @@ def _bounded_ids(key: str, values: list[str]) -> dict[str, JsonValue]:
 
 
 async def _active_job_ids_for_system(conn: AsyncConnection, system_id: UUID) -> list[str]:
-    """Every queued or running job for the System, whichever Run owns it."""
+    """Every queued or running job for the System, whichever Run owns it, bounded to one page.
+
+    One row past ``_MAX_ERROR_ENTRIES`` is fetched so :func:`_bounded_ids` still sees that the
+    cap bit and marks the list ``truncated``; the refusal itself needs no exact count.
+    """
+    params = (_ACTIVE_JOB_STATES, str(system_id), system_id, _MAX_ERROR_ENTRIES + 1)
     async with conn.cursor() as cur:
-        await cur.execute(_ACTIVE_JOBS_SQL, (_ACTIVE_JOB_STATES, str(system_id), system_id))
+        await cur.execute(_ACTIVE_JOBS_SQL, params)
         rows = await cur.fetchall()
     return [str(row[0]) for row in rows]
 
@@ -241,10 +256,12 @@ async def request_release(
                     next_action="runs.get",
                 )
             require_role(ctx, run.project, Role.CONTRIBUTOR)
-            return await _release_locked(conn, run, run.system_id)
+            return await _release_locked(conn, ctx, run, run.system_id)
 
 
-async def _release_locked(conn: AsyncConnection, run: Run, system_id: UUID) -> ToolResponse:
+async def _release_locked(
+    conn: AsyncConnection, ctx: RequestContext, run: Run, system_id: UUID
+) -> ToolResponse:
     """Decide the release under the System lock, so every read sees one consistent activation.
 
     ``conn`` has already read the Run, so this transaction is a SAVEPOINT and the lock releases
@@ -267,17 +284,24 @@ async def _release_locked(conn: AsyncConnection, run: Run, system_id: UUID) -> T
             )
         try:
             await check_external_boot_admission(
-                conn, system_id, ExternalBootOperation.EXTERNAL_BOOT_RELEASE, run_id=run.id
+                conn,
+                system_id,
+                ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
+                project=run.project,
+                run_id=run.id,
             )
         except ExternalBootDenied as exc:
-            return _denial(object_id, exc)
+            return _external_boot_denial(object_id, exc, ctx)
         job_ids = await _active_job_ids_for_system(conn, system_id)
         if job_ids:
             return _conflict(
                 object_id,
                 reason="system_job_active",
                 detail="a queued or running job holds this System; release once it settles",
-                next_actions=["jobs.wait", "runs.get"],
+                # `jobs.cancel` is named because `jobs.wait` is a dead end for a job that will
+                # never run (paused lane, dead worker) and `runs.cancel` is denied by the matrix.
+                # `jobs.cancel` is the one unguarded escape, so it is the action that clears this.
+                next_actions=["jobs.wait", "jobs.cancel", "runs.get"],
                 data=_bounded_ids("job_ids", job_ids),
             )
         session_ids = await active_session_ids_for_system(conn, system_id)
@@ -316,15 +340,13 @@ def _resolution_input_error(
 
 
 def _is_identity_shaped(value: str) -> bool:
-    """Bound the caller's identity, then check its shape against the stored digest form.
+    """Check the caller's identity against the stored digest form.
 
     Shape only. The value is never compared with the activation's recorded composite state:
     that compare-and-set is one half of ``begin_recovery_attempt``, and running it would commit
-    the transition this module cannot finish. The length check precedes the pattern check so an
-    oversized value is refused before any matching work.
+    the transition this module cannot finish. Length needs no separate check — ``Digest`` is an
+    anchored 71-character pattern, and the schema bounds the field before this runs.
     """
-    if len(value) > MAX_IDENTITY_LENGTH:
-        return False
     try:
         _IDENTITY.validate_python(value)
     except ValidationError:
@@ -359,10 +381,12 @@ async def resolve_conflict(
             invalid = _resolution_input_error(system_id, operation, observed_identity)
             if invalid is not None:
                 return invalid
-            return await _resolve_conflict_locked(conn, uid)
+            return await _resolve_conflict_locked(conn, ctx, uid, system.project)
 
 
-async def _resolve_conflict_locked(conn: AsyncConnection, system_id: UUID) -> ToolResponse:
+async def _resolve_conflict_locked(
+    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, project: str
+) -> ToolResponse:
     """Decide the resolution under the System lock.
 
     See :func:`_release_locked` for why the restricting activation is read directly rather
@@ -379,10 +403,13 @@ async def _resolve_conflict_locked(conn: AsyncConnection, system_id: UUID) -> To
             )
         try:
             await check_external_boot_admission(
-                conn, system_id, ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT
+                conn,
+                system_id,
+                ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT,
+                project=project,
             )
         except ExternalBootDenied as exc:
-            return _denial(object_id, exc)
+            return _external_boot_denial(object_id, exc, ctx)
     return _executor_unavailable(object_id, RESOLVE_CONFLICT_TOOL)
 
 
@@ -397,7 +424,7 @@ def _orphan_input_error(
             next_action="systems.get",
         )
     within_bounds = 0 < len(object_identities) <= MAX_OBJECT_IDENTITIES and all(
-        0 < len(identity) <= MAX_IDENTITY_LENGTH for identity in object_identities
+        0 < len(identity) <= MAX_OBJECT_IDENTITY_LENGTH for identity in object_identities
     )
     if not within_bounds:
         return _config_error(
@@ -405,7 +432,7 @@ def _orphan_input_error(
             reason="invalid_object_identities",
             detail=(
                 f"object_identities must hold 1 to {MAX_OBJECT_IDENTITIES} references, each "
-                f"1 to {MAX_IDENTITY_LENGTH} characters"
+                f"1 to {MAX_OBJECT_IDENTITY_LENGTH} characters"
             ),
             next_action="systems.get",
         )
@@ -452,8 +479,9 @@ async def resolve_recovery_orphan(
 
 __all__ = [
     "ADMISSION_STUB_DETAIL",
-    "MAX_IDENTITY_LENGTH",
     "MAX_OBJECT_IDENTITIES",
+    "MAX_OBJECT_IDENTITY_LENGTH",
+    "MAX_OBSERVED_IDENTITY_LENGTH",
     "ORPHAN_STUB_DETAIL",
     "ORPHAN_TOOL",
     "RELEASE_TOOL",

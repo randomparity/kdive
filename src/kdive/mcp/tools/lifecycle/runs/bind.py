@@ -5,6 +5,7 @@ from __future__ import annotations
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import external_boot_denial
 from kdive.security.authz.context import RequestContext
 from kdive.services.external_boot import ExternalBootDenied
 from kdive.services.runs.bind import RunBindRequest as RunBindRequest
@@ -21,9 +22,7 @@ async def bind_run(
     try:
         result = await _bind_run(pool, ctx, request)
     except ExternalBootDenied as exc:
-        return ToolResponse.failure_from_error(
-            request.run_id, exc, suggested_next_actions=exc.next_actions
-        )
+        return external_boot_denial(request.run_id, exc, ctx)
     except RunCreateError as exc:
         return ToolResponse.failure_from_error(exc.object_id, exc)
     return _bound_response(result)

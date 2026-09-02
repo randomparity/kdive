@@ -114,6 +114,7 @@ async def insert_session_locked(
             conn,
             request.system.id,
             ExternalBootOperation.DEBUG_ATTACH,
+            project=request.run.project,
             run_id=request.run.id,
         )
         now = datetime.now(UTC)
@@ -200,7 +201,11 @@ async def detach_locked(
         # Guards the detach itself, after the already-detached no-op returns: a terminal session
         # has no attachment left to reverse, so an activation must not un-idempotent a retry.
         await check_external_boot_admission(
-            conn, system_id, ExternalBootOperation.DEBUG_DETACH, run_id=row["run_id"]
+            conn,
+            system_id,
+            ExternalBootOperation.DEBUG_DETACH,
+            project=row["project"],
+            run_id=row["run_id"],
         )
         await close_transport(connector, row["transport_handle"])
         await DEBUG_SESSIONS.update_state(conn, session_id, DebugSessionState.DETACHED)

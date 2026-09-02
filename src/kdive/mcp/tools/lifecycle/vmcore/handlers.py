@@ -26,6 +26,7 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import kdump_capability_refusal as _kdump_capability_refusal
 from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
@@ -296,12 +297,14 @@ async def _fetch_vmcore(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
                 try:
                     await check_external_boot_admission(
-                        conn, system.id, ExternalBootOperation.CAPTURE_VMCORE, run_id=uid
+                        conn,
+                        system.id,
+                        ExternalBootOperation.CAPTURE_VMCORE,
+                        project=run.project,
+                        run_id=uid,
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        run_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(run_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,

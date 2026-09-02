@@ -195,8 +195,7 @@ permanently deletes the named objects or adopts them back, with no undo.
 
 Requires platform_admin, and a denial is audited. The repair covers quarantined recovery
 objects rather than the activation itself, so it needs no admissible activation state
-and reads none. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
-with `systems.teardown`; `runs.get` reports the owning Run's state.
+and reads none.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

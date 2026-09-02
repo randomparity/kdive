@@ -300,7 +300,7 @@ Run's current state.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `observed_identity` | string | yes | The composite state identity from your most recent systems.get, as 'sha256:<lowercase hex>'; validated for shape only today, because the compare-and-set that consumes it lands with the recovery executor. |
+| `observed_identity` | string | yes | The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'; validated for shape only today, because the compare-and-set that consumes it lands with the recovery executor. |
 | `operation` | string | yes | The resolution to apply; the only accepted value is 'restore-recorded-source', which puts the recorded source state back. |
 | `system_id` | string | yes | The System whose external-boot recovery conflict to resolve. |
 

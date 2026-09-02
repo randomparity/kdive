@@ -49,44 +49,53 @@ class ExternalBootDenied(CategorizedError):
     `ToolResponse.failure_from_error` reduces every `details` value to a JSON scalar, so a
     list of next actions there would be dropped. Binding them to the error also keeps a call
     site from reporting one state's actions against another state's denial.
+
+    `project` travels with them because the actions must be RBAC-filtered before they reach
+    the agent (ADR-0261) and two render frames — `runs.create`'s and `runs.bind`'s MCP
+    adapters — hold no project of their own.
     """
 
     def __init__(
-        self, message: str, *, details: dict[str, object], next_actions: list[str]
+        self,
+        message: str,
+        *,
+        details: dict[str, object],
+        next_actions: list[str],
+        project: str,
     ) -> None:
         super().__init__(message, category=ErrorCategory.CONFLICT, details=details, terminal=True)
         self.next_actions = next_actions
+        self.project = project
 
 
-_TEARDOWN_ONLY = frozenset({ExternalBootOperation.SYSTEM_TEARDOWN})
+# Admitted in every restricting state. Teardown is the escape hatch out of a stuck activation;
+# `DEBUG_DETACH` is the reversal of an attach the matrix itself admitted, so denying it would
+# strand a `live` session and leave its provider transport open with no agent-reachable way to
+# close it (#2117 review H1). It stays owning-Run scoped, so only the owning Run may detach.
+_ALWAYS_ADMITTED = frozenset(
+    {ExternalBootOperation.SYSTEM_TEARDOWN, ExternalBootOperation.DEBUG_DETACH}
+)
 
 # Total over the state enum, so no restricting activation can reach an undecided operation.
 _ADMITTED: Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]] = {
-    ExternalBootActivationState.PREPARING: _TEARDOWN_ONLY,
-    ExternalBootActivationState.PREPARED: _TEARDOWN_ONLY,
-    ExternalBootActivationState.ACTIVATING: _TEARDOWN_ONLY,
-    ExternalBootActivationState.RECOVERING: _TEARDOWN_ONLY,
-    ExternalBootActivationState.RECOVERY_CONFLICT: frozenset(
-        {
-            ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT,
-            ExternalBootOperation.SYSTEM_TEARDOWN,
-        }
-    ),
-    ExternalBootActivationState.RECOVERY_FAILED: _TEARDOWN_ONLY,
-    ExternalBootActivationState.ACTIVE: frozenset(
-        {
-            ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
-            ExternalBootOperation.SYSTEM_TEARDOWN,
-            ExternalBootOperation.FORCE_CRASH,
-            ExternalBootOperation.SYSTEM_WATCH_CRASH,
-            ExternalBootOperation.CAPTURE_VMCORE,
-            ExternalBootOperation.CAPTURE_TRAFFIC,
-            ExternalBootOperation.DEBUG_ATTACH,
-            ExternalBootOperation.DEBUG_DETACH,
-        }
-    ),
-    ExternalBootActivationState.RECOVERED: _TEARDOWN_ONLY,
-    ExternalBootActivationState.ABANDONED: _TEARDOWN_ONLY,
+    ExternalBootActivationState.PREPARING: _ALWAYS_ADMITTED,
+    ExternalBootActivationState.PREPARED: _ALWAYS_ADMITTED,
+    ExternalBootActivationState.ACTIVATING: _ALWAYS_ADMITTED,
+    ExternalBootActivationState.RECOVERING: _ALWAYS_ADMITTED,
+    ExternalBootActivationState.RECOVERY_CONFLICT: _ALWAYS_ADMITTED
+    | {ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT},
+    ExternalBootActivationState.RECOVERY_FAILED: _ALWAYS_ADMITTED,
+    ExternalBootActivationState.ACTIVE: _ALWAYS_ADMITTED
+    | {
+        ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
+        ExternalBootOperation.FORCE_CRASH,
+        ExternalBootOperation.SYSTEM_WATCH_CRASH,
+        ExternalBootOperation.CAPTURE_VMCORE,
+        ExternalBootOperation.CAPTURE_TRAFFIC,
+        ExternalBootOperation.DEBUG_ATTACH,
+    },
+    ExternalBootActivationState.RECOVERED: _ALWAYS_ADMITTED,
+    ExternalBootActivationState.ABANDONED: _ALWAYS_ADMITTED,
 }
 
 # Admitted only for the Run that owns the activation. Teardown and conflict resolution are
@@ -115,12 +124,17 @@ async def check_external_boot_admission(
     system_id: UUID,
     operation: ExternalBootOperation,
     *,
+    project: str,
     run_id: UUID | None = None,
 ) -> None:
     """Admit `operation` on `system_id`, or raise :class:`ExternalBootDenied`.
 
     Returns `None` both when no activation restricts the System and when the matrix admits
     the operation against the restricting one: this is a guard, not a lookup.
+
+    `project` decides nothing here; it is stamped onto the denial so the render frame can drop
+    the next actions the caller cannot invoke for that project (ADR-0261). It is required
+    rather than optional so a new call site cannot silently ship an unfiltered breadcrumb.
     """
     activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
     if activation is None:
@@ -139,6 +153,7 @@ async def check_external_boot_admission(
             "owning_run_id": str(activation.run_id),
         },
         next_actions=["runs.get"] if next_action is None else ["runs.get", next_action],
+        project=project,
     )
 
 

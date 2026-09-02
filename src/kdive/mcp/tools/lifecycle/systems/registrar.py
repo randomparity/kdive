@@ -22,6 +22,9 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
     ADMISSION_STUB_DETAIL as _ADMISSION_STUB_DETAIL,
 )
 from kdive.mcp.tools.external_boot.recovery_requests import (
+    MAX_OBSERVED_IDENTITY_LENGTH as _MAX_OBSERVED_IDENTITY_LENGTH,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
     SUPPORTED_RESOLUTION_OPERATION as _SUPPORTED_RESOLUTION_OPERATION,
 )
 from kdive.mcp.tools.external_boot.recovery_requests import (
@@ -656,11 +659,12 @@ def _register_systems_resolve_external_boot_conflict(
         observed_identity: Annotated[
             str,
             Field(
+                max_length=_MAX_OBSERVED_IDENTITY_LENGTH,
                 description=(
                     "The composite state identity from your most recent systems.get, as "
-                    "'sha256:<lowercase hex>'; validated for shape only today, because the "
+                    "'sha256:<64 lowercase hex>'; validated for shape only today, because the "
                     "compare-and-set that consumes it lands with the recovery executor."
-                )
+                ),
             ),
         ],
     ) -> ToolResponse:

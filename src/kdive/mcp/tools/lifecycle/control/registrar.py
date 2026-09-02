@@ -63,6 +63,9 @@ from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import (
+    external_boot_denial as _external_boot_denial,
+)
+from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
@@ -164,12 +167,10 @@ async def power_system(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_POWER
+                        conn, uid, ExternalBootOperation.SYSTEM_POWER, project=system.project
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        system_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -274,12 +275,10 @@ async def force_crash_system(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.FORCE_CRASH
+                        conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        system_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -348,12 +347,10 @@ async def diagnostic_sysrq_system(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_SYSRQ
+                        conn, uid, ExternalBootOperation.SYSTEM_SYSRQ, project=system.project
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        system_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -431,12 +428,10 @@ async def watch_for_crash_system(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
                 try:
                     await check_external_boot_admission(
-                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH
+                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        system_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(system_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,
@@ -568,12 +563,14 @@ async def _capture_traffic(
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
                 try:
                     await check_external_boot_admission(
-                        conn, system.id, ExternalBootOperation.CAPTURE_TRAFFIC, run_id=uid
+                        conn,
+                        system.id,
+                        ExternalBootOperation.CAPTURE_TRAFFIC,
+                        project=run.project,
+                        run_id=uid,
                     )
                 except ExternalBootDenied as exc:
-                    return ToolResponse.failure_from_error(
-                        run_id, exc, suggested_next_actions=exc.next_actions
-                    )
+                    return _external_boot_denial(run_id, exc, ctx)
                 return await keyed_mutation(
                     conn,
                     idempotency_key=idempotency_key,

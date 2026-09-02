@@ -42,6 +42,9 @@ _RELEASE = "runs.release_external_boot"
 _RESOLVE = "systems.resolve_external_boot_conflict"
 _ORPHAN = "ops.resolve_recovery_orphan"
 _CONTRACTS = (_RELEASE, _RESOLVE, _ORPHAN)
+# The two that decide against the activation matrix. The orphan repair is not one of them: it
+# reads no activation state, so activation-state guidance in its docstring would be noise.
+_ADMISSION_CONTRACTS = (_RELEASE, _RESOLVE)
 _UNAVAILABLE = "recovery_executor_unavailable"
 _RESOLUTION = "restore-recorded-source"
 _DIGEST = "sha256:" + "b" * 64
@@ -126,14 +129,27 @@ def test_each_docstring_states_the_required_role(name: str, role: str) -> None:
     assert role in (TOOLS[name].description or "")
 
 
-@pytest.mark.parametrize("name", _CONTRACTS)
+@pytest.mark.parametrize("name", _ADMISSION_CONTRACTS)
 def test_each_docstring_names_the_recovery_action_it_cannot_perform(name: str) -> None:
-    """A System stuck in a recovery state is recovered by teardown, and observed by runs.get."""
+    """A System stuck in a recovery state is recovered by teardown, and observed by runs.get.
+
+    Scoped to the two admission contracts. Asserting it over ``ops.resolve_recovery_orphan``
+    too is what put activation-state guidance into a docstring whose own paragraph says the
+    repair "needs no admissible activation state and reads none".
+    """
     description = TOOLS[name].description or ""
     assert "systems.teardown" in description
     assert "runs.get" in description
     assert "recovery_conflict" in description
     assert "recovery_failed" in description
+
+
+def test_the_orphan_docstring_carries_no_activation_state_guidance() -> None:
+    """The contract shapes the test: the repair reads no activation, so it names no state."""
+    description = TOOLS[_ORPHAN].description or ""
+    assert "recovery_conflict" not in description
+    assert "recovery_failed" not in description
+    assert "systems.teardown" not in description
 
 
 def test_the_release_names_the_only_admissible_activation_state() -> None:

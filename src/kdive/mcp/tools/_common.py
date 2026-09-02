@@ -13,8 +13,11 @@ from uuid import UUID
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import authorizing, context_from_job
+from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ResponseDataInput, ToolResponse, current_status_data
+from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
+from kdive.services.external_boot import ExternalBootDenied
 
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
@@ -302,6 +305,24 @@ def authz_denied(object_id: str, missing_checks: list[str]) -> ToolResponse:
     return ToolResponse.denied(object_id, data={"missing_checks": checks})
 
 
+def external_boot_denial(
+    object_id: str, exc: ExternalBootDenied, ctx: RequestContext
+) -> ToolResponse:
+    """Render an external-boot matrix denial with RBAC-filtered next actions (ADR-0261/0583).
+
+    The matrix steers a denied caller at ``systems.teardown`` in the two recovery states, which
+    is project ``ADMIN``: a contributor told to call it would be steered at a tool the ADR-0148
+    exposure filter hides from it and ``require_role`` denies. The filter is the same one every
+    other breadcrumb producer applies; the project comes off the denial because two render
+    frames (``runs.create``, ``runs.bind``) hold none of their own.
+    """
+    return ToolResponse.failure_from_error(
+        object_id,
+        exc,
+        suggested_next_actions=visible_next_actions(exc.next_actions, ctx, exc.project),
+    )
+
+
 def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:
     base = ToolResponse.from_job(job)
     return base.model_copy(update={"data": {**base.data, object_key: str(object_id)}})
@@ -326,6 +347,7 @@ __all__ = [
     "decode_ts_uuid_cursor",
     "encode_cursor",
     "encode_ts_uuid_cursor",
+    "external_boot_denial",
     "invalid_cursor_error",
     "invalid_uuid_error",
     "job_envelope",

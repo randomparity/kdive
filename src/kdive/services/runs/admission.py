@@ -332,7 +332,7 @@ async def _create_locked(
         if assertion_block is not None:
             raise assertion_block
         await check_external_boot_admission(
-            conn, targets.system_id, ExternalBootOperation.RUN_CREATE
+            conn, targets.system_id, ExternalBootOperation.RUN_CREATE, project=project
         )
         inv = await _investigation_for_update(conn, targets.investigation_id)
         if inv is None:

@@ -30,6 +30,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle._recovery import iso
@@ -198,12 +199,10 @@ async def snapshot_system(
                 return _config_error(system_id, data={"current_status": system.state.value})
             try:
                 await check_external_boot_admission(
-                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
                 )
             except ExternalBootDenied as exc:
-                return ToolResponse.failure_from_error(
-                    system_id, exc, suggested_next_actions=exc.next_actions
-                )
+                return _external_boot_denial(system_id, exc, ctx)
             collision = await _resolve_snapshot_collision(conn, uid, validated)
             if isinstance(collision, ToolResponse):
                 return collision
@@ -280,12 +279,10 @@ async def restore_system(
                 return _config_error(system_id, data={"current_status": system.state.value})
             try:
                 await check_external_boot_admission(
-                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
                 )
             except ExternalBootDenied as exc:
-                return ToolResponse.failure_from_error(
-                    system_id, exc, suggested_next_actions=exc.next_actions
-                )
+                return _external_boot_denial(system_id, exc, ctx)
             snapshot = await snapshot_by_name(conn, uid, name)
             if snapshot is None or snapshot.state is not SnapshotState.AVAILABLE:
                 return _config_error(
@@ -410,12 +407,10 @@ async def delete_snapshot(
                 return _config_error(system_id)
             try:
                 await check_external_boot_admission(
-                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
                 )
             except ExternalBootDenied as exc:
-                return ToolResponse.failure_from_error(
-                    system_id, exc, suggested_next_actions=exc.next_actions
-                )
+                return _external_boot_denial(system_id, exc, ctx)
             snapshot = await snapshot_by_name(conn, uid, name)
             if snapshot is None:
                 return _config_error(

@@ -178,7 +178,11 @@ async def _bind_locked(
         if assertion is not None:
             raise assertion
         await check_external_boot_admission(
-            conn, targets.system_id, ExternalBootOperation.RUN_BIND, run_id=run_id
+            conn,
+            targets.system_id,
+            ExternalBootOperation.RUN_BIND,
+            project=project,
+            run_id=run_id,
         )
         if not await _bind_system(conn, run_id, targets.system_id):
             raise RunCreateError(

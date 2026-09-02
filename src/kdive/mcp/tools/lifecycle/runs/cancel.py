@@ -17,6 +17,7 @@ from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
@@ -83,12 +84,10 @@ async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -
         if run.system_id is not None:
             try:
                 await check_external_boot_admission(
-                    conn, run.system_id, ExternalBootOperation.RUN_CANCEL
+                    conn, run.system_id, ExternalBootOperation.RUN_CANCEL, project=run.project
                 )
             except ExternalBootDenied as exc:
-                return ToolResponse.failure_from_error(
-                    str(run.id), exc, suggested_next_actions=exc.next_actions
-                )
+                return _external_boot_denial(str(run.id), exc, ctx)
         locked = await RUNS.get(conn, run.id)
         prior = locked.state if locked is not None else run.state
         try:

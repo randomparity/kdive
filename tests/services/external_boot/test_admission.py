@@ -44,7 +44,10 @@ _ADMITTING_STATES: dict[ExternalBootOperation, frozenset[ExternalBootActivationS
     _OP.CAPTURE_VMCORE: _ACTIVE_ONLY,
     _OP.CAPTURE_TRAFFIC: _ACTIVE_ONLY,
     _OP.DEBUG_ATTACH: _ACTIVE_ONLY,
-    _OP.DEBUG_DETACH: _ACTIVE_ONLY,
+    # Every restricting state, like teardown: a detach reverses an attach the matrix admitted,
+    # so denying it outside `active` would strand a live session and leak its transport. Still
+    # owning-Run scoped, so only the Run holding the activation may detach.
+    _OP.DEBUG_DETACH: _EVERY_RESTRICTED_STATE,
 }
 
 _NEVER_ADMITTED = frozenset(
@@ -103,7 +106,7 @@ def _restricted_by(
 def _check(system_id: UUID, operation: ExternalBootOperation, run_id: UUID | None = None) -> None:
     asyncio.run(
         check_external_boot_admission(
-            cast("AsyncConnection", None), system_id, operation, run_id=run_id
+            cast("AsyncConnection", None), system_id, operation, project="proj", run_id=run_id
         )
     )
 
@@ -198,6 +201,54 @@ def test_denial_carries_the_state_s_next_actions_off_details(
     assert denied.next_actions == next_actions
 
 
+def test_a_denial_carries_the_project_its_render_frame_filters_on() -> None:
+    """ADR-0261 filtering happens at the render frame, which reads the project off the error."""
+    system_id, run_id = uuid4(), uuid4()
+    activation = build_activation(
+        activation_id=uuid4(), system_id=system_id, run_id=run_id, state=_STATE.RECOVERY_CONFLICT
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        _restricted_by(patch, activation)
+        with pytest.raises(ExternalBootDenied) as raised:
+            _check(system_id, _OP.SYSTEM_POWER)
+    assert raised.value.project == "proj"
+
+
+_NON_ACTIVE_RESTRICTING = [state for state in _STATE if state is not _STATE.ACTIVE]
+
+
+def _detach_check(
+    monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState, caller_run: UUID | None
+) -> None:
+    system_id, owning_run_id = uuid4(), uuid4()
+    activation = build_activation(
+        activation_id=uuid4(), system_id=system_id, run_id=owning_run_id, state=state
+    )
+    _restricted_by(monkeypatch, activation)
+    _check(system_id, _OP.DEBUG_DETACH, owning_run_id if caller_run is None else caller_run)
+
+
+@pytest.mark.parametrize("state", _NON_ACTIVE_RESTRICTING)
+def test_the_owning_run_may_detach_in_every_restricting_state(
+    monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
+) -> None:
+    """Denying the reversal of an admitted attach strands a live session and leaks its transport.
+
+    The states here are the ones the matrix restricts *other* than ``active``; ``active`` is
+    already covered by the table test.
+    """
+    assert _detach_check(monkeypatch, state, None) is None
+
+
+@pytest.mark.parametrize("state", _NON_ACTIVE_RESTRICTING)
+def test_a_different_run_is_still_denied_a_detach_in_every_restricting_state(
+    monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
+) -> None:
+    """The owning-Run fence survives the widening: only the activation's Run may detach."""
+    with pytest.raises(ExternalBootDenied):
+        _detach_check(monkeypatch, state, uuid4())
+
+
 def test_get_restricting_for_system_sees_only_uncleaned_activations(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
@@ -287,7 +338,10 @@ _UNGUARDED_TOOLS: dict[str, str] = {
     "investigations.open": "Investigation bookkeeping; touches no System",
     "investigations.set": "Investigation bookkeeping; touches no System",
     "investigations.unlink": "Investigation bookkeeping; touches no System",
-    "jobs.cancel": "cancels a job the guard already admitted when it was enqueued",
+    "jobs.cancel": (
+        "cancelling is de-escalation: it starts no guest work and frees the System-held job "
+        "that blocks a release, which is why it is the escape hatch that refusal names"
+    ),
     "ops.diagnostics": "operator read-out; enqueues no System work",
     "ops.export_systems_toml": "operator read-out; enqueues no System work",
     "ops.force_release": "operator break-glass, the escape hatch a stuck activation needs",

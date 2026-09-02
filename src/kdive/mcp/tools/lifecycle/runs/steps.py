@@ -25,6 +25,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
 from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
@@ -156,6 +157,20 @@ async def _reject_crashkernel_off_kdump(
     return None
 
 
+async def _in_flight_job(conn: AsyncConnection, run_id: UUID, step: str) -> Job | None:
+    """The queued or running job for this step, if there is one.
+
+    A repeat call that finds one enqueues nothing and returns that job unchanged, so it is a
+    poll rather than fresh work. That is why the external-boot guard sits behind this lookup at
+    both step sites (ADR-0583): an activation must not turn an agent's own in-flight job into a
+    conflict, which is what idempotent replay is for.
+    """
+    prior = await queue.get_by_dedup_key(conn, f"{run_id}:{step}")
+    if prior is None or prior.state not in {JobState.QUEUED, JobState.RUNNING}:
+        return None
+    return prior
+
+
 async def _restage_and_enqueue_install(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -188,6 +203,10 @@ async def _restage_and_enqueue_install(
     # `_not_bound` for an unbound Run, so `run.system_id` is set by the time this runs.
     # `conn` has already read the Run, so this is a SAVEPOINT: every lock here releases at
     # end-of-request. Only the envelope render follows the block.
+    #
+    # `require_system_id()` raises rather than returning, and that raise is uncaught here — it is
+    # unreachable because the reasoning that rules it out lives two frames up, in `install_run`'s
+    # `_not_bound` early return, not at this call.
     system_id = run.require_system_id()
     async with (
         conn.transaction(),
@@ -198,14 +217,6 @@ async def _restage_and_enqueue_install(
         locked_run = await RUNS.get(conn, run.id)
         if locked_run is None or locked_run.investigation_id != run.investigation_id:
             return _config_error(str(run.id))
-        try:
-            await check_external_boot_admission(
-                conn, system_id, ExternalBootOperation.RUN_INSTALL, run_id=run.id
-            )
-        except ExternalBootDenied as exc:
-            return ToolResponse.failure_from_error(
-                str(run.id), exc, suggested_next_actions=exc.next_actions
-            )
         requested_cmdline = (
             cmdline.strip()
             if cmdline is not None
@@ -214,9 +225,21 @@ async def _restage_and_enqueue_install(
         progress = await step_progress(conn, run.id)
         if progress.install == RUN_STEP_RUNNING or progress.boot == RUN_STEP_RUNNING:
             return _config_error(str(run.id), data={"reason": "step_in_progress"})
-        prior = await queue.get_by_dedup_key(conn, f"{run.id}:install")
-        if prior is not None and prior.state in {JobState.QUEUED, JobState.RUNNING}:
+        prior = await _in_flight_job(conn, run.id, "install")
+        if prior is not None:
             return run_job_envelope(prior, run.id)
+        # After the replay return, so a poll of an install admitted and enqueued before the
+        # activation appeared still gets its own job back; only a fresh enqueue is guarded.
+        try:
+            await check_external_boot_admission(
+                conn,
+                system_id,
+                ExternalBootOperation.RUN_INSTALL,
+                project=run.project,
+                run_id=run.id,
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(str(run.id), exc, ctx)
         variant_changed = (
             progress.installed_cmdline != requested_cmdline
             or progress.installed_crashkernel != requested_crashkernel
@@ -464,20 +487,30 @@ async def _enqueue_step(
     # unbound Run, so `run.system_id` is set by the time this runs. `conn` has already read the
     # Run, so this is a SAVEPOINT: the locks release at end-of-request, and only the envelope
     # render follows the block.
+    #
+    # `require_system_id()` raises rather than returning, and that raise is uncaught here — it is
+    # unreachable because the reasoning that rules it out lives two frames up, in `boot_run`'s
+    # `_not_bound` early return, not at this call.
     system_id = run.require_system_id()
     async with (
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
         advisory_xact_lock(conn, LockScope.RUN, run.id),
     ):
-        try:
-            await check_external_boot_admission(
-                conn, system_id, ExternalBootOperation.RUN_BOOT, run_id=run.id
-            )
-        except ExternalBootDenied as exc:
-            return ToolResponse.failure_from_error(
-                str(run.id), exc, suggested_next_actions=exc.next_actions
-            )
+        # Behind the replay lookup, so a poll of a boot enqueued before the activation appeared
+        # still gets its own job back from `_locked_enqueue`; only a fresh enqueue is guarded.
+        # It stays ahead of the `force` re-stage, whose `delete_run_step` is a write.
+        if await _in_flight_job(conn, run.id, step) is None:
+            try:
+                await check_external_boot_admission(
+                    conn,
+                    system_id,
+                    ExternalBootOperation.RUN_BOOT,
+                    project=run.project,
+                    run_id=run.id,
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(str(run.id), exc, ctx)
         if force:
             progress = await step_progress(conn, run.id)
             if progress.boot == RUN_STEP_RUNNING:
