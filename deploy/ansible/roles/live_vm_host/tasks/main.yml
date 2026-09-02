@@ -91,7 +91,7 @@
     group: "{{ github_runner_user }}"
     mode: "0755"
 
-- name: Check out the project source for the venv
+- name: Check out the remote project source for the venv
   ansible.builtin.git:
     repo: "{{ live_vm_repo_url }}"
     dest: "{{ live_vm_venv }}"
@@ -99,6 +99,39 @@
   become: true
   become_user: "{{ github_runner_user }}"
   register: live_vm_host_checkout
+  when: not live_vm_repo_url.endswith('.bundle')
+
+- name: Clone the exact Git bundle for the venv
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/git
+      - clone
+      - --no-hardlinks
+      - "{{ live_vm_repo_url }}"
+      - "{{ live_vm_venv }}"
+  args:
+    creates: "{{ live_vm_venv }}/.git"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_bundle_clone
+  when: live_vm_repo_url.endswith('.bundle')
+
+- name: Read the exact Git bundle checkout revision  # noqa: command-instead-of-module
+  # The git module runs ls-remote through file://, which cannot probe a bundle file.
+  ansible.builtin.command: "/usr/bin/git -C {{ live_vm_venv }} rev-parse HEAD"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_bundle_revision
+  changed_when: false
+  failed_when: live_vm_host_bundle_revision.stdout != live_vm_repo_version
+  when: live_vm_repo_url.endswith('.bundle')
+
+- name: Record the exact Git bundle checkout result
+  ansible.builtin.set_fact:
+    live_vm_host_checkout:
+      after: "{{ live_vm_host_bundle_revision.stdout }}"
+      changed: "{{ live_vm_host_bundle_clone is changed }}"
+  when: live_vm_repo_url.endswith('.bundle')
 
 - name: Build the venv against the SYSTEM interpreter (ABI-match python3-guestfs)  # noqa: no-handler
   # noqa no-handler: not a handler on purpose — the venv must exist before the libguestfs

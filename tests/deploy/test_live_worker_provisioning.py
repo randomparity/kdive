@@ -238,6 +238,8 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "teardown pass 1" in proof
     assert "teardown pass 2" in proof
     assert "ub26-big.dev.pdx.drc.nz" not in proof
+    assert "Clone the exact Git bundle for the venv" in tasks
+    assert "live_vm_repo_url.endswith('.bundle')" in tasks
 
     teardown = _text(AUTHORITY_TEARDOWN)
     for evidence in (
