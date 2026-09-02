@@ -310,7 +310,12 @@ done
 echo "reboot: waiting for carrier to return"
 carrier_returned=0
 for _attempt in $(seq 1 60); do
-  if ssh -o BatchMode=yes -o ConnectTimeout=3 "$target" true 2>/dev/null; then
+  if ssh -o BatchMode=yes -o ConnectTimeout=3 "$target" bash -s -- "$remote_root" \
+    2>/dev/null <<'REMOTE_RETURN'; then
+set -euo pipefail
+remote_root=$1
+[[ $(cat /proc/sys/kernel/random/boot_id) != $(cat "$remote_root/pre-reboot.boot-id") ]]
+REMOTE_RETURN
     carrier_returned=1
     break
   fi
