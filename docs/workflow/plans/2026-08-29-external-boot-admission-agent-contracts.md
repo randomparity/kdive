@@ -82,7 +82,7 @@ Created:
 - `src/kdive/services/external_boot/admission.py` — the closed decision table.
 - `tests/services/external_boot/conftest.py` — the shared activation-seeding factory.
 - `src/kdive/services/external_boot/recovery_requests.py` — the three non-writing contract services.
-- `src/kdive/mcp/tools/ops/external_boot.py` — the `ops.resolve_recovery_orphan` plane.
+- three `docs/debt/` deferral records this design owes — see *Deferrals* for their paths.
 - `tests/services/external_boot/__init__.py`
 - `tests/services/external_boot/test_admission.py`
 - `tests/services/external_boot/test_recovery_requests.py`
@@ -100,9 +100,11 @@ Modified:
 - `src/kdive/services/runs/admission.py` — guard Run creation.
 - `src/kdive/services/runs/bind.py` — guard Run bind.
 - `src/kdive/services/debug/lifecycle.py` — guard attach and detach.
+- `src/kdive/mcp/tools/lifecycle/systems/ssh_access.py` — guard `systems.authorize_ssh_key`.
+- `src/kdive/mcp/tools/lifecycle/runs/cancel.py` — guard `runs.cancel`; conditional `SYSTEM` lock.
 - `src/kdive/mcp/tools/lifecycle/runs/registrar.py` — `runs.release_external_boot` wrapper.
 - `src/kdive/mcp/tools/lifecycle/systems/registrar.py` — `systems.resolve_external_boot_conflict`.
-- `src/kdive/mcp/assembly/tool_registration.py` — register the new `ops` plane.
+- `src/kdive/mcp/tools/ops/security/breakglass.py` — `ops.resolve_recovery_orphan` wrapper.
 - `src/kdive/mcp/tools/_docmeta.py` — add `ops.resolve_recovery_orphan` to `DESTRUCTIVE_TOOLS`.
 - `docs/guide/reference/` — regenerated, not hand-edited.
 
@@ -140,6 +142,7 @@ Provided to later tasks:
 class ExternalBootOperation(StrEnum):
     RUN_CREATE = "run_create"
     RUN_BIND = "run_bind"
+    RUN_CANCEL = "run_cancel"
     RUN_INSTALL = "run_install"
     RUN_BOOT = "run_boot"
     SYSTEM_REPROVISION = "system_reprovision"
@@ -147,6 +150,8 @@ class ExternalBootOperation(StrEnum):
     SYSTEM_SNAPSHOT = "system_snapshot"
     SYSTEM_SYSRQ = "system_sysrq"
     SYSTEM_TEARDOWN = "system_teardown"
+    SYSTEM_AUTHORIZE_SSH_KEY = "system_authorize_ssh_key"
+    SYSTEM_WATCH_CRASH = "system_watch_crash"
     FORCE_CRASH = "force_crash"
     CAPTURE_VMCORE = "capture_vmcore"
     CAPTURE_TRAFFIC = "capture_traffic"
@@ -156,29 +161,27 @@ class ExternalBootOperation(StrEnum):
     EXTERNAL_BOOT_RESOLVE_CONFLICT = "external_boot_resolve_conflict"
 
 
-@dataclass(frozen=True, slots=True)
-class ExternalBootBinding:
-    """The activation an admitted operation must fence against, or None when unrestricted."""
-
-    activation_id: UUID
-    run_id: UUID
-    state: ExternalBootActivationState
-
-
 async def check_external_boot_admission(
     conn: AsyncConnection,
     system_id: UUID,
     operation: ExternalBootOperation,
     *,
     run_id: UUID | None = None,
-) -> ExternalBootBinding | None: ...
+) -> None: ...
 ```
 
-`check_external_boot_admission` returns `None` when no activation restricts the System, returns the
-binding when the operation is admitted against a live activation, and raises
-`CategorizedError(category=ErrorCategory.CONFLICT, terminal=True)` otherwise. Its `details` carry
-exactly the three scalar keys `{"activation_id": str, "activation_state": str, "owning_run_id": str}`
-and nothing else.
+`check_external_boot_admission` returns `None` both when no activation restricts the System and when
+the operation is admitted against a live activation, and raises `ExternalBootDenied` otherwise. Its
+`details` carry exactly the three scalar keys
+`{"activation_id": str, "activation_state": str, "owning_run_id": str}` and nothing else.
+
+It is a guard, not a lookup: it returns no value. An earlier draft returned an `ExternalBootBinding`
+carrying the activation identity "for the later execution mechanism", but that mechanism belongs to
+#2118 and no caller on this branch consumes one — scaffolding for excluded work. #2118 introduces the
+dataclass with its first consumer.
+
+Because `None` covers both the unrestricted and the admitted case, a caller that needs to distinguish
+them must ask separately. Only the two contract services in Task 3 need to, and Task 3 says how.
 
 The next actions are **not** in `details`: `ToolResponse.failure_from_error` runs `exc.details`
 through `safe_error_details` (`src/kdive/serialization.py:96`), which reduces each value to a JSON
@@ -227,20 +230,33 @@ Admitted operations by state, and nothing else is admitted:
 | `preparing`, `prepared`, `activating`, `recovering` | `SYSTEM_TEARDOWN` |
 | `recovery_conflict` | `EXTERNAL_BOOT_RESOLVE_CONFLICT`, `SYSTEM_TEARDOWN` |
 | `recovery_failed` | `SYSTEM_TEARDOWN` |
-| `active` | `EXTERNAL_BOOT_RELEASE`, `SYSTEM_TEARDOWN`, `FORCE_CRASH`, `CAPTURE_VMCORE`, `CAPTURE_TRAFFIC`, `DEBUG_ATTACH`, `DEBUG_DETACH` |
+| `active` | `EXTERNAL_BOOT_RELEASE`, `SYSTEM_TEARDOWN`, `FORCE_CRASH`, `SYSTEM_WATCH_CRASH`, `CAPTURE_VMCORE`, `CAPTURE_TRAFFIC`, `DEBUG_ATTACH`, `DEBUG_DETACH` |
 | `recovered` / `abandoned` with `cleanup_complete=false` | `SYSTEM_TEARDOWN` |
 | no row, or terminal with `cleanup_complete=true` | every operation |
 
-`RUN_CREATE`, `RUN_BIND`, `RUN_INSTALL`, `RUN_BOOT`, `SYSTEM_POWER`, `SYSTEM_REPROVISION`,
-`SYSTEM_SNAPSHOT`, and `SYSTEM_SYSRQ` appear in no row above, so a restricting activation denies them
-in every state including `active` — which is ADR-0583's "rejects every install or restage,
-unrelated-Run operation, generic power/control operation, snapshot".
+`RUN_CREATE`, `RUN_BIND`, `RUN_CANCEL`, `RUN_INSTALL`, `RUN_BOOT`, `SYSTEM_POWER`,
+`SYSTEM_REPROVISION`, `SYSTEM_SNAPSHOT`, `SYSTEM_SYSRQ`, and `SYSTEM_AUTHORIZE_SSH_KEY` appear in no
+row above, so a restricting activation denies them in every state including `active` — which is
+ADR-0583's "rejects every install or restage, unrelated-Run operation, generic power/control
+operation, snapshot, and mutation of definition, modules, attachments, or boot selection".
+
+`SYSTEM_WATCH_CRASH` sits with the other `active` admissions because a crash watch is a console
+observer, and ADR-0583's `active` clause admits read-only System observation. It is denied in the
+restricted states, where the same clause rejects every capture and control operation.
+
+`RUN_CANCEL` is denied because `runs.cancel`'s own contract says it "frees the System for a new
+`runs.create`" (`runs/cancel.py:35-37`) and with an uncleaned activation it cannot — the matrix
+denies `RUN_CREATE`. Letting the cancel succeed would report a freed System that is still locked, so
+the denial is what makes the existing promise honest. It is System-scoped, not owning-Run scoped:
+cancelling any Run must not orphan another Run's activation.
 
 A second frozenset, `_OWNING_RUN_SCOPED`, holds `EXTERNAL_BOOT_RELEASE`, `CAPTURE_VMCORE`,
 `CAPTURE_TRAFFIC`, `DEBUG_ATTACH`, and `DEBUG_DETACH`. An operation in that set is admitted only when
 the caller's `run_id` equals the activation's `run_id`; a different or absent `run_id` is a denial.
-`SYSTEM_TEARDOWN` and `EXTERNAL_BOOT_RESOLVE_CONFLICT` are not in it: ADR-0583 scopes both to the
-System.
+`SYSTEM_TEARDOWN`, `SYSTEM_WATCH_CRASH`, `RUN_CANCEL`, and `EXTERNAL_BOOT_RESOLVE_CONFLICT` are not
+in it: ADR-0583 scopes teardown and conflict resolution to the System, `control.watch_for_crash`
+carries only a `system_id` (the same shape as `FORCE_CRASH` below), and `RUN_CANCEL` must deny
+regardless of which Run is being cancelled.
 
 **`FORCE_CRASH` is a stated residual, not an oversight.** ADR-0583:351 lists force-crash among the
 `active`-admitted operations under an "owning-Run" modifier, but `control.force_crash` carries only a
@@ -277,7 +293,7 @@ is `recovery_conflict` or `recovery_failed`.
 2. Add `get_restricting_for_system` to `ExternalBootActivationRepository`, following the existing
    `get` method's SQL and row-mapping style in the same file.
 3. Write `src/kdive/services/external_boot/__init__.py` exporting `ExternalBootOperation`,
-   `ExternalBootBinding`, and `check_external_boot_admission`, and
+   `ExternalBootDenied`, and `check_external_boot_admission`, and
    `src/kdive/services/external_boot/admission.py` implementing the table as a module-level
    `Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]]` plus the
    owning-Run-scoped subset as a second `frozenset[ExternalBootOperation]`. Re-run the command in
@@ -312,7 +328,7 @@ Where this fits: Task 1 supplies the decision; this task is the only place it is
 ### Interfaces
 
 Consumed from Task 1: `check_external_boot_admission(conn, system_id, operation, *, run_id=None)`,
-`ExternalBootOperation`, and `ExternalBootBinding` exactly as defined above.
+`ExternalBootOperation`, and `ExternalBootDenied` exactly as defined above.
 
 Consumed from the existing codebase:
 
@@ -388,6 +404,35 @@ conditional-lock machinery an earlier draft called for has no condition left to 
   LockScope.SYSTEM, system.id)`, using the `system` fetched at :229, and call the guard with
   `CAPTURE_VMCORE` and `run_id=uid`.
 
+Three further sites the 2026-09-02 scope audit found outside the set the earlier draft called
+complete:
+
+- `mcp/tools/lifecycle/control/registrar.py:watch_for_crash_system` (:325-393, enqueuing
+  `JobKind.WATCH_FOR_CRASH` at :376) — same wrapping as its four `control.*` siblings, calling the
+  guard with `SYSTEM_WATCH_CRASH` and `run_id=None`. `uid` and `system` are in scope and non-`None`
+  after the checks at :346-361.
+- `mcp/tools/lifecycle/systems/ssh_access.py:authorize_ssh_key` (:103-153, enqueuing
+  `JobKind.AUTHORIZE_SSH_KEY` at :149) — this handler holds no lock and calls `queue.enqueue`
+  directly rather than through `keyed_mutation`. Wrap the guard and that `enqueue` in
+  `conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid)`, calling the guard with
+  `SYSTEM_AUTHORIZE_SSH_KEY` and `run_id=None`. Note the existing `return ToolResponse.from_job(job)`
+  sits **outside** the `async with pool.connection()` block, so keep the enqueue inside the new
+  block and leave the return where it is.
+- `mcp/tools/lifecycle/runs/cancel.py:_cancel_locked` (:60-82) — the block at :62 is
+  `conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id)`. Insert
+  `advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)` first, on the condition
+  `run.system_id is not None` — unlike install and boot, `cancel_run` has no unbound-Run early
+  return, and its docstring states an unbound Run is a supported case. This is the one site where the
+  lock really is conditional, so use `contextlib.AsyncExitStack` here, following
+  `src/kdive/mcp/tools/catalog/artifacts/uploads.py:775-782`. Call the guard with `RUN_CANCEL` and
+  `run_id=None`, skipping both lock and guard for an unbound Run.
+
+`systems.check_ssh_reachable` (`ssh_access.py:157`) is deliberately **not** guarded: it registers
+`read_only()`, requires only `VIEWER`, and enqueues a banner-only liveness probe that mutates
+nothing. ADR-0583 admits read-only System observation in `active` and does not reject observation in
+its restricted states. Step 5's exemption mapping records that reason so the decision is visible
+rather than inferred from absence.
+
 `_fetch_vmcore` is the MCP enqueue path, not the worker handler ADR-0562's `LockScope` note is
 about. That note describes `capture_vmcore`'s **job handler** taking `RUN`, `RUN`, `SYSTEM`, `RUN` in
 separate committed transactions; this site holds no other advisory lock, so the added `SYSTEM` lock
@@ -439,24 +484,42 @@ their existing MCP callers, which already convert `CategorizedError`.
    `tests/mcp/lifecycle/test_runs_tools.py`, and `tests/services/debug/test_detach.py` with one
    negative case each asserting the `conflict` envelope and its `suggested_next_actions`. Run
    `just test-verbose tests/mcp/lifecycle tests/services/debug` and expect exit 0.
-5. Add a coverage assertion to `tests/services/external_boot/test_admission.py`: every member of
-   `ExternalBootOperation` except `EXTERNAL_BOOT_RELEASE` and `EXTERNAL_BOOT_RESOLVE_CONFLICT`
-   appears in the enforcing-call-site map the tests exercise. A site dropped in a later edit then
-   fails a gate instead of shipping.
-6. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
+5. Add the **inverted** coverage gate to `tests/services/external_boot/test_admission.py`. The
+   earlier draft asserted that every `ExternalBootOperation` member has an enforcing call site; the
+   2026-09-02 scope audit showed that gate is structurally blind to the failure it exists to catch,
+   because a tool nobody added a member for is missing from both sides of the comparison. Assert the
+   other direction instead: build the app through the existing assembly helper, enumerate every
+   registered tool whose `ToolAnnotations` mark it mutating (`readOnlyHint` false), and assert each
+   name is either in a `_GUARDED_TOOLS` mapping to its `ExternalBootOperation` or in an
+   `_UNGUARDED_TOOLS` mapping to a one-line reason. Seed `_UNGUARDED_TOOLS` with the exemptions this
+   design settled, `systems.check_ssh_reachable` among them. A new mutating tool then fails this gate
+   until someone decides its admission.
+
+   Keep the forward assertion too — every member of `ExternalBootOperation` except
+   `EXTERNAL_BOOT_RELEASE` and `EXTERNAL_BOOT_RESOLVE_CONFLICT` appears in `_GUARDED_TOOLS` — so a
+   member added without a call site also fails. The two together are what make the completeness claim
+   checkable in both directions.
+6. Verify per site that the guarded `keyed_mutation(...)` or `queue.enqueue(...)` is the last
+   statement in its handler, so the savepoint's `SYSTEM` lock is not held across later work, and add
+   the two-line comment at each new block recording that it is a savepoint and that nothing follows
+   it. Do **not** call `require_top_level_transaction` here: every one of these handlers has already
+   read the System or Run on the pooled connection, so the connection is `INTRANS` and that checker
+   would raise by construction. Its own docstring scopes it to a mint that must be visible to another
+   process before a large write, which is not this.
+7. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
 
 Acceptance: no reverse operation crosses a newly committed restriction, exactly one side of the race
-proceeds, no call site acquires `SYSTEM` after `INVESTIGATION` or `RUN`, and every enforced operation
-has a negative test.
+proceeds, no call site acquires `SYSTEM` after `INVESTIGATION` or `RUN`, every enforced operation has
+a negative test, and every registered mutating tool is either guarded or exempt with a recorded
+reason.
 
 ---
 
 ## Task 3: The three admission-and-authorization services
 
-Files: create `src/kdive/services/external_boot/recovery_requests.py`; modify
-`src/kdive/services/debug/sessions.py` only if the System-scoped session lookup it already exposes
-needs no change (verify first, do not add a second one); create
-`tests/services/external_boot/test_recovery_requests.py`.
+Files: create `src/kdive/services/external_boot/recovery_requests.py`; create
+`tests/services/external_boot/test_recovery_requests.py`. `src/kdive/services/debug/sessions.py` is
+consumed unchanged.
 
 Where this fits: Task 4's wrappers call exactly these three functions and add nothing of their own.
 Nothing else implements a contract.
@@ -482,11 +545,8 @@ Consumed from the existing codebase (each confirmed present at the stated path):
 - `kdive.domain.errors.ErrorCategory.CONFLICT` / `CONFIGURATION_ERROR` (`errors.py:24,40`).
 - `kdive.db.locks.advisory_xact_lock(conn, scope, key)` (`locks.py:94`) and `LockScope`
   (`locks.py:36`).
-- `kdive.services.debug.sessions` — the System-scoped active-session lookup. **Read the module and
-  use whatever it actually exports**; the pre-amendment draft cited
-  `active_session_ids_for_system(conn, system_id) -> list[str]` without verifying it, and that
-  citation is one of the four this design has already had to correct once. If no System-scoped
-  lookup exists, write the query inline in `recovery_requests.py` rather than adding a second
+- `kdive.services.debug.sessions.active_session_ids_for_system(conn, system_id) -> list[str]`
+  (`sessions.py:32`) — confirmed present by the 2026-09-02 scope audit. Consume it; add no second
   public name to `sessions.py`.
 
 Provided to Task 4:
@@ -553,12 +613,20 @@ reason is correct here because there is one missing thing — the external-boot 
 2. `require_role(ctx, run.project, Role.CONTRIBUTOR)`.
 3. Open one transaction holding `advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)`.
 4. `check_external_boot_admission(conn, run.system_id, ExternalBootOperation.EXTERNAL_BOOT_RELEASE,
-   run_id=run.id)`. A non-`active` activation, a non-owning Run, or no activation at all raises
-   `ExternalBootDenied` from Task 1; convert it with `failure_from_error(run_id, exc,
-   suggested_next_actions=exc.next_actions)`. Note that **no activation** is a denial here and an
-   admission everywhere else: `EXTERNAL_BOOT_RELEASE` against a System with nothing to release is
-   `conflict`, which Task 1's table already produces because the operation is owning-Run scoped and
-   there is no owning Run to match.
+   run_id=run.id)`. A non-`active` activation or a non-owning Run raises `ExternalBootDenied` from
+   Task 1; convert it with `failure_from_error(run_id, exc,
+   suggested_next_actions=exc.next_actions)`.
+
+   **No activation at all needs its own branch here.** Task 1's guard returns `None` for an
+   unrestricted System — it must, because every other call site needs an absent activation to admit
+   ordinary work — and its denial details are exactly
+   `{activation_id, activation_state, owning_run_id}`, none of which exist when there is no row. So
+   the guard cannot express "nothing to release". Read the restricting activation directly under the
+   same lock (`get_restricting_for_system`) before calling the guard, and when it is `None` return
+   `CONFLICT` with `data={"reason": "no_active_activation"}` and
+   `suggested_next_actions=["runs.get"]`. Without this branch the tool would report
+   `recovery_executor_unavailable` for a System with nothing to release, telling an agent its request
+   was admissible when the object it named does not exist.
 5. Refuse with `CONFLICT` and `data={"reason": "system_job_active", "job_ids": [...]}` while any job
    for the System is `queued` or `running`, regardless of owning Run.
 6. Refuse with `CONFLICT` and `data={"reason": "debug_session_active", "session_ids": [...]}` when a
@@ -574,7 +642,9 @@ executor lands.
 Run; requires `Role.ADMIN`; requires `operation == "restore-recorded-source"` exactly (anything else
 is `configuration_error` with `data={"reason": "unsupported_resolution_operation"}`); passes
 `ExternalBootOperation.EXTERNAL_BOOT_RESOLVE_CONFLICT`, which Task 1 admits only in
-`recovery_conflict`; and has no job or session refusal, because a System in `recovery_conflict`
+`recovery_conflict`; returns `CONFLICT` with `data={"reason": "no_recovery_conflict"}` for the
+absent-activation branch above; and has no job or session refusal, because a System in
+`recovery_conflict`
 already fails the matrix for every operation that could start one. It does **not** compare
 `observed_identity` against the stored composite state: that compare-and-set is one half of
 `begin_recovery_attempt`, and calling it would commit the transition the amendment forbids.
@@ -623,9 +693,14 @@ of the three.
 
 Files: modify `src/kdive/mcp/tools/lifecycle/runs/registrar.py`,
 `src/kdive/mcp/tools/lifecycle/systems/registrar.py`,
-`src/kdive/mcp/assembly/tool_registration.py`, `src/kdive/mcp/tools/_docmeta.py`; create
-`src/kdive/mcp/tools/ops/external_boot.py`; create
+`src/kdive/mcp/tools/ops/security/breakglass.py`, `src/kdive/mcp/tools/_docmeta.py`; create
 `tests/mcp/lifecycle/test_external_boot_contracts.py`; regenerate `docs/guide/reference/`.
+
+No new `ops` plane and no `assembly/tool_registration.py` edit: `breakglass.py` already registers the
+platform-admin destructive System repair tools `ops.force_teardown` (:170) and `ops.force_release`
+(:97) through its own `register(app, pool)` (:266), which the assembly already calls.
+`ops.resolve_recovery_orphan` is that same shape, so it joins them rather than opening a plane for
+one tool.
 
 Where this fits: the last build task. It exposes Task 3's services and nothing new of its own.
 
@@ -639,15 +714,14 @@ Consumed from the existing codebase:
 - `kdive.mcp.tools._docmeta.mutating() -> ToolAnnotations` and `destructive() -> ToolAnnotations`
   (`_docmeta.py:66,62`), `maturity_meta(maturity) -> dict[str, object]` (`_docmeta.py:24`), and
   `DESTRUCTIVE_TOOLS` (`_docmeta.py:37`).
+- `kdive.mcp.tools.ops.security.breakglass.register(app, pool)` (`breakglass.py:266`) — the existing
+  `ops` registrar this tool joins.
 - The generator's maturity contract (`scripts/generate/gen_tool_reference.py:203-237`): a `partial`
   tool's `meta` must carry `maturity_detail` with a `reason` drawn from exactly
   `{"provider_support", "live_dependency", "unproven_worker_path", "operator_gate",
   "degraded_stub"}`, a non-empty `detail`, and a non-empty `promotion`. A non-`partial` tool must
   carry no `maturity_detail`. The generator raises on violation, so `just docs-check` fails
   independently of the suite.
-- `_pool_only_plane_registrar` (`mcp/assembly/tool_registration.py:87-90`) and the `ops.*` plane list
-  it feeds (`:285-311`).
-
 Provided to later work: three registered tool names — `runs.release_external_boot`,
 `systems.resolve_external_boot_conflict`, `ops.resolve_recovery_orphan`.
 
@@ -721,21 +795,24 @@ description):
    assembly helper the other `tests/mcp/lifecycle` files use, then assert each of the three tools is
    registered; its `meta["maturity"] == "partial"`; its `maturity_detail` passes
    `scripts.generate.gen_tool_reference._maturity_detail`; every parameter has a newline-free
-   description; the docstring discloses `recovery_executor_unavailable` and names #2118; the
-   docstring contains **no** deadline vocabulary (assert the absence of `deadline`, `server_time`,
-   and `seconds`, so a reintroduced time contract fails a gate); the RBAC denial envelope for each
-   role boundary; and that each tool returns `error_category == "configuration_error"` with
+   description; the docstring discloses `recovery_executor_unavailable` and names #2118; the RBAC
+   denial envelope for each role boundary; and that each tool returns
+   `error_category == "configuration_error"` with
    `data["reason"] == "recovery_executor_unavailable"` on an admissible call. Run
    `just test-verbose tests/mcp/lifecycle/test_external_boot_contracts.py` and expect failure
    because no tool is registered.
+
+   The earlier draft also asserted the docstrings contain none of `deadline`, `server_time`, or
+   `seconds`. Dropped as brittle: a whole-docstring keyword ban breaks on any legitimate use of
+   those words, and the substantive guarantee it stood in for is already held by two direct gates —
+   Task 3 step 3's row byte-identity assertion and step 6's import closure. A phantom deadline needs
+   a transition to hang on, and both of those prove there is none.
 2. Add the two lifecycle wrappers to `runs/registrar.py` and `systems/registrar.py`, matching the
    surrounding registration style (`runs.boot` at `runs/registrar.py:625` is the closest analogue).
-3. Create `src/kdive/mcp/tools/ops/external_boot.py` with
-   `def register(app: FastMCP, pool: AsyncConnectionPool) -> None:` — the plain pool-only shape
-   `ops/queue.py:263` and `ops/tuning.py:359` use — and add
-   `_pool_only_plane_registrar(ops_external_boot_tools.register)` to `build_plane_registrars` in
-   `src/kdive/mcp/assembly/tool_registration.py`, beside the other `ops` registrars. Add
-   `"ops.resolve_recovery_orphan"` to `_docmeta.DESTRUCTIVE_TOOLS`.
+3. Add the `ops.resolve_recovery_orphan` wrapper to
+   `src/kdive/mcp/tools/ops/security/breakglass.py`'s existing `register(app, pool)` (:266), beside
+   `ops.force_teardown` and `ops.force_release`, and add `"ops.resolve_recovery_orphan"` to
+   `_docmeta.DESTRUCTIVE_TOOLS`. No new module and no assembly edit.
 4. Re-run the command from step 1 and expect exit 0.
 5. Run `just docs` to regenerate the tool reference, then `just docs-check` and
    `just doc-constants-check`; expect exit 0. If `doc-constants-check` reports a stale tool count,
@@ -806,8 +883,70 @@ re-dispositioned here against the amended criterion, concern and remedy judged s
    subject are both gone. Task 4 step 1 asserts the wrappers carry no time or retry vocabulary, which
    catches a reintroduction.
 
+## Scope-audit dispositions (2026-09-02, `$oathbind`, verdict `needs-attention`, 10 findings)
+
+Report: `.agent/oathbind/2117-external-boot-admission-agent-contracts.json` (ignored, per-worktree).
+Every finding was verified against the tree before disposition; concern and remedy judged separately.
+
+- **F1 — enforcement set incomplete — `accepted-fixed`, remedy partly substituted.** Verified:
+  `control.watch_for_crash` (`registrar.py:325`) and `systems.authorize_ssh_key`
+  (`ssh_access.py:103`) enqueue System-owning jobs and were outside the set. Both are now guarded, as
+  `SYSTEM_WATCH_CRASH` and `SYSTEM_AUTHORIZE_SSH_KEY`. `systems.check_ssh_reachable` is
+  **rejected-with-evidence**: it registers `read_only()`, requires `VIEWER`, and enqueues a
+  banner-only probe that mutates nothing — ADR-0583 admits read-only observation in `active` and does
+  not reject it in the restricted states. The remedy's second half is accepted in full: Task 2 step 5
+  now enumerates registered mutating tools against the guarded set, which is the direction that
+  catches a missing enum member.
+- **F2 — the promotion has no verified owner on #2118 — `accepted-fixed`** by the executor deferral
+  record listed below. Verified: #2118's body names none of the three tools. The obligation is now recorded in a durable
+  in-repo record naming #2118 as owner; the campaign report additionally returns it so the
+  orchestrator can annotate #2118 itself, which this run has no authority to do.
+- **F3 — savepoint blocks defer the commit and hold `SYSTEM` to end-of-request —
+  `accepted-fixed`, literal remedy rejected-with-evidence.** The proposed
+  `require_top_level_transaction` call would raise at all five sites by construction: each reads the
+  System or Run on the pooled connection first, so it is already `INTRANS`. What the concern is right
+  about is the post-block exposure, and Task 2 step 6 now makes "the guarded enqueue is the
+  handler's terminal statement" a verified per-site step with a recorded comment, rather than a
+  blanket claim.
+- **F4 — Task 1 and Task 3 contradicted each other on release with no activation —
+  `accepted-fixed`.** The contradiction was real and self-inflicted. Task 1's guard keeps returning
+  `None` for an unrestricted System, which every other call site needs; Tasks 3's two contract
+  services now read the restricting activation directly and return their own `no_active_activation`
+  / `no_recovery_conflict` conflict.
+- **F5 — the unenforced ADR-0583:351 owning-Run modifier on force-crash — `accepted-fixed`** by the
+  force-crash deferral record listed below. The concern is right that a knowing under-enforcement
+  with named out-of-scope remedies is a deferral, not a residual, and the repo has a mechanism for
+  deferrals.
+- **F6 — `runs.cancel` can strand an `active` activation — `accepted-fixed`.** Verified:
+  `_cancel_locked` holds `RUN` only, and `cancel_run`'s docstring promises to free the System.
+  `RUN_CANCEL` is now in the matrix, denied while an activation is uncleaned, and the call site is
+  guarded. The `investigations.close(force=true)` half is **rejected-with-evidence**: teardown is
+  admitted in every state, so it loses no denial.
+- **F7 — `ExternalBootBinding` is unconsumed scaffolding — `accepted-fixed`.** Cut. The guard
+  returns `None` or raises. #2118 introduces the dataclass with its first consumer.
+- **F8 — a new `ops` plane for one tool — `accepted-fixed`.** `ops.resolve_recovery_orphan` joins
+  `ops/security/breakglass.py` beside `ops.force_teardown` and `ops.force_release`, which are the
+  same platform-admin destructive System-repair shape. The new module and the assembly edit are both
+  dropped.
+- **F9 — brittle docstring keyword-absence gate — `accepted-fixed`** by deletion, for the reason the
+  finding gives.
+- **F10 — declared size exceeds `effort:M` — `accepted-fixed`.** Issue #2117 relabelled `effort:L`.
+
+**Smallest viable alternative — not taken, recorded.** The audit proposed shipping Tasks 1-2 only
+(matrix and enforcement, no MCP tools), which would deliver criteria 1 and 4 and break the
+#2117↔#2118 cycle. It is foreclosed by completion criterion 2: the operator's 2026-09-02 amendment
+explicitly directs that all three contracts ship as admission-and-authorization surfaces. The
+alternative is recorded here for the operator to reopen, not imposed by this run.
+
 ## Deferrals
 
-None. No finding was dispositioned `deferred-tracked`; no `docs/debt/` record was written. Finding 3
-is `rejected-with-evidence` for this branch and belongs to #2118's CAS work, which the amendment
-already assigns.
+Three, all written as `docs/debt/` records on this branch:
+
+- `docs/debt/0003-external-boot-contracts-await-their-executor.md` — the three tools' promotion from
+  `configuration_error` to live. Owner: #2118.
+- `docs/debt/0004-force-crash-owning-run-modifier-unenforced.md` — ADR-0583:351's owning-Run modifier
+  on force-crash, unenforceable without a public contract change. Owner: #2118.
+- `docs/debt/0005-external-boot-cas-superseded-conflation.md` — `CasStatus.SUPERSEDED` conflating a
+  stale identity, an unready reservation, and a missing row. Owner: #2118. This is the
+  pre-amendment design-review finding 3 above, given the owning record the scope audit noted it
+  lacked.

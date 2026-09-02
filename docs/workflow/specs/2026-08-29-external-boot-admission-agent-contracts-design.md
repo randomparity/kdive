@@ -109,10 +109,15 @@ the repository supplies that lookup. The decision accepts unrestricted work when
 present or a terminal activation is cleaned. `preparing`, `prepared`, `activating`, `recovering`,
 `recovery_conflict`, `recovery_failed`, and uncleaned terminal states admit only activation
 continuation, reconciliation, conflict resolution, and teardown. `active` additionally admits
-owning-Run debug attach/detach, traffic capture, force crash, and vmcore capture; it rejects another
-Run and generic lifecycle, power, snapshot, or install work. Allowed provider-mutating active
-operations return the activation identity and authority binding for the later execution mechanism;
-observation stays on the existing read-only seams.
+owning-Run debug attach/detach, traffic capture, force crash, crash watch, and vmcore capture; it
+rejects another Run and generic lifecycle, power, snapshot, or install work. Observation stays on the
+existing read-only seams.
+
+The guard is a guard and returns nothing: `-> None` on admission, raising `ExternalBootDenied`
+otherwise. An earlier draft returned an `ExternalBootBinding` carrying the activation identity and
+authority binding "for the later execution mechanism", but that mechanism is #2118's and nothing on
+this branch consumes one, so the dataclass was scaffolding for work this issue excludes. #2118
+introduces it with its first consumer.
 
 A denial is `ErrorCategory.CONFLICT`, carries only the authorized activation id/state and owning Run
 id, and suggests `runs.get`; `active` also suggests `runs.release_external_boot`, while
@@ -143,20 +148,67 @@ other order against a peer that already takes `ALLOCATION → SYSTEM` (`_create_
 `SYSTEM → INVESTIGATION` deadlocks. A Run with no bound System cannot carry an external activation,
 so the guard and the added lock are both skipped there rather than acquiring a lock on nothing.
 
-The call-site set is the complete set of registered mutating tools ADR-0583:345-353 reaches, and it
-is enumerable rather than narrative: every member of `ExternalBootOperation` has at least one
-enforcing call site and one negative test. `services/runs/bind.py:_bind_locked` is in it and already
-holds `SYSTEM` (`bind.py:151-154`). Read-only observation tools stay on their existing seams, which
-is what ADR-0583 admits in `active`.
+The call-site set is the complete set of registered mutating tools ADR-0583:345-353 reaches.
+**That completeness is proven by a gate, not asserted.** A scope audit on 2026-09-02 refuted the
+earlier narrative claim by finding three registered System-mutating tools outside the set, and the
+gate that was supposed to catch that — "every member of `ExternalBootOperation` has an enforcing
+call site" — was structurally blind to it, because a missing member is missing from both sides of
+that comparison.
+
+The gate is therefore inverted: a test enumerates every registered tool whose annotations mark it
+mutating, and asserts each is either in the guarded set or in an explicit exemption mapping that
+carries a reason. Adding a mutating tool without deciding its admission then fails a gate instead of
+shipping.
+
+Three sites the audit surfaced:
+
+- `control.watch_for_crash` (`control/registrar.py:325`, enqueuing `JobKind.WATCH_FOR_CRASH`) —
+  guarded as `SYSTEM_WATCH_CRASH`, admitted in `active` and denied in every other restricted state.
+  ADR-0583's `active` clause admits read-only System observation and a crash watch is a console
+  observer; its restricted-state clause rejects every capture and control operation, which is what a
+  queued watch job is while an activation is mid-flight.
+- `systems.authorize_ssh_key` (`systems/ssh_access.py:103`, enqueuing `JobKind.AUTHORIZE_SSH_KEY`) —
+  guarded as `SYSTEM_AUTHORIZE_SSH_KEY`, admitted in no restricted state. Its own docstring calls it
+  mutating; it writes the guest's authorized keys, which is exactly the System mutation the matrix
+  exists to stop.
+- `runs.cancel` (`runs/cancel.py:60`) — guarded as `RUN_CANCEL`, admitted in no restricted state.
+  Its docstring promises that cancel "frees the System for a new `runs.create`", and with an
+  uncleaned activation present it cannot: the matrix denies `RUN_CREATE`, so the System is not freed
+  and the caller is not told why. Denying the cancel with the matrix's own next actions is what makes
+  that promise honest.
+
+`systems.check_ssh_reachable` (`ssh_access.py:157`) is **not** guarded, and that is a decision rather
+than an omission. It registers `read_only()`, requires only `VIEWER`, and enqueues a banner-only
+liveness probe that mutates nothing. ADR-0583 admits read-only System observation in `active` and
+does not list observation among the classes its restricted states reject. It stays on its existing
+seam with every other observation tool, and the exemption mapping records that reason.
+
+`services/runs/bind.py:_bind_locked` is in the guarded set and already holds `SYSTEM`
+(`bind.py:149-155`).
 
 These new `conn.transaction()` blocks open on a pooled non-autocommit connection that has already
 issued a read, so each is a **savepoint** rather than a top-level transaction
 (`src/kdive/db/locks.py:126-135`, and the precedent at
-`src/kdive/mcp/tools/catalog/artifacts/uploads.py:763`). Atomicity of the guard and the enqueue holds;
-the consequence is that the advisory lock is released at end-of-request rather than end-of-block.
-That is accepted because each block spans no external I/O — provider-resolver and refusal checks stay
-outside it — and each site carries a comment saying so, since the behavior is invisible at the call
-site.
+`src/kdive/mcp/tools/catalog/artifacts/uploads.py:763`). Atomicity of the guard and the enqueue
+holds; the consequence is that the advisory lock is released when the pooled connection's
+transaction ends — at end-of-request — rather than at end-of-block.
+
+The scope audit proposed calling `require_top_level_transaction` at each new block so the condition
+fails fast. **That remedy is rejected with evidence: it would raise at every one of these sites by
+construction.** Each handler reads the System or Run on the pooled connection before reaching the
+block, so the connection is already `INTRANS` and the checker's precondition — a transaction-free
+connection — is unsatisfiable without restructuring five handlers onto fresh connections. Its
+docstring says it exists for a mint that must be visible to another process before a multi-GiB
+write, which is not this.
+
+What the concern is right about is the exposure *after* the block, and that is bounded by
+construction here rather than by argument: at every one of these sites the guarded
+`keyed_mutation(...)` is the handler's terminal statement, so the window between releasing the
+savepoint and ending the request contains no further work. Each site carries a comment recording
+both facts — that the block is a savepoint, and that nothing follows it — because neither is visible
+at the call site, and a later edit that appends work after the block would silently extend a
+System-wide lock. The implementation plan makes verifying "the enqueue is terminal" a per-site step
+rather than a blanket claim.
 
 ### The three contracts — admission and authorization, no transition
 
@@ -176,6 +228,17 @@ there to withhold:
    only). A denial is the matrix's own `CONFLICT` envelope, identical to the one a racing Run's
    install receives. Orphan repair validates its bounded `object_identities` and closed `disposition`
    literal instead, because ADR-0583 scopes it to quarantined objects rather than to an activation.
+
+   **A System with no activation is a denial for these two operations, and the guard cannot express
+   that.** `check_external_boot_admission` returns `None` for an unrestricted System — that is what
+   every reverse-admission call site needs, since an absent activation must admit ordinary work — and
+   its denial carries `{activation_id, activation_state, owning_run_id}`, none of which exist when
+   there is no row. So the guard returning `None` is not success here: `request_release` and
+   `resolve_conflict` each convert it into their own `CONFLICT`, with
+   `data={"reason": "no_active_activation"}` and `data={"reason": "no_recovery_conflict"}`
+   respectively, and `suggested_next_actions=["runs.get"]`. Without this the two tools would report
+   `recovery_executor_unavailable` for a System with nothing to release — telling an agent its
+   request was admissible when the object it named does not exist.
 4. **Report unavailable.** Return `ToolResponse.failure(..., ErrorCategory.CONFIGURATION_ERROR)`
    with `data={"reason": "recovery_executor_unavailable"}` and the literal next actions. The read
    transaction ends without writing.
@@ -226,8 +289,12 @@ a next action naming an unregistered tool is the phantom feature this design is 
 
 ### Agent surface
 
-MCP wrappers live with the existing runs and systems registrars; the repair tool is a new
-`mcp/tools/ops/external_boot.py` plane registered beside the other `ops` registrars. Wrapper
+MCP wrappers live with the existing runs and systems registrars; the repair tool joins
+`mcp/tools/ops/security/breakglass.py`, which already hosts the platform-admin destructive System
+repair tools `ops.force_teardown` and `ops.force_release` and already has a `register(app, pool)`.
+An earlier draft created a new `mcp/tools/ops/external_boot.py` plane and an
+`assembly/tool_registration.py` entry for one tool; extending the existing entry point costs neither.
+Wrapper
 docstrings and every `Field` description state the required role, the admissible activation state,
 and — first, before either — that the tool does not perform the operation it names today: it
 validates and reports, and returns `configuration_error` with `reason=recovery_executor_unavailable`
