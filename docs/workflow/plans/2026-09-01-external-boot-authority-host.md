@@ -83,8 +83,9 @@ Interfaces:
 
 - `AuthorityHostConfig.from_environment() -> AuthorityHostConfig` consumes fixed `KDIVE_*`
   configuration and systemd credential-directory paths.
-- `check_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` validates identity,
-  protected paths, journal restoration, database role shape, and provider socket access.
+- `check_authority_host(config: AuthorityHostConfig, listener: AuthorityListener) -> Awaitable[None]`
+  validates identity, protected paths, journal restoration, database role shape, provider socket
+  access, and the bound listener's socket/TLS evidence.
 - `serve_authority_transport(config, authenticate_peer, service=None)` binds the configured Unix
   stream with TLS 1.3, requires a client certificate, bounds one length-prefixed closed envelope,
   authenticates its worker credential through Task 1, and rejects with `provider-not-configured`
@@ -92,8 +93,9 @@ Interfaces:
 - Closed response envelopes return either one existing acknowledgement/observation model or one
   bounded transport/service error category; the server closes after one request/response pair.
 - `run_authority_host(config: AuthorityHostConfig) -> Awaitable[None]` performs the same check,
-  starts the request listener, sends `READY=1`, repeats every 30 seconds, then sends `STOPPING=1`
-  and exits on drift.
+  creates the request listener with `start_serving=False`, validates it, begins serving, sends
+  `READY=1`, repeats the equivalent live check every 30 seconds, then sends `STOPPING=1` and exits
+  on drift. The one-shot command uses the same factory/check against a fixed sibling probe socket.
 - CLI handlers expose `external-boot-authority-host` and
   `check-external-boot-authority-host`; Task 4's unit and Ansible probe rely on those names.
 
@@ -112,6 +114,11 @@ Verification:
 - Mode: focused-test. Contract: readiness is absent during an initial slow/failing check, appears
   only after success, and is retracted before drift exit. Case `test_host_notifies_readiness_state`;
   same focused command.
+- Mode: focused-test. Contract: the listener cannot serve or publish readiness before its bound
+  socket and loaded TLS evidence pass; wrong initial TLS/socket state suppresses `READY=1`, and
+  later live-listener or credential-fingerprint drift sends `STOPPING=1`. Cases
+  `test_host_validates_listener_before_ready` and `test_host_retracts_on_listener_drift`; same host
+  command.
 - Mode: focused-test. Contract: the Unix stream requires TLS 1.3 client authentication and bounded
   canonical framing; invalid certificates fail before request bytes are read, invalid lengths and
   envelopes are rejected without allocation or secret disclosure, and an invalid worker credential
@@ -119,6 +126,11 @@ Verification:
   `test_transport_rejects_oversize_before_read`, and
   `test_transport_authenticates_incarnation_before_dispatch`; green command:
   `uv run python -m pytest tests/providers/external_boot_authority/test_transport.py -q`.
+- Mode: focused-test. Contract: the server certificate has `serverAuth` EKU and a DNS SAN equal to
+  the deterministic base32-SHA-256 authority-instance name, while client certificates require
+  `clientAuth` EKU. Wrong-instance, wrong-EKU, expired, and untrusted certificates fail before an
+  envelope is sent. Case `test_transport_binds_certificate_purpose_and_instance`; same transport
+  command.
 - Mode: focused-test. Contract: a valid proof client and active incarnation receive only
   `provider-not-configured`, and no `ExternalBootAuthorityService` or adapter method runs. Case
   `test_dormant_transport_refuses_before_provider_dispatch`; same transport command.
@@ -128,9 +140,9 @@ Steps:
 1. Add the focused tests and run the command; expect collection/import failure.
 2. Implement the immutable config and filesystem checks using `os.open`/`stat` without following
    symlinks; run the focused command and expect filesystem cases green.
-3. Implement the closed envelope, four-byte length bound, TLS contexts, credential redaction, and
-   dormant dispatcher using only the standard library and existing protocol models; run the
-   transport command and expect green.
+3. Implement the closed envelope, four-byte length bound, deterministic TLS server name, strict TLS
+   contexts, listener evidence, credential redaction, and dormant dispatcher using only the
+   standard library and existing protocol models; run the transport command and expect green.
 4. Implement the async psycopg role/function checks and bounded error type; run both focused files
    and expect green.
 5. Wire the two CLI commands and add parser tests; run the focused commands plus the existing CLI

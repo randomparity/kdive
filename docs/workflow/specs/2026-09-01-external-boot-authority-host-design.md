@@ -42,9 +42,12 @@ service:
 - `check-external-boot-authority-host` runs the same checks once and emits one bounded,
   secret-free readiness result for Ansible and operators.
 
-The request socket carries TLS 1.3 over an `AF_UNIX` stream. The server presents an
-authority-instance certificate and requires a client certificate chained to the configured worker
-client CA. A four-byte network-order length prefix bounds each closed canonical JSON envelope to
+The request socket carries TLS 1.3 over an `AF_UNIX` stream. The server certificate has
+`serverAuth` EKU and a DNS SAN equal to the lower-case unpadded base32 SHA-256 digest of the UTF-8
+authority instance plus `.authority.kdive.invalid`; clients compute that name and pass it as the
+exact TLS server name. The server requires a non-expired client certificate with `clientAuth` EKU
+chained to the configured worker client CA. A four-byte network-order length prefix bounds each
+closed canonical JSON envelope to
 1,048,576 bytes before allocation. The envelope contains exactly an operation discriminator, one
 existing canonical `external-boot-authority-v1` request, and one worker-incarnation credential of
 at most 4,096 UTF-8 bytes. The host hashes the credential, resolves it through the least-privilege
@@ -124,10 +127,15 @@ The one-shot and long-running probes fail closed unless all of these hold:
    credentials, journal, helper, request socket, or mutation socket paths; and
 8. the existing fixed-worker provider/KVM path remains usable and unchanged.
 
-The runtime writes no durable readiness override. Its `Type=notify` unit stays activating until the
-first complete check succeeds. It repeats every check every 30 seconds and sends `STOPPING=1` before
-exiting on drift; #2140 must also call the same check immediately before enabling an adapter or
-admitting its first request. Journal restoration is therefore a prerequisite: any
+The runtime writes no durable readiness override. Startup performs static checks, creates the TLS
+listener with `start_serving=False`, validates the bound socket identity/mode plus the loaded TLS
+floor, certificate identity, client-verification mode, and credential-file fingerprints, starts
+serving, and only then sends `READY=1`. The one-shot command creates and validates a fixed sibling
+probe socket through the same listener factory, then closes it. Every 30 seconds the host repeats
+the static checks and verifies that the live server is serving, the request socket still has its
+exact identity/mode, and the loaded TLS evidence and credential-file fingerprints still match. Any
+drift sends `STOPPING=1` before exit; #2140 must also call the same check immediately before enabling
+an adapter or admitting its first request. Journal restoration is therefore a prerequisite: any
 corrupt, foreign, missing, extra, longer, or valid-prefix-truncated lane fails the inventory/local
 bijection or trusted-head comparison before readiness. Ansible additionally creates a transient
 proof identity, certificate, and active incarnation credential; verifies server, client, and worker
