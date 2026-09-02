@@ -212,6 +212,12 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
 
     ``domain_xml`` must be ``XMLDesc(VIR_DOMAIN_XML_INACTIVE)`` output; ADR-0583 makes live XML
     inadmissible as an identity input. That precondition is the caller's and is not enforced here.
+
+    These rules have been proven only against ``render_domain_xml`` output — what kdive writes,
+    not what libvirt returns after parsing it. libvirt can add fields of its own on define, and
+    the firmware rule rejects any it added there, so #2121's live tier must capture one real
+    ``XMLDesc(VIR_DOMAIN_XML_INACTIVE)`` from a provisioned System, assert this function accepts
+    it, and freeze that capture as a fixture.
     """
     root = parse_domain_xml(domain_xml)
     if boot_projection_identity(domain_xml) != _ALL_NULL_BOOT_PROJECTION:
@@ -257,8 +263,12 @@ class RemoteExternalBootDefinition(BaseModel):
     """The exact source and target definitions for one remote activation.
 
     Closed and frozen. The recorded digests are revalidated against the recorded XML on every
-    construction, so a tampered or corrupted stored record cannot present digests that do not
-    describe its own bytes. It round-trips through ordinary pydantic JSON, not the shared ports
+    construction, and ``expected_cmdline`` against the target definition's own ``<cmdline>``, so a
+    tampered or corrupted stored record cannot present either as describing bytes it does not.
+    ``expected_running`` is not bound this way: it comes from the materialization, not from the
+    XML, and nothing in this value can attest it.
+
+    It round-trips through ordinary pydantic JSON, not the shared ports
     module's canonical encoding: that pair is private to ``_ClosedValue`` and ``providers/ports/``
     is outside this change's surface. Nothing needs it — this value's ADR-0583 identity is the
     preserved digest it records, never a digest over its own serialization.
@@ -298,6 +308,10 @@ class RemoteExternalBootDefinition(BaseModel):
                     raise ValueError("recorded definition digest does not describe its own XML")
                 if boot_projection_identity(xml) != boot:
                     raise ValueError("recorded boot projection does not describe its own XML")
+            target_os = parse_domain_xml(self.target_xml).find("os")
+            recorded_cmdline = target_os.findtext("cmdline") if target_os is not None else None
+            if recorded_cmdline != self.expected_cmdline:
+                raise ValueError("expected_cmdline does not match the target definition")
         except CategorizedError as exc:
             raise ValueError(str(exc)) from exc
         return self
@@ -374,6 +388,15 @@ def prepare_target_definition(
             "initrd presence disagrees across plan, materialization, and supplied path",
             system_id=system_id,
             rule="initrd-presence",
+        )
+    # ExternalBootPlan admits a non-NFC debug_cmdline, and ADR-0583 forbids a provider
+    # normalizing the command line. Left alone it would compose a target XML that this module's
+    # own NFC gate rejects, reporting the domain XML as the subject. Name it here instead.
+    if unicodedata.normalize("NFC", plan.cmdline) != plan.cmdline:
+        raise _conflict(
+            "the plan command line is not NFC and this provider may not normalize it",
+            system_id=system_id,
+            rule="cmdline-nfc",
         )
     _require_artifact_path(kernel_path, system_id=system_id, what="kernel")
     if initrd_path is not None:
@@ -512,7 +535,7 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
     if which == "target":
         if active:
             return
-        _start(domain, definition)
+        _start(domain, definition, wrote=False)
         return
 
     try:
@@ -528,20 +551,29 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
             observed_definition=preserved,
             observed_boot=boot,
         )
-    _start(domain, definition)
+    _start(domain, definition, wrote=True)
 
 
-def _start(domain: ActivationDomain, definition: RemoteExternalBootDefinition) -> None:
+def _start(
+    domain: ActivationDomain, definition: RemoteExternalBootDefinition, *, wrote: bool
+) -> None:
+    """Start the domain, reporting truthfully whether this invocation wrote the definition."""
     try:
         domain.create()
     except libvirt.libvirtError as exc:
-        # The persistent definition now names the external kernel while the guest is not running
-        # it, so the caller enters recovery rather than retrying a half-applied write. CONFLICT is
-        # already non-retryable, so no terminal flag is needed.
+        # Either way the persistent definition names the external kernel while the guest is not
+        # running it, so the caller enters recovery rather than retrying. CONFLICT is already
+        # non-retryable, so no terminal flag is needed. The phase distinguishes the invocation
+        # that wrote the definition from one that found it already written, because a caller
+        # deciding between retry and recovery is misled by a write that did not happen.
         raise _activation_conflict(
-            "the target definition was written but the domain did not start",
+            (
+                "the target definition was written but the domain did not start"
+                if wrote
+                else "the target definition was already present but the domain did not start"
+            ),
             definition=definition,
-            phase="start",
+            phase="start-after-define" if wrote else "start",
             libvirt_error_code=exc.get_error_code(),
         ) from exc
 
@@ -608,12 +640,23 @@ def _guest_read(
     return result.stdout
 
 
+# The shared KernelRelease pattern caps a release at 64 characters, so anything longer cannot be
+# valid. Bounding here keeps guest-chosen text out of pydantic, whose ValidationError embeds the
+# rejected input verbatim in its message.
+MAX_GUEST_FIELD_CHARS = 64
+
+
 def _single_field(raw: bytes, *, what: str, definition: RemoteExternalBootDefinition) -> str:
     """One line, one field. `uname -r -m` would return two fields on one line; this rejects that."""
     text = raw.decode("utf-8", errors="replace")
     if text.endswith("\n"):
         text = text[:-1]
-    if not text or "\n" in text or any(character.isspace() for character in text):
+    if (
+        not text
+        or len(text) > MAX_GUEST_FIELD_CHARS
+        or "\n" in text
+        or any(character.isspace() for character in text)
+    ):
         raise _identity_failure(
             f"the guest returned a malformed {what}", definition=definition, mismatch=what
         )
@@ -642,7 +685,16 @@ def observe_guest_identity(
     so the release and the machine are read separately.
     """
     expected_name = domain_name_for(UUID(definition.binding.system_id))
-    if domain.name() != expected_name:
+    try:
+        observed_name = domain.name()
+    except libvirt.libvirtError as exc:
+        # A stale handle or dropped connection must not escape the isolation guard uncategorized.
+        raise CategorizedError(
+            "remote-libvirt external-boot observation could not read the domain name",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": definition.binding.system_id},
+        ) from exc
+    if observed_name != expected_name:
         raise CategorizedError(
             "remote-libvirt external-boot observation was given another System's domain",
             category=ErrorCategory.CONFLICT,
@@ -713,10 +765,12 @@ def observe_guest_identity(
         running = RunningKernelObservation(
             architecture=machine, release=release, gnu_build_id=build_id
         )
-    except ValidationError as exc:
+    except ValidationError:
+        # Deliberately not chained: pydantic's message embeds the rejected guest value verbatim,
+        # and no guest byte may reach a message, a details payload, or a logged traceback.
         raise _identity_failure(
             "the guest reported an out-of-contract kernel identity", definition=definition
-        ) from exc
+        ) from None
     if running != definition.expected_running:
         mismatch = next(
             field

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import traceback
 import xml.etree.ElementTree as ET  # noqa: S405 - test-owned XML
 from collections.abc import Callable
 from typing import Any
@@ -578,7 +579,7 @@ def test_activation_conflicts_when_the_start_fails_after_a_successful_define() -
     with pytest.raises(CategorizedError) as caught:
         activate_definition(_FakeConn(domain), definition)
     assert caught.value.category is ErrorCategory.CONFLICT
-    assert caught.value.details["phase"] == "start"
+    assert caught.value.details["phase"] == "start-after-define"
     assert caught.value.terminal is False
     assert len(domain.defined) == 1
 
@@ -670,6 +671,26 @@ def _guest(system_id: UUID = _SYSTEM_ID) -> _FakeGuestDomain:
     return _FakeGuestDomain(domain_name_for(system_id))
 
 
+def _rendered_chain(error: BaseException) -> str:
+    """Every message and details payload in the chain, without any source context.
+
+    A chained pydantic ValidationError embeds the rejected guest value verbatim in its own
+    message, which is the leak these assertions exist to catch. Source lines are excluded because
+    a test that constructs the guest value inevitably contains it.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.extend(traceback.format_exception_only(type(current), current))
+        details = getattr(current, "details", None)
+        if details is not None:
+            parts.append(str(details))
+        current = current.__cause__ or current.__context__
+    return "".join(parts)
+
+
 def test_observation_returns_the_running_identity_and_the_command_line() -> None:
     definition = _prepare()
     agent = _FakeAgentExec(_replies())
@@ -725,7 +746,7 @@ def test_observation_fails_closed_and_terminal_on_an_identity_mismatch(kwargs: A
         observe_guest_identity(_FakeAgentExec(_replies(**kwargs)), _guest(), definition)
     assert caught.value.category is ErrorCategory.READINESS_FAILURE
     assert caught.value.terminal is True
-    rendered = str(caught.value.details) + str(caught.value)
+    rendered = _rendered_chain(caught.value)
     for leak in (b"aarch64", b"ttyS1", b"6.9.0-other"):
         assert leak.decode() not in rendered
 
@@ -767,3 +788,71 @@ def test_observation_propagates_the_agent_seams_own_failures_unchanged(
         observe_guest_identity(agent, _guest(), _prepare())
     assert caught.value.category is category
     assert caught.value.terminal is False
+
+
+def test_boot_projection_distinguishes_an_empty_element_from_an_absent_one() -> None:
+    """ADR-0583 requires the projection to distinguish absence from an empty value.
+
+    Without it a definition carrying `<kernel/>` reads as a clean disk/GRUB baseline and would be
+    captured as a source point for a System that is already externally booted.
+    """
+    absent = boot_projection_identity("<domain><os /></domain>")
+    empty = boot_projection_identity("<domain><os><kernel /></os></domain>")
+    assert absent == _GOLDEN_NULL_BOOT
+    assert empty != absent
+
+
+def test_prepare_rejects_a_non_nfc_plan_command_line_naming_itself() -> None:
+    """ExternalBootPlan admits a non-NFC debug_cmdline and ADR-0583 forbids normalizing it."""
+    plan = _plan()
+    decomposed = plan.model_copy(update={"debug_cmdline": "debug=café"})
+    composed = plan.model_copy(
+        update={
+            "debug_cmdline": decomposed.debug_cmdline,
+            "cmdline": f"{plan.cmdline} {decomposed.debug_cmdline}",
+        }
+    )
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(plan=composed, materialization=_materialization(plan=composed))
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "cmdline-nfc"
+    assert caught.value.details["system_id"] == str(_SYSTEM_ID)
+
+
+def test_definition_rejects_an_expected_cmdline_the_target_xml_does_not_carry() -> None:
+    payload = _prepare().model_dump()
+    payload["expected_cmdline"] = "root=/dev/sda9 console=none"
+    with pytest.raises(ValidationError):
+        RemoteExternalBootDefinition.model_validate(payload)
+
+
+def test_observation_reports_an_unreadable_domain_name_as_infrastructure_failure() -> None:
+    class _StaleDomain:
+        def name(self) -> str:
+            raise _libvirt_error(libvirt.VIR_ERR_INVALID_DOMAIN)
+
+    agent = _FakeAgentExec(_replies())
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(agent, _StaleDomain(), _prepare())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert agent.argvs == []
+
+
+def test_observation_rejects_an_overlong_field_before_it_reaches_the_shared_model() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(
+            _FakeAgentExec(_replies(release=b"S3KRIT" + b"A" * 300 + b"\n")), _guest(), _prepare()
+        )
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert "S3KRIT" not in _rendered_chain(caught.value)
+
+
+def test_activation_start_failure_on_an_already_written_target_says_no_write_happened() -> None:
+    definition = _prepare()
+    domain = _FakeDomain(definition.target_xml, active=False)
+    domain.create_error = _libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(_FakeConn(domain), definition)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "start"
+    assert domain.defined == []
