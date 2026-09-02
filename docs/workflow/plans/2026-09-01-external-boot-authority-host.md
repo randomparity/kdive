@@ -33,9 +33,9 @@ Files:
 
 Interfaces:
 
-- SQL `list_external_boot_authority_journal_heads(text, integer)` returns only authority instance,
-  System, sequence, digest, phase, authority, generation, and operation identity for the supplied
-  instance, limited to maximum + 1 rows.
+- SQL `list_external_boot_authority_journal_heads(text)` returns only authority instance, System,
+  sequence, digest, phase, authority, generation, and operation identity for the supplied instance,
+  with a trust-boundary `LIMIT 4097`; row 4097 signals the fixed 4096-lane ceiling was exceeded.
 - `list_journal_heads(conn, authority_instance: str) -> tuple[JournalHead, ...]` is Task 2's exact
   inventory input.
 
@@ -43,15 +43,15 @@ Verification:
 
 - Mode: focused-test. Contract: only `kdive_provider_authority` can execute the security-definer
   inventory; 0125 grants no new direct table access; results are instance-filtered and limited to
-  maximum + 1 rows; and no lifecycle write is possible. The shared role-wide visibility is the
+  4097 rows; and no lifecycle write is possible. The shared role-wide visibility is the
   same accepted scope as its existing binding SELECTs. Red observation: migration 0125 is absent.
   Green command:
   `uv run python -m pytest tests/db/test_external_boot_authority_head_inventory_migration.py -q`.
 
 Steps:
 
-1. Add migration privilege, isolation, empty, multi-instance, and malformed-input tests and confirm
-   they fail because 0125 is absent.
+1. Add migration privilege, isolation, empty, multi-instance, and 4096/4097-boundary tests and
+   confirm they fail because 0125 is absent.
 2. Add migration 0125 and the typed repository reader; run the focused command and expect green.
 3. Regenerate/update migration inventory assertions and run the migration-order guard.
 4. Commit as `feat(db): expose bounded authority head inventory`.
@@ -154,6 +154,8 @@ Files:
 
 - Create `deploy/systemd/system/kdive-external-boot-authority.service`.
 - Create `deploy/systemd/provider-authority.env.example`.
+- Create `deploy/ansible/playbooks/authority_host_teardown.yml`.
+- Create `scripts/operations/prove-external-boot-authority-host.sh`.
 - Modify the live-VM host Ansible defaults, tasks, and verification files.
 - Modify `tests/deploy/test_systemd_units.py` and `tests/deploy/test_live_worker_provisioning.py`.
 
@@ -175,10 +177,11 @@ Verification:
   every positive and negative readiness proof. Case
   `test_ansible_installs_authority_in_clean_host_order`; red observation is missing declarations;
   green command is `uv run python -m pytest tests/deploy/test_live_worker_provisioning.py -q`.
-- Mode: focused-test. Contract: `scripts/operations/prove-external-boot-authority-host.sh` packages
-  the exact local HEAD, installs it in a SHA-named proof directory on the authorized clean Ubuntu
-  carrier, bootstraps a peer-authenticated local PostgreSQL database and real `kdive` denial
-  identity, passes the immutable SHA as `live_vm_repo_version`, asserts the installed revision,
+- Mode: focused-test. Contract: `scripts/operations/prove-external-boot-authority-host.sh` creates
+  and transfers a Git bundle containing the exact local HEAD, installs it in a SHA-named proof
+  directory on the authorized clean Ubuntu carrier, bootstraps a peer-authenticated local
+  PostgreSQL database and real `kdive` denial identity, overrides `live_vm_repo_url` with the bundle
+  and `live_vm_repo_version` with the immutable full SHA, asserts the installed revision,
   starts/restarts both services, verifies denial, injects drift, and observes readiness retract.
   Carrier: `dave@ub26-big.dev.pdx.drc.nz`; green command:
   `scripts/operations/prove-external-boot-authority-host.sh dave@ub26-big.dev.pdx.drc.nz $(git rev-parse HEAD)`.
@@ -190,10 +193,12 @@ Steps:
 3. Add authority identity, directories, credentials, venv installation, unit install/start, and
    readiness verification to Ansible in dependency order.
 4. Run both focused deployment files and `just lint-ansible`; expect green.
-5. Write the runbook and proof script before execution. Resolve exact pre-existing remote targets
-   read-only, execute the exact clean-host command, verify the installed revision equals the
-   supplied full SHA, retain bounded evidence, then clean only SHA-named/proof-labeled artifacts
-   created by this command.
+5. Write the runbook, proof script, and idempotent teardown play before execution. Resolve exact
+   pre-existing remote targets read-only; deploy from the transferred Git bundle with both source
+   overrides; verify the installed revision equals the supplied full SHA; then run the teardown
+   twice and prove both passes leave the dormant units/endpoint absent, LOGIN revoked, retained
+   journal/credential state intact, and the existing worker provider path usable. Retain bounded
+   evidence and clean only SHA-named/proof-labeled artifacts created by this command.
 6. Commit as `feat(deploy): supervise external boot authority`.
 
 Acceptance: clean provisioning fails before completion if service recovery, database least
@@ -239,5 +244,5 @@ adapter or lifecycle orchestration enters the diff.
 
 Run `just lint`, `just type`, focused deployment/provider/adversarial tests, `prek run` on the
 staged file set, the exact clean-host proof, and `just ci`. All must exit zero before delivery.
-Rollback disables the dormant unit/endpoint and credential but leaves forward-only migration 0125
-applied and inert; retain authority journals and credentials for operator-controlled cleanup.
+Rollback first runs the idempotent authority-host teardown, leaving migration 0125 applied and
+inert; retain authority journals and credentials for operator-controlled cleanup.

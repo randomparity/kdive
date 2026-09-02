@@ -72,9 +72,10 @@ Migrations 0122 and 0123 already create `kdive_provider_authority` and grant the
 binding and acknowledgement access plus journal-head functions. That shared capability role is
 intentionally authority-role-wide, not tenant- or instance-confidential. Migration 0125 adds one
 security-definer inventory function: it authenticates role membership, accepts one configured
-authority instance plus a maximum row count, and returns at most maximum + 1 bounded lane identities
-and trusted-head fields. The extra row is an over-limit signal; readiness fails closed above the
-configured ceiling of 4096 retained lanes. It grants execution only to
+authority instance, and returns at most 4097 bounded lane identities and trusted-head fields. Row
+4097 is the over-limit signal; readiness fails closed above the fixed ceiling of 4096 retained
+lanes. The SQL function hard-codes `LIMIT 4097` at this trust boundary rather than accepting a
+caller-selected bound. It grants execution only to
 `kdive_provider_authority`; no new direct table access or lifecycle write is added. Provisioning
 installs a LOGIN DSN whose role is a member of that existing role. The readiness probe checks role
 shape and never prints the DSN.
@@ -143,8 +144,10 @@ lifecycle state. Those are either accepted exclusions or owned by #2140/#2118.
   failures, and bounded diagnostics.
 - Structural deployment tests prove account/session separation, installed modes, systemd
   supervision, credential delivery, and absence of worker/reconciler authority-endpoint access.
-- The authorized Ubuntu 26.04 x86_64 carrier receives an archive of the exact local HEAD into a
-  SHA-named proof directory, asserts the installed revision equals that SHA, bootstraps a local
+- The authorized Ubuntu 26.04 x86_64 carrier receives a Git bundle containing the exact local HEAD
+  into a SHA-named proof directory. The proof overrides both `live_vm_repo_url` with that bundle
+  and `live_vm_repo_version` with the full SHA, then asserts the installed revision equals that
+  SHA. It bootstraps a local
   peer-authenticated PostgreSQL database and `kdive-provider-authority` LOGIN, executes the role
   from a clean KDIVE state, starts/restarts both endpoints, runs positive/negative readiness probes,
   injects drift, and verifies readiness retracts. The role creates the real `kdive` reconciler
@@ -156,10 +159,11 @@ lifecycle state. Those are either accepted exclusions or owned by #2140/#2118.
 
 ## Rollback
 
-Reverting disables/removes the dormant authority unit and endpoint and revokes or rotates its LOGIN
-credential while leaving the current fixed-worker provider path untouched. Migration 0125 is
-forward-only and remains applied but inert; removing its function or grant would require an
-authorized later migration. Because provider capability advertisement remains disabled, rollback
-has no active external-boot operation to migrate. Journal and credential directories are retained
-rather than deleted; an operator may inspect or remove them only after confirming no later #2140
-deployment uses them.
+Before reverting, operators run the explicit idempotent `authority_host_teardown.yml` play. It
+stops, disables, and removes both dormant authority units and endpoint artifacts, reloads systemd,
+revokes LOGIN, and proves the existing fixed-worker provider path still works. The clean-host proof
+executes deployment and this teardown. Migration 0125 is forward-only and remains applied but
+inert; removing its function or grant would require an authorized later migration. Because provider
+capability advertisement remains disabled, rollback has no active external-boot operation to
+migrate. Journal and credential directories are retained rather than deleted; an operator may
+inspect or remove them only after confirming no later #2140 deployment uses them.
