@@ -765,7 +765,7 @@ def _kdive_imports(source: str) -> set[str]:
 # The reviewed first-party import closure of `recovery_requests`. Every entry is a name the
 # module reaches today; a new one has to be added here, which is where a reviewer sees that a
 # transition writer has come within reach.
-_ALLOWED_KDIVE_IMPORTS = frozenset(
+_REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
     {
         "kdive.db.external_boot_activations:ExternalBootActivationRepository",
         "kdive.db.locks:LockScope",
@@ -806,16 +806,16 @@ def test_the_first_party_import_closure_is_the_reviewed_set() -> None:
     through a first-party helper. Pinning the import set is the closure property that can: any
     new ``kdive.*`` name this module reaches fails here until it is reviewed and listed.
     """
-    assert _kdive_imports(inspect.getsource(recovery_requests)) == _ALLOWED_KDIVE_IMPORTS
+    assert _kdive_imports(inspect.getsource(recovery_requests)) == _REVIEWED_FIRST_PARTY_IMPORTS
 
 
 def test_the_import_closure_gate_bites() -> None:
     """Canary: prove the closure detects the delegate-module escape the name scan misses."""
     escape = "from kdive.services.external_boot import executor\n"
     reached = _kdive_imports(escape)
-    assert reached - _ALLOWED_KDIVE_IMPORTS == {"kdive.services.external_boot:executor"}
+    assert reached - _REVIEWED_FIRST_PARTY_IMPORTS == {"kdive.services.external_boot:executor"}
     assert _reachable_names(escape, set()) & _ACTIVATION_WRITING_NAMES == set()
-    assert _kdive_imports("import kdive.jobs.queue\n") - _ALLOWED_KDIVE_IMPORTS == {
+    assert _kdive_imports("import kdive.jobs.queue\n") - _REVIEWED_FIRST_PARTY_IMPORTS == {
         "kdive.jobs.queue:*"
     }
     assert _kdive_imports("import os\nfrom collections import abc\n") == set()
