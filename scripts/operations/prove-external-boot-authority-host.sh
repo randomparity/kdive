@@ -221,7 +221,7 @@ chmod 0600 "$secrets/request.json"
 install -m 0600 /dev/null "$remote_root/vars.yml"
 cat >"$remote_root/vars.yml" <<EOF
 live_vm_venv: $remote_install
-live_vm_repo_url: file://$remote_root/kdive.bundle
+live_vm_repo_url: $remote_root/kdive.bundle
 live_vm_repo_version: $revision
 live_vm_host_authority_instance: $authority_instance
 live_vm_host_authority_database_name: $database
