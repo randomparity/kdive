@@ -93,14 +93,13 @@ The reaper is a reconciler sweep (ADR-0021) with the durable store in reach. Its
    deletes a live worker's storage; see *Durable intent precedes the volume*.
 4. An owner in the retained set is left alone. An owner absent from it has no outstanding claim on
    the volume, so it is a candidate for deletion.
-5. Before deleting, resolve the referenced-path set — the backing paths of every disk in every
-   active and inactive domain definition on the host — and refuse the deletion of any candidate
-   whose path is in it. A referenced volume is a conflict to report, never a deletion. This is the
-   whole-pool form of the exclusivity requirement ADR-0585 states; the existing
-   `inspect_module_attachments` performs the attempt-scoped form, and `protected_volume_paths`
-   only resolves caller-supplied names to paths. Resolve the set after the candidates are known
-   and immediately before the deletions, so the window in which a domain can be defined against a
-   candidate is as short as the sweep can make it.
+5. Then resolve the referenced-path set — the backing paths of every disk in every active and
+   inactive domain definition on the host — and refuse to delete any candidate whose path is in
+   it, reporting it as a conflict. Resolve it after the candidates are known and immediately
+   before the deletions, so the window in which a domain can be defined against a candidate is as
+   short as the sweep can make it. This is the whole-pool form of ADR-0585's exclusivity
+   requirement, and it is new code: `inspect_module_attachments` does the attempt-scoped form, and
+   `protected_volume_paths` only maps caller-supplied names to paths.
 6. Delete. `VIR_ERR_NO_STORAGE_VOL` is an achieved post-state, so the sweep is idempotent.
 
 ### What "retained" means
@@ -138,9 +137,9 @@ and one attempt owns several volumes:
 ### Durable intent precedes the volume
 
 A worker writes the durable row naming the attempt tuple `(system_id, run_id, operation_nonce)`
-**before** it creates any of that attempt's volumes. Together with step 3's read ordering this closes the
-race in both directions: a volume cannot exist whose attempt has no row, and the sweep never
-judges a volume against a set older than the volume. A row with no volume is benign and the
+**before** it creates any of that attempt's volumes. Together with step 3's read ordering this
+closes the race in both directions: a volume cannot exist whose attempt has no row, and the sweep
+never judges a volume against a set older than the volume. A row with no volume is benign and the
 ordinary crash residue; the attempt path already reconciles it.
 
 Without both halves the sweep deletes a live worker's volume. Writing the volume first opens the

@@ -712,6 +712,15 @@ Modifies #2129's durable schema and
 `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_operation.py`. Sequenced last
 because the deletion in its second half is only safe once its first half exists.
 
+**The ordering inside this task is the hazard, so it is a hard gate rather than a preference.**
+Steps 1–3 give every reader a durable source and prove it with a green run *while the element is
+still written*; only step 4 removes the element. Landing the removal first — or landing steps 1–4
+as one commit — leaves a window in which the readers have neither source, and that window is
+exactly the failure this whole record exists to end. Commit twice: once at step 3 with the
+migration and its green run, once at step 5 with the removal. A reviewer who sees a single commit
+deleting `_REAP_METADATA_NS` should reject it and ask for the migration commit that must precede
+it.
+
 **Interfaces consumed:** everything from Tasks 1, 4, and 7.
 
 Steps:
