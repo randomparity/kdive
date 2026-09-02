@@ -131,8 +131,11 @@ def boot_projection_identity(domain_xml: str) -> str
 def parse_domain_xml(domain_xml: str) -> ET.Element   # module-internal, shared by all of the above
 ```
 
-`parse_domain_xml` raises `CategorizedError(ErrorCategory.INFRASTRUCTURE_FAILURE)` for non-NFC,
-malformed, entity-bearing, or non-`domain`-rooted XML.
+`parse_domain_xml` raises `CategorizedError(ErrorCategory.INFRASTRUCTURE_FAILURE)` for malformed or
+entity-bearing XML, which is a bad read and retryable, and
+`CategorizedError(ErrorCategory.CONFLICT)` for non-NFC character data or a non-`domain` root, which
+are permanent: `XMLDesc` is deterministic for a given domain, so re-reading returns the same bytes
+and a retry can only burn the deadline.
 
 ### Steps
 
@@ -380,19 +383,24 @@ def test_projection_creates_the_os_element_when_the_source_has_none() -> None:
 
 
 @pytest.mark.parametrize(
-    "source",
+    ("source", "category"),
     [
-        "<domain>",
-        '<!DOCTYPE d [<!ENTITY x "y">]><domain><name>&x;</name></domain>',
-        "<not-a-domain />",
+        ("<domain>", ErrorCategory.INFRASTRUCTURE_FAILURE),
+        (
+            '<!DOCTYPE d [<!ENTITY x "y">]><domain><name>&x;</name></domain>',
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ),
+        ("<not-a-domain />", ErrorCategory.CONFLICT),
         "<domain><name>café</name></domain>",
     ],
     ids=["malformed", "entity", "wrong-root", "non-nfc"],
 )
-def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(source: str) -> None:
+def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(
+    source: str, category: ErrorCategory
+) -> None:
     with pytest.raises(CategorizedError) as caught:
         render_target_xml(source, kernel="k", initrd=None, cmdline="c")
-    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.category is category
 ```
 
    Add the imports and module fixtures those tests need at the top of the file:
@@ -413,8 +421,9 @@ def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(source: str) 
 - The three ADR-0583 golden digests are asserted literally and pass.
 - The projection changes only `<os><kernel>`, `<os><initrd>`, and `<os><cmdline>`, and the preserved
   digest is identical across the projection of a fully-featured remote domain.
-- Malformed, entity-bearing, non-NFC, and non-`domain` XML all raise
-  `INFRASTRUCTURE_FAILURE`.
+- Malformed and entity-bearing XML raise `INFRASTRUCTURE_FAILURE` (retryable); non-NFC character
+  data and a non-`domain` root raise `CONFLICT`, because `XMLDesc` is deterministic for a given
+  domain and a retry can only burn the deadline.
 
 ---
 
@@ -436,8 +445,8 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
 ```
 
 Raises `CategorizedError(ErrorCategory.CONFLICT)` on the first failed rule, with
-`details={"system_id": str(system_id), "rule": <rule name>}`. Returns `None` on success. The six
-five rule names are `boot-projection`, `system-metadata`, `boot-disk`, `boot-selection`, and
+`details={"system_id": str(system_id), "rule": <rule name>}`. Returns `None` on success. The five
+rule names are `boot-projection`, `system-metadata`, `boot-disk`, `boot-selection`, and
 `firmware`. There is deliberately no live-XML rule: libvirt persists operator-set user aliases in
 the inactive definition, so refusing any `<alias>` would reject a legitimate baseline, and live XML
 is caught one step later when its preserved digest fails to match `source_definition`.
@@ -625,9 +634,7 @@ def prepare_target_definition(
    `details["rule"] == "artifact-path"`; a model instance whose `target_definition` is edited to a
    wrong digest (construct via `model_validate` on a mutated dump) rejected with `ValidationError`;
    an XML field whose character count is under `MAX_DEFINITION_BYTES` but whose UTF-8 byte count is
-   over it, rejected with `ValidationError` — a character-counting bound would let this through; a
-   `source_xml` under the bound whose rendered projection crosses it, asserting `CONFLICT` with
-   `details["rule"] == "definition-size"` rather than a `ValidationError`; and
+   over it, rejected with `ValidationError` — a character-counting bound would let this through; and
    a `source_xml` that does not parse, also asserting `ValidationError` rather than a bare
    `CategorizedError`. Build the
    plan and materialization with small module-level factory helpers rather than fixtures, so each
@@ -691,8 +698,6 @@ def prepare_target_definition(
 - A definition whose recorded digest does not recompute from its own XML cannot be constructed, and
   the failure is a `ValidationError` on every input including unparseable XML.
 - Both XML fields are bounded at 65536 UTF-8 bytes, proved by a multibyte case.
-- An over-long host definition or projection is a categorized `CONFLICT`, never a bare
-  `ValidationError` on a value the caller does not control.
 - `expected_cmdline` is `plan.cmdline` with no tokenizing, quoting, or normalization.
 
 ---
@@ -890,7 +895,9 @@ proof on.
      (only one is stripped, so it must fail);
    - a non-zero exit from each of the four commands in turn;
    - a captured stream longer than `MAX_GUEST_READ_BYTES`;
-   - a `CategorizedError(TRANSPORT_FAILURE)` raised by `run`, propagating unchanged.
+   - a `CategorizedError(TRANSPORT_FAILURE)` raised by `run`, propagating unchanged;
+   - a `CategorizedError(INFRASTRUCTURE_FAILURE)` raised by `run` for a malformed agent reply,
+     propagating unchanged.
 
    Each asserts the category from the spec's failure table; each `READINESS_FAILURE` case asserts
    `caught.value.terminal is True`; and each failing identity case asserts that no guest bytes

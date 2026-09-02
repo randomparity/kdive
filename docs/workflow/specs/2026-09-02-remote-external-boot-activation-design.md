@@ -104,6 +104,13 @@ an activation that proceeds on an unchecked command line is wrong whatever core 
 provider check is a guard, not a replacement, and returning the bytes is what lets core detect a
 provider that skipped it.
 
+Under the shared contract as it stands the bytes stop at the provider: `ExternalBootPorts.observe`
+returns `RunningKernelObservation`, which carries only architecture, release, and build ID, and no
+shared value carries a command line. So the provider's own fail-closed comparison is the whole of
+the enforcement today, and core cannot yet detect a provider that skipped it. Widening that seam
+belongs to `providers/ports/`, outside this change's surface; it is recorded below as an accepted
+residual rather than worked around here.
+
 The bytes are guest-controlled, so they are bounded on read, never persisted by this module, and
 never placed in an error message, a `details` payload, or a transcript. A failure names which field
 differed and nothing more.
@@ -138,15 +145,15 @@ ADR-0583's three published golden digests.
 ADR-0583's remote source admission, checked in this order and raising
 `CategorizedError(ErrorCategory.CONFLICT)` on the first failure:
 
-1. The boot projection has no kernel, initrd, or cmdline.
-2. `metadata/{kdive}system` equals this System id.
+1. The boot projection has no kernel, initrd, or cmdline (`rule="boot-projection"`).
+2. `metadata/{kdive}system` equals this System id (`rule="system-metadata"`).
 3. There is exactly one `<disk device="disk">`, its `<source>` names the expected pool and the
    System's deterministic overlay volume — derived here as `overlay_volume_name(system_id)` rather
    than supplied, so a caller cannot admit a source against the wrong volume — its
-   `<driver type="qcow2">`, and its `<target dev="vda" bus="virtio">`.
-4. `<os>` carries exactly one `<boot>`, with `dev="hd"`.
+   `<driver type="qcow2">`, and its `<target dev="vda" bus="virtio">` (`rule="boot-disk"`).
+4. `<os>` carries exactly one `<boot>`, with `dev="hd"` (`rule="boot-selection"`).
 5. `<os>` carries no `firmware` attribute and no `<loader>` or `<nvram>` child, matching what remote
-   provisioning renders.
+   provisioning renders (`rule="firmware"`).
 
 A source carrying external-boot fields fails check 1 rather than being captured. ADR-0583 admits
 such a source only while a matching durable activation row owns it, and that row is #2116/#2120
@@ -185,9 +192,14 @@ a module-tree component state, and the module tree is #2129's. #2120 composes th
 
 ### `prepare_target_definition(source_xml, *, plan, materialization, binding, pool, kernel_path, initrd_path) -> RemoteExternalBootDefinition`
 
-Pure. Validates ownership, `materialization.plan_identity == plan.identity`, and that the
-materialization carries a kernel reference (and an initrd reference exactly when the plan carries an
-initrd).
+Pure. Validates, in order, each failure raising `CONFLICT` with the named `rule`: ownership
+(`rule="ownership"`), `materialization.plan_identity == plan.identity` (`rule="plan-identity"`),
+and initrd presence agreement across the plan, the materialization, and the supplied path
+(`rule="initrd-presence"`), then artifact-path shape (`rule="artifact-path"`).
+
+It does not check that the materialization carries a kernel reference. `MaterializedArtifacts.kernel`
+is a required field on a closed frozen model, so one without a kernel reference cannot be
+constructed and the check could never fail.
 
 Ownership agreement is field-wise, not equality: the three values have three different shapes —
 `ExternalBootActivationBinding` is `(system_id, run_id, activation_id)`, `PlanOwnership` is
@@ -374,7 +386,11 @@ would re-dispatch a job to re-observe the same wrong guest until its deadline ex
 
 | Condition | Category | `terminal` | Effective |
 | --- | --- | --- | --- |
-| Malformed, non-NFC, or non-`domain` XML | `INFRASTRUCTURE_FAILURE` | no | retry |
+| Malformed or entity-bearing XML | `INFRASTRUCTURE_FAILURE` | no | retry |
+| Non-NFC character data, or a non-`domain` root | `CONFLICT` | no | stop |
+| Binding, plan, and materialization ownership disagree | `CONFLICT` | no | stop |
+| Materialization does not describe this plan | `CONFLICT` | no | stop |
+| Initrd presence disagrees across plan, materialization, and supplied path | `CONFLICT` | no | stop |
 | Artifact path is empty, non-NFC, relative, oversized, or carries `..` | `CONFLICT` | no | stop |
 | Source is not this System's owned disk/GRUB baseline | `CONFLICT` | no | stop |
 | Observed definition or power is not an admitted combination | `CONFLICT` | no | stop |
@@ -448,7 +464,9 @@ Boundary 3. Each path is checked nonempty, NFC, absolute, at most 1024 bytes, fr
 catches a resolution defect, not an attack — and is stated so that a later caller change does not
 silently make the boundary load-bearing without anyone noticing.
 
-**Explicitly out of scope.** A guest that deliberately reports the expected release, machine, build
+**Explicitly out of scope.** Carrying the observed command-line bytes across the shared seam to
+core, which `ExternalBootPorts.observe`'s return type cannot express today; until it widens, the
+provider's own comparison is the only enforcement. A guest that deliberately reports the expected release, machine, build
 ID, and command line while running something else — the identity proof measures divergence, not
 deception, and closing it would take attestation. Mutation fencing against a stale worker (#2140, ADR-0584) — this module
 performs its compare-and-set against observed state and documents that its caller owns the fence.
