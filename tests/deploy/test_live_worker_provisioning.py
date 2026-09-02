@@ -232,6 +232,7 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
         "Prove journal restoration gates authority readiness",
     ):
         assert evidence in verify
+    assert "NRestarts" in verify
 
     proof = _text(AUTHORITY_PROOF)
     assert proof.startswith("#!/bin/bash\nset -euo pipefail\n")
