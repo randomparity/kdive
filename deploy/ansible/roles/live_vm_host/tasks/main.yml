@@ -309,7 +309,8 @@
   loop:
     - {path: /usr/local/libexec, mode: "0755"}
     - {path: /etc/kdive, mode: "0755"}
-    - {path: /etc/kdive/credentials, mode: "0700"}
+    # Traverse-only lets each service reach its own private child without listing sibling names.
+    - {path: /etc/kdive/credentials, mode: "0711"}
     - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
     - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}
 

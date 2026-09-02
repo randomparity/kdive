@@ -199,6 +199,7 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     authority_packages = defaults["live_vm_host_authority_packages"]
     assert isinstance(authority_packages, list)
     assert "python3-psycopg" in authority_packages
+    assert '- {path: /etc/kdive/credentials, mode: "0711"}' in tasks
 
     ordered = (
         "Install external-boot authority prerequisites",
