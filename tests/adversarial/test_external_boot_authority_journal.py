@@ -72,6 +72,40 @@ async def test_two_generation_race_fences_stale_retry_and_preserves_idempotency(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_unresolved_mutation_is_fenced_before_successor_takeover(
+    tmp_path: Path, restart: bool
+) -> None:
+    """A successor must settle an uncertain predecessor before becoming current."""
+    service, repository, adapter, peer, first = _service(tmp_path)
+    await service.acknowledge_takeover(peer, first)
+    repository.current = True
+    mutation = _mutation(first)
+    adapter.fail_commit = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, mutation)
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
+
+    successor = _successor(first)
+    repository.allocating_request = successor
+    adapter.fail_commit = False
+    if restart:
+        service = ExternalBootAuthorityService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthorityJournal(
+                tmp_path, f"{system_id}.journal"
+            ),
+            adapter=adapter,
+        )
+
+    acknowledgement = await service.acknowledge_takeover(peer, successor)
+    assert acknowledgement.generation == 2
+    assert adapter.calls == ["commit:activate", "observe"]
+    assert repository.records[-1].phase is JournalPhase.TAKEOVER_ACKNOWLEDGED
+    assert repository.records[-2].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
 async def test_later_run_cannot_replay_earlier_completed_run(tmp_path: Path) -> None:
     service, repository, adapter, peer, first = _service(tmp_path)
     await service.acknowledge_takeover(peer, first)
@@ -88,6 +122,86 @@ async def test_later_run_cannot_replay_earlier_completed_run(tmp_path: Path) -> 
         await service.execute_mutation(peer, completed)
     assert tuple(repository.records) == before
     assert adapter.calls == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
+async def test_valid_prefix_journal_loss_fences_successor_before_provider_access(
+    tmp_path: Path,
+) -> None:
+    """A valid journal prefix cannot replace the independently anchored head."""
+    service, repository, adapter, peer, first = _service(tmp_path)
+    await service.acknowledge_takeover(peer, first)
+    repository.current = True
+    await service.execute_mutation(peer, _mutation(first))
+    path = tmp_path / f"{first.system_id}.journal"
+    path.write_bytes(b"".join(path.read_bytes().splitlines(keepends=True)[:-1]))
+    calls = tuple(adapter.calls)
+    successor = _successor(first)
+    repository.current = False
+    repository.allocating_request = successor
+    restarted = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(path.parent, path.name),
+        adapter=adapter,
+    )
+
+    with pytest.raises(AuthorityServiceError, match="journal_conflict"):
+        await restarted.acknowledge_takeover(peer, successor)
+    assert path.read_bytes().endswith(b"\n")
+    assert tuple(adapter.calls) == calls
+
+
+@pytest.mark.anyio
+async def test_independent_lane_heads_cannot_be_substituted(tmp_path: Path) -> None:
+    """Each system restores only the journal anchored by its own trusted head."""
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first_service, first_repository, _, first_peer, first = _service(first_dir)
+    second_service, second_repository, second_adapter, second_peer, second = _service(second_dir)
+    await first_service.acknowledge_takeover(first_peer, first)
+    await second_service.acknowledge_takeover(second_peer, second)
+    assert first_repository.head is not None
+    assert second_repository.head is not None
+    assert first_repository.head.digest != second_repository.head.digest
+
+    substituted = ExternalBootAuthorityService(
+        repository=second_repository,
+        journal_factory=lambda _system_id: FileAuthorityJournal(
+            first_dir, f"{first.system_id}.journal"
+        ),
+        adapter=second_adapter,
+    )
+    assert not await substituted.readiness(second_peer, second)
+    assert second_adapter.calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fence", ["provider", "core"])
+async def test_stale_provider_and_core_writes_are_fenced_before_commit(
+    tmp_path: Path, fence: str
+) -> None:
+    """A stale provider request and a stale core confirmation stop before mutation."""
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    mutation = _mutation(request)
+    if fence == "provider":
+        repository.current = False
+    else:
+        repository.reject_resolution = 2
+
+    with pytest.raises(AuthorityServiceError, match="superseded"):
+        await service.execute_mutation(peer, mutation)
+    assert adapter.calls == []
+    if fence == "provider":
+        assert [record.phase for record in repository.records] == [
+            JournalPhase.WATERMARK_INSTALLED,
+            JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        ]
+    else:
+        assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
 
 
 @pytest.mark.anyio
