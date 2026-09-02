@@ -60,7 +60,7 @@ pure XML layer      render_target_xml / preserved_definition_identity / boot_pro
                     require_disk_grub_source
                             |
 definition layer    prepare_target_definition(source_xml, plan, materialization, binding, ...)
-                        -> RemoteExternalBootDefinition   (closed, canonical-JSON value)
+                        -> RemoteExternalBootDefinition   (closed frozen value)
                             |
 operation layer     activate_definition(conn, definition)
                     observe_guest_identity(agent_exec, domain, definition)
@@ -82,9 +82,16 @@ Signatures in this section are the contract; the implementation plan repeats the
    observation and expected command line.
 3. #2120 stores the resulting `RemoteExternalBootDefinition` in its recovery point; #2140 wraps the
    next step in the authority fence.
-4. `activate_definition` re-observes the domain inactive with the exact recorded source XML, defines
-   the target XML, and starts the domain.
-5. `observe_guest_identity` makes one bounded attempt to read the running-kernel identity and
+4. The caller stops the domain through the existing control plane and verifies it inactive.
+   ADR-0583 puts this in the prepare phase, beside the recovery point, and requires the recovery
+   evidence to bind the prior power state. Neither is owned here: #2120 records the prior power
+   state alongside the definition, as it already does for the module tree, and #2118 or #2120 issues
+   the stop. `activate_definition` requires the inactive result but does not produce it — a domain
+   observed active is a `CONFLICT`, and a provisioned System is normally running when its Run
+   begins, so this step is not optional.
+5. `activate_definition` re-observes the domain inactive with the exact recorded source definition,
+   defines the target XML, and starts the domain.
+6. `observe_guest_identity` makes one bounded attempt to read the running-kernel identity and
    `/proc/cmdline`, and compares both exactly. It does not wait: an agent that is not yet answering
    is a retryable `TRANSPORT_FAILURE`, and #2118's job owns the readiness deadline and the retry
    that constitutes the wait, exactly as it owns every other deadline on this lane.
@@ -147,11 +154,15 @@ state this module cannot read, so the conflict is raised for its caller to resol
 
 ### `RemoteExternalBootDefinition`
 
-A closed frozen pydantic value (`extra="forbid"`, canonical JSON) carrying: `binding`,
+A closed frozen pydantic value (`extra="forbid"`, `frozen=True`) carrying: `binding`,
 `plan_identity`, `materialization_identity`, `source_xml`, `source_definition`, `source_boot`,
 `target_xml`, `target_definition`, `target_boot`, `expected_running`, `expected_cmdline`. Validators
 require both XMLs NFC and both digest pairs to recompute from their recorded XML, so a tampered
-record cannot present digests that do not describe its own bytes.
+record cannot present digests that do not describe its own bytes. It round-trips through ordinary
+pydantic JSON, not the shared ports module's canonical encoding — that pair is private to
+`_ClosedValue` and `providers/ports/` is outside this change's surface. Nothing needs it: this
+value's ADR-0583 identity is the preserved digest it records, never a digest over its own
+serialization.
 
 Both XML fields are bounded at 65536 **bytes** — the same unit and the same number the shared ports
 module applies to a canonical value (`ports/external_boot.py:26,44` measures `len(data)` over
@@ -168,7 +179,8 @@ converts only `ValueError` and `AssertionError` into a `ValidationError`, so the
 one exception class, including rehydration of a corrupted stored record through
 `model_validate_json`.
 
-It deliberately does not carry `ProviderStateIdentity`. That value pairs the definition digest with
+It carries no prior power state either: ADR-0583 requires the recovery evidence to bind it, and
+#2120 owns that record. It deliberately does not carry `ProviderStateIdentity`. That value pairs the definition digest with
 a module-tree component state, and the module tree is #2129's. #2120 composes the two.
 
 ### `prepare_target_definition(source_xml, *, plan, materialization, binding, pool, kernel_path, initrd_path) -> RemoteExternalBootDefinition`
@@ -415,8 +427,13 @@ recorded. That check runs after `GuestAgentExec` has already materialized the re
 what bounds worker allocation — the guest agent's own `guest-exec` output cap and libvirt's maximum
 agent reply size are, and they are outside this design. Naming the right layer matters because a
 later change to the agent seam could remove the real bound with no threat model showing a
-regression. A guest that lies fails identity proof, which is the intended outcome: the
-observation exists to detect exactly that. Failure details carry digests and identifiers, not guest
+regression. The comparison detects a guest that boots, or reports, a kernel or
+command line other than the plan's — the mis-boot case this proof exists for. It does not detect a
+guest that deliberately reports the expected values: every one of the four reads is answered by
+guest user space, which this section already declares the tenant controls, and the reads are four
+separate round trips rather than one atomic sample. Detecting deliberate misreporting would take
+attestation this design does not attempt and no charter authorizes; it is an accepted residual,
+recorded below. Failure details carry digests and identifiers, not guest
 bytes, so a hostile command line cannot be reflected into a transcript. No guest value is
 interpolated into a command, path, URL, or template — the three argv vectors are literals.
 
@@ -431,7 +448,9 @@ Boundary 3. Each path is checked nonempty, NFC, absolute, at most 1024 bytes, fr
 catches a resolution defect, not an attack — and is stated so that a later caller change does not
 silently make the boundary load-bearing without anyone noticing.
 
-**Explicitly out of scope.** Mutation fencing against a stale worker (#2140, ADR-0584) — this module
+**Explicitly out of scope.** A guest that deliberately reports the expected release, machine, build
+ID, and command line while running something else — the identity proof measures divergence, not
+deception, and closing it would take attestation. Mutation fencing against a stale worker (#2140, ADR-0584) — this module
 performs its compare-and-set against observed state and documents that its caller owns the fence.
 Module-tree trust (#2129, ADR-0585). Artifact content trust: the kernel and initrd bytes were
 verified at finalization (#2107) and materialization (#2109), and this module consumes their
@@ -456,19 +475,23 @@ source; malformed XML; a DTD/entity payload; a non-`domain` root; `initrd=None` 
 element.
 
 **Source admission.** One passing case and one failing case per numbered rule, each asserting
-`CONFLICT` and that no XML was produced.
+`CONFLICT` and its `rule` value.
 
 **Definition value.** Ownership mismatch between binding, plan, and materialization; a
 materialization whose initrd presence disagrees with the plan's; each rejected artifact-path shape;
-canonical-JSON round trip; a digest that does not recompute from its recorded XML; and `source_xml`
+a JSON round trip; a digest that does not recompute from its recorded XML; and `source_xml`
 that does not parse, asserting `ValidationError` rather than a bare `CategorizedError`. The byte
 cap gets a multibyte case: XML under 65536 characters and over 65536 bytes must be rejected, which a
 character-counting `max_length` would let through.
 
 **Activation matrix.** Every combination of observed definition in `{source, target, other}` and
-power in `{inactive, active}`: the two admitted cells act, the rest raise `CONFLICT` with no
-`defineXML` and no `create` recorded on the double. Plus a `create()` that raises after a successful
-`defineXML`, asserting `CONFLICT` with `terminal is True`; a lookup raising `VIR_ERR_NO_DOMAIN`
+power in `{inactive, active}`, matching the six-cell table the activation section defines:
+`(source, inactive)` defines then starts, `(target, inactive)` starts only, `(target, active)`
+returns without a write — the idempotent re-run after a lost response, which must not raise — and
+the remaining three raise `CONFLICT` with no `defineXML` and no `create` recorded on the double.
+Plus a `create()` that raises after a successful `defineXML`, asserting `CONFLICT` carrying
+`"phase": "start"`; a readback matching neither pair, asserting `CONFLICT` carrying
+`"phase": "readback"` and both observed digests; a lookup raising `VIR_ERR_NO_DOMAIN`
 asserting `NOT_FOUND`; a lookup raising another libvirt code asserting `INFRASTRUCTURE_FAILURE`; a
 `defineXML` raising `VIR_ERR_XML_ERROR` asserting `CONFLICT` with no `create` recorded; and an
 `XMLDesc` raising `VIR_ERR_OPERATION_INVALID` asserting `INFRASTRUCTURE_FAILURE`.

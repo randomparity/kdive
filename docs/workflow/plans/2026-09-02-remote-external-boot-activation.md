@@ -233,16 +233,28 @@ def _malformed(reason: str) -> CategorizedError:
     )
 
 
+def _permanent(reason: str) -> CategorizedError:
+    return CategorizedError(
+        f"remote-libvirt domain XML {reason}",
+        category=ErrorCategory.CONFLICT,
+    )
+
+
 def parse_domain_xml(domain_xml: str) -> ET.Element:
-    """Safely parse an NFC domain definition, or raise ``INFRASTRUCTURE_FAILURE``."""
+    """Safely parse an NFC domain definition.
+
+    A malformed or truncated read is ``INFRASTRUCTURE_FAILURE`` and retryable. Non-NFC character
+    data and a non-``domain`` root are ``CONFLICT``: for a given domain ``XMLDesc`` is
+    deterministic, so re-reading returns the same bytes and a retry can only burn the deadline.
+    """
     if unicodedata.normalize("NFC", domain_xml) != domain_xml:
-        raise _malformed("must be NFC")
+        raise _permanent("must be NFC")
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException) as exc:
         raise _malformed("is malformed or forbidden") from exc
     if root.tag != "domain":
-        raise _malformed("must have a domain root")
+        raise _permanent("must have a domain root")
     return root
 
 
@@ -613,7 +625,9 @@ def prepare_target_definition(
    `details["rule"] == "artifact-path"`; a model instance whose `target_definition` is edited to a
    wrong digest (construct via `model_validate` on a mutated dump) rejected with `ValidationError`;
    an XML field whose character count is under `MAX_DEFINITION_BYTES` but whose UTF-8 byte count is
-   over it, rejected with `ValidationError` — a character-counting bound would let this through; and
+   over it, rejected with `ValidationError` — a character-counting bound would let this through; a
+   `source_xml` under the bound whose rendered projection crosses it, asserting `CONFLICT` with
+   `details["rule"] == "definition-size"` rather than a `ValidationError`; and
    a `source_xml` that does not parse, also asserting `ValidationError` rather than a bare
    `CategorizedError`. Build the
    plan and materialization with small module-level factory helpers rather than fixtures, so each
@@ -677,6 +691,8 @@ def prepare_target_definition(
 - A definition whose recorded digest does not recompute from its own XML cannot be constructed, and
   the failure is a `ValidationError` on every input including unparseable XML.
 - Both XML fields are bounded at 65536 UTF-8 bytes, proved by a multibyte case.
+- An over-long host definition or projection is a categorized `CONFLICT`, never a bare
+  `ValidationError` on a value the caller does not control.
 - `expected_cmdline` is `plan.cmdline` with no tokenizing, quoting, or normalization.
 
 ---
