@@ -17,4 +17,5 @@ SETTING_MODULES: tuple[str, ...] = (
     "kdive.providers.local_libvirt.settings",
     "kdive.providers.fault_inject.settings",
     "kdive.providers.remote_libvirt.settings",
+    "kdive.providers.external_boot_authority.settings",
 )
