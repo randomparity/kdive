@@ -262,9 +262,11 @@ helper — the worker composes the whole argv and the guest supplies none of it,
 what may be run, not in who chooses it. Second, `/usr/bin/uname` and `/usr/bin/cat` are present in
 the three cloud and virt-builder catalog images but are **not** established for
 `bare-kdive-remote-base`, a busybox scratch image
-(`deploy/ansible/inventory/group_vars/all.yml:53-91`, `build_scratch.yml:17-38`) that installs
-busybox with `--setopt=install_weak_deps=False`, never names `coreutils`, and is already marked
-UNVALIDATED at `build_scratch.yml:8-10`. The exit-127 rule above is what turns that into an
+(`deploy/ansible/inventory/group_vars/all.yml:82-91`). Its build at
+`deploy/ansible/roles/guest_base_image/tasks/build_scratch.yml` installs with
+`--setopt=install_weak_deps=False` (`:24`) and names `busybox` (`:28`) but never `coreutils` —
+not on the dnf path and not in the Debian `--include` at `:48` — and the file carries an
+UNVALIDATED marker at `:8`. The exit-127 rule above is what turns that into an
 actionable `CONFIGURATION_ERROR` instead of a terminal identity failure, and a follow-up carries
 whether that image should be in the external-boot catalog at all.
 
