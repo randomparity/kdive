@@ -353,6 +353,7 @@ class AuthorityListener:
             or self.tls_context.verify_mode is not ssl.CERT_REQUIRED
         ):
             raise OSError("listener evidence invalid")
+        validate_socket_parent(self.socket_path, self.authority_uid)
         status = os.stat(self.socket_path, follow_symlinks=False)
         if (
             not stat.S_ISSOCK(status.st_mode)

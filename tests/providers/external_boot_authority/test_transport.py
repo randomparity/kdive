@@ -589,6 +589,10 @@ def test_listener_evidence_detects_socket_and_credential_drift(tmp_path: Path) -
             with pytest.raises(OSError, match="listener evidence invalid"):
                 listener.validate()
             config.request_socket.chmod(0o660)
+            config.request_socket.parent.chmod(0o770)
+            with pytest.raises(OSError, match="unsafe"):
+                listener.validate()
+            config.request_socket.parent.chmod(0o2750)
             material["worker_client_ca"].chmod(0o644)
             material["worker_client_ca"].write_bytes(
                 material["worker_client_ca"].read_bytes() + b"\n"
