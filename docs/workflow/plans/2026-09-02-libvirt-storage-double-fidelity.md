@@ -35,10 +35,10 @@ Design: `docs/workflow/specs/2026-09-02-libvirt-storage-double-fidelity-design.m
 - `just check-mermaid` needs `npm ci` run once in `.github/scripts/mermaid-check/` in a fresh
   worktree (known gap #2156).
 
-Expected implementation size: 520–680 changed lines (M) — derived from the file map below: the two
-double classes plus their rendering helper and the `backingStore` branch, the unit proof's sixteen
-tests, the gate with its three-check resolver and contract, the live-tier proof over a base and a
-backed overlay, and the gate's eight unit tests.
+Expected implementation size: 600–780 changed lines (M) — derived from the file map below: the two
+double classes with their suffix table, rejection paths, and `backingStore` branch (~170 lines);
+the unit proof's twenty-two tests (~250); the gate with its three-check resolver and contract
+(~60); its eight unit tests (~90); and the live-tier proof over a base and a backed overlay (~110).
 
 ## File map
 
@@ -93,14 +93,24 @@ Facts this pins, all observed in that run:
 - A submitted `<metadata>` child, a submitted `<bogusElement>` child, and a submitted
   `kdive='owned'` attribute on `<name>` are accepted by `virStorageVolCreateXML` and appear nowhere
   in the readback.
-- The submitted document carried no root `type` attribute; libvirt supplies `type='file'`.
+- Root `type` is **overridden**, not merely defaulted: a document declaring `type='block'` still
+  reads back `type='file'` from a dir pool. The double therefore always renders `file`.
+- `capacity` is **normalised to bytes**. Observed suffix table: `bytes`/`B` = 1, `K`/`KiB` = 1024,
+  `KB` = 1000, `M`/`MiB` = 1048576, `MB` = 1000000, `G`/`GiB` = 1073741824, `GB` = 1000000000. An
+  unknown suffix raises `VIR_ERR_INVALID_ARG` (code 8). The double converts and renders
+  `unit='bytes'`.
+- A document with **no `<capacity>` is rejected**: `XML error: missing capacity element`,
+  `VIR_ERR_XML_ERROR` (code 27). A document with no `<target>` is accepted and reads back a full
+  `target` with `format type='raw'`.
+- A submitted `target/permissions/mode` **is honoured** (`0640` in, `0640` out; `0600` when none is
+  submitted), so the double retains it. A submitted `<label>` is **not** — the host's own security
+  label replaces it — so `label`, `owner`, and `group` stay placeholders.
 - `backingStore` is present only when the submitted document carried one. The base volume, created
   without it, reads back the same six top-level children minus `backingStore`.
-- `allocation`, `physical`, `permissions`, and `timestamps` are host facts. `allocation` (200704)
-  and `physical` (196616) differ from `capacity` (1048576) and from each other, and
-  `info()` returns `[0, 1048576, 200704]` — so `info()[2]` is the allocation. The double renders
-  these as **placeholders**, not derivations: `0` for allocation and physical with the capacity's
-  unit, `0600`/`0`/`0`/empty for the permission children, `0` for every timestamp.
+- `allocation`, `physical`, and `timestamps` are host facts. `allocation` (200704) and `physical`
+  (196616) differ from `capacity` (1048576) and from each other, and `info()` returns
+  `[0, 1048576, 200704]` — so `info()[2]` is the allocation. The double renders these as
+  **placeholders**: `0` for allocation and physical with `unit='bytes'`, `0` for every timestamp.
 - `label` carries the file's security label. It is present on this SELinux host and is not
   universal, so the live proof excludes it from exact comparison (Task 4).
 
@@ -114,13 +124,15 @@ Files:
 Interfaces this task defines, relied on by Tasks 3 and 4:
 
 ```python
+CAPACITY_SUFFIXES: dict[str, int]   # bytes/B=1, K/KiB=1024, KB=1000, M/MiB=1048576,
+                                    # MB=1000000, G/GiB=1073741824, GB=1000000000
+
 @dataclass(frozen=True, slots=True)
 class VolumeState:
     name: str
-    volume_type: str
-    capacity: int
-    capacity_unit: str
+    capacity_bytes: int
     format_type: str
+    mode: str
     path: str
     backing_path: str | None
     backing_format: str | None
@@ -170,20 +182,38 @@ Steps:
    - `test_readback_renders_the_modelled_backing_store_tags`: assert the `backingStore` child tag
      tuple equals `("path", "format", "permissions", "timestamps")`, with the same `permissions`
      and `timestamps` child tuples as `target`.
-   - `test_readback_retains_submitted_fields`: assert root `type`, `name` text, `capacity` text and
-     its `unit` attribute, and `target/format@type` equal what was submitted.
+   - `test_readback_retains_submitted_fields`: assert `name` text, `target/format@type`, and
+     `target/permissions/mode` equal what was submitted. Do **not** assert root `type` or
+     `capacity/@unit` round-trip: libvirt overrides both.
+   - `test_readback_overrides_the_submitted_root_type`: submit `<volume type='block'>`; assert the
+     readback root `type` is `file`. Real libvirt takes the type from the pool backend.
+   - `test_readback_normalises_capacity_to_bytes`: parametrised over `("bytes", 1, 1)`,
+     `("B", 1, 1)`, `("K", 1, 1024)`, `("KiB", 1, 1024)`, `("KB", 1, 1000)`, `("M", 1, 1048576)`,
+     `("MiB", 1, 1048576)`, `("MB", 1, 1000000)`, `("G", 1, 1073741824)`, `("GiB", 1, 1073741824)`,
+     `("GB", 1, 1000000000)`; assert the readback `capacity` carries `unit='bytes'` and the
+     converted text. The table was read off real libvirt (see *The modelled set*).
    - `test_readback_retains_the_submitted_backing_store`: assert `backingStore/path` text and
      `backingStore/format@type` equal what was submitted.
+   - `test_create_rejects_a_document_with_no_capacity`: submit `<volume><name>x</name></volume>`;
+     assert `pytest.raises(libvirt.libvirtError)` with
+     `exc.value.get_error_code() == libvirt.VIR_ERR_XML_ERROR`, and that `pool.listVolumes()` is
+     empty afterwards.
+   - `test_create_rejects_an_unknown_capacity_unit`: submit `unit='bogusUnit'`; assert
+     `libvirt.VIR_ERR_INVALID_ARG`.
    - `test_readback_derives_key_and_path_from_the_pool`: build the pool with
      `target_path="/pool/target"`, create `disk.qcow2`, assert `key` text, `target/path` text,
      `volume.key()`, and `volume.path()` all equal `/pool/target/disk.qcow2`.
-   - `test_readback_renders_allocation_and_physical_as_placeholders`: assert both texts are `"0"`
-     and both carry the submitted capacity's unit. Real libvirt fills them from the file on disk
-     (observed: allocation 200704, physical 196616 against capacity 1048576), so the double states
-     a placeholder rather than a plausible-looking wrong derivation.
-   - `test_readback_applies_defaults_for_absent_input`: submit only `<volume><name>x</name></volume>`;
-     assert root `type` is `file`, `target/format@type` is `raw`, `capacity` text is `0` with unit
-     `bytes`.
+   - `test_readback_renders_host_facts_as_placeholders`: assert `allocation` and `physical` texts
+     are `"0"` with `unit='bytes'`, `permissions/owner` and `permissions/group` are `"0"`,
+     `permissions/label` is empty, and every `timestamps` child is `"0"`. Real libvirt fills these
+     from the file on disk (observed: allocation 200704, physical 196616 against capacity 1048576;
+     a submitted SELinux label replaced by the host's own), so the double states a placeholder
+     rather than a plausible-looking wrong value.
+   - `test_readback_applies_defaults_for_absent_optional_input`: submit
+     `<volume><name>x</name><capacity unit='bytes'>65536</capacity></volume>` — no `<target>`, no
+     `<backingStore>`, no `<permissions>`; assert `target/format@type` is `raw`,
+     `permissions/mode` is `0600`, and no `backingStore` element is rendered. Real libvirt accepts
+     a document with no `<target>` and reads back a full one.
    - `test_readback_drops_attributes_libvirt_does_not_keep`: submit `<name kdive='owned'>x</name>`
      and a root `kdive='owned'` attribute; assert neither appears in the readback. Grounded by the
      probe under *The modelled set*, which observed both dropped by real libvirt.
@@ -202,13 +232,17 @@ Steps:
    Expect a collection error: `ImportError: cannot import name 'FakeStoragePool'`.
 3. Add `VolumeState`, `FakeStorageVolume`, and `FakeStoragePool` to `fakes.py` with the interface
    above. `createXML` parses with `xml.etree.ElementTree.fromstring` and reads only `./name`,
-   `./capacity` and its `unit`, the root `type` attribute, `./target/format` and its `type`
-   attribute, and `./backingStore/path` with `./backingStore/format`'s `type` attribute, then
-   builds a `VolumeState`; the volume's `path` is `f"{pool_target_path}/{name}"`.
-   `XMLDesc` renders the modelled document from that state alone, with `allocation` and `physical`
-   `0` carrying the capacity's unit, `mode` `0600`, `owner` and `group` `0`, `label` the empty
-   string, and every timestamp `0`. It renders the `backingStore` branch only when
-   `state.backing_path` is not `None`, matching libvirt. Add `# noqa: N802` on `XMLDesc`,
+   `./capacity` and its `unit`, `./target/format`'s `type` attribute, `./target/permissions/mode`,
+   and `./backingStore/path` with `./backingStore/format`'s `type` attribute. It raises
+   `libvirt_error(libvirt.VIR_ERR_XML_ERROR)` when `./capacity` is absent and
+   `libvirt_error(libvirt.VIR_ERR_INVALID_ARG)` when its `unit` is outside `CAPACITY_SUFFIXES`,
+   otherwise converting the value to bytes through that table. It does **not** read the root `type`
+   attribute — libvirt overrides it. The volume's `path` is `f"{pool_target_path}/{name}"`.
+   `XMLDesc` renders the modelled document from that state alone: root `type='file'`, `capacity`
+   with `unit='bytes'`, `allocation` and `physical` `0` with `unit='bytes'`, the retained `mode`,
+   `owner` and `group` `0`, `label` the empty string, and every timestamp `0`. It renders the
+   `backingStore` branch only when `state.backing_path` is not `None`, matching libvirt, and
+   renders that branch's permissions and timestamps as placeholders. Add `# noqa: N802` on `XMLDesc`,
    `createXML`, `storageVolLookupByName`, and `listVolumes`, matching the file's existing
    libvirt-binding methods. Update the module docstring to say the storage double models the
    readback rather than echoing the request, and cite #2164.
@@ -331,8 +365,9 @@ Acceptance criteria:
 - With no `KDIVE_LIBVIRT_URI` and no session daemon, the gate skips.
 - With `KDIVE_LIBVIRT_URI` set to a URI that does not answer, the gate fails loud.
 - With `KDIVE_LIBVIRT_URI` set to a non-session URI, the gate fails loud without opening anything.
-- A host that answers `open` but has no storage driver takes the same skip/fail split, not an error
-  inside the test body.
+- A host whose storage driver does not answer a list call takes the same skip/fail split, not an
+  error inside the test body. A host that lists pools but cannot define one is out of the probe's
+  reach and still errors in the test body; that limit is stated in the spec, not fixed here.
 - The probe connection is closed on the success and both failure paths.
 
 ## Task 4: prove the double against real libvirt
@@ -354,16 +389,16 @@ Steps:
      error that explains it.
    - Inside the `try`: `conn = libvirt.open(contract.libvirt_uri)`; define a `dir` pool named with
      a `uuid4().hex` suffix over `str(tmp_path)`; `pool.create(0)`.
-   - Build two volume document strings. `base_document` is
+   - Build `base_document` =
      `<volume><name>base.qcow2</name><capacity unit='bytes'>1048576</capacity>`
-     `<target><format type='qcow2'/></target></volume>` — no `backingStore`. `overlay_document` is
-     the shape `render_volume_xml` produces (`<name>`, `<capacity>`, `<target><format
-     type='qcow2'/></target>`, `<backingStore><path>…</path><format type='qcow2'/></backingStore>`
-     pointing at the base volume's `path()`), plus a `<metadata><owner>run-1</owner></metadata>`
-     child, a `<bogusElement>zzz</bogusElement>` child, and a `kdive='owned'` attribute on
-     `<name>`. Neither document carries a root `type` attribute.
-   - `real_base = pool.createXML(base_document, 0)`; then build `overlay_document` from
-     `real_base.path()`; then `real = pool.createXML(overlay_document, 0).XMLDesc(0)` and
+     `<target><format type='qcow2'/></target></volume>` — no `backingStore`, no root `type`.
+   - `real_base = pool.createXML(base_document, 0)`.
+   - **Now** build `overlay_document` from `real_base.path()`: the shape `render_volume_xml`
+     produces (`<name>`, `<capacity>`, `<target><format type='qcow2'/></target>`,
+     `<backingStore><path>real_base.path()</path><format type='qcow2'/></backingStore>`), plus a
+     `<metadata><owner>run-1</owner></metadata>` child, a `<bogusElement>zzz</bogusElement>` child,
+     and a `kdive='owned'` attribute on `<name>`. No root `type`.
+   - `real = pool.createXML(overlay_document, 0).XMLDesc(0)`;
      `real_base_desc = real_base.XMLDesc(0)`.
    - `fake_pool = FakeStoragePool(target_path=str(tmp_path))`;
      `fake_base_desc = fake_pool.createXML(base_document).XMLDesc(0)`;
@@ -372,13 +407,19 @@ Steps:
      equal root `type` attributes, and equal top-level child tag tuples — which is also what
      distinguishes the two volumes, since only the overlay carries `backingStore`.
    - For `target` on both pairs, and for `backingStore` on the overlay pair, assert equal child tag
-     tuples and equal `timestamps` child tag tuples. For `permissions`, compare the child tag sets
-     with `label` removed from both, and additionally assert the real set is a subset of the
-     double's. `label` carries the file's security label, so a runner without SELinux emits three
-     children where an SELinux host emits four; comparing it exactly would make a portable proof
-     host-specific.
-   - Assert `metadata`, `bogusElement`, and the `kdive` attribute appear in none of the four
-     readbacks, by tag and attribute search over every element and by substring over the strings.
+     tuples and equal `timestamps` child tag tuples. For `permissions`, make exactly two
+     assertions: `real_tags - {"label"} == fake_tags - {"label"}` on the label-stripped sets, and
+     `real_tags <= fake_tags` on the **unstripped** sets. `label` carries the file's security
+     label, so a runner without SELinux emits three children where an SELinux host emits four; only
+     `label` is optional, and the subset leg on the full sets keeps the comparison from letting the
+     double render a child libvirt never emits.
+   - Assert none of the four parsed readbacks contains an element tagged `metadata` or
+     `bogusElement`, or any element carrying a `kdive` attribute key — by walking the trees, **not**
+     by substring over the readback strings. Every readback carries the pool target path three
+     times, and `tmp_path` honours `TMPDIR` and `--basetemp`, so a substring check for `kdive`
+     false-reds on any runner whose temp root contains that token. Do assert by substring that the
+     submitted payload values `run-1` and `zzz` appear in none of the four strings: those cannot
+     occur in a path libvirt generates.
    - `finally`: skip each of `pool` and `conn` that is still `None`; otherwise delete each volume
      the pool lists, then `pool.destroy()`, `pool.undefine()`, `conn.close()`, each guarded so an
      already-absent object does not mask the real failure.
