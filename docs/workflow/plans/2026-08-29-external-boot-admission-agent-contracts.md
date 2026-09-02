@@ -81,7 +81,7 @@ Created:
 - `src/kdive/services/external_boot/__init__.py`
 - `src/kdive/services/external_boot/admission.py` — the closed decision table.
 - `tests/services/external_boot/conftest.py` — the shared activation-seeding factory.
-- `src/kdive/services/external_boot/recovery_requests.py` — the three non-writing contract services.
+- `src/kdive/mcp/tools/external_boot/recovery_requests.py` — the three non-writing contract services.
 - three `docs/debt/` deferral records this design owes — see *Deferrals* for their paths.
 - `tests/services/external_boot/__init__.py`
 - `tests/services/external_boot/test_admission.py`
@@ -519,7 +519,7 @@ reason.
 
 ## Task 3: The three admission-and-authorization services
 
-Files: create `src/kdive/services/external_boot/recovery_requests.py`; create
+Files: create `src/kdive/mcp/tools/external_boot/recovery_requests.py`; create
 `tests/services/external_boot/test_recovery_requests.py`. `src/kdive/services/debug/sessions.py` is
 consumed unchanged.
 
@@ -681,7 +681,7 @@ matrix keys on, and no quarantine record exists on this branch to read.
    `updated_at`. Assert `external_boot_recovery_attempts` and `jobs` gained no row for the System.
    This proves "no tool commits a transition it cannot complete" against the database rather than
    against the source.
-4. Write `src/kdive/services/external_boot/recovery_requests.py`. Re-run the command from step 2 and
+4. Write `src/kdive/mcp/tools/external_boot/recovery_requests.py`. Re-run the command from step 2 and
    expect exit 0.
 5. Run `just lint` and `just type`; expect exit 0. Commit.
 
@@ -697,6 +697,13 @@ Files: modify `src/kdive/mcp/tools/lifecycle/runs/registrar.py`,
 `src/kdive/mcp/tools/lifecycle/systems/registrar.py`,
 `src/kdive/mcp/tools/ops/security/breakglass.py`, `src/kdive/mcp/tools/_docmeta.py`; create
 `tests/mcp/lifecycle/test_external_boot_contracts.py`; regenerate `docs/guide/reference/`.
+
+Registering a tool also has to satisfy the registry-wide maps that enumerate the live surface, so
+this task additionally classifies the three names in `src/kdive/mcp/exposure.py`, adds them to the
+reviewed sets in `tests/mcp/core/test_docmeta.py` and `tests/services/external_boot/test_admission.py`
+(which retires that module's `_LIFECYCLE_ONLY` exemption, since both lifecycle operations now have a
+guarded tool), documents the two namespaced tools in `docs/guide/toolsets/`, and regenerates the
+RBAC matrix, the CLI verb descriptors, the doc constants, and the packaged doc-resource snapshots.
 
 No new `ops` plane and no `assembly/tool_registration.py` edit: `breakglass.py` already registers the
 platform-admin destructive System repair tools `ops.force_teardown` (:170) and `ops.force_release`
@@ -820,7 +827,7 @@ description):
    `just doc-constants-check`; expect exit 0. If `doc-constants-check` reports a stale tool count,
    run its generator without `--check` and commit the regenerated file.
 6. Add the import-closure gate to `tests/services/external_boot/test_recovery_requests.py`: walk
-   `kdive.services.external_boot.recovery_requests`'s module-level names and assert none of
+   `kdive.mcp.tools.external_boot.recovery_requests`'s module-level names and assert none of
    `begin_recovery_attempt`, `finish_recovery_attempt`, `record_conflict`, `release_reservation`,
    `mark_cleanup_complete`, `transition`, `create`, `ExternalBootAuthorityMarkerV1`, or
    `enqueue` is reachable from it. Static enforcement of the amendment's hard rule, beside Task 3

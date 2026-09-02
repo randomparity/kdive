@@ -13,6 +13,10 @@ target. For exact parameters, types, and return schema, read each tool's own des
 - `systems.reprovision` — rebuild a system back to a clean baseline (for example, to
   refresh a local-libvirt rootfs).
 - `systems.teardown` — destroy a system and release its host resources.
+- `systems.resolve_external_boot_conflict` — put the recorded source state back on a system whose
+  external boot is in `recovery_conflict`. Not served yet: it validates your role and the
+  activation's state, then reports `recovery_executor_unavailable` and changes nothing (#2118
+  promotes it), so recover such a system with `systems.teardown` today.
 
 Some debug and live-introspection capabilities are bound at provision: the profile's
 `debug` flags (the gdb stub and crash-preserve) and the live-ssh credential cannot be

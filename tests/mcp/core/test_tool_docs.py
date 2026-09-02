@@ -736,10 +736,26 @@ def test_every_tool_has_a_valid_maturity() -> None:
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
 
 
-def test_tools_have_no_maturity_detail() -> None:
-    # A maturity_detail left behind after a tool is promoted would mislead.
-    offenders = [t.name for t in TOOLS if "maturity_detail" in (t.meta or {})]
-    assert not offenders, f"tools carrying a stale maturity_detail: {offenders}"
+# The reviewed `partial` set: the three external-boot recovery contracts, each of which
+# validates its request and then reports that the recovery executor is absent (#2117, #2118).
+# Pinned so a new partial tool is a deliberate entry, and so promoting one has to be recorded
+# here as well as at its registration.
+_PARTIAL_TOOLS = frozenset(
+    {
+        "ops.resolve_recovery_orphan",
+        "runs.release_external_boot",
+        "systems.resolve_external_boot_conflict",
+    }
+)
+
+
+def test_exactly_the_partial_tools_carry_a_maturity_detail() -> None:
+    # ADR-0175: a partial tool must carry a maturity_detail and every other tool must not — a
+    # maturity_detail left behind after a tool is promoted would mislead.
+    detailed = {t.name for t in TOOLS if "maturity_detail" in (t.meta or {})}
+    partial = {t.name for t in TOOLS if (t.meta or {}).get("maturity") == "partial"}
+    assert partial == _PARTIAL_TOOLS, f"unreviewed partial tools: {sorted(partial)}"
+    assert detailed == partial, f"maturity_detail set {sorted(detailed)} != partial set"
 
 
 # The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208

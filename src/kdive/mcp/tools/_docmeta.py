@@ -40,6 +40,8 @@ DESTRUCTIVE_TOOLS = frozenset(
         "systems.teardown",
         "ops.force_teardown",
         "ops.force_release",
+        # Its promoted behavior deletes or adopts quarantined recovery objects (#2117, #2118).
+        "ops.resolve_recovery_orphan",
         "ops.reconcile_systems",
         "resources.drain",
         "resources.deregister",

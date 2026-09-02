@@ -35,6 +35,7 @@ from kdive.domain.lifecycle.records import Run
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.security.authz.context import RequestContext
@@ -82,6 +83,41 @@ _ACTIVE_JOBS_SQL: LiteralString = (
 
 _REPOSITORY = ExternalBootActivationRepository()
 _IDENTITY = TypeAdapter(Digest)
+
+_PROMOTION = (
+    "Promoted when the external-boot recovery job handler and worker claim path land (#2118)."
+)
+
+#: The `maturity_detail` text the two admission contracts register with.
+ADMISSION_STUB_DETAIL = (
+    "Validates the caller's identity, role, and the System-wide external-boot admission "
+    "matrix, then reports configuration_error with reason=recovery_executor_unavailable. No "
+    "activation transition is committed and no recovery job is enqueued, because the "
+    "external-boot recovery executor is not installed."
+)
+
+#: The `maturity_detail` text the quarantined-object repair registers with.
+ORPHAN_STUB_DETAIL = (
+    "Validates the caller's platform role and the bounded repair reference, then reports "
+    "configuration_error with reason=recovery_executor_unavailable. No quarantined object is "
+    "deleted or adopted and no recovery job is enqueued, because the external-boot recovery "
+    "executor is not installed."
+)
+
+
+def degraded_stub_meta(detail: str) -> dict[str, object]:
+    """Build the `partial` tool metadata a contract registers with.
+
+    Built here rather than at each registrar so the reason a tool reports and the reason its
+    schema advertises cannot drift apart, and so all three promote on one issue reference.
+    """
+    return _docmeta.maturity_meta("partial") | {
+        "maturity_detail": {
+            "reason": "degraded_stub",
+            "detail": detail,
+            "promotion": _PROMOTION,
+        }
+    }
 
 
 def _executor_unavailable(object_id: str, tool: str) -> ToolResponse:
@@ -415,13 +451,16 @@ async def resolve_recovery_orphan(
 
 
 __all__ = [
+    "ADMISSION_STUB_DETAIL",
     "MAX_IDENTITY_LENGTH",
     "MAX_OBJECT_IDENTITIES",
+    "ORPHAN_STUB_DETAIL",
     "ORPHAN_TOOL",
     "RELEASE_TOOL",
     "RESOLVE_CONFLICT_TOOL",
     "SUPPORTED_DISPOSITIONS",
     "SUPPORTED_RESOLUTION_OPERATION",
+    "degraded_stub_meta",
     "request_release",
     "resolve_conflict",
     "resolve_recovery_orphan",

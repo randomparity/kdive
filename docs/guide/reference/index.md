@@ -81,6 +81,7 @@
 | [`ops.reconcile_now`](ops.md#opsreconcile_now) | `implemented` |
 | [`ops.reconcile_systems`](ops.md#opsreconcile_systems) | `implemented` |
 | [`ops.recover_build_use`](ops.md#opsrecover_build_use) | `implemented` |
+| [`ops.resolve_recovery_orphan`](ops.md#opsresolve_recovery_orphan) | `partial` |
 | [`ops.set_cost_class_coeff`](ops.md#opsset_cost_class_coeff) | `implemented` |
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
 | [`ops.set_queue_paused`](ops.md#opsset_queue_paused) | `implemented` |
@@ -105,6 +106,7 @@
 | [`runs.get`](runs.md#runsget) | `implemented` |
 | [`runs.install`](runs.md#runsinstall) | `implemented` |
 | [`runs.list`](runs.md#runslist) | `implemented` |
+| [`runs.release_external_boot`](runs.md#runsrelease_external_boot) | `partial` |
 | [`runs.set`](runs.md#runsset) | `implemented` |
 | [`secrets.list`](secrets.md#secretslist) | `implemented` |
 | [`session.whoami`](session.md#sessionwhoami) | `implemented` |
@@ -120,6 +122,7 @@
 | [`systems.profile_examples`](systems.md#systemsprofile_examples) | `implemented` |
 | [`systems.provision`](systems.md#systemsprovision) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `implemented` |
+| [`systems.resolve_external_boot_conflict`](systems.md#systemsresolve_external_boot_conflict) | `partial` |
 | [`systems.restore`](systems.md#systemsrestore) | `implemented` |
 | [`systems.snapshot`](systems.md#systemssnapshot) | `implemented` |
 | [`systems.ssh_info`](systems.md#systemsssh_info) | `implemented` |

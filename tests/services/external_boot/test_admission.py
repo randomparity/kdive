@@ -228,7 +228,10 @@ def test_get_restricting_for_system_sees_only_uncleaned_activations(
 
 
 # Every registered mutating tool, mapped to the operation its handler guards with. A tool here
-# is enforced by `tests/services/external_boot/test_reverse_admission.py`.
+# is enforced by `tests/services/external_boot/test_reverse_admission.py`, except the two
+# external-boot recovery contracts, whose guard is enforced by
+# `tests/services/external_boot/test_recovery_requests.py` (they are the reverse operations, so
+# they have no reverse case of their own).
 _GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
     "control.capture_traffic": _OP.CAPTURE_TRAFFIC,
     "control.diagnostic_sysrq": _OP.SYSTEM_SYSRQ,
@@ -242,9 +245,11 @@ _GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
     "runs.cancel": _OP.RUN_CANCEL,
     "runs.create": _OP.RUN_CREATE,
     "runs.install": _OP.RUN_INSTALL,
+    "runs.release_external_boot": _OP.EXTERNAL_BOOT_RELEASE,
     "systems.authorize_ssh_key": _OP.SYSTEM_AUTHORIZE_SSH_KEY,
     "systems.delete_snapshot": _OP.SYSTEM_SNAPSHOT,
     "systems.reprovision": _OP.SYSTEM_REPROVISION,
+    "systems.resolve_external_boot_conflict": _OP.EXTERNAL_BOOT_RESOLVE_CONFLICT,
     "systems.restore": _OP.SYSTEM_SNAPSHOT,
     "systems.snapshot": _OP.SYSTEM_SNAPSHOT,
     "systems.teardown": _OP.SYSTEM_TEARDOWN,
@@ -290,6 +295,9 @@ _UNGUARDED_TOOLS: dict[str, str] = {
     "ops.reconcile_now": "operator break-glass reconcile; must run against a stuck activation",
     "ops.reconcile_systems": "operator break-glass reconcile; must run against a stuck activation",
     "ops.recover_build_use": "build-ledger repair; touches no System",
+    "ops.resolve_recovery_orphan": (
+        "repairs quarantined recovery objects, which are not the activation the matrix keys on"
+    ),
     "ops.set_cost_class_coeff": "accounting configuration; touches no System",
     "ops.set_host_capacity": "capacity configuration on a Resource, not a System",
     "ops.set_queue_paused": "worker-lane configuration; touches no System",
@@ -310,10 +318,6 @@ _UNGUARDED_TOOLS: dict[str, str] = {
     "systems.provision": "creates the System; no activation can restrict it yet",
     "tools.invoke": "gateway dispatcher; the re-entered inner tool carries its own guard",
 }
-
-# The two operations no ordinary tool performs: they belong to the external-boot lifecycle
-# #2118 lands, not to a reverse operation this task enforces.
-_LIFECYCLE_ONLY = frozenset({_OP.EXTERNAL_BOOT_RELEASE, _OP.EXTERNAL_BOOT_RESOLVE_CONFLICT})
 
 
 def _registered_tools() -> dict[str, ToolAnnotations | None]:
@@ -345,4 +349,4 @@ def test_every_registered_mutating_tool_is_guarded_or_exempt() -> None:
 
 def test_every_operation_the_matrix_decides_has_a_guarded_tool() -> None:
     """The forward half: a member added without a call site fails too."""
-    assert set(_GUARDED_TOOLS.values()) == set(ExternalBootOperation) - _LIFECYCLE_ONLY
+    assert set(_GUARDED_TOOLS.values()) == set(ExternalBootOperation)

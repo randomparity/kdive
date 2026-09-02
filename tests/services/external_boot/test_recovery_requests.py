@@ -8,7 +8,9 @@ rather than against the source.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,6 +25,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import DebugSessionState, ExternalBootActivationState
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.external_boot import recovery_requests
 from kdive.mcp.tools.external_boot.recovery_requests import (
     request_release,
     resolve_conflict,
@@ -43,6 +46,24 @@ _ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _AUTHORIZING = {"principal": "alice", "agent_session": None, "project": "proj"}
 _CAP = _MAX_ERROR_ENTRIES
+
+# Every name that begins, advances, or finishes an external-boot activation transition, plus the
+# authority marker and the job enqueue such a transition would need. The amendment's hard rule is
+# that this module reaches none of them; `test_no_activation_writing_name_is_reachable` is the
+# static half of that, beside the behavioral one below.
+_ACTIVATION_WRITING_NAMES = frozenset(
+    {
+        "ExternalBootAuthorityMarkerV1",
+        "begin_recovery_attempt",
+        "create",
+        "enqueue",
+        "finish_recovery_attempt",
+        "mark_cleanup_complete",
+        "record_conflict",
+        "release_reservation",
+        "transition",
+    }
+)
 
 
 def _ctx(
@@ -684,6 +705,41 @@ def test_orphan_repair_needs_no_activation_to_report(migrated_url: str) -> None:
 
 
 # --- the amendment's hard rule ----------------------------------------------------------------
+
+
+def _reachable_names(source: str, bound: set[str]) -> set[str]:
+    """Every name this source could call, plus the names already bound in its namespace.
+
+    Both halves are needed: an activation write can arrive as a bare call (``enqueue(...)``),
+    as a method on an object the module holds (``_REPOSITORY.begin_recovery_attempt(...)``), or
+    as an import that a later edit only has to call. Attribute names are collected unqualified,
+    so no walk of the transitive import graph — which reaches every writer through the
+    repository module — is needed or wanted.
+    """
+    tree = ast.parse(source)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    return names | attributes | bound
+
+
+def test_no_activation_writing_name_is_reachable() -> None:
+    """No tool commits a transition it cannot complete — held statically, not just in Postgres.
+
+    A later edit that reintroduces a write fails here at import time rather than needing a
+    seeded database to expose it.
+    """
+    reachable = _reachable_names(inspect.getsource(recovery_requests), set(vars(recovery_requests)))
+    assert sorted(reachable & _ACTIVATION_WRITING_NAMES) == []
+
+
+def test_the_import_closure_gate_bites() -> None:
+    """Canary: the gate runs over a clean module, so prove it still detects each name."""
+    for name in sorted(_ACTIVATION_WRITING_NAMES):
+        source = f"async def f(conn):\n    await _REPOSITORY.{name}(conn)\n"
+        called = _reachable_names(source, set())
+        assert called & _ACTIVATION_WRITING_NAMES == {name}
+        imported = _reachable_names("", {name})
+        assert imported & _ACTIVATION_WRITING_NAMES == {name}
 
 
 def test_no_service_changes_any_durable_row(migrated_url: str) -> None:

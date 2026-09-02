@@ -213,6 +213,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.tool_trail": _PLAT_AUDITOR,  # cross-tenant per-call trail read (ADR-0304)
     "ops.force_release": _PLAT_ADMIN,
     "ops.force_teardown": _PLAT_ADMIN,
+    "ops.resolve_recovery_orphan": _PLAT_ADMIN,
     "ops.reconcile_systems": _PLAT_ADMIN,
     # postmortem
     "postmortem.crash": _CONTRIBUTOR,
@@ -233,6 +234,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "runs.complete_build": _CONTRIBUTOR,
     "runs.install": _CONTRIBUTOR,
     "runs.boot": _CONTRIBUTOR,
+    "runs.release_external_boot": _CONTRIBUTOR,
     # secrets (platform operator)
     "secrets.list": _PLAT_OP,
     # shapes
@@ -244,6 +246,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.provision": _CONTRIBUTOR,  # provision lane is leaseholder control (ADR-0326)
     "systems.reprovision": _CONTRIBUTOR,
     "systems.teardown": _ADMIN,
+    "systems.resolve_external_boot_conflict": _ADMIN,
     "systems.ssh_info": _VIEWER,
     "systems.check_ssh_reachable": _VIEWER,
     "systems.authorize_ssh_key": _CONTRIBUTOR,  # add a key to a VM the caller already sudos

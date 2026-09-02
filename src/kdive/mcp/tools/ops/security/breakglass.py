@@ -45,6 +45,15 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    ORPHAN_STUB_DETAIL as _ORPHAN_STUB_DETAIL,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    degraded_stub_meta as _degraded_stub_meta,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    resolve_recovery_orphan as _resolve_recovery_orphan,
+)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
@@ -297,3 +306,53 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Break-glass teardown of a stuck cross-project System. Requires platform_admin."""
         return await force_teardown(pool, current_context(), system_id=system_id, reason=reason)
+
+    @app.tool(
+        name="ops.resolve_recovery_orphan",
+        annotations=_docmeta.destructive(),
+        meta=_degraded_stub_meta(_ORPHAN_STUB_DETAIL),
+    )
+    async def ops_resolve_recovery_orphan(
+        system_id: Annotated[
+            str, Field(description="The System whose quarantined recovery objects to repair.")
+        ],
+        object_identities: Annotated[
+            list[str],
+            Field(
+                description=(
+                    "The bounded list of quarantined recovery-object identities to repair; an "
+                    "out-of-bounds list is refused with reason invalid_object_identities, whose "
+                    "detail names the accepted range."
+                )
+            ),
+        ],
+        disposition: Annotated[
+            str,
+            Field(
+                description=(
+                    "'delete' to remove the named objects permanently, or 'adopt' to bring "
+                    "them back under the System's own external-boot activation."
+                )
+            ),
+        ],
+    ) -> ToolResponse:
+        """Validate a quarantined recovery-object repair, then report the executor is missing.
+
+        Today this call checks that you hold platform_admin, resolves the System, and validates
+        `object_identities` and `disposition`, and then fails with `configuration_error` and
+        `data.reason` of `recovery_executor_unavailable`: the external-boot recovery executor is
+        not installed, so nothing was deleted or adopted. Once promoted (#2118), the same call
+        permanently deletes the named objects or adopts them back, with no undo.
+
+        Requires platform_admin, and a denial is audited. The repair covers quarantined recovery
+        objects rather than the activation itself, so it needs no admissible activation state
+        and reads none. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
+        with `systems.teardown`; `runs.get` reports the owning Run's state.
+        """
+        return await _resolve_recovery_orphan(
+            pool,
+            current_context(),
+            system_id=system_id,
+            object_identities=object_identities,
+            disposition=disposition,
+        )
