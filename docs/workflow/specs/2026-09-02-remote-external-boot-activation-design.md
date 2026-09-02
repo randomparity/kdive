@@ -97,19 +97,20 @@ Signatures in this section are the contract; the implementation plan repeats the
    that constitutes the wait, exactly as it owns every other deadline on this lane.
 
 ADR-0583 requires the guest observation to return the newline-stripped `/proc/cmdline` bytes and
-core to compare them. That assignment is kept. `observe_guest_identity` returns a
-`RemoteGuestIdentity` carrying the `RunningKernelObservation` and those bytes, and #2118 performs
-the comparison the ADR gives it. The provider also compares them itself and fails closed, because
-an activation that proceeds on an unchecked command line is wrong whatever core does later; the
-provider check is a guard, not a replacement, and returning the bytes is what lets core detect a
-provider that skipped it.
+core to compare them. `observe_guest_identity` returns a `RemoteGuestIdentity` carrying the
+`RunningKernelObservation` and those bytes, so the provider half of that assignment is met, and it
+compares them itself and fails closed because an activation that proceeds on an unchecked command
+line is wrong whatever core does later.
 
-Under the shared contract as it stands the bytes stop at the provider: `ExternalBootPorts.observe`
+The core half is **not** met, and this design does not claim it is. `ExternalBootPorts.observe`
 returns `RunningKernelObservation`, which carries only architecture, release, and build ID, and no
-shared value carries a command line. So the provider's own fail-closed comparison is the whole of
-the enforcement today, and core cannot yet detect a provider that skipped it. Widening that seam
-belongs to `providers/ports/`, outside this change's surface; it is recorded below as an accepted
-residual rather than worked around here.
+shared value carries a command line, so the bytes stop at the provider whatever this function
+returns. Until that seam widens, the provider's own comparison is the whole of the enforcement and
+core cannot detect a provider that skipped or faked it — so the provider check is not the guard
+beside a core check that ADR-0583 describes, it is the only check. Widening the seam belongs to
+`providers/ports/`, outside this change's surface, and returning the bytes now is what makes the
+widening a change to one signature rather than to this module. The residual is recorded below and
+its owner is named there.
 
 The bytes are guest-controlled, so they are bounded on read, never persisted by this module, and
 never placed in an error message, a `details` payload, or a transcript. A failure names which field
@@ -466,7 +467,11 @@ silently make the boundary load-bearing without anyone noticing.
 
 **Explicitly out of scope.** Carrying the observed command-line bytes across the shared seam to
 core, which `ExternalBootPorts.observe`'s return type cannot express today; until it widens, the
-provider's own comparison is the only enforcement. A guest that deliberately reports the expected release, machine, build
+provider's own comparison is the only enforcement. ADR-0583 assigns that comparison to core, so this
+is a conformance gap on a settled record rather than a design preference, and it has no owner as of
+this writing — the orchestrator has been asked to assign one, and this paragraph is to be updated
+with the owning issue before the epic closes. It is named here rather than worked around because
+widening `providers/ports/` is outside this change's surface. A guest that deliberately reports the expected release, machine, build
 ID, and command line while running something else — the identity proof measures divergence, not
 deception, and closing it would take attestation. Mutation fencing against a stale worker (#2140, ADR-0584) — this module
 performs its compare-and-set against observed state and documents that its caller owns the fence.

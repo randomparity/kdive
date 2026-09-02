@@ -859,9 +859,11 @@ def observe_guest_identity(
 ```
 
 `cmdline` is the newline-stripped `/proc/cmdline` bytes. ADR-0583 requires the observation to return
-them and core to compare them, so they are returned even though this function also compares them
-itself and fails closed — the provider check is a guard, and returning the bytes is what lets #2118
-detect a provider that skipped it. They are never persisted or logged here.
+them and core to compare them; this function returns them and also compares them itself, failing
+closed. Do not read the return value as core enforcement: `ExternalBootPorts.observe` cannot carry a
+command line today, so the bytes stop at the provider and this function's own comparison is the only
+check that runs. Returning them anyway keeps the eventual seam widening a one-signature change.
+They are never persisted or logged here.
 
 The caller builds `agent_exec` as
 `GuestAgentExec(agent_command=..., allowed_programs=OBSERVATION_PROGRAMS)`. Do **not** use the QEMU
