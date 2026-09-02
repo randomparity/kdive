@@ -30,8 +30,9 @@ the other two failing the same way:
 - the attempt volumes, `urn:kdive:remote-module-volume:v1`, read back in
   `remote_module_volumes.py` and again in `remote_module_operation.py`;
 - the reap-marker journal volumes, `urn:kdive:remote-module-reap:v1`
-  (`remote_module_operation.py`), whose *entire* payload is a nineteen-attribute `attempt-reap`
-  element in the discarded `<metadata>` — so a journal volume today carries nothing but its name;
+  (`remote_module_operation.py`), whose *entire* payload is an `attempt-reap` element in the
+  discarded `<metadata>` — so a journal volume today carries nothing but its name, and the five
+  call sites that read terminal evidence out of it are already inert on the branch;
 - the remote boot-artifact volumes on `main`, which #2158 tracks separately.
 
 Reap needs two facts about a volume whose creating worker is gone. Whether the volume is
@@ -113,14 +114,31 @@ makes it unnecessary" and retained "for diagnosis" when restoration fails closed
 the sweep runs, restoration has not happened yet — and ADR-0585's only remaining escape is System
 teardown.
 
-So an obligation is discharged, and its volumes become reclaimable, when ADR-0585 says the
-material is no longer needed: durable `restored`, or baseline commitment. A reap-marker journal
-volume is itself an obligation record, and its own discharge follows the same rule.
+There are two obligations, both keyed on the attempt tuple `(system_id, run_id,
+operation_nonce)` and never on the volume kind, because an obligation is a property of the attempt
+and one attempt owns several volumes:
+
+- **The mutation obligation** covers `source.ext4` and `scratch.ext4`. It opens before the first
+  volume is created and discharges at ADR-0585's durable `restored`, at baseline commitment, or on
+  ADR-0585's terminal escape — System teardown, or an operator-acknowledged close of a parked
+  recovery conflict. The third event is what stops a dead or failed-closed attempt from holding
+  10 GiB forever: without it the first two are unreachable for a worker killed mid-mutation, for a
+  restoration that failed closed, and for a parked conflict, and the design would recover
+  ownership while never reclaiming anything. The teardown and conflict-close paths must clear the
+  durable row; that is a requirement this record places on them.
+- **The reap obligation** covers `reaping.journal` and `reaped.journal`. It cannot follow the
+  mutation obligation's rule, because the journal volumes are created strictly *after* `restored`
+  — the branch's `_validate_terminal_evidence` refuses to build a marker unless the terminal
+  result is a successful restore — so the mutation obligation is already discharged at the instant
+  the first journal volume exists. Under one shared rule the sweep would delete the marker the
+  crash-resume path calls authoritative, and an attempt that crashed after its scratch volume was
+  deleted would have neither. So the reap obligation opens when the reap sequence starts and
+  discharges when that sequence reaches its own durable terminal state.
 
 ### Durable intent precedes the volume
 
-A worker writes the durable attempt row naming `(system_id, run_id, operation_nonce, kind)`
-**before** it creates any of its volumes. Together with step 3's read ordering this closes the
+A worker writes the durable row naming the attempt tuple `(system_id, run_id, operation_nonce)`
+**before** it creates any of that attempt's volumes. Together with step 3's read ordering this closes the
 race in both directions: a volume cannot exist whose attempt has no row, and the sweep never
 judges a volume against a set older than the volume. A row with no volume is benign and the
 ordinary crash residue; the attempt path already reconciles it.
@@ -136,26 +154,23 @@ window and never addressed it; the second is a property of the sweep, not of the
 the `Pool.createXML` double echoed the submitted XML back verbatim. A double that accepts
 everything asserts nothing.
 
-The storage double used by remote-libvirt tests parses the submitted volume XML, retains the whole
-of what libvirt persists for a dir-pool volume — the `type` attribute, `name`, `key`, `capacity`,
-`allocation`, `physical`, and the complete `target` subtree including `path`, `format`,
-`permissions`, and `timestamps` — and renders `XMLDesc` from that retained state. Every other
-submitted element is dropped, exactly as libvirt drops it. The modelled set is the whole observed
-readback rather than the subset today's code reads, because a subset is the same defect one level
-down: a future check reading a persisted field the double omits goes green against nothing.
+So the storage double stops echoing. It parses the submitted XML, retains the whole of what
+libvirt persists for a dir-pool volume, and renders `XMLDesc` from that retained state, dropping
+everything else exactly as libvirt drops it. The modelled set is the whole observed readback and
+not the subset today's code reads, because a subset is this same defect one level down. The design
+spec fixes the field list.
 
-The double owes a fidelity test of its own, in the `live_vm` tier, comparing a real dir-pool
-readback with the double's for the same submitted XML — element sets at the top level **and**
-inside `target`, so a divergence in the subtree fails the arm instead of passing it.
+Because the double is now load-bearing, it owes a fidelity test of its own in the `live_vm` tier,
+comparing a real dir-pool readback against the double's for the same submitted XML.
 
 A wrong implementation is therefore caught as follows. An implementation that puts ownership
 anywhere libvirt does not persist gets nothing back from the double, so its reap tests fail on an
 unrecoverable owner rather than passing on an echo. A double that drifts from libvirt fails the
-fidelity test on a host with libvirt. A name grammar that overruns `NAME_MAX`, admits a foreign
-shape, or fails to round-trip fails the budget and round-trip tests over the full parameter space.
-A sweep that keys retention on the running attempt rather than the un-discharged obligation
-deletes a completed-but-unrestored attempt's scratch volume, and the test for that case is the one
-that fails.
+fidelity test on a host with libvirt. A name grammar that overruns `NAME_MAX`, omits a kind the
+provider renders, or admits a foreign shape fails the budget, coverage, and negative tests. A
+sweep that keys retention on the running attempt rather than the un-discharged obligation deletes
+a completed-but-unrestored attempt's scratch volume, and the test for that case is the one that
+fails.
 
 ## Consequences
 
@@ -167,14 +182,16 @@ that fails.
   (`docs/operating/runbooks/remote-libvirt-host-setup.md`).
   Adding a pool type with a tighter name limit — LVM logical volumes are the realistic case —
   requires revisiting this record rather than silently truncating a name.
-- A scratch volume is reclaimable only after ADR-0585's `restored` or baseline commitment, so
-  recovery material accumulates for as long as those obligations stand. ADR-0585 already accounts
-  10 GiB per in-flight external boot; this record makes explicit that the accounting is keyed on
-  the obligation rather than on the attempt.
+- A scratch volume is reclaimable only after ADR-0585's `restored`, baseline commitment, or
+  terminal escape, so recovery material accumulates for as long as those obligations stand.
+  ADR-0585 already accounts 10 GiB per in-flight external boot; this record makes explicit that
+  the accounting is keyed on the obligation rather than on the attempt, and that teardown and
+  conflict-close now carry a durable-row clearing step they did not have before.
 - Deleting the `attempt-reap` element leaves the reap-marker journal volumes carrying nothing but
-  their names, which is all they carried in production anyway. The nineteen attributes that
-  element held have to come from the durable store instead — work #2129 owns, and the reason this
-  record covers journal names in the grammar rather than leaving them to a later decision.
+  their names, which is all they carried in production anyway. The attributes that element held
+  have to come from the durable store instead. That is work #2129 owns, and it has to land before
+  the element is removed — deleting the code is safe only once its replacement exists, even
+  though the element itself never persisted.
 - The owner tuple is now part of a name, and a name is not versionable in place. The
   `kdive-module-` prefix and the fixed field order are a compatibility surface: changing either
   strands volumes created by an earlier worker, which then read as foreign and are never reaped.
@@ -209,12 +226,14 @@ that fails.
   them leaves an unowned volume; and the journal's own orphaning needs a name convention anyway.
 - **The durable row records the created volume name; recognition is set membership.** judgment:
   this is a real simplification — it removes the grammar, its parser, the `NAME_MAX` budget, the
-  fixed-field-order compatibility surface, and the forged-name path — and it loses on one
-  property. Recognition would then require the store to be reachable and its row to exist, so a
-  row lost to a store failure or a partial restore strands its volumes as permanently
-  unrecognised, with no way to tell them from an operator's. A name-encoded tuple degrades to a
-  parse instead: the volume still says what it is with nothing else available. Reap is the path
-  that runs when things have already gone wrong, so the channel that survives more of them wins.
+  fixed-field-order compatibility surface, and the forged-name path — and the sweep reads the
+  store either way, so store reachability is not the ground that separates them. What separates
+  them is what happens when a *row* is lost or was never written. Under set membership a volume
+  with no row is unrecognisable: it cannot be told from an operator's, so it can never be
+  reclaimed and never be safely deleted. Under a name-encoded tuple the same volume still says
+  what it is, and the sweep can retain or reclaim it on its own terms. Reap is the path that runs
+  after something has already gone wrong, so the channel that keeps working with less state
+  intact wins.
 - **A libvirt domain as a metadata carrier.** verified: domains do persist `<metadata>` —
   `domaincommon.rng` defines it and `virDomain.setMetadata` exists — so the channel is real. It
   carries the same two-operation crash window as the index volume, and it makes an inert domain

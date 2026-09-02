@@ -141,8 +141,9 @@ output are never returned or persisted.
 ### Amendment (2026-09-02): the durable owner is the volume name (#2157)
 
 This is an amendment because
-[ADR-0588](0588-remote-module-volume-ownership-lives-in-the-volume-name.md) supersedes only the
-unnamed ownership channel behind two claims above, and leaves the rest of this decision in force.
+[ADR-0588](0588-remote-module-volume-ownership-lives-in-the-volume-name.md) — **Proposed**, and
+Accepted when the pull request implementing it merges — supersedes only the unnamed ownership
+channel behind two claims above, and leaves the rest of this decision in force.
 The claims it qualifies are "deletes only attempt-scoped staging volumes whose durable owner and
 digest match" and "Reaper logic applies the same identity checks after worker death" in the
 preceding section: this record never named the channel carrying those durable identities, and the

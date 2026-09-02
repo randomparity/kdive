@@ -30,7 +30,7 @@ issue did not name:
 - it implements a **second** channel, `_REAP_METADATA_NS = "urn:kdive:remote-module-reap:v1"`, for
   the reap-marker journal volumes `_reap_marker_name` renders as
   `kdive-module-<system>-<run>-<nonce>-{reaping,reaped}.journal`. Their whole payload is a
-  nineteen-attribute `attempt-reap` element inside the discarded `<metadata>`, read back in three
+  fixed-attribute `attempt-reap` element inside the discarded `<metadata>`, read back in three
   places, so a journal volume in production carries nothing but its name.
 - `inventory()` recognises volumes with `name.startswith("kdive-module-")`, a prefix match this
   design replaces with an anchored parse.
@@ -78,18 +78,35 @@ Longest rendered name: 135 bytes (`13 + 36 + 1 + 36 + 1 + 32 + 1 + 15`, the last
   `attempt-volume` reads in `remote_module_operation.py`. Deleted, not disabled. The readbacks
   keep only checks against fields libvirt does persist: `target/format` is `raw`, and capacity
   from `volume.info()[1]`.
-- **N5 — intent precedes the volume.** The durable attempt row naming
-  `(system_id, run_id, operation_nonce, kind)` is written before any of the attempt's volumes are
-  created. A volume may never exist whose attempt has no row. A row with no volume is the ordinary
-  crash residue and is benign.
-- **N6 — retention comes from the durable store, keyed on obligation.** The sweep takes the
-  retained-owner set as a parameter, in the shape `reap_orphaned_boot_artifacts` already takes
-  `live_owners`; the provider does not query Postgres itself. That set is the set of attempts with
-  an **un-discharged durable obligation**, not the set of running attempts. ADR-0585 retains a
-  scratch volume "until recovery or successful baseline commitment makes it unnecessary" and
-  retains it "for diagnosis" on a failed restoration, so an obligation is discharged only at
-  ADR-0585's durable `restored` or at baseline commitment. Keying on the running attempt deletes
-  the recovery point on the ordinary path.
+- **N5 — intent precedes the volume.** The durable attempt row naming the attempt tuple
+  `(system_id, run_id, operation_nonce)` is written before any of that attempt's volumes are
+  created — both attempt volumes, and the journal volumes under their own obligation. A volume may
+  never exist whose attempt has no row. A row with no volume is the ordinary crash residue and is
+  benign.
+- **N6 — retention comes from the durable store, keyed on obligation.** The sweep takes a
+  **callable** returning the retained-owner set, not the set itself; N10 requires the set to be
+  read after the enumeration, and a collection parameter forces the caller to resolve it first,
+  which is the race. The provider does not query Postgres itself. The set holds attempt tuples
+  with an **un-discharged durable obligation**, not running attempts, and the key is
+  `(system_id, run_id, operation_nonce)` — never the volume kind, since one attempt owns several
+  volumes and an obligation is a property of the attempt.
+
+  Two obligations, per ADR-0588:
+
+  - the **mutation obligation** covers `source.ext4` and `scratch.ext4`. It discharges at
+    ADR-0585's durable `restored`, at baseline commitment, or on ADR-0585's terminal escape —
+    System teardown, or an operator-acknowledged close of a parked recovery conflict. Without the
+    third event nothing discharges for a worker killed mid-mutation, a restoration that failed
+    closed, or a parked conflict, and 10 GiB per attempt is retained forever;
+  - the **reap obligation** covers `reaping.journal` and `reaped.journal`. The journal volumes are
+    created strictly *after* `restored` — `_validate_terminal_evidence` refuses to build a marker
+    unless the terminal result is a successful restore — so the mutation obligation is already
+    discharged when the first journal volume exists. Under one shared rule the sweep would delete
+    the marker `_operation_for_cleanup` calls authoritative. This obligation opens when the reap
+    sequence starts and discharges when that sequence reaches its own durable terminal state.
+
+  Keying on the running attempt deletes the recovery point on the ordinary path; keying the
+  journals on the mutation obligation deletes the resume marker on the ordinary path.
 - **N7 — attachment guard before deletion.** A volume whose backing path is referenced by any
   active or inactive domain definition on the host is never deleted; it is reported as a conflict.
   No existing function performs this at whole-pool scope: `protected_volume_paths(conn, pool_name,
@@ -97,7 +114,11 @@ Longest rendered name: 135 bytes (`13 + 36 + 1 + 36 + 1 + 32 + 1 + 15`, the last
   `inspect_module_attachments` / `_inspect_definition` enumerate domains but need an
   `ExpectedAttachmentState` naming one attempt's volumes in advance. The sweep discovers its
   candidates from the pool and has no expected state, so the whole-pool referenced-path builder is
-  new code this design owes.
+  new code this design owes. A disk reference the builder cannot resolve to a path suppresses the
+  whole tick's deletions and raises, matching `protected_volume_paths`, which already raises
+  `_conflict("could not resolve a remote module volume path", …)` rather than contributing
+  nothing. Contributing nothing to a set of protected paths protects nothing, so the fail-closed
+  direction has to be an abort, not an omission.
 - **N8 — deletion is idempotent.** `VIR_ERR_NO_STORAGE_VOL` on delete is an achieved post-state,
   counted as removed, never an error.
 - **N9 — doubles discard what libvirt discards.** Any test double standing in for a libvirt
@@ -117,11 +138,12 @@ The sweep runs in the reconciler (ADR-0021), in this order:
    `None` ends that volume's evaluation (N3).
 2. Each parse result *is* the recovery. `(system_id, run_id, operation_nonce, kind)` comes off the
    name, so nothing is reconstructed from a dead worker's memory, its console output, or the
-   volume's bytes.
+   volume's bytes. The `kind` selects which obligation governs the volume; the attempt tuple is
+   what the join uses.
 3. **Then** read the retained-owner set (N6, N10).
-4. Owner in the retained set → retained, no further action.
-5. Owner absent → no outstanding claim. Resolve the referenced-path set (N7) and drop any
-   candidate whose path is in it, reporting it as a conflict.
+4. Attempt tuple in the retained set for that volume's obligation → retained, no further action.
+5. Absent → no outstanding claim. Resolve the referenced-path set (N7) and drop any candidate
+   whose path is in it, reporting it as a conflict.
 6. Delete the rest under N8.
 
 **Why the read order matters (N10).** A volume observed at enumeration time only proves it was
@@ -215,8 +237,15 @@ elements. The `target` half is what makes the arm bite: top-level tags match by 
 divergence inside the subtree is exactly what a top-level-only assertion cannot see. This is the
 only arm that can catch the double drifting from libvirt, and it is the arm that would have caught
 the original defect. It needs libvirt and a writable directory — a strict subset of the `live_vm`
-environment contract, no KVM guest — and it carries its own skip guard (Task 6), since the tier
-has no shared environment gate to inherit.
+environment contract, no KVM guest — and it threads the tier's own gate mechanism in
+`tests/live_vm/__init__.py`, alongside `require_live_vm_bzimage` and its siblings (Task 6).
+
+The unmodelled probe element is **not** `<backingStore>`. Measured on this host: libvirt refuses a
+`<backingStore>` on a raw volume outright ("backing storage not supported for raw volumes"), and
+on a qcow2 volume with a resolvable path it *persists* the whole subtree — so it is never an
+element libvirt discards, and a test built on it either errors or asserts a falsehood. An
+arbitrary unknown child of `<volume>` is the right probe: `<bogusElement>hello</bogusElement>`
+alongside `<metadata>` on a raw dir-pool volume was accepted and absent from `XMLDesc(0)`.
 
 **How a wrong implementation is caught.** Each row names the failure and the single arm that goes
 red for it:
@@ -254,10 +283,13 @@ one.
 - Guardrails: `just lint`, `just type`, `just test`, and `just ci` before push. Run them bare.
 - No new dependency. The grammar is `re` and `uuid` from the stdlib.
 
-Expected implementation size: 900–1,300 changed lines (L) — derived from the six new files and the
-five modified entries in the map below, counting the tests each task adds. The band is L rather
-than M because two of the modified entries, `remote_module_operation.py` and the referenced-path
-builder, were found during design review and each carries its own task.
+Expected implementation size: 1,200–1,800 changed lines (L) — derived from the map below: five new
+files (two source modules, three test modules), six modified entries, and eight tasks. The two
+largest single contributions are Task 5's sweep with its eleven tests and Task 8's move of the
+terminal evidence onto a durable row with its repointed readers; the two smallest are Task 1's
+grammar and Task 6's single fidelity test. The band is L rather than M because three of the
+entries — `remote_module_operation.py`, the referenced-path builder, and the terminal-evidence
+migration — were found during design review, and each carries its own task.
 
 ### File map
 
@@ -266,7 +298,8 @@ builder, were found during design review and each carries its own task.
 | `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_volume_names.py` | **new.** Render and parse the grammar. Nothing else. |
 | `src/kdive/providers/remote_libvirt/reaping/module_volumes.py` | **new.** The reconciler sweep and its referenced-path builder. |
 | `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_volumes.py` | **modified.** Drops the `attempt-volume` channel at all three readback sites; calls the renderer. |
-| `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_operation.py` | **modified.** Drops the second `attempt-volume` readback pair and the whole `attempt-reap` channel; replaces the `inventory()` prefix match with the parse. |
+| `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_operation.py` | **modified, twice.** Task 4 drops the second `attempt-volume` readback pair and replaces the `inventory()` prefix match with the parse. Task 8 moves the terminal evidence onto a durable row and only then drops the `attempt-reap` channel. |
+| #2129's durable reap-obligation row | **modified.** Task 8's terminal-evidence columns; not on `main`, so named by contract. |
 | `tests/providers/remote_libvirt/fakes.py` | **modified.** Gains the projection-modelling storage double. |
 | `tests/providers/remote_libvirt/lifecycle/rootfs/test_remote_module_volume_names.py` | **new.** Grammar tests. |
 | `tests/providers/remote_libvirt/reaping/test_module_volumes.py` | **new.** Sweep tests. |
@@ -287,6 +320,7 @@ tests `tests/providers/remote_libvirt/lifecycle/rootfs/test_remote_module_volume
 MODULE_VOLUME_NAME_MAX_BYTES = 255
 MODULE_VOLUME_KINDS = ("source.ext4", "scratch.ext4", "reaping.journal", "reaped.journal")
 
+
 @dataclass(frozen=True, slots=True)
 class ModuleVolumeOwner:
     system_id: str
@@ -294,9 +328,11 @@ class ModuleVolumeOwner:
     operation_nonce: str
     kind: str
 
+
 def render_module_volume_name(
     system_id: str, run_id: str, operation_nonce: str, kind: str
 ) -> str: ...
+
 
 def parse_module_volume_name(name: str) -> ModuleVolumeOwner | None: ...
 ```
@@ -353,10 +389,11 @@ class FakeStorageVolume:
     def name(self) -> str: ...
     def key(self) -> str: ...
     def path(self) -> str: ...
-    def info(self) -> list[int]: ...          # [type, capacity, allocation]
+    def info(self) -> list[int]: ...  # [type, capacity, allocation]
     def XMLDesc(self, flags: int = 0) -> str: ...
     def delete(self, flags: int = 0) -> int: ...
     def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int: ...
+
 
 class FakeStoragePool:
     def __init__(self, path: str = "/var/lib/libvirt/images") -> None: ...
@@ -371,11 +408,11 @@ class FakeStoragePool:
 Steps:
 
 1. Write `tests/providers/remote_libvirt/test_fakes_storage.py::test_created_volume_drops_unmodelled_elements`:
-   `createXML` a volume whose XML carries a `<metadata>` child and a `<backingStore>` child; assert
+   `createXML` a volume whose XML carries a `<metadata>` child and a `<bogusElement>` child; assert
    the returned volume's `XMLDesc(0)` parses to a `<volume type='file'>` root whose child tags are
    exactly `{name, key, capacity, allocation, physical, target}` and whose `target` child tags are
    exactly `{path, format, permissions, timestamps}`, and that neither `metadata` nor
-   `backingStore` appears anywhere in it.
+   `bogusElement` appears anywhere in it.
 2. Run `uv run python -m pytest tests/providers/remote_libvirt/test_fakes_storage.py -q`. Expect
    an `ImportError` for `FakeStoragePool`.
 3. Implement both classes in `fakes.py`. `createXML` parses with
@@ -406,6 +443,15 @@ Modifies `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_volu
 
 **Interfaces produced:** `_names(request: VolumeRequest) -> tuple[str, str]` keeps its signature
 and returns `(source_name, scratch_name)` rendered by Task 1's renderer.
+
+**What the parse check does and does not prove.** At all three attempt-scoped sites the name was
+rendered from the same tuple the parse is compared against, so the comparison cannot fail on a
+name the provider itself built. It is not a tautology, but it proves something narrower than an
+ownership check: that the volume libvirt returned for a looked-up name really carries that name,
+and that a name reaching these paths from anywhere else — a resumed operation document, a
+recovery-point reference — is one this provider could have produced. The load-bearing use of the
+parse is in the sweep, where the name is discovered rather than constructed. Stating that here so
+an implementer does not read the attempt-scoped checks as stronger than they are.
 
 Steps:
 
@@ -479,19 +525,25 @@ Steps:
    owner tuple from the parse, so it no longer reconstructs anything.
 4. Replace `inventory()`'s `if not name.startswith("kdive-module-")` filter with
    `if parse_module_volume_name(name) is None`, satisfying N2.
-5. Delete `_REAP_METADATA_NS` and every `attempt-reap` read and write — the `findall` calls in
-   `reap_marker`, `_validate_reap_marker`, `_operation_from_reap_marker` and `inventory()`, and
-   the `SubElement` that writes it. A journal volume's durable content becomes its name plus the
-   attempt row; the nineteen attributes the element carried come from that row.
-6. Rewrite `_reap_marker_name` to call `render_module_volume_name(..., f"{state}.journal")`, and
+5. Rewrite `_reap_marker_name` to call `render_module_volume_name(..., f"{state}.journal")`, and
    assert `f"{state}.journal" in MODULE_VOLUME_KINDS` so a new state cannot be introduced without
    extending the grammar.
-7. Run the same command. Expect all passed.
-8. Run `just lint` and `just type`. Expect clean.
-9. Commit.
+6. Run the same command. Expect all passed.
+7. Run `just lint` and `just type`. Expect clean.
+8. Commit.
 
-Acceptance: `rg -n 'urn:kdive:remote-module' src/` returns nothing, and
+Acceptance: `rg -n 'urn:kdive:remote-module-volume' src/` returns nothing, and
 `rg -n 'startswith\("kdive-module-"\)' src/` returns nothing.
+
+**The `attempt-reap` channel is deliberately not in this task.** It carries the terminal-evidence
+attributes — `terminal-operation`, `terminal-result` and their identity digests — that are the
+sole input to `_operation_from_marker_attributes`, `_terminal_evidence_from_marker`,
+`_recovery_from_reap_marker`, `_operation_from_reap_marker`, `_validate_reap_marker`,
+`reap_marker()` and `inventory()`'s marker branch, and through them to `_operation_for_cleanup`,
+`_delete`, `delete_source`, `delete_scratch` and `resume_reap`. Deleting the element with no
+replacement leaves those call sites with no data source, so no green test run is reachable. That
+the element never persisted does not change the sequencing: what is being deleted is the *code
+path*, and the code path needs somewhere else to read from first. Task 8 owns it.
 
 ### Task 5 — the reconciler sweep
 
@@ -510,11 +562,14 @@ class ModuleVolumeReaperConn(Protocol):
     def storagePoolLookupByName(self, name: str) -> _Pool: ...
     def listAllDomains(self, flags: int = 0) -> list[_Domain]: ...
 
+
 def list_owned_module_volumes(
     conn: ModuleVolumeReaperConn, pool_name: str
 ) -> list[tuple[str, ModuleVolumeOwner]]: ...
 
+
 def referenced_volume_paths(conn: ModuleVolumeReaperConn) -> frozenset[str]: ...
+
 
 def reap_orphaned_module_volumes(
     conn: ModuleVolumeReaperConn,
@@ -544,8 +599,11 @@ Steps:
    parse each `XMLDesc(0)`, and collect every `./devices/disk/source/@file`,
    `./devices/disk/source/@dev`, and, for `<disk type='volume'>`, the path the pool/volume pair
    resolves to. Wrap libvirt errors in `CategorizedError` with
-   `ErrorCategory.INFRASTRUCTURE_FAILURE`. An unresolvable reference fails closed — it is added to
-   the set, so the volume is protected rather than deleted.
+   `ErrorCategory.INFRASTRUCTURE_FAILURE`. A `<disk type='volume'>` reference that cannot be
+   resolved to a path **raises**, which suppresses every deletion this tick — an unresolvable
+   reference contributes no path, and contributing nothing to a set of protected paths would
+   protect nothing and delete everything. This mirrors `protected_volume_paths`, which raises
+   `_conflict("could not resolve a remote module volume path", …)` for the same case.
 4. Implement `list_owned_module_volumes` and `reap_orphaned_module_volumes` following
    `reaping/boot_artifacts.py`'s structure, in N10's order: look up the pool, `refresh(0)`,
    `listAllVolumes(0)`, parse each name and drop `None`; **then** call `retained_owners()`;
@@ -553,17 +611,28 @@ Steps:
    `path()` is in it, raising the existing conflict shape for each; delete the rest. Error
    details are limited to `pool` and `volume`.
 5. Run the same command. Expect 1 passed.
-6. Add: `test_retained_owner_is_kept`; `test_referenced_volume_is_kept_and_reported` (a domain
-   references the candidate's path); `test_already_deleted_volume_counts_as_removed` (delete
-   raises `VIR_ERR_NO_STORAGE_VOL`); `test_list_owned_returns_name_and_owner`;
-   `test_journal_volumes_are_candidates` (a `…-reaped.journal` whose owner is not retained is
-   deleted); `test_retained_set_is_read_after_enumeration` — the N10 arm: a `retained_owners`
-   callable that records when it was called and inserts the owner at call time, asserting the
-   volume is retained, so an implementation resolving the set before enumeration fails; and
-   `test_unrestored_attempt_keeps_its_scratch_volume` — the obligation arm: an owner whose attempt
-   has completed but whose ADR-0585 obligation is un-discharged is returned by `retained_owners`
-   and its `scratch.ext4` volume survives the sweep.
-7. Run the same command. Expect 8 passed.
+6. Add:
+   - `test_retained_owner_is_kept`;
+   - `test_referenced_volume_is_kept_and_reported` (a domain references the candidate's path);
+   - `test_unresolvable_disk_reference_suppresses_all_deletions` — one domain carries a
+     `<disk type='volume'>` whose pool/volume pair does not resolve; assert the sweep raises and
+     no `delete` was called on any candidate;
+   - `test_already_deleted_volume_counts_as_removed` (delete raises `VIR_ERR_NO_STORAGE_VOL`);
+   - `test_list_owned_returns_name_and_owner`;
+   - `test_in_flight_reap_journal_is_kept` — a `…-reaping.journal` whose reap obligation is
+     un-discharged survives, even though its attempt's mutation obligation discharged at
+     `restored`. This is the arm that fails if the journals are keyed on the mutation obligation;
+   - `test_discharged_reap_journal_is_reclaimed` — a `…-reaped.journal` whose reap obligation has
+     discharged is deleted, so the journals do not leak;
+   - `test_retained_set_is_read_after_enumeration` — the N10 arm: a `retained_owners` callable
+     that records when it was called and inserts the owner at call time, asserting the volume is
+     retained, so an implementation resolving the set before enumeration fails;
+   - `test_unrestored_attempt_keeps_both_volumes` — the obligation arm: an attempt that completed
+     its mutation but has not reached ADR-0585's `restored` keeps **both** its `source.ext4` and
+     its `scratch.ext4`, which is also what proves the retention key excludes `kind`;
+   - `test_torn_down_attempt_is_reclaimed` — the terminal-discharge arm: an attempt whose System
+     was torn down has its row cleared, so its volumes are reclaimed rather than retained forever.
+7. Run the same command. Expect 11 passed.
 8. Run `just lint` and `just type`. Expect clean.
 9. Commit.
 
@@ -579,30 +648,23 @@ Creates `tests/live_vm/test_libvirt_storage_double_fidelity.py`.
 
 Steps:
 
-1. Write the skip guard first, as a module-level fixture, because the tier has no shared
-   environment gate to inherit and `libvirt.open` raises `libvirt.libvirtError` on a host with no
-   session daemon — which pytest reports as an error, not a skip:
-
-   ```python
-   @pytest.fixture(scope="module")
-   def session_conn() -> Iterator[object]:
-       libvirt = pytest.importorskip("libvirt")
-       try:
-           conn = libvirt.open("qemu:///session")
-       except libvirt.libvirtError as unavailable:
-           pytest.skip(f"no session libvirt: {unavailable}")
-       try:
-           yield conn
-       finally:
-           conn.close()
-   ```
-
+1. Write the skip guard first, following the tier's existing gate pattern in
+   `tests/live_vm/__init__.py` — `require_live_vm_bzimage(default_uri="qemu:///session")` and its
+   siblings resolve the family's env into a typed contract and skip when it is absent. Add a
+   `require_live_vm_storage_double(default_uri: str = "qemu:///session")` gate beside them
+   returning the session URI, so this test skips through the same mechanism every other `live_vm`
+   family uses instead of inventing a second one. The guard must also cover a reachable-daemon
+   failure: `libvirt.open` raises `libvirt.libvirtError` on a host with no session daemon, and
+   pytest reports an uncaught one as an error rather than a skip.
 2. Write the test body, marked `live_vm`: define and start a `dir` pool over a `tmp_path` target,
-   `createXML` a volume whose XML carries a `<metadata>` child and a `<backingStore>` child, and
-   read it back through both the real pool and `FakeStoragePool`.
+   `createXML` a volume whose XML carries a `<metadata>` child and a `<bogusElement>` child, and
+   read it back through both the real pool and `FakeStoragePool`. `<bogusElement>` rather than
+   `<backingStore>`: libvirt refuses a backing store on a raw volume and persists it on a qcow2
+   one, so it is never discarded, while an unknown child of `<volume>` is accepted and dropped
+   (measured on libvirt 12.0.0, this host, 2026-09-02).
 3. Assert the two readbacks agree on the root element's tag and `type` attribute, on the top-level
    child tag set, and on the `target` child tag set — and that neither contains `metadata` or
-   `backingStore`. The `target` comparison is the load-bearing one: top-level tags match by
+   `bogusElement`. The `target` comparison is the load-bearing one: top-level tags match by
    construction.
 4. Tear down: delete the volume, then destroy and undefine the pool, in a `finally`.
 5. Run `just test-live` on a host with libvirt. Expect 1 passed. On a host without one, run
@@ -618,25 +680,65 @@ Acceptance: the test fails if `FakeStoragePool` is changed to echo its input or 
 A contract note plus two tests, against #2129's recovery-point attempt path. That module does not
 exist on `main`, so #2129 chooses the file; the contract and the tests are fixed here.
 
-**The contract.** The durable attempt row naming `(system_id, run_id, operation_nonce, kind)` is
-written before the first `createXML` of that attempt, and that row is what the sweep's
-`retained_owners` callable reads (N5, N6).
+**The contract.** One durable row per attempt, keyed `(system_id, run_id, operation_nonce)` and
+carrying no volume kind, is written before the first `createXML` of that attempt — which covers
+both `source.ext4` and `scratch.ext4`, since `prepare_attempt_volumes` creates them in one call.
+The reap obligation is opened, on the same key, before the first `_reap_marker_name` `createXML`.
+Those rows are what the sweep's `retained_owners` callable reads (N5, N6).
 
 **Interfaces consumed:** `render_module_volume_name` from Task 1.
 
 Steps:
 
-1. Write `test_attempt_row_precedes_volume_creation`: drive the attempt path with a durable-store
-   double and a `FakeStoragePool` that both append to one shared call log, and assert the row
-   write appears before the first `createXML`. An implementation that creates the volume first
-   must make it red.
-2. Write `test_row_without_volume_reconciles_cleanly`: an attempt whose row exists and whose
+1. Write `test_attempt_row_precedes_both_volume_creations`: drive `prepare_attempt_volumes` with a
+   durable-store double and a `FakeStoragePool` that both append to one shared call log, and
+   assert the row write appears before the *first* `createXML` and that no second row is written
+   for the second volume. An implementation that creates a volume first, or that writes a row per
+   kind, must make it red.
+2. Write `test_reap_obligation_precedes_the_journal_volume`: the same shape around the reap path —
+   the reap obligation is opened before `record_reaping` calls `createXML`.
+3. Write `test_row_without_volume_reconciles_cleanly`: an attempt whose row exists and whose
    volumes do not is reconciled without error and produces no orphan.
-3. Run the test file the two tests were added to, bare. Expect both passed.
-4. Commit.
+4. Run the test file the three tests were added to, bare. Expect all passed.
+5. Commit.
 
 Acceptance: `reap_orphaned_module_volumes`'s docstring names N5 as the precondition it relies on,
-and these two tests are what hold it. Reversing the order in the attempt path turns them red.
+and these tests are what hold it. Reversing the order in either path turns them red, and so does
+introducing a per-kind row.
+
+### Task 8 — the durable terminal evidence, then the second channel
+
+Modifies #2129's durable schema and
+`src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_operation.py`. Sequenced last
+because the deletion in its second half is only safe once its first half exists.
+
+**Interfaces consumed:** everything from Tasks 1, 4, and 7.
+
+Steps:
+
+1. Move the terminal evidence the `attempt-reap` element carried — the terminal operation and
+   result payloads and their identity digests, the baseline identities, and the installed
+   entry/byte counts — onto the durable reap-obligation row from Task 7. #2129 owns the column
+   set; this task owns the requirement that every reader below has a source.
+2. Repoint `_operation_from_marker_attributes`, `_terminal_evidence_from_marker`,
+   `_recovery_from_reap_marker`, `_operation_from_reap_marker`, `_validate_reap_marker`,
+   `reap_marker()` and `inventory()`'s marker branch at that row. Their callers —
+   `_operation_for_cleanup`, `_delete`, `delete_source`, `delete_scratch`, `resume_reap` — keep
+   their signatures.
+3. Run `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/rootfs/test_remote_module_operation.py -q`.
+   Expect all passed with the readers on the row and the element still written.
+4. Only now delete `_REAP_METADATA_NS`, the `SubElement` that writes `attempt-reap`, and every
+   remaining `findall` for it.
+5. Run the same command. Expect all passed.
+6. Add `test_no_volume_metadata_channel_remains`: assert `rg`-equivalent search over
+   `src/kdive/providers/remote_libvirt/` finds no `urn:kdive:remote-module` occurrence. This is
+   the guard the verification table names.
+7. Run `just lint`, `just type`. Expect clean.
+8. Commit.
+
+Acceptance: `rg -n 'urn:kdive:remote-module' src/` returns nothing, every reader named in step 2
+has a durable source, and the resume path still works when the scratch volume is already deleted —
+the case `_operation_for_cleanup` exists for.
 
 ### Verification for the whole change
 
@@ -651,8 +753,15 @@ sufficient evidence for this change — the defect it is fixing passed `just ci`
   reap paths use different ownership channels.
 - Wiring `reap_orphaned_module_volumes` into the reconciler's remote sweep belongs to #2129's
   recovery-point work; this spec fixes its contract, not its call site.
-- The durable schema behind N6 — what an un-discharged obligation is, and the nineteen attributes
-  the deleted `attempt-reap` element used to carry — is #2129's to define. This spec fixes the
-  predicate (ADR-0585 `restored` or baseline commitment discharges it) and the read ordering
-  (N10), which is what the sweep's correctness depends on; the columns are not a design decision
-  this record needs to make. Task 7 carries N5's obligation into that work.
+- The durable schema behind N6 is #2129's to define. This spec fixes the two obligations, their
+  key, their three and two discharge events, the read ordering (N10), and the requirement that
+  the terminal evidence the `attempt-reap` element carried lands on a row before that element is
+  deleted (Task 8). The column names are not a design decision this record needs to make. Tasks 7
+  and 8 carry those obligations into that work.
+- **Prerequisite this design places on paths it does not own.** ADR-0585's terminal escape —
+  System teardown, and the operator-acknowledged close of a parked recovery conflict — must clear
+  the durable attempt row. Neither path clears anything today, because there was nothing to clear.
+  Without it, a worker killed mid-mutation, a restoration that failed closed, and a parked
+  conflict all retain 10 GiB indefinitely: reap recovers their ownership and then correctly
+  declines to reclaim them forever. Task 5's `test_torn_down_attempt_is_reclaimed` is the arm that
+  holds it, and #2129 owns the teardown-side change.
