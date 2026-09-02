@@ -1343,7 +1343,7 @@
 
           try:
               asyncio.run(main())
-          except (ConnectionError, OSError, ssl.SSLError):
+          except (asyncio.IncompleteReadError, ConnectionError, OSError, ssl.SSLError):
               if sys.argv[1] != "no-certificate":
                   raise
           else:

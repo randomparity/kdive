@@ -245,6 +245,7 @@ def test_ansible_installs_authority_in_clean_host_order() -> None:
     assert "ub26-big.dev.pdx.drc.nz" not in proof
     assert "Clone the exact Git bundle for the venv" in tasks
     assert "live_vm_repo_url.endswith('.bundle')" in tasks
+    assert "asyncio.IncompleteReadError" in tasks
 
     teardown = _text(AUTHORITY_TEARDOWN)
     assert "/usr/bin/python3" in teardown
