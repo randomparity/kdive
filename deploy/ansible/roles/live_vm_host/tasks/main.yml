@@ -1370,7 +1370,10 @@
       Type=forking
       # The daemon's sockets and pid live under the dedicated runtime root, not /run/user.
       Environment=XDG_RUNTIME_DIR=/run/kdive/live-libvirt
-      ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid
+      # A lingering user manager can predate Ansible's group update. sg resolves the declared
+      # fixed-worker group on every start so libvirtd can apply unix_sock_group without a reboot.
+      ExecStart=/usr/bin/sg kdive-live-libvirt -c \
+        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf --pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'
       PIDFile=/run/kdive/live-libvirt/libvirt/libvirtd.pid
       Restart=on-failure
       RestartSec=5s

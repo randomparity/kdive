@@ -758,10 +758,15 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
 def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
     """The dedicated session daemon survives reboots (#2032): linger + an enabled user unit."""
     tasks = _text(MAIN_TASKS)
+    defaults = _yaml(DEFAULTS)
+    packages = defaults["live_vm_host_packages"]
+    assert isinstance(packages, list)
+    assert "login" in packages
     assert "kdive-libvirtd-live.service" in tasks
     assert (
-        "ExecStart=/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
-        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid" in tasks
+        "ExecStart=/usr/bin/sg kdive-live-libvirt -c \\\n"
+        "        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
+        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'" in tasks
     )
     # The user manager is reached through the runner's XDG_RUNTIME_DIR (no login session needed).
     enable = tasks.index("- name: Enable the boot-persistent session libvirtd user unit")
