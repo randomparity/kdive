@@ -66,6 +66,13 @@ dispatcher only after the before-use readiness check succeeds. Starting this hos
 deployment readiness, never capability readiness, and it cannot acknowledge takeover or mutate a
 provider in this issue.
 
+The authority also owns a least-privilege TLS health-client certificate and key chained to the
+same client CA, but no worker-incarnation credential. Startup and each readiness interval perform a
+real mutual-TLS self-connection using that certificate and the configured server CA/name, then
+close before sending an application frame. The handshake re-evaluates current server, client, and
+CA validity and purpose using the standard-library TLS stack; it can never construct
+`AuthenticatedPeer` or dispatch a request.
+
 ### Host identities and paths
 
 Ansible creates these independent principals and groups:
@@ -131,9 +138,12 @@ The runtime writes no durable readiness override. Startup performs static checks
 listener with `start_serving=False`, validates the bound socket identity/mode plus the loaded TLS
 floor, certificate identity, client-verification mode, and credential-file fingerprints, starts
 serving, and only then sends `READY=1`. The one-shot command creates and validates a fixed sibling
-probe socket through the same listener factory, then closes it. Every 30 seconds the host repeats
-the static checks and verifies that the live server is serving, the request socket still has its
-exact identity/mode, and the loaded TLS evidence and credential-file fingerprints still match. Any
+probe socket through the same listener factory, completes the TLS health handshake, then closes it.
+Every 30 seconds the host repeats the static checks and verifies that the live server is serving,
+the request socket still has its exact identity/mode, the loaded TLS evidence and credential-file
+fingerprints still match, and a new health handshake succeeds. A certificate crossing
+`notBefore`/`notAfter` therefore retracts readiness at the next interval even when its file is
+unchanged. Any
 drift sends `STOPPING=1` before exit; #2140 must also call the same check immediately before enabling
 an adapter or admitting its first request. Journal restoration is therefore a prerequisite: any
 corrupt, foreign, missing, extra, longer, or valid-prefix-truncated lane fails the inventory/local
@@ -141,6 +151,12 @@ bijection or trusted-head comparison before readiness. Ansible additionally crea
 proof identity, certificate, and active incarnation credential; verifies server, client, and worker
 authentication plus `provider-not-configured`; and removes the proof identity and its material
 and retires its database incarnation before declaring provisioning complete.
+
+The one-shot probe takes a nonblocking exclusive lock in the authority-owned request directory.
+Contention returns one bounded `probe-busy` failure. With the lock held, it may remove a leftover
+probe path only when `lstat` proves it is an authority-owned socket, connection proves no listener
+owns it, and an immediate inode recheck still matches. Every exit removes only the socket inode the
+invocation created. A symlink, foreign owner/type/inode, or live listener fails closed.
 
 ## Threat model
 

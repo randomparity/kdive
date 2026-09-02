@@ -96,6 +96,10 @@ Interfaces:
   creates the request listener with `start_serving=False`, validates it, begins serving, sends
   `READY=1`, repeats the equivalent live check every 30 seconds, then sends `STOPPING=1` and exits
   on drift. The one-shot command uses the same factory/check against a fixed sibling probe socket.
+- `check_tls_health(listener, config)` uses an authority-owned health-client certificate with no
+  incarnation credential to complete a real mutual-TLS self-handshake against the deterministic
+  server name, closing before any application frame. Startup and every interval thereby re-evaluate
+  current server/client/CA validity and EKUs through the standard-library TLS stack.
 - CLI handlers expose `external-boot-authority-host` and
   `check-external-boot-authority-host`; Task 4's unit and Ansible probe rely on those names.
 
@@ -119,6 +123,10 @@ Verification:
   later live-listener or credential-fingerprint drift sends `STOPPING=1`. Cases
   `test_host_validates_listener_before_ready` and `test_host_retracts_on_listener_drift`; same host
   command.
+- Mode: focused-test. Contract: a time advance across the unchanged server, health-client, or CA
+  certificate validity boundary makes the next health handshake fail and sends `STOPPING=1`; the
+  health client has no incarnation credential and never constructs `AuthenticatedPeer`. Case
+  `test_host_retracts_when_transport_certificate_expires`; same host command.
 - Mode: focused-test. Contract: the Unix stream requires TLS 1.3 client authentication and bounded
   canonical framing; invalid certificates fail before request bytes are read, invalid lengths and
   envelopes are rejected without allocation or secret disclosure, and an invalid worker credential
@@ -134,6 +142,10 @@ Verification:
 - Mode: focused-test. Contract: a valid proof client and active incarnation receive only
   `provider-not-configured`, and no `ExternalBootAuthorityService` or adapter method runs. Case
   `test_dormant_transport_refuses_before_provider_dispatch`; same transport command.
+- Mode: focused-test. Contract: one-shot probes serialize through a nonblocking authority-owned
+  lock, remove only an unlocked stale authority-owned socket after an inode recheck, and reject a
+  live, foreign, replaced, or symlink path. Cases `test_probe_recovers_owned_stale_socket` and
+  `test_probe_rejects_concurrent_or_foreign_socket`; same host command.
 
 Steps:
 
@@ -141,8 +153,9 @@ Steps:
 2. Implement the immutable config and filesystem checks using `os.open`/`stat` without following
    symlinks; run the focused command and expect filesystem cases green.
 3. Implement the closed envelope, four-byte length bound, deterministic TLS server name, strict TLS
-   contexts, listener evidence, credential redaction, and dormant dispatcher using only the
-   standard library and existing protocol models; run the transport command and expect green.
+   contexts, authority-owned health client, listener evidence, serialized probe cleanup, credential
+   redaction, and dormant dispatcher using only the standard library and existing protocol models;
+   run the transport command and expect green.
 4. Implement the async psycopg role/function checks and bounded error type; run both focused files
    and expect green.
 5. Wire the two CLI commands and add parser tests; run the focused commands plus the existing CLI
@@ -210,7 +223,8 @@ Interfaces:
 - The `Type=notify`, `NotifyAccess=main` systemd unit runs
   `/opt/kdive-provider-authority/.venv/bin/python -m kdive
   external-boot-authority-host`, loads `database-dsn` and `service-credential` through
-  `LoadCredential=` together with the server certificate and worker-client CA, uses
+  `LoadCredential=` together with the server certificate/CA, worker-client CA, and health-client
+  certificate/key, uses
   `User=kdive-provider-authority`, and hardens filesystem/network access. `service-credential` is
   the TLS server private key rather than an unused sentinel.
 - Ansible installs the venv, root/authority-owned credentials, journal and runtime directories,
