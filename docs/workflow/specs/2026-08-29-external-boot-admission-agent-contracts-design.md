@@ -35,8 +35,54 @@ before this design was accepted:
 - `kdive.jobs.worker` already finalizes marked jobs through `queue.complete_external_boot` /
   `queue.fail_external_boot`.
 
-The one deliberately missing piece is worker claim of a marked job. That is #2118's, and it governs
-the maturity decision below.
+## Blocked precondition — the activation lifecycle has no Python implementation
+
+The design below was reviewed adversarially on 2026-09-02 and three of its load-bearing premises were
+refuted against the tree. They are recorded here because they decide what this issue can ship, and
+they are not visible from the migrations alone.
+
+**1. Nothing in `src/` creates or transitions an external-boot activation.** `rg -n
+'external_boot_activations' src/ --type py` matches only the repository module itself;
+`ExternalBootActivationRepository` has zero importers outside `tests/`. Every one of its transition
+methods — `create`, `transition`, `begin_recovery_attempt`, `finish_recovery_attempt`,
+`record_conflict`, `release_reservation`, `mark_cleanup_complete` — is called from no production
+code path. The table, the migrations, and the repository are installed; the lifecycle that drives
+them is not.
+
+**2. The server cannot allocate external-boot mutation authority.**
+`allocate_external_boot_authority` (`0122_external_boot_authority.sql:322`) opens with
+`IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN RAISE ... ERRCODE = '42501'`, and
+its `p_job_id` / `p_attempt` parameters bind an already-claimed job attempt. All three 0122 authority
+functions are role-gated to `kdive_worker` or `kdive_provider_authority`. The MCP server runs as
+`kdive_server`, so the authority allocation this slice would need is available to the worker and
+unavailable here.
+
+**3. The authority marker cannot be constructed from the activation row.**
+`ExternalBootAuthorityMarkerV1` requires `authority_instance` and `provider_kind`
+(`src/kdive/jobs/models.py:188`). Neither `ExternalBootActivation` nor `ExternalBootReservation`
+(`src/kdive/domain/external_boot_activation.py:226,354`) carries either field. The earlier draft of
+this spec asserted both could be read from the activation and its reservation; that is false.
+
+**What follows from them.** `runs.release_external_boot` as originally designed commits
+`active -> recovering` and nothing on this branch can move an activation out of `recovering`: no
+worker claims an authority-marked job, no reconciler sweep exists, no caller of
+`finish_recovery_attempt` exists, and the deadline that would fail the attempt forward is #2118's.
+The System would then be denied Run creation, install, boot, power, snapshot, and reprovision by this
+issue's own matrix, with only `systems.teardown` remaining. That is a one-way door reached on the
+happy path by an authorized contributor following the documented contract — strictly worse than the
+phantom feature the earlier draft set out to avoid, and `partial` maturity does not disclose it.
+
+The admission matrix itself is unaffected: it is a guard, it denies nothing while no activation
+exists, and it denies correctly the moment the lifecycle that creates activations lands.
+
+**Open decision, owned by the operator.** Issue #2117's frozen completion criteria require MCP
+wrappers carrying "absolute deadline/retry/recovery contracts". With no truthful transition to
+anchor it, there is no absolute deadline to return. Either that criterion is narrowed — the three
+contracts ship as admission-and-authorization surfaces returning a truthful
+`configuration_error` with `reason=recovery_executor_unavailable`, exactly as this design already
+accepted for `ops.resolve_recovery_orphan` — or the executable half moves to whichever issue owns the
+activation lifecycle and the server-side authority boundary. This design does not choose; the rest of
+the document describes the matrix, which is buildable either way.
 
 ## Architecture
 
@@ -57,6 +103,13 @@ A denial is `ErrorCategory.CONFLICT`, carries only the authorized activation id/
 id, and suggests `runs.get`; `active` also suggests `runs.release_external_boot`, while
 `recovery_conflict` and `recovery_failed` suggest `systems.teardown`.
 
+Those actions ride the envelope's own `suggested_next_actions` field, never
+`CategorizedError.details`. `ToolResponse.failure_from_error` passes `exc.details` through
+`safe_error_details` (`src/kdive/serialization.py:96`), which reduces every key to a JSON scalar and
+drops non-scalars apart from three reserved list keys — so a list placed in `details` is silently
+discarded. The admission service therefore exposes `next_actions_for(state) -> list[str]` beside the
+table, and each call site passes it as `failure_from_error(..., suggested_next_actions=...)`.
+
 ### Reverse admission
 
 Every reverse-admission caller invokes this service inside its System lock immediately before
@@ -64,15 +117,40 @@ durable admission or enqueue. `create_run`, `teardown_system`, `_reprovision_loc
 `snapshot_system`/`restore_system`/`delete_snapshot`, `insert_session_locked`, and `detach_locked`
 already hold `LockScope.SYSTEM` and gain only the guard call.
 
-`install_run`, `boot_run`, `power_system`, `force_crash_system`, and `_fetch_vmcore` do not hold it
-today. Each extends its existing lock block to acquire `LockScope.SYSTEM` on the bound System
-**first**, before any `INVESTIGATION` or `RUN` lock, because `src/kdive/db/locks.py` fixes the total
-order `PROJECT → RESOURCE → ALLOCATION → SYSTEM → RECOVERY_STORE → INVESTIGATION → RUN`. Acquiring
-in any other order against a peer that already takes `ALLOCATION → SYSTEM` (`_create_locked`) or
+`install_run`, `boot_run`, `power_system`, `force_crash_system`, `capture_traffic`,
+`diagnostic_sysrq_system`, and `_fetch_vmcore` do not hold it today. Each extends its existing lock
+block to acquire `LockScope.SYSTEM` on the bound System **first**, before any `INVESTIGATION` or
+`RUN` lock, because `src/kdive/db/locks.py` fixes the total order
+`PROJECT → RESOURCE → ALLOCATION → SYSTEM → RECOVERY_STORE → INVESTIGATION → RUN`. Acquiring in any
+other order against a peer that already takes `ALLOCATION → SYSTEM` (`_create_locked`) or
 `SYSTEM → INVESTIGATION` deadlocks. A Run with no bound System cannot carry an external activation,
 so the guard and the added lock are both skipped there rather than acquiring a lock on nothing.
 
-### Recovery requests
+The call-site set is the complete set of registered mutating tools ADR-0583:345-353 reaches, and it
+is enumerable rather than narrative: every member of `ExternalBootOperation` has at least one
+enforcing call site and one negative test. `services/runs/bind.py:_bind_locked` is in it and already
+holds `SYSTEM` (`bind.py:151-154`). Read-only observation tools stay on their existing seams, which
+is what ADR-0583 admits in `active`.
+
+These new `conn.transaction()` blocks open on a pooled non-autocommit connection that has already
+issued a read, so each is a **savepoint** rather than a top-level transaction
+(`src/kdive/db/locks.py:126-135`, and the precedent at
+`src/kdive/mcp/tools/catalog/artifacts/uploads.py:763`). Atomicity of the guard and the enqueue holds;
+the consequence is that the advisory lock is released at end-of-request rather than end-of-block.
+That is accepted because each block spans no external I/O — provider-resolver and refusal checks stay
+outside it — and each site carries a comment saying so, since the behavior is invisible at the call
+site.
+
+### Recovery requests — blocked, see *Blocked precondition* above
+
+The rest of this section describes the state-mutating form of release and conflict resolution. It is
+**not buildable on this branch** and is retained only so the operator's decision has something
+concrete to accept or narrow. Three of its steps are refuted: the marker of step 9 cannot be
+constructed, the authority it names cannot be allocated by the server, and the transition of step 8
+has no exit. Its idempotency claim is separately wrong — step 8 mints a fresh `attempt_id` and
+step 9 embeds it in the `dedup_key`, so the dedup never fires on a retry; the repository's actual
+idempotency seam is `keyed_mutation` (`src/kdive/mcp/tools/lifecycle/support/_idempotency.py:70`),
+which stores the envelope, as `install_run` and `power_system` already use it.
 
 `services/external_boot/recovery_requests.py` owns release and conflict-resolution admission. Under
 the System lock, release requires contributor on the owning Run, an `active` activation, no active
@@ -96,10 +174,15 @@ row as an in-flight recovery would be telling an agent something false.
 This design therefore uses the repository's own disclosure mechanism (ADR-0175) rather than inventing
 one. `runs.release_external_boot` and `systems.resolve_external_boot_conflict` register with
 `meta={"maturity": "partial", "maturity_detail": {"reason": ...}}`, the reason naming that the
-recovery executor is delivered separately; the wrapper docstrings state plainly that the request is
-recorded and queued and that the job stays `queued` until that executor lands. The lifecycle-prompt
-registrar already renders a `[partial: <reason>]` tag from exactly that metadata, so the disclosure
-reaches an agent through the schema it actually reads.
+recovery executor is delivered separately.
+
+**The metadata is not the disclosure an agent reads.** FastMCP serializes the wrapper docstring and
+`Field` descriptions into the tool schema; `meta.maturity` drives `just docs` reference generation
+and the `[partial: <reason>]` tag the lifecycle-prompt registrar renders on a journey step
+(`src/kdive/mcp/prompts/registrar.py:240-250`), and neither reaches an agent that calls the tool
+without going through a prompt journey. So the schema-visible half is the docstring, and it carries
+the disclosure in prose; the metadata is the machine-readable record beside it. Claiming otherwise
+was an error in the earlier draft of this section.
 
 `ops.resolve_recovery_orphan` is a platform-admin repair admission contract. No durable quarantine
 record or executable repair mechanism exists yet, so it validates authorization and the bounded

@@ -39,6 +39,26 @@ config setting, regenerated reference docs, and their matching test files.
 - Guardrails: `just lint`, `just type`, `just test-verbose <path>`, and `just ci`. Run them bare.
 - Branch: `feat/external-boot-admission-agent-contracts-2117`; base: `main`.
 
+## Status: Tasks 3 and 4 are blocked
+
+An adversarial review on 2026-09-02 refuted three premises Tasks 3 and 4 rest on. The spec's
+*Blocked precondition* section holds the evidence. In short: nothing in `src/` creates or transitions
+an external-boot activation, the server cannot allocate external-boot mutation authority (the 0122
+functions are role-gated to `kdive_worker`), and the authority marker's `authority_instance` and
+`provider_kind` are on neither the activation nor the reservation row. A shipped
+`runs.release_external_boot` would therefore commit `active -> recovering` with no exit but
+`systems.teardown`.
+
+**Tasks 1 and 2 are unaffected and remain buildable as written.** They are the matrix and its
+enforcement — a guard that denies nothing while no activation exists and denies correctly once one
+does. Task 5's gates apply to whatever ships.
+
+Tasks 3 and 4 wait on an operator decision recorded in the spec: narrow the "absolute
+deadline/retry/recovery contracts" criterion so the three tools ship as admission-and-authorization
+surfaces returning a truthful `configuration_error` with `reason=recovery_executor_unavailable`, or
+move the executable half to the issue that owns the activation lifecycle. Their text below is kept as
+written so the decision has a concrete proposal to act on; do not implement it as-is.
+
 ## Lock-order constraint (binds Tasks 2 and 3)
 
 `src/kdive/db/locks.py:36` fixes the total co-hold order
@@ -53,6 +73,7 @@ Created:
 
 - `src/kdive/services/external_boot/__init__.py`
 - `src/kdive/services/external_boot/admission.py` — the closed decision table.
+- `tests/services/external_boot/conftest.py` — the shared activation-seeding factory.
 - `src/kdive/services/external_boot/recovery_requests.py` — release and conflict-resolution writers.
 - `src/kdive/mcp/tools/ops/external_boot.py` — the `ops.resolve_recovery_orphan` plane.
 - `tests/services/external_boot/__init__.py`
@@ -72,6 +93,7 @@ Modified:
 - `src/kdive/mcp/tools/lifecycle/systems/admin.py` — guard teardown and reprovision.
 - `src/kdive/mcp/tools/lifecycle/systems/snapshot.py` — guard snapshot, restore, delete.
 - `src/kdive/services/runs/admission.py` — guard Run creation.
+- `src/kdive/services/runs/bind.py` — guard Run bind.
 - `src/kdive/services/debug/lifecycle.py` — guard attach and detach.
 - `src/kdive/mcp/tools/lifecycle/runs/registrar.py` — `runs.release_external_boot` wrapper.
 - `src/kdive/mcp/tools/lifecycle/systems/registrar.py` — `systems.resolve_external_boot_conflict`.
@@ -111,11 +133,13 @@ Provided to later tasks:
 ```python
 class ExternalBootOperation(StrEnum):
     RUN_CREATE = "run_create"
+    RUN_BIND = "run_bind"
     RUN_INSTALL = "run_install"
     RUN_BOOT = "run_boot"
     SYSTEM_REPROVISION = "system_reprovision"
     SYSTEM_POWER = "system_power"
     SYSTEM_SNAPSHOT = "system_snapshot"
+    SYSTEM_SYSRQ = "system_sysrq"
     SYSTEM_TEARDOWN = "system_teardown"
     FORCE_CRASH = "force_crash"
     CAPTURE_VMCORE = "capture_vmcore"
@@ -147,8 +171,21 @@ async def check_external_boot_admission(
 `check_external_boot_admission` returns `None` when no activation restricts the System, returns the
 binding when the operation is admitted against a live activation, and raises
 `CategorizedError(category=ErrorCategory.CONFLICT, terminal=True)` otherwise. Its `details` carry
-exactly `{"activation_id": str, "activation_state": str, "owning_run_id": str,
-"suggested_next_actions": [...]}`.
+exactly the three scalar keys `{"activation_id": str, "activation_state": str, "owning_run_id": str}`
+and nothing else.
+
+The next actions are **not** in `details`: `ToolResponse.failure_from_error` runs `exc.details`
+through `safe_error_details` (`src/kdive/serialization.py:96`), which reduces each value to a JSON
+scalar and drops non-scalars apart from the reserved `errors` / `accepted_values` / `available` keys,
+so a list there is silently discarded. The module exposes them separately:
+
+```python
+def next_actions_for(state: ExternalBootActivationState) -> list[str]: ...
+```
+
+returning `["runs.get"]`, plus `"runs.release_external_boot"` for `ACTIVE`, plus `"systems.teardown"`
+for `RECOVERY_CONFLICT` and `RECOVERY_FAILED`. Every call site passes it explicitly:
+`ToolResponse.failure_from_error(object_id, exc, suggested_next_actions=next_actions_for(...))`.
 
 New repository method:
 
@@ -176,17 +213,27 @@ Admitted operations by state, and nothing else is admitted:
 | `recovered` / `abandoned` with `cleanup_complete=false` | `SYSTEM_TEARDOWN` |
 | no row, or terminal with `cleanup_complete=true` | every operation |
 
-`RUN_CREATE`, `RUN_INSTALL`, `RUN_BOOT`, `SYSTEM_POWER`, `SYSTEM_REPROVISION`, and `SYSTEM_SNAPSHOT`
-appear in no row above, so a restricting activation denies them in every state including `active` —
-which is ADR-0583's "rejects every install or restage, unrelated-Run operation, generic
-power/control operation, snapshot".
+`RUN_CREATE`, `RUN_BIND`, `RUN_INSTALL`, `RUN_BOOT`, `SYSTEM_POWER`, `SYSTEM_REPROVISION`,
+`SYSTEM_SNAPSHOT`, and `SYSTEM_SYSRQ` appear in no row above, so a restricting activation denies them
+in every state including `active` — which is ADR-0583's "rejects every install or restage,
+unrelated-Run operation, generic power/control operation, snapshot".
 
 A second frozenset, `_OWNING_RUN_SCOPED`, holds `EXTERNAL_BOOT_RELEASE`, `CAPTURE_VMCORE`,
 `CAPTURE_TRAFFIC`, `DEBUG_ATTACH`, and `DEBUG_DETACH`. An operation in that set is admitted only when
 the caller's `run_id` equals the activation's `run_id`; a different or absent `run_id` is a denial.
-`SYSTEM_TEARDOWN`, `EXTERNAL_BOOT_RESOLVE_CONFLICT`, and `FORCE_CRASH` are not in it: the first two
-are System-scoped by ADR-0583, and `control.force_crash` takes only a `system_id`, so the only System
-it can target while an activation is `active` is that activation's own.
+`SYSTEM_TEARDOWN` and `EXTERNAL_BOOT_RESOLVE_CONFLICT` are not in it: ADR-0583 scopes both to the
+System.
+
+**`FORCE_CRASH` is a stated residual, not an oversight.** ADR-0583:351 lists force-crash among the
+`active`-admitted operations under an "owning-Run" modifier, but `control.force_crash` carries only a
+`system_id` — there is no caller Run for the guard to compare, so passing one would mean inventing
+it. This slice therefore admits `FORCE_CRASH` in `active` on the tool's own authorization —
+project `ADMIN` plus the ADR-0130 destructive-op gate at `security/authz/gate.py` — and does not
+enforce the owning-Run modifier. Enforcing it needs either a `run_id` parameter on
+`control.force_crash` (a public contract change outside this issue's surface) or a rule tying
+admission to a live DebugSession on the owning Run. Task 2's tests assert the admitted-in-`active`,
+denied-in-every-other-restricted-state behavior that this slice does implement, and state the
+unenforced modifier in a comment at the call site so it is not mistaken for coverage.
 
 Suggested next actions on denial: `["runs.get"]` always, plus
 `"runs.release_external_boot"` when the state is `active`, plus `"systems.teardown"` when the state
@@ -194,8 +241,16 @@ is `recovery_conflict` or `recovery_failed`.
 
 ### Steps
 
-1. Create `tests/services/external_boot/__init__.py` (empty) and write
-   `tests/services/external_boot/test_admission.py` as a pure table test over a fake repository:
+0. Create `tests/services/external_boot/__init__.py` (empty) and
+   `tests/services/external_boot/conftest.py` holding one `seeded_activation` factory fixture that
+   inserts an activation in a requested state — and, when asked, a `ready` reservation — satisfying
+   every CHECK constraint in `0121_external_boot_activations.sql`. Tasks 1, 2, and 3 all consume it;
+   without it their first steps have no way to reach a restricted state. Check
+   `tests/db/external_boot_authority_support.py:191,232` first: the #2150 work already inserts
+   activation rows there, so reuse or lift that helper rather than writing a second one. Run
+   `just test-verbose tests/services/external_boot` and expect collection to succeed with no tests.
+1. Write `tests/services/external_boot/test_admission.py` as a pure table test over a fake
+   repository:
    parametrize every `(state, cleanup_complete, operation, owning_run)` combination against the
    table above and assert admit-or-`CONFLICT`, plus the exact `details` keys and
    `suggested_next_actions` for three representative denials. Run
@@ -256,7 +311,8 @@ Sites that already hold `LockScope.SYSTEM` gain only a guard call inside the exi
 
 | file:function | operation passed | run_id passed |
 |---|---|---|
-| `services/runs/admission.py:_create_locked` (lock at :322-324) | `RUN_CREATE` | `None` |
+| `services/runs/admission.py:_create_locked` (lock at :320-324) | `RUN_CREATE` | `None` |
+| `services/runs/bind.py:_bind_locked` (lock at :151-154) | `RUN_BIND` | the bound `run_id` |
 | `mcp/tools/lifecycle/systems/admin.py:_teardown_locked` (lock at :360) | `SYSTEM_TEARDOWN` | `None` |
 | `mcp/tools/lifecycle/systems/admin.py:_reprovision_locked` (lock at :132) | `SYSTEM_REPROVISION` | `None` |
 | `mcp/tools/lifecycle/systems/snapshot.py:snapshot_system` (lock at :187), `restore_system` (:261), `delete_snapshot` (:385) | `SYSTEM_SNAPSHOT` | `None` |
@@ -268,15 +324,24 @@ admitted in every state, so the call can only ever return, never raise.
 
 Sites that must acquire `LockScope.SYSTEM` first:
 
-- `mcp/tools/lifecycle/runs/steps.py:install_run` — the existing block at :179-184 is
+- `mcp/tools/lifecycle/runs/steps.py:_restage_and_enqueue_install` (the locked body `install_run`
+  delegates to) — the existing block at :181-184 is
   `conn.transaction(), advisory_xact_lock(INVESTIGATION, run.investigation_id),
   advisory_xact_lock(RUN, run.id)`. Insert `advisory_xact_lock(conn, LockScope.SYSTEM,
   run.system_id)` as the first lock in that same `async with`, guarded by `run.system_id is not
   None`. Call the guard with `RUN_INSTALL` and `run_id=run.id` immediately after `locked_run` is
   re-read and before the `queue.get_by_dedup_key` replay check.
-- `mcp/tools/lifecycle/runs/steps.py:_enqueue_step` — the block at :437 is
+- `mcp/tools/lifecycle/runs/steps.py:_enqueue_step` — the block at :443 is
   `conn.transaction(), advisory_xact_lock(RUN, run.id)`. Insert the `SYSTEM` lock first on the same
   condition, then call the guard with `RUN_BOOT` and `run_id=run.id`.
+- `mcp/tools/lifecycle/control/registrar.py:diagnostic_sysrq_system` (:263) — wrap its
+  `_enqueue`/`keyed_mutation` pair in `conn.transaction(), advisory_xact_lock(conn,
+  LockScope.SYSTEM, uid)` and call the guard with `SYSTEM_SYSRQ` and `run_id=None`. `SYSTEM_SYSRQ` is
+  in no admitted row, so any restricting activation denies it.
+
+A `SYSTEM` lock that must be acquired only when `run.system_id is not None` cannot be written as a
+plain conditional inside a single `async with`. Use `contextlib.AsyncExitStack`, following the
+existing pattern at `src/kdive/mcp/tools/catalog/artifacts/uploads.py:775-782`.
 - `mcp/tools/lifecycle/control/registrar.py:power_system` — wrap the state re-read, guard call, and
   `keyed_mutation(...)` in `conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid)`,
   calling the guard with `SYSTEM_POWER` and `run_id=None`.
@@ -299,28 +364,42 @@ the error propagate to their existing callers, which already convert `Categorize
 
 ### Steps
 
-1. Write `tests/services/external_boot/test_reverse_admission.py`: a PostgreSQL test over
-   `migrated_url` that seeds an `active` activation owned by Run A and asserts each of Run B's
-   install, boot, power, force-crash, snapshot, vmcore, and attach paths returns
-   `error_category == "conflict"`, while Run A's force-crash, vmcore, attach, and detach succeed.
-   Add a barrier race in the same file: two concurrent connections, one committing
-   `active -> recovering` and one admitting Run B's install, asserting exactly one proceeds. Run
+1. Write `tests/services/external_boot/test_reverse_admission.py` over `migrated_url`, using the
+   `seeded_activation` factory Task 1 step 0 creates. Seed an `active` activation owned by Run A and
+   assert each of Run B's create, bind, install, boot, power, sysrq, snapshot, reprovision,
+   vmcore, traffic-capture, and attach paths returns `error_category == "conflict"` with the
+   expected `suggested_next_actions`, while Run A's vmcore, traffic capture, attach, and detach
+   succeed and Run A's install and boot are still denied (ADR-0583 rejects install and restage even
+   for the owning Run). Assert `force_crash` is admitted in `active` and denied in
+   `recovery_conflict`.
+
+   Add a barrier race in the same file: two connections, the ordering forced by a
+   `pg_advisory_xact_lock` on a test-only key rather than by timing — connection 1 takes the test
+   key, commits `active -> recovering`, and releases; connection 2 blocks on it, then admits Run B's
+   install. Assert exactly one side proceeds. Run
    `just test-verbose tests/services/external_boot/test_reverse_admission.py` and expect the
    negative cases to fail because no guard exists yet.
-2. Add the guard call to the six already-locked sites listed above. Re-run the command from step 1;
-   expect the snapshot, teardown, attach, and detach cases to pass and the rest to still fail.
-3. Add the `SYSTEM` lock and guard to `install_run`, `_enqueue_step`, `power_system`,
-   `force_crash_system`, and `_fetch_vmcore`, keeping `SYSTEM` first in every `async with`. Re-run
-   the command from step 1 and expect exit 0.
+2. Add the guard call to the seven already-locked sites listed above. Re-run the command from step 1;
+   expect the create, bind, snapshot, teardown, attach, and detach cases to pass and the rest to
+   still fail.
+3. Add the `SYSTEM` lock and guard to `_restage_and_enqueue_install`, `_enqueue_step`,
+   `power_system`, `force_crash_system`, `capture_traffic`, `diagnostic_sysrq_system`, and
+   `_fetch_vmcore`, keeping `SYSTEM` first in every `async with` and using `AsyncExitStack` where the
+   lock is conditional. Re-run the command from step 1 and expect exit 0.
 4. Extend `tests/mcp/lifecycle/test_control_registrar.py`,
    `tests/mcp/lifecycle/test_systems_snapshot.py`, `tests/mcp/lifecycle/test_vmcore_tools.py`,
    `tests/mcp/lifecycle/test_runs_tools.py`, and `tests/services/debug/test_detach.py` with one
    negative case each asserting the `conflict` envelope and its `suggested_next_actions`. Run
    `just test-verbose tests/mcp/lifecycle tests/services/debug` and expect exit 0.
-5. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
+5. Add a coverage assertion to `tests/services/external_boot/test_admission.py`: every member of
+   `ExternalBootOperation` except `EXTERNAL_BOOT_RELEASE` and `EXTERNAL_BOOT_RESOLVE_CONFLICT`
+   appears in the enforcing-call-site map the tests exercise. A site dropped in a later edit then
+   fails a gate instead of shipping.
+6. Run `just lint`, `just type`, and `just test-changed`; expect exit 0. Commit.
 
 Acceptance: no reverse operation crosses a newly committed restriction, exactly one side of the race
-proceeds, and no call site acquires `SYSTEM` after `INVESTIGATION` or `RUN`.
+proceeds, no call site acquires `SYSTEM` after `INVESTIGATION` or `RUN`, and every enforced operation
+has a negative test.
 
 ---
 
@@ -349,8 +428,11 @@ Consumed from the existing codebase (each confirmed present at the stated path):
   `operation: Literal["activate","recover","resolve-conflict","release","cleanup","teardown","deadline","recovery-attempt","fail"]`,
   `operation_identity: str`.
 - `kdive.domain.operations.jobs.JobKind.BOOT` (`jobs.py:27`).
-- `kdive.mcp.tools._common.job_authorizing(ctx, project)` and `job_envelope(job, object_key,
-  object_id)` (`_common.py:305`).
+- `kdive.mcp.tools._common.authorizing(ctx, project)` — re-exported from `kdive.jobs.context`
+  (`_common.py:15,318`). Call sites import it under the local alias `job_authorizing`
+  (`runs/steps.py:26`); follow that convention. There is no symbol named `job_authorizing` in
+  `_common.py`.
+- `kdive.mcp.tools._common.job_envelope(job, object_key, object_id)` (`_common.py:305`).
 - `kdive.db.external_boot_activations.ExternalBootActivationRepository.begin_recovery_attempt(conn, *, system_id, activation_id, operation_owner_id, authority_generation, expected_state, attempt_id, recovery_readiness_deadline, resolution_operation=None, resolution_identity=None, acknowledged_composite_state=None) -> CasResult` (`external_boot_activations.py:595`) and
   `CasStatus.APPLIED` / `SUPERSEDED` / `NOT_FOUND` (`:33`).
 - `kdive.security.authz.rbac.require_role(ctx, project, role)` (`rbac.py:136`) and
@@ -443,7 +525,7 @@ EXTERNAL_BOOT_RECOVERY_READINESS_TIMEOUT_SECONDS = Setting(
 
    When it is not `None`, `enqueue` merges `{"external_boot_authority_v1":
    external_boot_marker.model_dump(mode="json")}` into the `payload_json` dict that
-   `dump_payload` returned (`queue.py:88`) before the `Jsonb(payload_json)` insert. That is the one
+   `dump_payload` returned (`queue.py:90`) before the `Jsonb(payload_json)` insert. That is the one
    place the sibling key can be written without loosening a payload model, `queue.py` already
    imports from `kdive.jobs.models`, and the replay path is unaffected: `ON CONFLICT DO NOTHING`
    leaves an existing marked row exactly as it was.
@@ -621,7 +703,28 @@ Rollback is `git revert` of the branch. Queued external requests are durable: be
 deployed build, drain or execute them through #2118's executor, because reverting removes the only
 tools that can create them but not the rows already created.
 
+## Design-review dispositions (2026-09-02, `$gauntlet` pass 1, 12 findings)
+
+Blocked — these three are one condition, and they stop Tasks 3 and 4 pending the operator decision
+recorded in the spec's *Blocked precondition*:
+
+- The release transition is a one-way door into `recovering` with no exit but `systems.teardown`.
+- The authority marker cannot be constructed and the server cannot allocate authority.
+- `CasStatus.SUPERSEDED` conflates a stale identity with an unready reservation and a missing row;
+  if the transition ships, read the reservation under the same lock and refuse an unready one with
+  its own `reservation_not_ready` reason before calling `begin_recovery_attempt`.
+
+Also blocked with them, because it only exists if the transition does: the documented idempotency is
+wrong — a fresh `attempt_id` in the `dedup_key` means the dedup never fires. The correct seam is
+`keyed_mutation`, which stores the envelope; the `dedup_key` idempotency claim should be deleted
+rather than repaired.
+
+Accepted and fixed in this revision: the `suggested_next_actions` sanitizer defect; the two missing
+call sites (`runs.bind`, `control.diagnostic_sysrq`); `capture_traffic` dropped from the steps and
+tests; the maturity-metadata visibility claim; the savepoint consequence of the new
+`conn.transaction()` blocks; the `FORCE_CRASH` scoping argument, restated as an explicit residual;
+four bad interface citations; and the missing shared activation-seeding fixture.
+
 ## Deferrals
 
-None recorded yet. Any `$trial-loop` deferral from the design or branch review is appended here with
-its owning record path or tracker issue.
+None. No finding was dispositioned `deferred-tracked`; no `docs/debt/` record was written.
