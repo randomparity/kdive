@@ -30,6 +30,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
+from kdive.serialization import _MAX_ERROR_ENTRIES
 from tests.mcp.lifecycle import runs_support
 from tests.reconciler.conftest import connect, seed_debug_session, seed_run, seed_system
 from tests.services.external_boot.conftest import seed_activation
@@ -41,6 +42,7 @@ _UNAVAILABLE = "recovery_executor_unavailable"
 _ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _AUTHORIZING = {"principal": "alice", "agent_session": None, "project": "proj"}
+_CAP = _MAX_ERROR_ENTRIES
 
 
 def _ctx(
@@ -411,6 +413,57 @@ def test_release_refuses_while_a_system_scoped_job_is_active(migrated_url: str) 
     response, job_id = _drive(migrated_url, _body)
     _assert_reason(response, "conflict", "system_job_active")
     assert response.data["job_ids"] == [str(job_id)]
+    # A complete list carries no `truncated` key, which is what makes the capped case below
+    # distinguishable from this one.
+    assert "truncated" not in response.data
+
+
+def test_release_caps_the_blocking_job_ids_it_returns(migrated_url: str) -> None:
+    """A System can hold more blockers than the envelope should carry."""
+
+    async def _body(fixture: _Fixture) -> tuple[ToolResponse, set[str]]:
+        seeded = await _seed(fixture.conn)
+        job_ids = {
+            str(
+                await _seed_queued_job(
+                    fixture.conn, kind="power", payload={"system_id": str(seeded.system_id)}
+                )
+            )
+            for _ in range(_CAP + 1)
+        }
+        response = await request_release(fixture.pool, _ctx(), run_id=str(seeded.run_id))
+        return response, job_ids
+
+    response, job_ids = _drive(migrated_url, _body)
+    _assert_reason(response, "conflict", "system_job_active")
+    returned = response.data["job_ids"]
+    assert isinstance(returned, list)
+    assert len(returned) == _CAP
+    assert set(returned) < job_ids
+    assert response.data["truncated"] is True
+
+
+def test_release_caps_the_blocking_session_ids_it_returns(migrated_url: str) -> None:
+    """The session refusal is bounded by the same helper, on its own list key."""
+
+    async def _body(fixture: _Fixture) -> tuple[ToolResponse, set[str]]:
+        seeded = await _seed(fixture.conn)
+        session_ids = set()
+        for _ in range(_CAP + 1):
+            run_id = await seed_run(fixture.conn, seeded.system_id)
+            session_ids.add(
+                str(await seed_debug_session(fixture.conn, run_id, state=DebugSessionState.LIVE))
+            )
+        response = await request_release(fixture.pool, _ctx(), run_id=str(seeded.run_id))
+        return response, session_ids
+
+    response, session_ids = _drive(migrated_url, _body)
+    _assert_reason(response, "conflict", "debug_session_active")
+    returned = response.data["session_ids"]
+    assert isinstance(returned, list)
+    assert len(returned) == _CAP
+    assert set(returned) < session_ids
+    assert response.data["truncated"] is True
 
 
 def test_release_refuses_while_a_job_for_another_run_on_the_system_is_active(
@@ -456,6 +509,7 @@ def test_release_refuses_while_a_debug_session_is_active(migrated_url: str) -> N
     response, session_id = _drive(migrated_url, _body)
     _assert_reason(response, "conflict", "debug_session_active")
     assert response.data["session_ids"] == [str(session_id)]
+    assert "truncated" not in response.data
 
 
 def test_release_ignores_a_detached_debug_session(migrated_url: str) -> None:

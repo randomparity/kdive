@@ -45,7 +45,11 @@ from kdive.security.authz.rbac import (
     require_platform_role,
     require_role,
 )
-from kdive.serialization import JsonValue
+
+# The ceiling `safe_error_details` applies to the list keys it preserves. The refusal payloads
+# below are built directly rather than through that filter, so they take the same bound from the
+# same constant instead of growing a second one.
+from kdive.serialization import _MAX_ERROR_ENTRIES, JsonValue
 from kdive.services.debug.sessions import active_session_ids_for_system
 from kdive.services.external_boot import (
     ExternalBootDenied,
@@ -152,6 +156,20 @@ def _denial(object_id: str, exc: ExternalBootDenied) -> ToolResponse:
     return ToolResponse.failure_from_error(object_id, exc, suggested_next_actions=exc.next_actions)
 
 
+def _bounded_ids(key: str, values: list[str]) -> dict[str, JsonValue]:
+    """Carry a refusal's blocking ids under ``key``, bounded to one page of them.
+
+    A System can hold more blockers than an envelope should carry, and these lists are built
+    directly rather than through ``safe_error_details``, which bounds only its own reserved
+    keys. ``truncated`` is present only when the cap bit, so a caller can tell a complete list
+    from a prefix rather than having to compare its length against the cap.
+    """
+    bounded: dict[str, JsonValue] = {key: list(values[:_MAX_ERROR_ENTRIES])}
+    if len(values) > _MAX_ERROR_ENTRIES:
+        bounded["truncated"] = True
+    return bounded
+
+
 async def _active_job_ids_for_system(conn: AsyncConnection, system_id: UUID) -> list[str]:
     """Every queued or running job for the System, whichever Run owns it."""
     async with conn.cursor() as cur:
@@ -224,7 +242,7 @@ async def _release_locked(conn: AsyncConnection, run: Run, system_id: UUID) -> T
                 reason="system_job_active",
                 detail="a queued or running job holds this System; release once it settles",
                 next_actions=["jobs.wait", "runs.get"],
-                data={"job_ids": list(job_ids)},
+                data=_bounded_ids("job_ids", job_ids),
             )
         session_ids = await active_session_ids_for_system(conn, system_id)
         if session_ids:
@@ -233,7 +251,7 @@ async def _release_locked(conn: AsyncConnection, run: Run, system_id: UUID) -> T
                 reason="debug_session_active",
                 detail="a debug session is attaching to or live on this System",
                 next_actions=["debug.detach", "runs.get"],
-                data={"session_ids": list(session_ids)},
+                data=_bounded_ids("session_ids", session_ids),
             )
     return _executor_unavailable(object_id, RELEASE_TOOL)
 
