@@ -15,12 +15,21 @@ import hashlib
 import json
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
+from typing import Annotated, Self
 from uuid import UUID
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.external_boot import (
+    Digest,
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    RunningKernelObservation,
+)
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
@@ -31,6 +40,11 @@ from kdive.providers.shared.libvirt_xml import (
 _BOOT_FIELDS = ("kernel", "initrd", "cmdline")
 _PRESERVED_PREFIX = b"kdive-libvirt-preserved-v1"
 _BOOT_PROJECTION_PREFIX = b"kdive-libvirt-boot-projection-v1"
+
+# The same unit and number the shared ports module applies to a canonical value
+# (`ports/external_boot.py:26,44` measures `len(data)` over bytes).
+MAX_DEFINITION_BYTES = 65_536
+MAX_ARTIFACT_PATH_BYTES = 1_024
 
 
 def _digest(prefix: bytes, payload: bytes) -> str:
@@ -208,3 +222,153 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
         raise _conflict(
             "it carries loader, firmware, or NVRAM fields", system_id=system_id, rule="firmware"
         )
+
+
+def _bounded_definition(value: str) -> str:
+    if len(value.encode()) > MAX_DEFINITION_BYTES:
+        raise ValueError("domain XML exceeds 65536 bytes")
+    return value
+
+
+class RemoteExternalBootDefinition(BaseModel):
+    """The exact source and target definitions for one remote activation.
+
+    Closed and frozen. The recorded digests are revalidated against the recorded XML on every
+    construction, so a tampered or corrupted stored record cannot present digests that do not
+    describe its own bytes. It round-trips through ordinary pydantic JSON, not the shared ports
+    module's canonical encoding: that pair is private to ``_ClosedValue`` and ``providers/ports/``
+    is outside this change's surface. Nothing needs it — this value's ADR-0583 identity is the
+    preserved digest it records, never a digest over its own serialization.
+
+    It carries no ``ProviderStateIdentity`` and no prior power state: both pair the definition with
+    module-tree or recovery evidence that #2129 and #2120 own.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    materialization_identity: Digest
+    source_xml: Annotated[str, Field(min_length=1)]
+    source_definition: Digest
+    source_boot: Digest
+    target_xml: Annotated[str, Field(min_length=1)]
+    target_definition: Digest
+    target_boot: Digest
+    expected_running: RunningKernelObservation
+    expected_cmdline: Annotated[str, Field(min_length=1)]
+
+    _bounded = field_validator("source_xml", "target_xml")(_bounded_definition)
+
+    @model_validator(mode="after")
+    def _digests_recompute(self) -> Self:
+        # The identity helpers raise CategorizedError, which pydantic does not convert. Re-raise
+        # as ValueError so every construction failure — including rehydration of a corrupted
+        # stored record — surfaces as one ValidationError.
+        try:
+            pairs = (
+                (self.source_xml, self.source_definition, self.source_boot),
+                (self.target_xml, self.target_definition, self.target_boot),
+            )
+            for xml, definition, boot in pairs:
+                if preserved_definition_identity(xml) != definition:
+                    raise ValueError("recorded definition digest does not describe its own XML")
+                if boot_projection_identity(xml) != boot:
+                    raise ValueError("recorded boot projection does not describe its own XML")
+        except CategorizedError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
+def _require_artifact_path(value: str, *, system_id: UUID, what: str) -> str:
+    """Shape-check a caller-resolved host path before it is written into the domain XML.
+
+    The caller is a worker trusted to the same degree as this one, so this catches a resolution
+    defect rather than an attack. It is stated so a later caller change cannot make the boundary
+    load-bearing unnoticed.
+    """
+    if (
+        not value
+        or unicodedata.normalize("NFC", value) != value
+        or not value.startswith("/")
+        or len(value.encode()) > MAX_ARTIFACT_PATH_BYTES
+        or "\0" in value
+        or ".." in value.split("/")
+    ):
+        raise _conflict(
+            f"{what} path is empty, non-NFC, relative, oversized, or carries a traversal segment",
+            system_id=system_id,
+            rule="artifact-path",
+        )
+    return value
+
+
+def prepare_target_definition(
+    source_xml: str,
+    *,
+    plan: ExternalBootPlan,
+    materialization: ExternalBootMaterialization,
+    binding: ExternalBootActivationBinding,
+    pool: str,
+    kernel_path: str,
+    initrd_path: str | None,
+) -> RemoteExternalBootDefinition:
+    """Derive the exact target definition for one activation. Pure.
+
+    ``source_xml`` must be ``XMLDesc(VIR_DOMAIN_XML_INACTIVE)`` output: ADR-0583 makes live XML
+    inadmissible as an identity input, and a definition built from live XML would record digests
+    libvirt will never return. That precondition is the caller's and is not enforced here.
+
+    ``kernel_path`` and ``initrd_path`` are resolved by the caller from the opaque references
+    #2109 minted, because ADR-0583 forbids a provider path crossing the shared seam and this
+    module never learns the host's pool directory. ``plan.cmdline`` is used verbatim, with no
+    tokenizing, quoting, normalization, or shell.
+
+    It does not check that the materialization carries a kernel reference:
+    ``MaterializedArtifacts.kernel`` is required on a closed frozen model, so one without it
+    cannot be constructed and the check could never fail.
+    """
+    system_id = UUID(binding.system_id)
+    if (
+        binding.system_id != plan.ownership.system_id
+        or binding.system_id != materialization.ownership.system_id
+        or binding.run_id != plan.ownership.run_id
+        or binding.run_id != materialization.ownership.run_id
+    ):
+        raise _conflict(
+            "binding, plan, and materialization ownership disagree",
+            system_id=system_id,
+            rule="ownership",
+        )
+    if materialization.plan_identity != plan.identity:
+        raise _conflict(
+            "materialization does not describe this plan", system_id=system_id, rule="plan-identity"
+        )
+    if (plan.initrd is not None) != (materialization.artifacts.initrd is not None) or (
+        plan.initrd is not None
+    ) != (initrd_path is not None):
+        raise _conflict(
+            "initrd presence disagrees across plan, materialization, and supplied path",
+            system_id=system_id,
+            rule="initrd-presence",
+        )
+    _require_artifact_path(kernel_path, system_id=system_id, what="kernel")
+    if initrd_path is not None:
+        _require_artifact_path(initrd_path, system_id=system_id, what="initrd")
+    require_disk_grub_source(source_xml, system_id=system_id, pool=pool)
+    target_xml = render_target_xml(
+        source_xml, kernel=kernel_path, initrd=initrd_path, cmdline=plan.cmdline
+    )
+    return RemoteExternalBootDefinition(
+        binding=binding,
+        plan_identity=plan.identity,
+        materialization_identity=materialization.identity,
+        source_xml=source_xml,
+        source_definition=preserved_definition_identity(source_xml),
+        source_boot=boot_projection_identity(source_xml),
+        target_xml=target_xml,
+        target_definition=preserved_definition_identity(target_xml),
+        target_boot=boot_projection_identity(target_xml),
+        expected_running=materialization.kernel_observation,
+        expected_cmdline=plan.cmdline,
+    )

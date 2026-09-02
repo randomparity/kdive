@@ -7,11 +7,30 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.providers.ports.external_boot import (
+    ActivationOwnership,
+    BundleSource,
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    InitrdSource,
+    MaterializedArtifacts,
+    ModuleObligation,
+    OpaqueProviderRef,
+    PlanOwnership,
+    RootSource,
+    RootSpecV1,
+    RunningKernelObservation,
+)
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
+    MAX_DEFINITION_BYTES,
+    RemoteExternalBootDefinition,
     boot_projection_identity,
+    prepare_target_definition,
     preserved_definition_identity,
     render_target_xml,
     require_disk_grub_source,
@@ -195,3 +214,222 @@ def test_admission_rejects_a_source_that_is_not_the_owned_baseline(
         require_disk_grub_source(mutate(_source_xml()), system_id=_SYSTEM_ID, pool="kdive")
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details["rule"] == rule
+
+
+_RUN_ID = "00000000-0000-0000-0000-000000000001"
+_OTHER_RUN_ID = "00000000-0000-0000-0000-000000009999"
+_ACTIVATION_ID = "00000000-0000-0000-0000-000000000a01"
+_BUILD_GENERATION = "00000000-0000-0000-0000-000000000b01"
+_SHA = "sha256:" + "11" * 32
+_INITRD_SHA = "sha256:" + "22" * 32
+_MANIFEST = "sha256:" + "33" * 32
+_TREE = "sha256:" + "44" * 32
+_ROOT_IDENTITY = "sha256:" + "55" * 32
+_KERNEL_PATH = "/var/lib/kdive/boot/kernel.img"
+_INITRD_PATH = "/var/lib/kdive/boot/initrd.img"
+
+
+def _observation() -> RunningKernelObservation:
+    return RunningKernelObservation(
+        architecture="x86_64", release="6.9.0-kdive", gnu_build_id="ab" * 8
+    )
+
+
+def _plan(*, with_initrd: bool = True) -> ExternalBootPlan:
+    arguments = ("root=/dev/vda1", "console=ttyS0")
+    return ExternalBootPlan(
+        schema="external-boot-plan-v1",
+        architecture="x86_64",
+        ownership=PlanOwnership(
+            system_id=str(_SYSTEM_ID), run_id=_RUN_ID, build_generation=_BUILD_GENERATION
+        ),
+        bundle=BundleSource(
+            key="builds/kernel.tar",
+            version="v1",
+            sha256=_SHA,
+            vmlinuz_sha256=_SHA,
+            member_count=12,
+            uncompressed_bytes=4096,
+            vmlinuz_size_bytes=2048,
+            decoded_kernel_size_bytes=4096,
+            elf_metadata_bytes=512,
+            gnu_build_id_size_bytes=8,
+        ),
+        initrd=(
+            InitrdSource(key="builds/initrd.img", version="v1", sha256=_INITRD_SHA, size_bytes=1024)
+            if with_initrd
+            else None
+        ),
+        cmdline="root=/dev/vda1 console=ttyS0",
+        debug_cmdline=None,
+        platform_arguments=arguments,
+        module_obligation=ModuleObligation(
+            release="6.9.0-kdive", source_manifest=_MANIFEST, member_count=3, uncompressed_bytes=64
+        ),
+        root=RootSpecV1(
+            schema="root-spec-v1",
+            architecture="x86_64",
+            root="/dev/vda1",
+            arguments=("root=/dev/vda1",),
+            authority="stage-inspection",
+            source=RootSource(kind="staged-image", identity=_ROOT_IDENTITY),
+        ),
+    )
+
+
+def _materialization(
+    *, plan: ExternalBootPlan | None = None, with_initrd: bool = True, run_id: str = _RUN_ID
+) -> ExternalBootMaterialization:
+    plan = plan if plan is not None else _plan(with_initrd=with_initrd)
+    return ExternalBootMaterialization(
+        schema="external-boot-materialization-v1",
+        architecture="x86_64",
+        provider_kind="remote-libvirt",
+        ownership=ActivationOwnership(system_id=str(_SYSTEM_ID), run_id=run_id),
+        plan_identity=plan.identity,
+        extracted_vmlinuz_sha256=_SHA,
+        source_module_manifest=_MANIFEST,
+        installed_module_tree=_TREE,
+        verified_bundle_sha256=_SHA,
+        verified_initrd_sha256=_INITRD_SHA if with_initrd else None,
+        kernel_observation=_observation(),
+        artifacts=MaterializedArtifacts(
+            kernel=OpaqueProviderRef(ref="kernel/abc"),
+            modules=OpaqueProviderRef(ref="modules/abc"),
+            initrd=OpaqueProviderRef(ref="initrd/abc") if with_initrd else None,
+        ),
+    )
+
+
+def _binding(
+    *, run_id: str = _RUN_ID, system_id: UUID = _SYSTEM_ID
+) -> ExternalBootActivationBinding:
+    return ExternalBootActivationBinding(
+        system_id=str(system_id), run_id=run_id, activation_id=_ACTIVATION_ID
+    )
+
+
+def _prepare(**overrides: Any) -> RemoteExternalBootDefinition:
+    plan = overrides.pop("plan", None) or _plan()
+    kwargs: dict[str, Any] = {
+        "plan": plan,
+        "materialization": overrides.pop("materialization", None) or _materialization(plan=plan),
+        "binding": overrides.pop("binding", None) or _binding(),
+        "pool": "kdive",
+        "kernel_path": _KERNEL_PATH,
+        "initrd_path": _INITRD_PATH,
+    }
+    kwargs.update(overrides)
+    source = kwargs.pop("source_xml", None) or _source_xml()
+    return prepare_target_definition(source, **kwargs)
+
+
+def test_prepare_records_both_definitions_and_the_expected_identity() -> None:
+    definition = _prepare()
+    source = _source_xml()
+    assert definition.source_xml == source
+    assert definition.source_definition == preserved_definition_identity(source)
+    assert definition.source_boot == boot_projection_identity(source)
+    assert definition.target_definition == preserved_definition_identity(definition.target_xml)
+    assert definition.target_boot == boot_projection_identity(definition.target_xml)
+    assert definition.source_definition == definition.target_definition
+    assert definition.source_boot != definition.target_boot
+    assert f"<kernel>{_KERNEL_PATH}</kernel>" in definition.target_xml
+    assert f"<initrd>{_INITRD_PATH}</initrd>" in definition.target_xml
+    assert definition.expected_cmdline == "root=/dev/vda1 console=ttyS0"
+    assert definition.expected_running == _observation()
+
+
+def test_prepare_round_trips_through_pydantic_json() -> None:
+    definition = _prepare()
+    assert RemoteExternalBootDefinition.model_validate_json(definition.model_dump_json()) == (
+        definition
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "rule"),
+    [
+        ({"binding": _binding(system_id=_OTHER_SYSTEM_ID)}, "ownership"),
+        ({"binding": _binding(run_id=_OTHER_RUN_ID)}, "ownership"),
+        (
+            {"materialization": _materialization(run_id=_OTHER_RUN_ID)},
+            "ownership",
+        ),
+    ],
+    ids=["binding-system", "binding-run", "materialization-run"],
+)
+def test_prepare_rejects_ownership_disagreement(overrides: dict[str, Any], rule: str) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(**overrides)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == rule
+
+
+def test_prepare_rejects_a_materialization_describing_another_plan() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(materialization=_materialization(plan=_plan(with_initrd=False)))
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "plan-identity"
+
+
+@pytest.mark.parametrize(
+    ("with_initrd", "initrd_path"),
+    [(True, None), (False, _INITRD_PATH)],
+    ids=["path-missing", "path-unexpected"],
+)
+def test_prepare_rejects_initrd_presence_disagreement(
+    with_initrd: bool, initrd_path: str | None
+) -> None:
+    plan = _plan(with_initrd=with_initrd)
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(
+            plan=plan,
+            materialization=_materialization(plan=plan, with_initrd=with_initrd),
+            initrd_path=initrd_path,
+        )
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "initrd-presence"
+
+
+@pytest.mark.parametrize(
+    "kernel_path",
+    ["", "relative/kernel.img", "/var/lib/kdive/../../etc/shadow", "/a\x00b", "/" + "x" * 1025],
+    ids=["empty", "relative", "traversal", "nul", "oversized"],
+)
+def test_prepare_rejects_an_ill_shaped_artifact_path(kernel_path: str) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(kernel_path=kernel_path)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "artifact-path"
+
+
+def test_prepare_rejects_a_non_nfc_artifact_path() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(kernel_path="/var/lib/kdive/café")
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "artifact-path"
+
+
+def test_definition_rejects_a_digest_that_does_not_recompute() -> None:
+    payload = _prepare().model_dump()
+    payload["target_definition"] = "sha256:" + "99" * 32
+    with pytest.raises(ValidationError):
+        RemoteExternalBootDefinition.model_validate(payload)
+
+
+def test_definition_rejects_xml_over_the_byte_bound_a_character_bound_would_admit() -> None:
+    payload = _prepare().model_dump()
+    # Under MAX_DEFINITION_BYTES characters, over it in UTF-8 bytes.
+    payload["source_xml"] = "<domain><name>" + "é" * 40_000 + "</name></domain>"
+    assert len(payload["source_xml"]) < MAX_DEFINITION_BYTES
+    assert len(payload["source_xml"].encode()) > MAX_DEFINITION_BYTES
+    with pytest.raises(ValidationError):
+        RemoteExternalBootDefinition.model_validate(payload)
+
+
+def test_definition_surfaces_unparseable_xml_as_validation_error() -> None:
+    payload = _prepare().model_dump()
+    payload["source_xml"] = "<domain>"
+    with pytest.raises(ValidationError):
+        RemoteExternalBootDefinition.model_validate(payload)
