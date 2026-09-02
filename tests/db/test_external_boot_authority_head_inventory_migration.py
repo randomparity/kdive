@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from psycopg.sql import SQL, Identifier
+from psycopg.sql import SQL, Composed, Identifier
 from pydantic import SecretStr
 
 from kdive.db import external_boot_authority_journal as journal_repository
@@ -448,3 +448,85 @@ def test_host_role_shape_rejects_public_application_function_privilege(
     finally:
         with psycopg.connect(migrated_url, autocommit=True) as admin:
             admin.execute(SQL("DROP FUNCTION public.{}()").format(Identifier(public_function)))
+
+
+def test_host_role_shape_rejects_delegable_capability_membership(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    login = authority_role_dsns.logins["kdive_provider_authority"]
+
+    async def validate() -> None:
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as connection:
+            await check_database_role(connection)
+
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute(
+            SQL("GRANT kdive_provider_authority TO {} WITH ADMIN OPTION").format(Identifier(login))
+        )
+    try:
+        with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+            asyncio.run(validate())
+    finally:
+        with psycopg.connect(migrated_url, autocommit=True) as admin:
+            admin.execute(
+                SQL("REVOKE ADMIN OPTION FOR kdive_provider_authority FROM {}").format(
+                    Identifier(login)
+                )
+            )
+
+
+def test_host_role_shape_rejects_cluster_parameter_privilege(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    login = authority_role_dsns.logins["kdive_provider_authority"]
+
+    async def validate() -> None:
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as connection:
+            await check_database_role(connection)
+
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute(
+            SQL("GRANT ALTER SYSTEM ON PARAMETER work_mem TO {}").format(Identifier(login))
+        )
+    try:
+        with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+            asyncio.run(validate())
+    finally:
+        with psycopg.connect(migrated_url, autocommit=True) as admin:
+            admin.execute(SQL("REVOKE ALL ON PARAMETER work_mem FROM {}").format(Identifier(login)))
+
+
+def test_host_role_shape_rejects_cluster_and_generic_role_authority(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    login = authority_role_dsns.logins["kdive_provider_authority"]
+    owned_collation = f"authority_role_shape_{uuid4().hex}"
+
+    async def reject(*statements: SQL | Composed) -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url) as connection:
+            for statement in statements:
+                await connection.execute(statement)
+            await connection.execute(SQL("SET SESSION AUTHORIZATION {}").format(Identifier(login)))
+            try:
+                with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+                    await check_database_role(connection)
+            finally:
+                await connection.rollback()
+
+    asyncio.run(reject(SQL("ALTER ROLE kdive_provider_authority SUPERUSER")))
+    asyncio.run(
+        reject(SQL("GRANT SET ON PARAMETER session_replication_role TO kdive_provider_authority"))
+    )
+    asyncio.run(reject(SQL("GRANT SET ON PARAMETER session_replication_role TO PUBLIC")))
+    asyncio.run(
+        reject(
+            SQL('CREATE COLLATION public.{} FROM "C"').format(Identifier(owned_collation)),
+            SQL("ALTER COLLATION public.{} OWNER TO {}").format(
+                Identifier(owned_collation), Identifier(login)
+            ),
+        )
+    )

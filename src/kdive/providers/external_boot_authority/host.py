@@ -377,9 +377,38 @@ async def check_database_role(connection: Any) -> None:
                         WHERE NOT walk.cycle
                    ) AS membership_overflow
         ), accepted_role AS (
-            SELECT role.oid
-              FROM pg_roles AS role
-             WHERE role.rolname = 'kdive_provider_authority'
+            SELECT capability_role.oid,
+                   capability_role.rolcanlogin
+                   OR capability_role.rolinherit
+                   OR capability_role.rolsuper
+                   OR capability_role.rolcreatedb
+                   OR capability_role.rolcreaterole
+                   OR capability_role.rolreplication
+                   OR capability_role.rolbypassrls
+                   OR EXISTS (
+                       SELECT 1
+                         FROM pg_auth_members AS parent_membership
+                        WHERE parent_membership.member = capability_role.oid
+                   ) AS shape_invalid
+              FROM pg_roles AS capability_role
+             WHERE capability_role.rolname = 'kdive_provider_authority'
+        ), accepted_membership AS (
+            SELECT count(membership.roleid) <> 1
+                   OR COALESCE(bool_or(
+                       membership.admin_option
+                       OR NOT membership.inherit_option
+                       OR NOT membership.set_option
+                   ), TRUE) AS shape_invalid
+              FROM session_role AS role
+              CROSS JOIN accepted_role
+              LEFT JOIN pg_auth_members AS membership
+                ON membership.member = role.oid
+               AND membership.roleid = accepted_role.oid
+        ), accepted_relation AS (
+            SELECT unnest(ARRAY[
+                'public.external_boot_authorities'::regclass,
+                'public.external_boot_authority_acknowledgements'::regclass
+            ])::oid AS oid
         ), accepted_function AS (
             SELECT unnest(ARRAY[
                 'public.acknowledge_external_boot_authority(uuid,bigint,uuid,uuid,uuid,uuid,'
@@ -406,6 +435,41 @@ async def check_database_role(connection: Any) -> None:
                 'public.reject_system_root_provenance_update()'::regprocedure,
                 'public.set_updated_at()'::regprocedure
             ])::oid AS oid
+        ), unexpected_role_dependency AS (
+            SELECT EXISTS (
+                SELECT 1
+                  FROM pg_shdepend AS dependency
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                 WHERE dependency.refclassid = 'pg_authid'::regclass
+                   AND dependency.refobjid IN (role.oid, accepted_role.oid)
+                   AND dependency.dbid IN (
+                       0,
+                       (SELECT database_row.oid
+                          FROM pg_database AS database_row
+                         WHERE database_row.datname = current_database())
+                   )
+                   AND dependency.deptype IN ('a', 'o', 'i', 'r')
+                   AND NOT (
+                       dependency.refobjid = accepted_role.oid
+                       AND dependency.deptype = 'a'
+                       AND dependency.dbid <> 0
+                       AND (
+                           (
+                               dependency.classid = 'pg_namespace'::regclass
+                               AND dependency.objid = 'public'::regnamespace
+                           )
+                           OR (
+                               dependency.classid = 'pg_class'::regclass
+                               AND dependency.objid IN (SELECT oid FROM accepted_relation)
+                           )
+                           OR (
+                               dependency.classid = 'pg_proc'::regclass
+                               AND dependency.objid IN (SELECT oid FROM accepted_function)
+                           )
+                       )
+                   )
+            ) AS present
         ), excess_application_acl AS (
             SELECT EXISTS (
                 SELECT 1
@@ -513,13 +577,69 @@ async def check_database_role(connection: Any) -> None:
                   CROSS JOIN LATERAL aclexplode(COALESCE(
                       database_row.datacl, acldefault('d', database_row.datdba)
                   )) AS acl
-                 WHERE database_row.datname = current_database()
-                   AND acl.grantee IN (0, role.oid, accepted_role.oid)
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
                    AND NOT (
                        acl.grantee = 0
                        AND NOT acl.is_grantable
                        AND acl.privilege_type IN ('CONNECT', 'TEMPORARY')
                    )
+                UNION ALL
+                SELECT 1
+                  FROM pg_foreign_data_wrapper AS wrapper
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      wrapper.fdwacl, acldefault('F', wrapper.fdwowner)
+                  )) AS acl
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_foreign_server AS server
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      server.srvacl, acldefault('S', server.srvowner)
+                  )) AS acl
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_language AS language_row
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      language_row.lanacl, acldefault('l', language_row.lanowner)
+                  )) AS acl
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
+                   AND NOT (
+                       acl.grantee = 0
+                       AND NOT acl.is_grantable
+                       AND acl.privilege_type = 'USAGE'
+                   )
+                UNION ALL
+                SELECT 1
+                  FROM pg_largeobject_metadata AS large_object
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      large_object.lomacl, acldefault('L', large_object.lomowner)
+                  )) AS acl
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_parameter_acl AS parameter_acl
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(parameter_acl.paracl) AS acl
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_tablespace AS tablespace
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                  CROSS JOIN LATERAL aclexplode(COALESCE(
+                      tablespace.spcacl, acldefault('t', tablespace.spcowner)
+                  )) AS acl
+                 WHERE acl.grantee IN (0, role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_default_acl AS default_acl
@@ -569,8 +689,37 @@ async def check_database_role(connection: Any) -> None:
                   FROM pg_database AS database_row
                   CROSS JOIN session_role AS role
                   CROSS JOIN accepted_role
-                 WHERE database_row.datname = current_database()
-                   AND database_row.datdba IN (role.oid, accepted_role.oid)
+                 WHERE database_row.datdba IN (role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_foreign_data_wrapper AS wrapper
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                 WHERE wrapper.fdwowner IN (role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_foreign_server AS server
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                 WHERE server.srvowner IN (role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_language AS language_row
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                 WHERE language_row.lanowner IN (role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_largeobject_metadata AS large_object
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                 WHERE large_object.lomowner IN (role.oid, accepted_role.oid)
+                UNION ALL
+                SELECT 1
+                  FROM pg_tablespace AS tablespace
+                  CROSS JOIN session_role AS role
+                  CROSS JOIN accepted_role
+                 WHERE tablespace.spcowner IN (role.oid, accepted_role.oid)
                 UNION ALL
                 SELECT 1
                   FROM pg_default_acl AS default_acl
@@ -586,9 +735,16 @@ async def check_database_role(connection: Any) -> None:
                    'public.list_external_boot_authority_journal_heads(text)', 'EXECUTE'),
                has_function_privilege(session_user,
                    'public.authenticate_external_boot_authority_peer(bytea)', 'EXECUTE'),
-               excess_application_acl.present OR owned_application_object.present
+               accepted_role.shape_invalid
+                   OR accepted_membership.shape_invalid
+                   OR unexpected_role_dependency.present
+                   OR excess_application_acl.present
+                   OR owned_application_object.present
           FROM session_role AS role
           CROSS JOIN membership_shape
+          CROSS JOIN accepted_role
+          CROSS JOIN accepted_membership
+          CROSS JOIN unexpected_role_dependency
           CROSS JOIN excess_application_acl
           CROSS JOIN owned_application_object
     """

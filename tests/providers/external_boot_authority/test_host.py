@@ -350,12 +350,33 @@ def test_host_database_role_query_inventories_all_application_privileges() -> No
         "pg_proc",
         "pg_type",
         "pg_namespace",
+        "pg_database",
+        "pg_foreign_data_wrapper",
+        "pg_foreign_server",
+        "pg_language",
+        "pg_largeobject_metadata",
+        "pg_parameter_acl",
+        "pg_tablespace",
     ):
         assert catalog in query
     assert "aclexplode" in query
     assert "acldefault" in query
+    assert "pg_shdepend" in query
     assert "acl.grantee IN (0, role.oid, accepted_role.oid)" in query
     assert "accepted_public_function" in query
+    for attribute in (
+        "capability_role.rolcanlogin",
+        "capability_role.rolinherit",
+        "capability_role.rolsuper",
+        "capability_role.rolcreatedb",
+        "capability_role.rolcreaterole",
+        "capability_role.rolreplication",
+        "capability_role.rolbypassrls",
+        "membership.admin_option",
+        "membership.inherit_option",
+        "membership.set_option",
+    ):
+        assert attribute in query
 
 
 def test_host_diagnostics_are_bounded_and_secret_free() -> None:
