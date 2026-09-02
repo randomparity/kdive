@@ -9,6 +9,9 @@ import json
 import os
 import socket
 import ssl
+import tempfile
+from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -21,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from pydantic import SecretStr
 
+from kdive.providers.external_boot_authority import transport
 from kdive.providers.external_boot_authority.host import (
     AuthorityHostConfig,
     HostReadinessError,
@@ -35,6 +39,13 @@ from kdive.providers.external_boot_authority.transport import (
     read_frame,
     serve_authority_transport,
 )
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Keep trust-path tests below an owner-controlled, non-writable parent chain."""
+    with tempfile.TemporaryDirectory(prefix="kdive-authority-test-", dir=Path.home()) as path:
+        yield Path(path)
 
 
 def _write(path: Path, content: bytes, mode: int) -> Path:
@@ -467,6 +478,93 @@ def test_dormant_transport_refuses_before_provider_dispatch(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_transport_recovers_stale_main_socket_and_rejects_unsafe_owners(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            return AuthenticatedPeer("worker-a")
+
+        stale = socket.socket(socket.AF_UNIX)
+        stale.bind(str(config.request_socket))
+        stale.close()
+        listener = await serve_authority_transport(config, authenticate)
+        with pytest.raises(OSError, match="busy"):
+            await serve_authority_transport(config, authenticate)
+        await listener.close()
+        assert not config.request_socket.exists()
+
+        live = socket.socket(socket.AF_UNIX)
+        live.bind(str(config.request_socket))
+        live.listen()
+        try:
+            with pytest.raises(OSError, match="live-socket"):
+                await serve_authority_transport(config, authenticate)
+        finally:
+            live.close()
+            config.request_socket.unlink()
+
+        foreign = socket.socket(socket.AF_UNIX)
+        foreign.bind(str(config.request_socket))
+        foreign.close()
+        real_stat = transport.os.stat
+
+        def foreign_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            status = real_stat(path, *args, **kwargs)
+            if Path(path) == config.request_socket:
+                return type(status)(
+                    (
+                        status.st_mode,
+                        status.st_ino,
+                        status.st_dev,
+                        status.st_nlink,
+                        status.st_uid + 1,
+                        status.st_gid,
+                        status.st_size,
+                        status.st_atime,
+                        status.st_mtime,
+                        status.st_ctime,
+                    )
+                )
+            return status
+
+        monkeypatch.setattr(transport.os, "stat", foreign_stat)
+        with pytest.raises(OSError, match="unsafe-socket"):
+            await serve_authority_transport(config, authenticate)
+        monkeypatch.setattr(transport.os, "stat", real_stat)
+        config.request_socket.unlink()
+
+        target = tmp_path / "target"
+        target.touch()
+        config.request_socket.symlink_to(target)
+        with pytest.raises(OSError, match="unsafe-socket"):
+            await serve_authority_transport(config, authenticate)
+
+    asyncio.run(run())
+
+
+def test_transport_rejects_linked_request_parent(tmp_path: Path) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+        real_parent = tmp_path / "real-request"
+        real_parent.mkdir(mode=0o750)
+        linked_parent = tmp_path / "linked-request"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        config = replace(config, request_socket=linked_parent / "authority.sock")
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            return AuthenticatedPeer("worker-a")
+
+        with pytest.raises(OSError, match="parent chain"):
+            await serve_authority_transport(config, authenticate)
+
+    asyncio.run(run())
+
+
 def test_listener_evidence_detects_socket_and_credential_drift(tmp_path: Path) -> None:
     async def run() -> None:
         material = _tls_material(tmp_path, "authority-a")
@@ -493,6 +591,36 @@ def test_listener_evidence_detects_socket_and_credential_drift(tmp_path: Path) -
             material["worker_client_ca"].write_bytes(
                 material["worker_client_ca"].read_bytes() + b"\n"
             )
+            with pytest.raises(OSError, match="TLS evidence changed"):
+                listener.validate()
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+def test_listener_rejects_valid_health_chain_credential_replacement(tmp_path: Path) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            return AuthenticatedPeer("worker-a")
+
+        listener = await serve_authority_transport(config, authenticate)
+        await listener.start_serving()
+        try:
+            await check_tls_health(listener, config)
+            for path in (
+                config.server_ca,
+                config.health_client_certificate,
+                config.health_client_key,
+            ):
+                replacement = path.with_suffix(".replacement")
+                replacement.write_bytes(path.read_bytes())
+                replacement.chmod(0o400)
+                replacement.replace(path)
+            await check_tls_health(listener, config)
             with pytest.raises(OSError, match="TLS evidence changed"):
                 listener.validate()
         finally:

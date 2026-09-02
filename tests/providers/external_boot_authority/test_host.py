@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import socket
+import tempfile
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,12 +16,11 @@ from uuid import uuid4
 import pytest
 
 from kdive.db.external_boot_authority_journal import JournalHead
-from kdive.providers.external_boot_authority import host
+from kdive.providers.external_boot_authority import host, transport
 from kdive.providers.external_boot_authority import settings as authority_settings
 from kdive.providers.external_boot_authority.host import (
     AuthorityHostConfig,
     HostReadinessError,
-    check_probe_socket,
     restore_journal_inventory,
     run_authority_host,
     validate_credential_paths,
@@ -32,6 +32,13 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
     record_digest,
 )
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Keep trust-path tests below an owner-controlled, non-writable parent chain."""
+    with tempfile.TemporaryDirectory(prefix="kdive-authority-test-", dir=Path.home()) as path:
+        yield Path(path)
 
 
 def _file(path: Path, *, mode: int, content: str = "value") -> Path:
@@ -75,6 +82,45 @@ def test_host_rejects_unsafe_credentials(tmp_path: Path) -> None:
         validate_credential_paths(config)
 
 
+def test_host_rejects_untrusted_protected_parent_chains(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _config(tmp_path)
+
+    writable = tmp_path / "writable"
+    writable.mkdir(mode=0o770)
+    writable.chmod(0o770)
+    writable_dsn = _file(writable / "database-dsn", mode=0o400)
+    with pytest.raises(HostReadinessError, match="credentials: unsafe-path"):
+        validate_credential_paths(replace(config, database_dsn=writable_dsn))
+
+    real = tmp_path / "real"
+    linked_journal = real / "journal"
+    linked_journal.mkdir(parents=True, mode=0o700)
+    link = tmp_path / "linked"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(HostReadinessError, match="journal: unsafe-path"):
+        restore_journal_inventory(replace(config, journal_dir=link / "journal"), ())
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir(mode=0o700)
+    real_stat = host.os.stat
+
+    def foreign_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        status = real_stat(path, *args, **kwargs)
+        if Path(path) == foreign:
+            return SimpleNamespace(st_mode=status.st_mode, st_uid=status.st_uid + 1)
+        return status
+
+    monkeypatch.setattr(host.os, "stat", foreign_stat)
+    with pytest.raises(HostReadinessError, match="provider-socket: unsafe-path"):
+        asyncio.run(
+            host._check_provider_socket(  # noqa: SLF001 - direct trust-boundary proof
+                replace(config, provider_socket=foreign / "provider.sock")
+            )
+        )
+
+
 def test_host_rejects_invalid_journal_tree(tmp_path: Path) -> None:
     config = _config(tmp_path)
     config.journal_dir.chmod(0o777)
@@ -83,8 +129,9 @@ def test_host_rejects_invalid_journal_tree(tmp_path: Path) -> None:
 
 
 class _Cursor:
-    def __init__(self, row: object) -> None:
+    def __init__(self, row: object, queries: list[str]) -> None:
         self.row = row
+        self.queries = queries
 
     async def __aenter__(self) -> _Cursor:
         return self
@@ -93,7 +140,7 @@ class _Cursor:
         return None
 
     async def execute(self, *_args: object) -> None:
-        return None
+        self.queries.append(str(_args[0]))
 
     async def fetchone(self) -> object:
         return self.row
@@ -102,9 +149,10 @@ class _Cursor:
 class _Connection:
     def __init__(self, row: object) -> None:
         self.row = row
+        self.queries: list[str] = []
 
     def cursor(self) -> _Cursor:
-        return _Cursor(self.row)
+        return _Cursor(self.row, self.queries)
 
 
 def test_host_rejects_privileged_database_role() -> None:
@@ -118,12 +166,35 @@ def test_host_rejects_privileged_database_role() -> None:
         False,
         False,
         ("kdive_provider_authority",),
+        False,
         True,
         True,
         False,
     )
     with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
         asyncio.run(host.check_database_role(_Connection(privileged)))
+
+
+def test_host_rejects_nested_effective_database_role() -> None:
+    nested = (
+        "kdive-provider-authority",
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        ("kdive_provider_authority", "nested_extra_role"),
+        False,
+        True,
+        True,
+        False,
+    )
+    connection = _Connection(nested)
+    with pytest.raises(HostReadinessError, match="database-role: excessive-privilege"):
+        asyncio.run(host.check_database_role(connection))
+    assert "WITH RECURSIVE" in connection.queries[0]
 
 
 def test_host_diagnostics_are_bounded_and_secret_free() -> None:
@@ -413,7 +484,7 @@ def test_probe_recovers_owned_stale_socket(tmp_path: Path) -> None:
     stale = socket.socket(socket.AF_UNIX)
     stale.bind(str(probe))
     stale.close()
-    check_probe_socket(probe, config.authority_uid)
+    transport.check_stale_socket(probe, config.authority_uid)
     assert not probe.exists()
 
 
@@ -427,8 +498,8 @@ def test_probe_rejects_concurrent_or_foreign_socket(
     live.bind(str(probe))
     live.listen()
     try:
-        with pytest.raises(HostReadinessError, match="probe: live-socket"):
-            check_probe_socket(probe, config.authority_uid)
+        with pytest.raises(OSError, match="live-socket"):
+            transport.check_stale_socket(probe, config.authority_uid)
     finally:
         live.close()
         probe.unlink()
@@ -450,27 +521,48 @@ def test_probe_rejects_concurrent_or_foreign_socket(
         return status
 
     monkeypatch.setattr(host.os, "stat", foreign_stat)
-    with pytest.raises(HostReadinessError, match="probe: unsafe-socket"):
-        check_probe_socket(probe, config.authority_uid)
+    with pytest.raises(OSError, match="unsafe-socket"):
+        transport.check_stale_socket(probe, config.authority_uid)
     monkeypatch.setattr(host.os, "stat", real_stat)
     probe.unlink()
 
     target = tmp_path / "target"
     target.touch()
     probe.symlink_to(target)
-    with pytest.raises(HostReadinessError, match="probe: unsafe-socket"):
-        check_probe_socket(probe, config.authority_uid)
+    with pytest.raises(OSError, match="unsafe-socket"):
+        transport.check_stale_socket(probe, config.authority_uid)
+
+    probe.unlink()
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(probe))
+    stale.close()
+    stat_calls = 0
+    replacement: socket.socket | None = None
+
+    def replace_before_recheck(path: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal replacement, stat_calls
+        if Path(path) == probe:
+            stat_calls += 1
+            if stat_calls == 2:
+                probe.unlink()
+                replacement = socket.socket(socket.AF_UNIX)
+                replacement.bind(str(probe))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(host.os, "stat", replace_before_recheck)
+    with pytest.raises(OSError, match="replaced-socket"):
+        transport.check_stale_socket(probe, config.authority_uid)
+    assert replacement is not None
+    replacement.close()
+    monkeypatch.setattr(host.os, "stat", real_stat)
+    probe.unlink()
 
     lock = config.request_socket.with_name("authority-probe.lock")
     lock.touch(mode=0o600)
-    descriptor = os.open(lock, os.O_RDWR)
+    descriptor = transport.acquire_socket_lock(lock, config.authority_uid)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with (
-            pytest.raises(HostReadinessError, match="probe: busy"),
-            host.probe_lock(lock, config.authority_uid),
-        ):
-            pass
+        with pytest.raises(OSError, match="busy"):
+            transport.acquire_socket_lock(lock, config.authority_uid)
     finally:
         os.close(descriptor)
 

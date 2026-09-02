@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import re
 import socket
 import stat
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,6 +37,7 @@ from kdive.providers.external_boot_authority.transport import (
     authority_server_name,
     health_tls_context,
     serve_authority_transport,
+    validate_protected_parents,
     validate_socket_parent,
 )
 
@@ -121,7 +121,7 @@ class AuthorityHostConfig:
 
 
 def _validate_file(path: Path, *, owner_uid: int, mode: int, component: str) -> None:
-    _validate_parent_components(path, component)
+    _validate_parent_components(path, component, owner_uid)
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     except OSError:
@@ -138,18 +138,11 @@ def _validate_file(path: Path, *, owner_uid: int, mode: int, component: str) -> 
         os.close(descriptor)
 
 
-def _validate_parent_components(path: Path, component: str) -> None:
-    if not path.is_absolute():
-        raise HostReadinessError(component, "unsafe-path")
-    current = Path(path.root)
-    for part in path.parts[1:-1]:
-        current /= part
-        try:
-            status = os.stat(current, follow_symlinks=False)
-        except OSError:
-            raise HostReadinessError(component, "unsafe-path") from None
-        if not stat.S_ISDIR(status.st_mode):
-            raise HostReadinessError(component, "unsafe-path")
+def _validate_parent_components(path: Path, component: str, owner_uid: int) -> None:
+    try:
+        validate_protected_parents(path, owner_uid)
+    except OSError:
+        raise HostReadinessError(component, "unsafe-path") from None
 
 
 def validate_credential_paths(config: AuthorityHostConfig) -> None:
@@ -168,7 +161,7 @@ def validate_credential_paths(config: AuthorityHostConfig) -> None:
 
 
 def _validate_journal_root(config: AuthorityHostConfig) -> int:
-    _validate_parent_components(config.journal_dir, "journal")
+    _validate_parent_components(config.journal_dir, "journal", config.authority_uid)
     try:
         descriptor = os.open(
             config.journal_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -264,21 +257,51 @@ def restore_journal_inventory(config: AuthorityHostConfig, heads: tuple[JournalH
 async def check_database_role(connection: Any) -> None:
     """Require the authority LOGIN's exact non-privileged role and function shape."""
     query = """
-        SELECT session_user, role.rolcanlogin, role.rolinherit, role.rolsuper,
+        WITH RECURSIVE session_role AS (
+            SELECT role.oid, role.rolname, role.rolcanlogin, role.rolinherit, role.rolsuper,
+                   role.rolcreatedb, role.rolcreaterole, role.rolreplication, role.rolbypassrls
+              FROM pg_roles AS role
+             WHERE role.rolname = session_user
+        ), role_walk(role_oid, path, depth, cycle) AS (
+            SELECT membership.roleid, ARRAY[role.oid, membership.roleid], 1,
+                   membership.roleid = role.oid
+              FROM session_role AS role
+              JOIN pg_auth_members AS membership ON membership.member = role.oid
+            UNION ALL
+            SELECT membership.roleid, walk.path || membership.roleid, walk.depth + 1,
+                   membership.roleid = ANY(walk.path)
+              FROM role_walk AS walk
+              JOIN pg_auth_members AS membership ON membership.member = walk.role_oid
+             WHERE NOT walk.cycle AND walk.depth < 64
+        ), membership_shape AS (
+            SELECT ARRAY(
+                       SELECT DISTINCT granted.rolname
+                         FROM role_walk AS walk
+                         JOIN pg_roles AS granted ON granted.oid = walk.role_oid
+                        WHERE NOT walk.cycle
+                        ORDER BY granted.rolname
+                        LIMIT 2
+                   ) AS memberships,
+                   COALESCE(
+                       (SELECT bool_or(walk.cycle OR walk.depth = 64) FROM role_walk AS walk),
+                       FALSE
+                   ) OR (
+                       SELECT count(DISTINCT walk.role_oid) > 1
+                         FROM role_walk AS walk
+                        WHERE NOT walk.cycle
+                   ) AS membership_overflow
+        )
+        SELECT role.rolname, role.rolcanlogin, role.rolinherit, role.rolsuper,
                role.rolcreatedb, role.rolcreaterole, role.rolreplication, role.rolbypassrls,
-               COALESCE(array_agg(granted.rolname ORDER BY granted.rolname)
-                        FILTER (WHERE granted.rolname IS NOT NULL), ARRAY[]::name[]),
+               membership_shape.memberships, membership_shape.membership_overflow,
                has_function_privilege(session_user,
                    'public.list_external_boot_authority_journal_heads(text)', 'EXECUTE'),
                has_function_privilege(session_user,
                    'public.authenticate_external_boot_authority_peer(bytea)', 'EXECUTE'),
                has_table_privilege(session_user,
                    'public.external_boot_authority_journal_heads', 'SELECT,INSERT,UPDATE,DELETE')
-          FROM pg_roles AS role
-          LEFT JOIN pg_auth_members AS membership ON membership.member = role.oid
-          LEFT JOIN pg_roles AS granted ON granted.oid = membership.roleid
-         WHERE role.rolname = session_user
-         GROUP BY role.oid
+          FROM session_role AS role
+          CROSS JOIN membership_shape
     """
     try:
         async with connection.cursor() as cursor:
@@ -286,7 +309,7 @@ async def check_database_role(connection: Any) -> None:
             row = await cursor.fetchone()
     except Exception:
         raise HostReadinessError("database-role", "query-failed") from None
-    if row is None or len(row) != 12:
+    if row is None or len(row) != 13:
         raise HostReadinessError("database-role", "shape-invalid")
     (
         _session_user,
@@ -298,16 +321,29 @@ async def check_database_role(connection: Any) -> None:
         replication,
         bypass_rls,
         memberships,
+        membership_overflow,
         can_list,
         can_authenticate,
         has_table_access,
     ) = row
-    if any((superuser, create_db, create_role, replication, bypass_rls, has_table_access)):
+    membership_names = tuple(memberships)
+    if any(
+        (
+            superuser,
+            create_db,
+            create_role,
+            replication,
+            bypass_rls,
+            membership_overflow,
+            any(name != "kdive_provider_authority" for name in membership_names),
+            has_table_access,
+        )
+    ):
         raise HostReadinessError("database-role", "excessive-privilege")
     if (
         can_login is not True
         or inherit is not True
-        or tuple(memberships) != ("kdive_provider_authority",)
+        or membership_names != ("kdive_provider_authority",)
         or can_list is not True
         or can_authenticate is not True
     ):
@@ -362,6 +398,10 @@ async def _database_heads(config: AuthorityHostConfig) -> tuple[JournalHead, ...
 
 
 async def _check_provider_socket(config: AuthorityHostConfig) -> None:
+    try:
+        validate_protected_parents(config.provider_socket, config.authority_uid)
+    except OSError:
+        raise HostReadinessError("provider-socket", "unsafe-path") from None
     try:
         status = os.stat(config.provider_socket, follow_symlinks=False)
         if not stat.S_ISSOCK(status.st_mode) or status.st_uid != config.authority_uid:
@@ -479,93 +519,29 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 await _close_listener(listener)
 
 
-def check_probe_socket(path: Path, owner_uid: int) -> None:
-    """Remove only a conclusively stale, authority-owned socket inode."""
-    try:
-        before = os.stat(path, follow_symlinks=False)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(before.st_mode) or before.st_uid != owner_uid:
-        raise HostReadinessError("probe", "unsafe-socket")
-    candidate = socket.socket(socket.AF_UNIX)
-    try:
-        try:
-            candidate.connect(str(path))
-        except ConnectionRefusedError:
-            pass
-        except OSError:
-            raise HostReadinessError("probe", "socket-check-failed") from None
-        else:
-            raise HostReadinessError("probe", "live-socket")
-    finally:
-        candidate.close()
-    try:
-        after = os.stat(path, follow_symlinks=False)
-    except FileNotFoundError:
-        raise HostReadinessError("probe", "replaced-socket") from None
-    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-        raise HostReadinessError("probe", "replaced-socket")
-    path.unlink()
-
-
-@contextmanager
-def probe_lock(path: Path, owner_uid: int):
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(
-            path,
-            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
-        )
-        status = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(status.st_mode)
-            or status.st_uid != owner_uid
-            or stat.S_IMODE(status.st_mode) != 0o600
-        ):
-            raise HostReadinessError("probe", "unsafe-lock")
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise HostReadinessError("probe", "busy") from None
-        yield
-    except HostReadinessError:
-        raise
-    except OSError:
-        raise HostReadinessError("probe", "unsafe-lock") from None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-
-
 async def check_authority_host_once(config: AuthorityHostConfig) -> None:
     """Run the complete check on fixed sibling probe and lock paths."""
     probe = config.request_socket.with_name("authority-probe.sock")
-    lock = config.request_socket.with_name("authority-probe.lock")
     try:
         validate_socket_parent(probe, config.authority_uid)
     except OSError:
         raise HostReadinessError("probe", "unsafe-directory") from None
-    with probe_lock(lock, config.authority_uid):
-        check_probe_socket(probe, config.authority_uid)
-        probe_config = replace(config, request_socket=probe)
-        await _check_static_authority_host(probe_config)
+    probe_config = replace(config, request_socket=probe)
+    await _check_static_authority_host(probe_config)
 
-        async def never_authenticate(_credential: SecretStr) -> AuthenticatedPeer:
-            raise ValueError("health client has no incarnation credential")
+    async def never_authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        raise ValueError("health client has no incarnation credential")
 
+    try:
+        listener = await serve_authority_transport(probe_config, never_authenticate, service=None)
+    except Exception:
+        raise HostReadinessError("listener", "bind-failed") from None
+    try:
         try:
-            listener = await serve_authority_transport(
-                probe_config, never_authenticate, service=None
-            )
-        except Exception:
-            raise HostReadinessError("listener", "bind-failed") from None
-        try:
-            try:
-                listener.validate()
-            except OSError, ValueError:
-                raise HostReadinessError("listener", "invalid-evidence") from None
-            await listener.start_serving()
-            await check_tls_health(listener, probe_config)
-        finally:
-            await _close_listener(listener)
+            listener.validate()
+        except OSError, ValueError:
+            raise HostReadinessError("listener", "invalid-evidence") from None
+        await listener.start_serving()
+        await check_tls_health(listener, probe_config)
+    finally:
+        await _close_listener(listener)

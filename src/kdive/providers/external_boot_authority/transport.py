@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -219,16 +220,25 @@ def _fingerprint(path: Path) -> tuple[int, int, int, int, str]:
         os.close(descriptor)
 
 
-def validate_socket_parent(path: Path, owner_uid: int) -> None:
-    """Reject a request path whose parent chain is linked or whose leaf is unsafe."""
+def validate_protected_parents(path: Path, owner_uid: int) -> None:
+    """Require an absolute, non-writable parent chain owned by root or the authority."""
     if not path.is_absolute():
-        raise OSError("authority socket path is not absolute")
+        raise OSError("protected path is not absolute")
     current = Path(path.root)
     for part in path.parts[1:-1]:
         current /= part
         status = os.stat(current, follow_symlinks=False)
-        if not stat.S_ISDIR(status.st_mode):
-            raise OSError("authority socket parent chain is unsafe")
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid not in {0, owner_uid}
+            or stat.S_IMODE(status.st_mode) & 0o022
+        ):
+            raise OSError("protected parent chain is unsafe")
+
+
+def validate_socket_parent(path: Path, owner_uid: int) -> None:
+    """Reject a request path whose parent chain is linked or whose leaf is unsafe."""
+    validate_protected_parents(path, owner_uid)
     parent = os.stat(path.parent, follow_symlinks=False)
     if (
         not stat.S_ISDIR(parent.st_mode)
@@ -236,6 +246,63 @@ def validate_socket_parent(path: Path, owner_uid: int) -> None:
         or stat.S_IMODE(parent.st_mode) != SOCKET_DIRECTORY_MODE
     ):
         raise OSError("authority socket parent is unsafe")
+
+
+def check_stale_socket(path: Path, owner_uid: int) -> None:
+    """Remove only a conclusively stale, authority-owned socket inode."""
+    try:
+        before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(before.st_mode) or before.st_uid != owner_uid:
+        raise OSError("unsafe-socket")
+    candidate = socket.socket(socket.AF_UNIX)
+    try:
+        try:
+            candidate.connect(str(path))
+        except ConnectionRefusedError:
+            pass
+        except OSError:
+            raise OSError("socket-check-failed") from None
+        else:
+            raise OSError("live-socket")
+    finally:
+        candidate.close()
+    try:
+        after = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        raise OSError("replaced-socket") from None
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise OSError("replaced-socket")
+    path.unlink()
+
+
+def acquire_socket_lock(path: Path, owner_uid: int) -> int:
+    """Acquire one nonblocking authority-owned lock descriptor."""
+    validate_protected_parents(path, owner_uid)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        status = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or status.st_uid != owner_uid
+            or stat.S_IMODE(status.st_mode) != 0o600
+        ):
+            raise OSError("unsafe-lock")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OSError("busy") from None
+        return descriptor
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
 
 
 def server_tls_context(config: AuthorityHostConfig) -> ssl.SSLContext:
@@ -268,6 +335,7 @@ class AuthorityListener:
     tls_context: ssl.SSLContext
     fingerprints: dict[Path, tuple[int, int, int, int, str]]
     socket_identity: tuple[int, int]
+    lock_descriptor: int
     started: bool = False
 
     async def start_serving(self) -> None:
@@ -297,14 +365,22 @@ class AuthorityListener:
             raise OSError("listener TLS evidence changed")
 
     async def close(self) -> None:
-        self.server.close()
-        await self.server.wait_closed()
         try:
-            status = os.stat(self.socket_path, follow_symlinks=False)
-        except FileNotFoundError:
-            return
-        if stat.S_ISSOCK(status.st_mode) and (status.st_dev, status.st_ino) == self.socket_identity:
-            self.socket_path.unlink()
+            self.server.close()
+            await self.server.wait_closed()
+            try:
+                status = os.stat(self.socket_path, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if (
+                stat.S_ISSOCK(status.st_mode)
+                and (status.st_dev, status.st_ino) == self.socket_identity
+            ):
+                self.socket_path.unlink()
+        finally:
+            descriptor, self.lock_descriptor = self.lock_descriptor, -1
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 async def serve_authority_transport(
@@ -313,20 +389,31 @@ async def serve_authority_transport(
     service: AuthorityService | None = None,
 ) -> AuthorityListener:
     """Bind the dormant authenticated boundary without beginning to serve it."""
-    context = server_tls_context(config)
     validate_socket_parent(config.request_socket, config.authority_uid)
+    lock_path = config.request_socket.with_suffix(".lock")
+    lock_descriptor = acquire_socket_lock(lock_path, config.authority_uid)
+    try:
+        check_stale_socket(config.request_socket, config.authority_uid)
+        context = server_tls_context(config)
+    except BaseException:
+        os.close(lock_descriptor)
+        raise
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _handle_session(reader, writer, authenticate_peer, service)
 
-    server = await asyncio.start_unix_server(
-        handle,
-        path=str(config.request_socket),
-        ssl=context,
-        ssl_handshake_timeout=_TLS_TIMEOUT_SECONDS,
-        ssl_shutdown_timeout=_TLS_TIMEOUT_SECONDS,
-        start_serving=False,
-    )
+    try:
+        server = await asyncio.start_unix_server(
+            handle,
+            path=str(config.request_socket),
+            ssl=context,
+            ssl_handshake_timeout=_TLS_TIMEOUT_SECONDS,
+            ssl_shutdown_timeout=_TLS_TIMEOUT_SECONDS,
+            start_serving=False,
+        )
+    except BaseException:
+        os.close(lock_descriptor)
+        raise
     try:
         os.chmod(config.request_socket, SOCKET_MODE, follow_symlinks=False)
         status = os.stat(config.request_socket, follow_symlinks=False)
@@ -335,7 +422,10 @@ async def serve_authority_transport(
             for path in (
                 config.server_private_key,
                 config.server_certificate,
+                config.server_ca,
                 config.worker_client_ca,
+                config.health_client_certificate,
+                config.health_client_key,
             )
         }
         return AuthorityListener(
@@ -346,8 +436,10 @@ async def serve_authority_transport(
             context,
             fingerprints,
             (status.st_dev, status.st_ino),
+            lock_descriptor,
         )
     except BaseException:
         server.close()
         await server.wait_closed()
+        os.close(lock_descriptor)
         raise
