@@ -73,7 +73,7 @@ still returns `reason=recovery_executor_unavailable`.
 
 ## Provenance
 
-target: src/kdive/services/external_boot/recovery_requests.py
+target: src/kdive/mcp/tools/external_boot/recovery_requests.py
 target: src/kdive/mcp/tools/lifecycle/runs/registrar.py
 target: src/kdive/mcp/tools/lifecycle/systems/registrar.py
 target: src/kdive/mcp/tools/ops/security/breakglass.py

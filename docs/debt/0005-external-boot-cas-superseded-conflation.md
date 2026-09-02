@@ -29,7 +29,7 @@ to wait; a superseded authority generation should tell them another operation to
 The concern has no subject on this branch. Issue #2117 delivers the external-boot admission
 matrix and three admission-and-authorization contracts that commit no activation transition;
 `begin_recovery_attempt` has no caller in `src/`, and
-`src/kdive/services/external_boot/recovery_requests.py` is gated by a test asserting its
+`src/kdive/mcp/tools/external_boot/recovery_requests.py` is gated by a test asserting its
 import closure reaches no activation-writing name.
 
 The proposed remedy — read the reservation under the same System lock and refuse an unready
@@ -40,7 +40,7 @@ door into `recovering` that the amendment closed.
 
 ## Non-regression boundary
 
-- `src/kdive/services/external_boot/recovery_requests.py` must not gain a
+- `src/kdive/mcp/tools/external_boot/recovery_requests.py` must not gain a
   `begin_recovery_attempt` call while this record is open and the executor is absent; the
   import-closure gate in `tests/services/external_boot/test_recovery_requests.py` holds it.
 - `_miss` and `_authorized_row` must keep returning an opaque status **at the repository
@@ -62,7 +62,7 @@ reservation, and one against a superseded authority generation return three diff
 ## Provenance
 
 target: src/kdive/db/external_boot_activations.py
-target: src/kdive/services/external_boot/recovery_requests.py
+target: src/kdive/mcp/tools/external_boot/recovery_requests.py
 Found by the `$gauntlet` design pass on the #2117 branch on 2026-09-02 (finding 3 of 12),
 dispositioned `blocked` there, then re-dispositioned `rejected-with-evidence` for this branch
 under the operator's scope amendment. The `$oathbind` scope audit the same day accepted that

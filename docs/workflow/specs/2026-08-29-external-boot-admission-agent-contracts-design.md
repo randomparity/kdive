@@ -212,7 +212,7 @@ rather than a blanket claim.
 
 ### The three contracts — admission and authorization, no transition
 
-`services/external_boot/recovery_requests.py` owns all three. Each is the same four-stage pipeline,
+`mcp/tools/external_boot/recovery_requests.py` owns all three. Each is the same four-stage pipeline,
 and the stages run in this order because each later stage would otherwise leak what an earlier one is
 there to withhold:
 
@@ -377,7 +377,7 @@ the truthful `recovery_executor_unavailable` response from each of the three too
 
 Two tests exist specifically to hold the amendment's hard rule:
 
-- an import-closure assertion that `services/external_boot/recovery_requests.py` reaches no
+- an import-closure assertion that `mcp/tools/external_boot/recovery_requests.py` reaches no
   activation-writing name, so a later edit that adds a transition fails a gate rather than shipping;
 - a PostgreSQL assertion that calling all three tools against a seeded `active` activation leaves the
   activation row byte-identical, so the "no transition it cannot complete" rule is proven on the
