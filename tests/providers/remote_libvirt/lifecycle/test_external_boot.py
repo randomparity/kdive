@@ -1096,6 +1096,10 @@ def test_recovery_refuses_to_define_when_another_actor_redefined_during_the_stop
         recover_disk_grub_baseline(_FakeConn(domain), recovery)
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details["phase"] == "stop"
+    # The definition moved and the power did not: the two halves take different resolutions, so
+    # the report has to separate them.
+    assert caught.value.details["observed_definition"] != recovery.definition.target_definition
+    assert caught.value.details["active"] is False
     assert domain.defined == []
 
 
@@ -1107,6 +1111,8 @@ def test_recovery_refuses_to_define_when_another_actor_restarted_during_the_stop
         recover_disk_grub_baseline(_FakeConn(domain), recovery)
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details["phase"] == "stop"
+    assert caught.value.details["observed_definition"] == recovery.definition.target_definition
+    assert caught.value.details["active"] is True
     assert domain.defined == []
 
 

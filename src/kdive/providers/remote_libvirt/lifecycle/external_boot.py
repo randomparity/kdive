@@ -602,9 +602,6 @@ def activate_definition(conn: ExternalBootConn, definition: RemoteExternalBootDe
     if which == "target":
         if active:
             return
-        # The phase distinguishes an invocation that wrote the definition from one that found it
-        # already written, because a caller deciding between retry and recovery is misled by a
-        # write that did not happen.
         _start(
             domain,
             definition,
@@ -651,7 +648,9 @@ def _start(
 
     A failed start always leaves the persistent definition naming a kernel the guest is not
     running, so the caller enters recovery rather than retrying. CONFLICT is already
-    non-retryable, so no terminal flag is needed.
+    non-retryable, so no terminal flag is needed. ``phase`` distinguishes an invocation that wrote
+    the definition from one that found it already written, because a caller deciding between
+    retry and recovery is misled by a write that did not happen.
     """
     try:
         domain.create()
@@ -715,7 +714,10 @@ def _restore_source_definition(
     if _is_active(domain, definition, subject="recovery"):
         _stop(domain, definition)
         which, preserved, boot = _observed_state(domain, definition, subject="recovery")
-        if which != "target" or _is_active(domain, definition, subject="recovery"):
+        still_active = _is_active(domain, definition, subject="recovery")
+        if which != "target" or still_active:
+            # Both halves are reported: a caller told only the digests cannot tell a competing
+            # redefine from a competing restart, and they take different operator resolutions.
             raise _refused(
                 "the domain did not stop on its recorded target definition",
                 subject="recovery",
@@ -723,6 +725,7 @@ def _restore_source_definition(
                 phase="stop",
                 observed_definition=preserved,
                 observed_boot=boot,
+                active=still_active,
             )
     try:
         conn.defineXML(definition.source_xml)
@@ -786,6 +789,8 @@ def recover_disk_grub_baseline(
                 "the baseline is running and the recorded prior power state was not",
                 subject="recovery",
                 definition=definition,
+                # Proven equal to what was just observed: this branch is reached only after the
+                # definition classified as the recorded source.
                 observed_definition=definition.source_definition,
                 observed_boot=definition.source_boot,
                 active=True,
