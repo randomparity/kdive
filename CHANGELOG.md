@@ -1118,6 +1118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the external-boot guest userland contract
 - Apply design-review findings to ADR-0590 and its plan
 - State ADR-0590's contract generally and fix a #2110 claim
+- Define the canonical byte form of remote-module documents
 
 ### Fixed
 
@@ -1821,6 +1822,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop the gate invocation masking a failed exit code
 - Install the mermaid checker's deps during just setup
 - Report both halves of a recovery stop conflict
+- Hold every remote-module document to one byte form
 
 ### Security
 
