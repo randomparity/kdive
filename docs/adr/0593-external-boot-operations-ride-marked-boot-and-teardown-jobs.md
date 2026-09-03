@@ -152,6 +152,21 @@ the server half only.
   idempotency under a later authority generation is the adapter's obligation under ADR-0584, and
   observe-driven re-entry is #2202's. This decision does not close that window; it names it
   correctly. #2203 owns the reaping half.
+- **A third route reaches the same wedge, through the commit rather than the handler.**
+  `_finalize_handler` calls `_commit_external_result` outside its `try/except`
+  (`src/kdive/jobs/worker.py:539` against `:505-533`), and `_dispatch` has no `except`
+  (`:439-444`), so an exception from `commit_external_boot_authority_result` propagates to
+  `_claim_loop`'s generic handler (`:417-427`). The observable is a lane-level warning with no job
+  attribution — weaker than the marked-job log line the bullet above describes — and the commit
+  raises SQLSTATE `22023` on several evidence-content paths a handler composes. Keeping every
+  evidence `objects` entry inside the commit's `known_refs` set is what keeps handlers off it.
+- **The adapter's admission watermark fences the concurrent case, not the sequential one.**
+  `_require_admissible_generation`
+  (`src/kdive/providers/local_libvirt/external_boot_authority.py:149-158`) rejects a *lower*
+  generation and does not constrain a higher one, so it does nothing for the re-execution window
+  above, where the re-claim allocates a higher generation. It does fence a still-live worker whose
+  lease lapsed while it was mid-provider-call and whose replacement has already allocated a later
+  generation — a concurrency case, not a sequential one.
 - The `release` operation credits the recovery-store reservation back while the objects it covers
   still exist, because ADR-0584's adapter makes deletion belong to `cleanup` under a later
   generation. That departs from ADR-0583's stated ordering and under-charges
@@ -191,10 +206,14 @@ the server half only.
   `0121…sql:38-52` admits only once `materialization` and `recovery_point` are both recorded.
   The phases would have to run before the authority they need. Recording them is also a
   `kdive_server` write the worker's SELECT-only grant (`0121…sql:280-285`) forbids.
-- **Give materialize and prepare their own unmarked jobs.** verified: an unmarked job is
-  dispatched by `JobKind`, and the only kinds available are `boot` and `teardown`, whose
-  handlers already boot a Run and tear a System down; a new kind is excluded by criterion 1 and
-  would need a Postgres enum migration. The disposition above needs neither.
+- **Give materialize and prepare their own unmarked jobs.** verified: a distinct unmarked job
+  needs a distinct `JobKind`, and `JobKind` is a Postgres enum whose values
+  `src/kdive/db/schema/` can only extend by migration — which criterion 1 and this change's
+  no-migration constraint both exclude. Reusing `boot` or `teardown` unmarked is not an option
+  either: an unmarked job of those kinds is dispatched to `boot_handler`/`teardown_handler` by
+  `route_marked`, which boot a Run and tear a System down. (`0122…sql:465` does **not** carry
+  this: it constrains an *authority-marked* job's kind, and an unmarked job never calls
+  `allocate_external_boot_authority` at all.) The disposition above needs no new kind.
 - **Have the handler call `commit_external_boot_authority_result` itself.** judgment: it
   bypasses `_authority_binding_matches`, the one check standing between a mismatched result and
   the authority tables, and duplicates a commit path `queue.py:267` already owns.

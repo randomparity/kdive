@@ -234,9 +234,24 @@ Every operation handler is the same seven steps, in `operations/common.py`:
    when `binding.kind.value != marker.provider_kind` or `binding.runtime.external_boot is None`
    (`configuration_error`, terminal).
 2. **Read the activation.** `SELECT`-only, permitted. Refuse when the row is absent, when its
-   `run_id`/`system_id`/`plan_identity` disagree with the marker, or when the evidence the
-   operation consumes is missing — for `activate` that is `materialization` **and**
-   `recovery_point` (the `prepared-before-admission` disposition, ADR-0593 decision 4).
+   `run_id`/`system_id`/`plan_identity` disagree with the marker, when its `state` is outside the
+   operation's required set, or when any evidence column the operation reads is `NULL`.
+
+   **The evidence check applies to every operation, not only `activate`, and it is a positive
+   check.** Activation state does not imply the evidence is present:
+   `external_boot_activation_state_evidence`
+   (`src/kdive/db/schema/0121_external_boot_activations.sql:38-52`) admits `abandoned` on
+   `terminal_evidence` alone — both `materialization` and `recovery_point` may be `NULL` — and
+   admits `recovering`/`recovered`/`recovery_conflict`/`recovery_failed` with `recovery_point`
+   `NULL` whenever `pre_recovery_evidence` is present. `release`, `cleanup`, and `teardown` are
+   all admitted from those states and all need a `RecoveryPoint` to call the port with. So the
+   runner refuses on the **presence of the column it will read**, per §7's *required activation
+   evidence* column, with a terminal `configuration_error` — never by inferring from the state
+   that the evidence must be there, and never by treating a `NULL` as a finished operation. A
+   missing recovery point and a completed one are different propositions, and only the column
+   distinguishes them. Without this check the failure is an uncategorized `TypeError` or
+   `ValidationError` rather than a categorized refusal, and if it lands after step 3 the authority
+   row is already allocated.
 3. **Allocate.** `allocate_external_boot_authority` as `kdive_worker`. `superseded` raises a
    non-terminal `CategorizedError(stale_handle)`; the SQLSTATE `42501` from a non-worker session
    propagates unchanged, which is what criterion 8 asserts.
@@ -259,16 +274,27 @@ A provider exception is wrapped in `ExternalBootAuthorityFailure` carrying an
 `CategorizedError` where there is one and `infrastructure_failure` otherwise. Richer category
 mapping is #2202's; this change ships the honest default and one test pinning it.
 
+**The wrap drops the provider's message, and must do so without re-attaching it.** `_FailureResult`
+carries `error_category`, a `failure_context` whose only admitted field is a closed-`Literal`
+`phase`, and `terminal` — no free text — and the commit re-checks that
+(`0122…sql:1640-1647`). So the original exception's text never reaches the authority audit by
+value. It must not reach it by traceback either: the wrap raises
+`ExternalBootAuthorityFailure(...) from None`, never `from exc`. Chaining would re-attach the
+provider's own exception — which for a real adapter can carry a host filesystem path in an
+`OSError.filename`/`.strerror` — to a traceback that a worker log, and from there a CI log or a
+PR comment, can render. `from None` is the difference between a bound that holds and one that
+looks like it holds.
+
 ### 7. Per-operation detail
 
-| Operation | Kind / purpose | Required activation state | Port call | Result variant | Activation after an applied commit |
-|---|---|---|---|---|---|
-| `activate` | boot / activate | `activating` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
-| `recover` | boot / recover | `recovering` † | `recover` then `observe` | `_RecoverResult` | `recovered` |
-| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † | `recover` then `observe` | `_RecoverResult` | `recovered` |
-| `release` | boot / release | `active`, `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `observe` | `_ReleaseResult` | reservation released |
-| `cleanup` | boot / release | `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `cleanup` | `_CleanupResult` | `cleanup_complete = true` |
-| `teardown` | teardown / teardown | `recovery_conflict`, `recovery_failed` ‡ § | `cleanup` | `_TeardownResult` | `cleanup_complete`, System `torn_down` |
+| Operation | Kind / purpose | Required activation state | Required activation evidence | Port call | Result variant | Activation after an applied commit |
+|---|---|---|---|---|---|---|
+| `activate` | boot / activate | `activating` | `materialization`, `recovery_point` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
+| `recover` | boot / recover | `recovering` † | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `release` | boot / release | `active`, `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `recovery_point`, `ready` reservation row | `observe` | `_ReleaseResult` | reservation released |
+| `cleanup` | boot / release | `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `recovery_point`, release row | `cleanup` | `_CleanupResult` | `cleanup_complete = true` |
+| `teardown` | teardown / teardown | `recovery_conflict`, `recovery_failed` ‡ § | `recovery_point`, release row | `cleanup` | `_TeardownResult` | `cleanup_complete`, System `torn_down` |
 
 The **required activation state** column is the set `run_operation` passes as
 `require_activation_state`, and it is taken from the **commit** preconditions
@@ -388,20 +414,55 @@ is permanently `running`, because `repair_abandoned_jobs` is fenced against mark
 (`src/kdive/reconciler/repairs/jobs.py:42-49`) and both generic finalizers are fenced
 (`0122…sql:304-315`).
 
-Nothing here makes the port calls idempotent or gates re-entry on an observation. Idempotency
-under a later authority generation is the adapter's obligation under ADR-0584 — the merged local
-adapter keeps per-activation admission watermarks for exactly that
-(`src/kdive/providers/local_libvirt/external_boot_authority.py:111`, `:151-154`) — and this change
-neither verifies nor relies on it. Observe-driven re-entry is #2202's; the reaping half is
-#2203's. This design closes neither, and a test records the behavior so it cannot change
+A **third** route reaches the same wedge, and it is one this change's own evidence composition
+creates. `_finalize_handler` calls `_commit_external_result` at `worker.py:539`, **outside** the
+`try/except` that ends at `:533`, and `_dispatch` wraps it in `try/finally` with no `except`
+(`:439-444`). So an exception raised by the commit itself propagates out of `run_once` to
+`_claim_loop`'s generic handler (`:417-427`), which logs `run_once failed on lane %s` and sleeps.
+The marked-job log line is never reached, `record_job_failure` is never called, and no `jobs` row
+is written — and the only observable is a lane-level warning carrying no job id.
+`commit_external_boot_authority_result` raises SQLSTATE `22023` on several evidence-content paths
+the handler composes: the forbidden-key scan (`0122…sql:978-983`), an invalid evidence timestamp
+(`:1295-1298`), invalid release (`:1544-1545`), cleanup (`:1415-1416`), or failure-context
+(`:1657-1658`) evidence, and the unknown-ref check the recursion at `:1204-1249` feeds. §7's rule
+that every `objects` entry must already be a `known_refs` reference is what keeps the handler off
+that path; a test pins what happens when it is violated.
+
+Nothing here makes the port calls idempotent or gates re-entry on an observation, and the
+adapter's watermark does not supply it either. `_require_admissible_generation`
+(`src/kdive/providers/local_libvirt/external_boot_authority.py:149-158`) raises `superseded` when
+`request.generation < admitted` and otherwise records the maximum: it rejects an **older**
+generation and places no constraint on a later one. So it contributes nothing to the sequential
+re-execution case above, where the re-claim allocates a *higher* generation. What it does fence is
+a case §8 would otherwise leave unnamed: `_heartbeat_loop` ends rather than escaping on a failed
+heartbeat (`worker.py:576-582`), so a still-running worker A can be mid-provider-call while worker
+B re-claims and allocates a later generation — two concurrent mutations on one System. The
+database refuses A's commit (`v_authority.state <> 'current'`, `0122…sql:913`), but only the
+adapter watermark stops A's *provider* call, and only because A holds the older generation.
+Idempotency under a later generation remains the adapter's obligation under ADR-0584, and this
+change neither verifies nor relies on it. Observe-driven re-entry is #2202's; the reaping half is
+#2203's. This design closes neither, and tests record all three routes so they cannot change
 silently.
 
 ### 9. Import closure
 
 `src/kdive/jobs/handlers/external_boot/` imports only `kdive.jobs`, `kdive.db`,
-`kdive.domain`, `kdive.providers.ports`, and `kdive.providers.core`. The `provider_kind`
-literals are data. A closure-walking test mirrors the gate
-`tests/services/external_boot/test_recovery_requests.py` already uses.
+`kdive.domain`, `kdive.providers.ports`, `kdive.providers.core`, and
+`kdive.providers.external_boot_authority.protocol`. The `provider_kind` literals are data.
+
+**The test is a real closure walk, and the existing gate is not one.**
+`tests/services/external_boot/test_recovery_requests.py` is a **static, single-module** check:
+`_reachable_names` (`:714-727`) is an `ast.walk` over one module's source, and its own docstring
+says "no walk of the transitive import graph … is needed or wanted"; `_kdive_imports` (`:749-766`)
+is a direct-import allow-list compared against a frozen reviewed set. Mirroring it would catch a
+direct `import kdive.providers.local_libvirt` and miss a transitive reach through, say,
+`kdive.providers.core.resolver` — which is exactly what criterion 10 excludes. So this change
+imports each module under `kdive.jobs.handlers.external_boot` **in a subprocess** and asserts the
+resulting `sys.modules` holds no name starting with `kdive.providers.local_libvirt` or
+`kdive.providers.remote_libvirt` and no `libvirt`. A subprocess rather than the test process
+because `sys.modules` is shared and any earlier test's imports would pollute it. The existing file
+is cited as the precedent for pairing such a gate with a canary that proves it bites, not as the
+walk to copy.
 
 ## Threat model
 
@@ -432,6 +493,7 @@ the provider says about identity.
 | Absent acknowledger | Fails closed before the port call — no partial provider mutation |
 | Evidence content | The commit's forbidden-key scan (`0122…sql:978-979`) rejects anything resembling a credential, command, path, URL, or XML; handlers compose evidence only from persisted rows and closed models |
 | Failure context | `_FailureContext` admits one field, `phase`, from a closed `Literal`; no message text crosses into the authority audit |
+| Provider port call (boundary c) | `activate`, `recover`, `resolve-conflict`, and `release` compare the `observe` return against the activation's persisted `materialization.kernel_observation` and refuse to emit terminal evidence when they disagree; the observation is otherwise discarded. `cleanup` and `teardown` have **no** observation control, because their port call is `cleanup` and `ExternalBootPorts` offers nothing to observe a deletion with — stated rather than left for a reader to infer from the table's silence |
 
 **Out of scope.** Authenticating the provider-authority peer (ADR-0584's mTLS transport, not
 wired here); rate-limiting enqueue (the MCP admission surface, #2204); the availability leak
@@ -446,8 +508,8 @@ fault reverted, file verified byte-identical.
 ### The execution vehicle, stated before the tests that rest on it
 
 "Against the fault-inject port" is not constructible by simply handing a handler a fresh
-`FaultInjectExternalBoot`, and two independent mechanisms make it so. Both are the fixture's job
-to solve, and neither weakens ADR-0593 decision 4.
+`FaultInjectExternalBoot`, and **three** independent mechanisms make it so. All three are the
+fixture's job to solve, and none of them weakens ADR-0593 decision 4.
 
 1. **`observe` answers only for a recovery point `prepare` produced.**
    `FaultInjectExternalBoot.observe` is `return self._observations[recovery.recovery_ref.ref]`
@@ -465,14 +527,35 @@ to solve, and neither weakens ADR-0593 decision 4.
    `ExternalBootAuthorityMarkerV1.provider_kind` cannot hold and `allocate_external_boot_authority`
    rejects (`0122…sql:369`).
 
-**The fixture therefore does this, and the tests assert against it:**
+3. **A persisted recovery point is bound to its activation row by a CHECK, so the ids cannot be
+   minted independently.** `0124_external_boot_activation_binding.sql:96-111` requires a non-NULL
+   `recovery_point` to carry a `binding` object of exactly three keys whose UUIDs equal the row's
+   `system_id`, `run_id`, and `id`, to carry **no** `ownership` key, and to have
+   `plan_identity` equal to the row's. The same constraint (`:92-95`) requires
+   `materialization.ownership.system_id`/`run_id` and `materialization.plan_identity` to match the
+   row. Every one of those values is fixed by the port from its inputs —
+   `FaultInjectExternalBoot.materialize` copies `plan.ownership` and sets
+   `plan_identity = plan.identity` (`src/kdive/providers/fault_inject/lifecycle/external_boot.py:30-53`),
+   and `prepare` copies its `binding` argument through (`:70-85`). A seeder that mints its own
+   `uuid4()` ids and a fixed `plan_identity` constant, as
+   `tests/db/external_boot_authority_support.py:135` does, cannot agree with them, and the INSERT
+   fails with a `CheckViolation` before any handler runs.
 
-- Build one `FaultInjectExternalBoot` and drive it through `materialize` then `prepare`
-  **out of band**, in the fixture, from a synthetic `ExternalBootPlan`. That is what populates
-  `_observations` and yields a real `RecoveryPoint`.
-- Write that `RecoveryPoint`'s canonical JSON verbatim into the seeded
+**The fixture therefore does this, in this order, and the tests assert against it:**
+
+- **Mint `system_id`, `run_id`, and `activation_id` first.** Everything below is derived from
+  them; nothing is minted twice.
+- Build the synthetic `ExternalBootPlan` with `ownership.system_id`/`run_id` set to the first two,
+  and set the seeded activation's `plan_identity` to that plan's computed `.identity` — not to a
+  chosen constant.
+- Build one `FaultInjectExternalBoot` and drive it through `materialize(plan, …)` then
+  `prepare(materialization, ExternalBootActivationBinding(system_id, run_id, activation_id), …)`
+  **out of band**, in the fixture. That is what populates `_observations` and yields a real
+  `RecoveryPoint` whose `binding` already satisfies the CHECK.
+- Only then write that `RecoveryPoint`'s canonical JSON verbatim into
   `external_boot_activations.recovery_point`, and the `ExternalBootMaterialization`'s into
-  `materialization`, so the row the handler reads back is the object the port already knows.
+  `materialization`, so the row the handler reads back is the object the port already knows and
+  the CHECK accepts.
 - Hand the handler that **same instance**, wrapped in a delegating double that raises
   `AssertionError` from `materialize` and `prepare` and forwards the other four. The pin
   ADR-0593 decision 4 asks for is about the **handler**, so the fixture performing those two
@@ -493,10 +576,19 @@ to solve, and neither weakens ADR-0593 decision 4.
    resolved binding is rejected at validation, asserted by showing
    `allocate_external_boot_authority` is never reached; a runtime with `external_boot is None`
    is rejected.
-3. **Registry** (`test_operations.py`) — the production registry from
-   `build_production_handler_registry` resolves each of the six operations to exactly one
-   handler; a second registration raises; `deadline`, `recovery-attempt`, and `fail` are refused
-   by name.
+3. **Registry** (`test_operations.py`) — criterion 4 as written, asserted through the
+   production entry point rather than around it. `HandlerRegistry` exposes only `register` and
+   `get(kind)` (`src/kdive/jobs/models.py:386-399`), and the `ExternalBootOperations` registry is
+   captured in the router closure, so it cannot be read off the returned object. The test
+   therefore **drives** it: for each of the six operations it builds a marked job, dispatches it
+   through the handler `build_handler_registry(<stub assembly>)` returned for that operation's
+   `JobKind`, and asserts exactly one operation handler ran and it was the right one. That
+   asserts what the criterion asks — the registry from the production builder resolves each
+   marker `operation` to exactly one handler — over the real wiring, including that
+   `register_all_handlers` passed the same registry to **both** registrars. Separately:
+   registering an operation twice raises `DuplicateExternalBootHandler`; `registry.register` on a
+   `JobKind` already bound raises `DuplicateHandler`; and `deadline`, `recovery-attempt`, and
+   `fail` are refused by name.
 4. **Routing** (`test_router.py`) — an unmarked `boot` job reaches the ordinary handler and a
    marked one does not; the same for `teardown`; a malformed marker reaches the operations
    registry, not the ordinary handler.

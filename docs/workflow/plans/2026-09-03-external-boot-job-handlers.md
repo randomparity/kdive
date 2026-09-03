@@ -97,32 +97,41 @@ everything.
 ### Edited — existing tests Task 1 breaks
 
 `_ACTIVE_PAYLOAD_MODELS` naming the subclass breaks every site that passes a *base-class model
-instance* to `queue.enqueue` for these kinds, in tests as well as in `src/`. These six are the
-complete set, each one identifier:
+instance* to `queue.enqueue` for these kinds, in tests as well as in `src/`.
 
-| File | Site |
-|---|---|
-| `tests/mcp/lifecycle/test_systems_tools.py` | `_enqueue_teardown`, `JobKind.TEARDOWN` + `SystemPayload` (≈:200-205) |
-| `tests/mcp/jobs/test_jobs_tools.py` | `JobKind.TEARDOWN` + `SystemPayload` (≈:1153-1157) |
-| `tests/jobs/handlers/test_systems_bootstrap_key.py` | three `JobKind.TEARDOWN` + `SystemPayload` enqueues (≈:474, :511, :541) |
-| `tests/mcp/lifecycle/test_runs_tools.py` | parametrized `(JobKind.BOOT, "boot", RunPayload(run_id=run_id))` (≈:3691-3702) |
-| `tests/jobs/test_worker.py` | `RunPayload(run_id=run_id) if kind is JobKind.BOOT else …` (≈:519-527) |
+**This plan does not claim a complete list, because it cannot produce one statically and an
+earlier draft got it wrong by trying.** Two of the sites are inside helpers that take `kind` as a
+parameter (`tests/adversarial/test_provider_state_races.py::_enqueue`,
+`tests/mcp/lifecycle/test_runs_tools.py::_enqueue_job`), so grepping `JobKind.(BOOT|TEARDOWN)`
+finds the *call sites* and not the line to edit; and a payload constructed inside a
+`parametrize` tuple is invisible to a simple AST sweep of `enqueue(...)` arguments. Instead:
 
-(Five files, six sites — `test_systems_bootstrap_key.py` carries three.) Re-derive each line
-number with `rg -n "JobKind.(BOOT|TEARDOWN)" tests/` before editing; the ranges above are
-approximate and are a search aid, not a citation.
+- **The authoritative enumeration is the test run.** Task 1 step 6 makes the `src/` change first
+  and then runs the whole suite. Every broken site announces itself as a
+  `PayloadValidationError`, by exact node id. Fix precisely those. This is complete by
+  construction and needs no list to be right.
+- **A candidate list is a search aid only.** An AST sweep for `enqueue(...)` calls whose payload
+  argument is a `RunPayload(...)`/`SystemPayload(...)` construction — inline or via a local —
+  reports **25 candidate sites across 16 files** on this base. Most are `PROVISION`,
+  `FORCE_CRASH`, or `POWER` and are unaffected; only the ones reachable with `BOOT`/`TEARDOWN`
+  break. The known-affected ones seen so far are `tests/adversarial/test_provider_state_races.py`
+  (`_enqueue`, reached with `TEARDOWN` from three call sites),
+  `tests/mcp/lifecycle/test_runs_tools.py` (`_enqueue_job`, reached with `BOOT` from about
+  fourteen, plus one parametrized construction),
+  `tests/jobs/handlers/test_systems_bootstrap_key.py`, `tests/jobs/test_worker.py`,
+  `tests/mcp/jobs/test_jobs_tools.py`, and `tests/mcp/lifecycle/test_systems_tools.py` — six
+  files, but treat that as where to look first, not as the answer.
 
-**Why the five `src/` enqueue files and the five test files are in scope.** They are the
-complete set of sites that pass a *model instance* rather than a dict to `queue.enqueue` for
-`boot`/`teardown` (`dump_payload` is called from exactly one place,
-`src/kdive/jobs/queue.py:90`). Once `_ACTIVE_PAYLOAD_MODELS` names the subclass,
-`dump_payload`'s `isinstance(payload, model_class)` is False for a `RunPayload` instance, and
-pydantic v2 refuses to validate one model instance as a different model class — confirmed here
-with pydantic 2.13.4: `Sub.model_validate(base_instance)` raises `ValidationError … model_type`.
-The edit is one identifier per site and is an unavoidable consequence of the sourced criterion
-that the boot and teardown payloads round-trip; it is not new scope. The charter's `surface`
-field listed none of them, so the PR body must name **both** groups — the five `src/` enqueue
-files and the five test files carrying six sites — not the `src/` half alone.
+**Why the `src/` enqueue files and the test files are in scope.** `dump_payload` is called from
+exactly one place (`src/kdive/jobs/queue.py:90`). Once `_ACTIVE_PAYLOAD_MODELS` names the
+subclass, `dump_payload`'s `isinstance(payload, model_class)` is False for a `RunPayload`
+instance, and pydantic v2 refuses to validate one model instance as a different model class —
+confirmed here with pydantic 2.13.4: `Sub.model_validate(base_instance)` raises
+`ValidationError … model_type`. The edit is one identifier per site and is an unavoidable
+consequence of the sourced criterion that the boot and teardown payloads round-trip; it is not
+new scope. The charter's `surface` field listed none of them, so the PR body must name **both**
+groups — the `src/` enqueue files and the test files — and must state the count that the Task 1
+step 6 run actually produced, not a count predicted before it.
 
 ### New tests
 
@@ -210,14 +219,24 @@ Later tasks rely on `BootPayload`, `TeardownPayload`,
    `rg -n "JobKind.(BOOT|TEARDOWN)," -A 2 src/`. Do not touch `provision_handler`
    (`systems.py:393`) or the force-crash handler (`control/control.py:221`) — those are
    `PROVISION` and `FORCE_CRASH`, whose model is unchanged.
-6. **Run the affected suites and expect a specific red first**:
-   `uv run python -m pytest tests/jobs tests/mcp/lifecycle tests/mcp/jobs tests/reconciler -q`.
-   **Expect the six enqueue sites in the five existing test files above to fail** with
-   `PayloadValidationError: invalid teardown payload` / `invalid boot payload`, because they still
-   construct the base model. That red is the change working, not a regression. Swap each to
-   `TeardownPayload` / `BootPayload`, re-run the same command, and expect green. Do not skip
-   straight to the swap: seeing the six fail first is what proves the model registry actually
-   changed, and it is the cheapest bite proof available for this task.
+6. **Run the whole suite and let the breakage enumerate itself.** Make the `src/` change first,
+   then run `just test` — the **whole** suite, not a subset. An earlier draft of this plan named
+   four subdirectories and a fixed count; both were wrong, and one affected file
+   (`tests/adversarial/`) was outside the named set, so the plan's own verification step would
+   have missed it and the break would have surfaced only at Task 7. Do not narrow the command.
+
+   Expect a set of failures, all `PayloadValidationError: invalid teardown payload` /
+   `invalid boot payload`, from sites still constructing the base model. **That red is the change
+   working, not a regression** — and seeing it first is the cheapest bite proof this task has,
+   because it proves the model registry actually changed. Record the exact node ids, swap each to
+   `TeardownPayload` / `BootPayload`, re-run `just test`, and expect green. Carry the recorded
+   list into the PR body as the observed surface. Any failure that is **not** a
+   `PayloadValidationError` on one of these two kinds is a real regression, not this expected
+   red — except
+   `tests/support/test_xdist_backend.py::test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one`,
+   which is a known host-local flake caused by a concurrent kdive suite reaping this test's own
+   container (`BACKEND_LABEL` is repo-wide and `_private_sweep_lock` opts these tests out of the
+   host-global sweep lock). Report that one; do not re-run to green.
 7. `just lint && just type`. Commit:
    `feat(jobs): carry an external-boot authority marker on boot and teardown payloads`.
 
@@ -298,6 +317,18 @@ def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
        `DuplicateHandler`. The second half is what proves the kind is bound once rather than
        merely bound; asserting only non-`None` would pass under a double registration if one
        silently won. This is the "no duplicate registration" half of criterion 4.
+     - `test_production_registry_resolves_every_operation_to_one_handler` — criterion 4's other
+       half, asserted **through** the production entry point rather than around it.
+       `HandlerRegistry` exposes only `register` and `get(kind)`, and the operations registry is
+       captured in the router closure, so it cannot be read off the returned object. Parametrize
+       over the six operations: build a marked `Job` for each, fetch the handler
+       `build_handler_registry(<stub assembly>)` returns for that operation's `JobKind`, await it,
+       and assert exactly one operation handler ran and it was the one bound to that operation.
+       Use recording doubles for all six so "exactly one" is asserted against the recorder rather
+       than inferred. This is what proves `register_all_handlers` passed the *same* registry to
+       **both** registrars — `test_production_registry_binds_each_enqueueable_operation_once`
+       proves only that `build_operations` is internally complete, which is a weaker claim and
+       must not be presented as this one.
    - `test_router.py`, using two recording fakes:
      - `test_unmarked_boot_job_reaches_the_ordinary_handler`.
      - `test_marked_boot_job_does_not_reach_the_ordinary_handler` — assert the ordinary fake was
@@ -306,12 +337,18 @@ def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
      - `test_malformed_marker_does_not_reach_the_ordinary_handler` — payload key present but its
        value is `{"nonsense": 1}`; the ordinary fake is never called.
      - the same three for teardown.
-   - `test_import_closure.py` — walk the import closure of
-     `kdive.jobs.handlers.external_boot` (and each submodule) and assert no reached module name
-     starts with `kdive.providers.local_libvirt`, `kdive.providers.remote_libvirt`, or equals
-     `libvirt`. Follow the existing gate in
-     `tests/services/external_boot/test_recovery_requests.py`; read it and mirror its walk
-     rather than inventing one.
+   - `test_import_closure.py` — a **real** transitive closure check, which the existing gate is
+     not. Run `uv run python -c` in a **subprocess** that imports every module under
+     `kdive.jobs.handlers.external_boot` and prints `sys.modules`; assert no name starts with
+     `kdive.providers.local_libvirt` or `kdive.providers.remote_libvirt`, and that `libvirt` is
+     absent. A subprocess because `sys.modules` is process-wide and another test's imports would
+     pollute an in-process assertion into a false pass.
+     `tests/services/external_boot/test_recovery_requests.py` is **not** the walk to copy — its
+     `_reachable_names` (`:714-727`) and `_kdive_imports` (`:749-766`) are single-module `ast`
+     sweeps, and the first's docstring says outright that no transitive walk "is needed or
+     wanted" there. Copy only its second idea: pair the gate with a canary
+     (`test_the_import_closure_gate_bites`, `:816-825`) that proves the check fails when a
+     forbidden import is present, so a gate that silently stopped checking is caught.
 2. **Run and confirm they fail.**
 3. **Implement** the five modules. `ExternalBootOperations.run` loads the payload
    (`load_payload(job, BootPayload)` or `TeardownPayload` by `job.kind`), reads
@@ -430,17 +467,37 @@ introduces). `failure_context.phase` is `admission` for steps 1–3, `preparatio
 
 1. **Write `conftest.py`** providing, for the whole package's Postgres tests:
    - **`external_boot_vehicle`** — the fixture the spec's "execution vehicle" subsection
-     specifies, and the prerequisite for every other Postgres test in this package. It builds one
-     `FaultInjectExternalBoot`, drives it through `materialize` then `prepare` **out of band**
-     from a synthetic `ExternalBootPlan` (this is what populates `_observations`, which
-     `observe` reads and which nothing else writes), keeps the resulting
-     `ExternalBootMaterialization` and `RecoveryPoint`, and returns the port wrapped in a
-     delegating double that forwards `activate`/`observe`/`recover`/`cleanup` and raises
-     `AssertionError` from `materialize`/`prepare`. Build the plan with the smallest values
-     `ExternalBootPlan`'s validators accept — its `_validate_composed_plan` requires `cmdline`
-     to compose `platform_arguments` exactly and the root arguments to occur exactly once, so
-     copy the shape from `docs/adr/0583-external-run-boot-uses-prepared-recovery-points.md`'s
-     golden vector rather than inventing one.
+     specifies, and the prerequisite for every other Postgres test in this package.
+
+     **Order is forced and is not a style choice.**
+     `0124_external_boot_activation_binding.sql:96-111` requires a persisted `recovery_point` to
+     carry a three-key `binding` whose UUIDs equal the activation row's `system_id`, `run_id`,
+     and `id`, no `ownership` key, and a matching `plan_identity`; `:92-95` requires the same of
+     `materialization.ownership`. Those values come from the port's inputs, so a fixture that
+     seeds first and builds second cannot make them agree and the INSERT fails with a
+     `CheckViolation`. So: **(1)** mint `system_id`, `run_id`, `activation_id`; **(2)** build the
+     synthetic `ExternalBootPlan` with `ownership` from the first two; **(3)** build one
+     `FaultInjectExternalBoot` and drive it through `materialize(plan, …)` then
+     `prepare(materialization, ExternalBootActivationBinding(system_id, run_id, activation_id), …)`
+     — this is what populates `_observations`, which `observe` reads and nothing else writes;
+     **(4)** seed the activation row with `plan_identity = plan.identity` and the resulting
+     objects' canonical JSON.
+
+     Return the port wrapped in a delegating double that forwards
+     `activate`/`observe`/`recover`/`cleanup` and raises `AssertionError` from
+     `materialize`/`prepare`.
+
+     **Source the synthetic plan from `tests/providers/remote_libvirt/lifecycle/test_external_boot.py:254`**,
+     which is the repo's only existing `ExternalBootPlan(...)` construction (`rg -n
+     'ExternalBootPlan\(' src/ tests/` returns exactly that one plus the class definition).
+     Do **not** source it from ADR-0583's golden vector: that vector is a libvirt **domain-XML**
+     identity under the hash prefix `kdive-libvirt-boot-projection-v1`, whereas
+     `ExternalBootPlan.identity` uses `kdive-external-boot-plan-v1`
+     (`src/kdive/providers/ports/external_boot.py:213-215`), and ADR-0583 carries no
+     `ExternalBootPlan`, `platform_arguments`, or `RootSpecV1` example at all. A hand-rolled plan
+     is likely to be rejected: `_validate_composed_plan` (`:190-211`) requires the root arguments
+     to occur exactly once in `platform_arguments`, `cmdline` to compose them exactly, unique
+     argument keys, and a 2047-byte cap.
    - a `seeded_activation` helper that inserts resource/allocation/system/investigation/run/
      activation/worker_incarnation/job rows in a given activation state and purpose, modelled on
      `tests/db/external_boot_authority_support.py:135` (`_seed_case`) but async and returning
@@ -551,10 +608,20 @@ recovery action.
      (criterion 6, not-applied half);
    - `test_superseded_commit_leaves_the_job_running` — records the #2203-owned leak, with the
      issue number in the test's docstring so it cannot be mistaken for intended coverage.
-2. **Write `test_prepared_before_admission.py`** — ADR-0593 decision 4's pin:
+2. **Write `test_prepared_before_admission.py`** — ADR-0593 decision 4's pin, plus the
+   NULL-evidence refusals §6 step 2 requires for every operation:
    - an activate job whose activation has `recovery_point` NULL is refused, and the port double
      recorded no call;
    - the same for `materialization` NULL;
+   - **a `cleanup` job against an activation in state `abandoned` with `recovery_point` NULL**
+     (which `0121…sql:38-52` permits: `abandoned` requires only
+     `terminal_evidence->>'outcome' = 'abandoned'`) is refused with a terminal
+     `configuration_error`, the port double recorded no call, and **no `external_boot_authorities`
+     row was created** — so the refusal is proven to happen before allocation, not after it;
+   - the same shape for `release` and `teardown` against a state whose CHECK permits a NULL
+     `recovery_point`. These are the cases where a `NULL` column and a completed operation would
+     otherwise be indistinguishable, so each asserts on the column's absence producing a
+     categorized refusal, never on the handler happening not to crash;
    - across every one of the six handlers, the port records no call to `materialize` or
      `prepare` on any path. This is the `external_boot_vehicle` fixture's wrapper, which raises
      `AssertionError` from those two, so the assertion cannot be satisfied by the test forgetting
@@ -633,8 +700,11 @@ for `purpose == "teardown"` and `BOOT` otherwise, matching
    `build_handler_registry` with the fault-inject runtime and the real acknowledger; let the
    worker dispatch and commit; assert the activation reaches `active` and the `jobs` row is
    `succeeded`.
-2. Run, confirm failure, implement any wiring gaps, run, confirm pass.
-3. Commit: `test(jobs): drive an authority-marked job end to end through a worker`.
+2. **Add a teardown arm.** Repeat the whole flow for a `teardown`-purpose job on
+   `JobKind.TEARDOWN`, so both kinds are exercised on the production path rather than `boot`
+   alone. Without it the production wiring is proven for one kind and assumed for the other.
+3. Run, confirm failure, implement any wiring gaps, run, confirm pass.
+4. Commit: `test(jobs): drive an authority-marked job end to end through a worker`.
 
 ### Acceptance criteria
 
@@ -660,8 +730,11 @@ for `purpose == "teardown"` and `BOOT` otherwise, matching
 
 ### Acceptance criteria
 
-- `just ci` exits 0, run bare.
+- **Charter criterion 11** — repository guardrails pass: `just ci` exits 0, run bare, with its
+  own exit status read rather than a trailing `echo $?` or a pipeline's.
 - Every new test has a recorded bite proof with matching before/after hashes.
+- The observed set of existing test sites Task 1 broke is recorded and carried into the PR body,
+  as the count the run produced rather than one predicted before it.
 
 ---
 
