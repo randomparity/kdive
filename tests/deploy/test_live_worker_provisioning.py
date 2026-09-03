@@ -1476,10 +1476,21 @@ def test_external_boot_recovery_roots_are_health_gated() -> None:
     verify = re.sub(r"\s+", " ", _text(VERIFY_TASKS))
     # stat.exists precedes stat.isdir so an absent root reports what is wrong instead of
     # failing on an undefined attribute.
-    assert (
-        "item.stat.exists - item.stat.isdir - not item.stat.islnk "
-        "- item.stat.pw_name == item.item" in verify
-    )
+    # Pieces, not one contiguous run: explanatory comments and the `is defined` guards sit
+    # between these arms in the role.
+    for arm in (
+        "item.stat.exists",
+        "item.stat.isdir",
+        "not item.stat.islnk",
+        "item.stat.pw_name == item.item",
+        "item.stat.mode == '0700'",
+    ):
+        assert arm in verify
+    # `is defined` precedes each owner equality: the stat module fills pw_name inside a
+    # try/except around pwd.getpwuid, so an orphaned uid leaves the key absent and the
+    # equality would raise an undefined-attribute error instead of the fail_msg.
+    assert "item.stat.pw_name is defined" in verify
+    assert "live_vm_host_recovery_root_check.stat.pw_name is defined" in verify
     assert "live_vm_host_recovery_root_check.stat.mode == '0711'" in verify
     assert "live_vm_host_recovery_root_check.stat.exists" in verify
     # The parent-owner arm compares against the literal root, never against a variable the
