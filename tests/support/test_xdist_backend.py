@@ -49,6 +49,58 @@ _REPO_WIDE_BACKEND_LABEL = "kdive.test-backend"
 _TEST_SCRATCH_LABEL = "kdive.test-scratch"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _reap_orphaned_scratch_containers() -> None:
+    """Collect scratch containers a previous run of this module was killed before removing.
+
+    ``private_backend_label`` puts this module's real containers beyond the reach of every
+    sweep on the host, which also puts them beyond ADR-0551's crash recovery: before it, a
+    run killed between the start and the ``finally`` left containers the *next* run's sweep
+    collected, and each one pins an anonymous volume. This restores that collection on the
+    same next-run principle, keyed to the one label every scratch container carries.
+
+    ``status=exited`` is what makes it safe with other suites in flight, structurally
+    rather than by warning: a live test holds a container that is *running* for its whole
+    ``sleep 300``, so it can never be a candidate. ``ignore_removed=True`` for the reason
+    the sweep uses it — docker-py inspects every listed id, and a container removed in
+    between would otherwise raise (`xdist_backend.py`).
+
+    Best-effort, like the sweep it mirrors. A daemon that will not answer is the ordinary
+    Docker-less runner and says nothing; a removal that fails once the daemon *has*
+    answered is an anomaly and warns.
+    """
+    try:
+        import docker
+
+        client = docker.from_env()
+    except Exception:
+        return
+    with suppress(Exception):
+        _reap_scratch_orphans(client)
+
+
+def _reap_scratch_orphans(client: Any) -> list[str]:
+    """Remove every *exited* scratch container and its anonymous volume; return their ids."""
+    import docker.errors
+
+    reaped: list[str] = []
+    orphans = client.containers.list(
+        all=True,
+        filters={"label": _TEST_SCRATCH_LABEL, "status": "exited"},
+        ignore_removed=True,
+    )
+    for orphan in orphans:
+        try:
+            orphan.remove(force=True, v=True)
+        except docker.errors.NotFound:
+            continue  # a concurrent run's reaper got there first
+        except Exception as exc:
+            warnings.warn(f"scratch reap: could not remove orphan {orphan.id}: {exc}", stacklevel=2)
+            continue
+        reaped.append(orphan.id)
+    return reaped
+
+
 @pytest.fixture
 def private_backend_label(monkeypatch: pytest.MonkeyPatch) -> str:
     """Scope one test's *real* containers to a label key no other suite can enumerate.
@@ -988,32 +1040,76 @@ def test_sweep_warns_rather_than_failing_the_run_when_docker_is_unusable() -> No
         assert xdist_backend.sweep_stale_backend_containers(_BrokenClient()) == []
 
 
-def _run_labelled_container(client: Any, labels: Mapping[str, str]) -> Any:
+def test_the_scratch_reap_takes_only_exited_containers_and_their_volumes() -> None:
+    """The scratch reaper's whole safety argument is its filter (#2219).
+
+    `_run_labelled_container` puts these containers beyond every sweep on the host, so this
+    reaper is the only thing that collects one a killed run left behind. It runs at session
+    start on a host where other suites are mid-test, and the single thing between it and
+    their in-flight fixtures is `status=exited`: a live test holds a container that is
+    *running* for its whole `sleep 300`.
+
+    So assert the filter, not just the outcome. A reaper that removed the right container
+    while enumerating the wrong set would satisfy any test that only looked at what came
+    back — and the wrong set here is other agents' running backends.
+    """
+    orphan = _FakeDockerContainer("cid-orphan", {_TEST_SCRATCH_LABEL: "1"})
+    client = _FakeDockerClient(orphan)
+
+    assert _reap_scratch_orphans(client) == ["cid-orphan"]
+    assert client.filters == {"label": "kdive.test-scratch", "status": "exited"}
+    # Same reason the sweep passes it: docker-py inspects every listed id, and a container
+    # another run removed in between would otherwise take the whole reap down.
+    assert client.ignore_removed is True
+    # `v=True` takes the anonymous volume the postgres image declares. Without it the
+    # volume outlives the container and nothing ever reclaims it (#1910).
+    assert orphan.removed_with == {"force": True, "v": True}
+
+
+def test_the_scratch_reap_is_silent_when_another_run_got_there_first() -> None:
+    import docker.errors
+
+    gone = _FakeDockerContainer(
+        "cid-gone", {_TEST_SCRATCH_LABEL: "1"}, error=docker.errors.NotFound("already reaped")
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here fails the test
+        assert _reap_scratch_orphans(_FakeDockerClient(gone)) == []
+
+
+def _run_labelled_container(client: Any, labels: Mapping[str, str], started: list[str]) -> Any:
     """Start one real container carrying ``labels``, plus a fixed recovery handle.
 
-    The image is the db fixtures' own digest-pinned reference, so this pulls nothing extra
-    and cannot drift if `postgres:17` is re-tagged upstream; the entrypoint is overridden
-    so it starts instantly instead of running initdb. Pulling by digest leaves no
-    `postgres:17` tag behind, so the bare tag this used to name was a second image and a
-    hidden network dependency on any host that had only ever run the db suite.
+    The image is the db fixtures' own digest-pinned constant, so this reuses the reference
+    ``scripts/pull-test-images.sh`` already pre-pulls — a guard keeps those two in step —
+    and cannot drift if `postgres:17` is re-tagged upstream. The entrypoint is overridden
+    so it starts instantly instead of running initdb.
+
+    Created and started separately, so ``started`` records the id *before* anything can
+    fail: ``containers.run`` does the same two steps but raises out of the second without
+    ever returning the object, which would leave the caller's teardown with nothing to
+    remove.
 
     ``_TEST_SCRATCH_LABEL`` is the price of ``private_backend_label``. A container these
     tests start under a per-invocation key is invisible to every sweep on the host —
-    which is the point while the test runs, but means that a run killed outright between
-    the start and the ``finally`` leaks a container *and its anonymous volume* that
-    nothing will ever reap, where the repo-wide key would have had the next run collect
-    it. These containers are not testcontainers-managed either, so the ``org.testcontainers``
-    cleanup in AGENTS.md does not see them. One fixed key nothing filters on costs no
-    isolation and keeps that residual recoverable; AGENTS.md carries the command.
+    which is the point while the test runs, but means a run killed outright leaks a
+    container *and its anonymous volume* that no sweep will ever reap, where the repo-wide
+    key would have had the next run collect it. These containers are not
+    testcontainers-managed either, so the ``org.testcontainers`` cleanup in AGENTS.md does
+    not see them. One fixed key nothing filters on costs no isolation and makes that
+    residual collectable: ``_reap_orphaned_scratch_containers`` does it automatically, and
+    AGENTS.md carries the manual equivalent.
     """
     from tests.db import conftest as db_conftest
 
-    return client.containers.run(
+    container = client.containers.create(
         db_conftest._POSTGRES_IMAGE,
         entrypoint=["sleep", "300"],
-        detach=True,
         labels={**labels, _TEST_SCRATCH_LABEL: "1"},
     )
+    started.append(container.id)
+    container.start()
+    return container
 
 
 def _remove_quietly(client: Any, *container_ids: str) -> None:
@@ -1056,18 +1152,16 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(
         # liveness label with nothing holding the lock behind it (ADR-0551).
         with xdist_backend._liveness_held(tmp_path, "pg"):
             container = _run_labelled_container(
-                client, xdist_backend.backend_container_labels(tmp_path, "pg")
+                client, xdist_backend.backend_container_labels(tmp_path, "pg"), started
             )
-            started.append(container.id)
             # A second container whose run is already gone: its liveness file is never
             # locked, so it is stale from the start. Sweeping both in ONE call is what
             # keeps the spare assertion honest — an empty result would satisfy `not in`
             # on its own, so the reap of this one is the evidence that the sweep actually
             # ran and still spared the live one.
             stranded = _run_labelled_container(
-                client, xdist_backend.backend_container_labels(stranded_root, "pg")
+                client, xdist_backend.backend_container_labels(stranded_root, "pg"), started
             )
-            started.append(stranded.id)
 
             # A concurrently-running suite holds its lock, so a sweep from any other run
             # must leave its backend alone. This is the property that makes the sweep
@@ -1129,12 +1223,10 @@ def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
     started: list[str] = []
     with xdist_backend._liveness_held(control_root, "pg"):
         try:
-            control = _run_labelled_container(client, control_labels)
-            started.append(control.id)
+            control = _run_labelled_container(client, control_labels, started)
             subject = _run_labelled_container(
-                client, xdist_backend.backend_container_labels(subject_root, "pg")
+                client, xdist_backend.backend_container_labels(subject_root, "pg"), started
             )
-            started.append(subject.id)
 
             control.reload()
             subject.reload()
@@ -1145,11 +1237,17 @@ def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
             assert _REPO_WIDE_BACKEND_LABEL not in subject.labels
 
             # Exactly the enumeration `sweep_stale_backend_containers` performs in a
-            # sibling suite that never patched anything.
+            # sibling suite that never patched anything — `ignore_removed=True` included.
+            # This filter is the repo-wide key, so on a shared host the list holds other
+            # suites' live backends; without the flag, one of them being removed between
+            # the list and docker-py's per-id inspect fails this test with a Docker
+            # exception. That is the race `xdist_backend.py` documents at its own call.
             visible = {
                 found.id
                 for found in client.containers.list(
-                    all=True, filters={"label": _REPO_WIDE_BACKEND_LABEL}
+                    all=True,
+                    filters={"label": _REPO_WIDE_BACKEND_LABEL},
+                    ignore_removed=True,
                 )
             }
             assert control.id in visible, "the sibling's enumeration returned nothing"
