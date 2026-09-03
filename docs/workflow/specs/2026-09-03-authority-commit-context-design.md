@@ -94,34 +94,28 @@ request has none.
   longer matches what `advance` reported as accepted under this identity: a second authority
   instance sharing the operation identity, or a repository row that changed underneath. That
   is the whole of its value.
-- **N4a.** **Every** refusal between the `mutation-started` anchor and the provider call
-  anchors `terminal` with `outcome="never-began"` before it raises, through one shared helper
-  rather than a guard per caller. Without it the operation stays unresolved at
-  `mutation-started`, and the next admission on the lane runs `_finish_recovery`'s
-  `MUTATION_STARTED` arm, which calls the adapter's `observe` and journals
-  `provider-returned`, `observed` and a terminal outcome — a full provider-observation cycle
-  for a mutation that provably never reached the provider. ADR-0584 makes the journal the
-  evidence of record for exactly that question.
+- **N4a — withdrawn during implementation, and the reason is the finding.** An earlier draft
+  required every refusal between the `mutation-started` anchor and the provider call to
+  anchor `terminal` with `outcome="never-began"` first, so the lane was left resolved. It is
+  not implementable, and on inspection it was also wrong.
 
-  There are exactly **two** such refusals, and the second is pre-existing:
+  Not implementable: the journal enforces phase ordering, and
+  `journal._NEXT_OPERATION_PHASES` allows `mutation-started` to be followed only by
+  `provider-returned`. `terminal` is a legal successor of `admitted` — which is why
+  `execute_mutation`'s `stop_before_start` path can anchor `never-began` — but not of
+  `mutation-started`. Writing one raises "authority journal phase ordering is invalid".
+  Changing that table is journal behaviour, which this charter excludes.
 
-  1. the new head-disagreement refusal (N4); and
-  2. the existing `superseded` raise after the post-anchor `resolve_current` recheck
-     (`service.py:878-879`), which today raises with no terminal record.
+  Also wrong: the ordering encodes ADR-0584's rule that `mutation-started` is anchored
+  *before* any provider access precisely because, after it, the authority cannot know whether
+  the provider was reached. A `never-began` record there would assert something the journal's
+  own model says is unknowable, and a crash-recovery reader could not distinguish it from a
+  true one. The designed resolution is the observation cycle `_finish_recovery` runs: it calls
+  the adapter's `observe` and journals what was *observed*, which is accurate whether or not
+  the provider was touched. So leaving the operation unresolved is correct, and both refusals
+  on this path — the new head-disagreement one and the pre-existing `resolve_current` recheck
+  — raise without a terminal record, as the recheck already did.
 
-  A third site, the `stop_before_start` raise at `service.py:852-864`, is **not** an instance:
-  it already anchors `terminal`/`never-began` before raising, and is the shape the helper
-  generalises. Fixing only the new arm would leave a two-arm defect half-closed in the same
-  function, so both route through the helper.
-
-  Source: necessary consequence of criterion 5 for arm 1; arm 2 is an in-scope repair on the
-  same seam, authorized by the campaign orchestrator on 2026-09-03 as a found-here-fixed-here
-  widening of the frozen surface.
-
-  This does not touch the excluded journal surface. N4a introduces no phase, no field and no
-  anchoring rule: it reuses `JournalPhase.TERMINAL` with `outcome="never-began"`, which
-  `execute_mutation`'s existing `stop_before_start` path already writes, through the existing
-  `_record`/`_anchor` pair. What changes is only which condition reaches that write.
 - **N5.** The local adapter's `cleanup` commit point calls `finalize_cleanup_tombstone` with a
   proof whose every field comes from the context or the resolved recovery point; none is
   defaulted or synthesized. To make that literally true of `phase`,

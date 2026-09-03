@@ -161,12 +161,23 @@ Three residuals this decision does not close, all inherited and none made worse 
   `observe` for a cleanup mutation classifies `unreadable` and journals a terminal outcome of
   `conflict` — true before this change and unchanged by it.
 
-A head-disagreement refusal (above) leaves the operation unresolved at `mutation-started`
-rather than raising bare, so the service anchors `terminal` with `outcome="never-began"` before
-it raises. Without that, the next admission on the lane would run `_finish_recovery`'s
-`MUTATION_STARTED` arm and journal a full provider-observation cycle for a mutation the
-authority knows never reached the provider — and ADR-0584 makes the journal the evidence of
-record for exactly that question.
+A head-disagreement refusal leaves the operation unresolved at `mutation-started`, and so does
+the pre-existing `resolve_current` recheck beside it. That is the journal's design, not a gap,
+and an earlier draft of this record got it wrong in both directions.
+
+`journal._NEXT_OPERATION_PHASES` allows `mutation-started` to be followed only by
+`provider-returned`. `terminal` is a legal successor of `admitted` — which is why
+`execute_mutation`'s `stop_before_start` path anchors `never-began` — but not of
+`mutation-started`, so a `never-began` record there is rejected as invalid phase ordering. That
+ordering is not an accident: ADR-0584 requires `mutation-started` to be anchored *before* any
+provider access precisely because, after it, the authority cannot know whether the provider was
+reached. Asserting `never-began` would claim knowledge the model says is unavailable, and a
+crash-recovery reader could not tell a true one from a false one.
+
+The designed resolution is the observation cycle `_finish_recovery` runs on the next admission:
+it calls the adapter's `observe` and journals what was *observed*, which is accurate whether or
+not the provider was touched. So both refusals raise without a terminal record, and the lane is
+settled by observation rather than by assertion.
 
 ### The durable records gain a required field, and that has an ordering constraint
 
