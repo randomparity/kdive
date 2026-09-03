@@ -9,14 +9,20 @@ running guest, and the factory keeps its fail-closed `_unconfigured_observation`
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     _open_or_create_private_child,
+    _open_private_directory,
     _require_private_owned_directory,
 )
+
+# The name the sink actually writes, imported rather than restated so the two cannot
+# drift: a second literal here would silently stop matching if the sink ever renamed it.
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import _ARCHIVE_NAME
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     OperationOwnership,
@@ -25,7 +31,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 
 _ARTIFACT_ROOT_REFUSED = "artifact root is not an owner-only service-owned directory"
-_NOT_CANONICAL = "artifact root component is not a canonical identifier"
+_NOT_CANONICAL = "external-boot path component is not a canonical identifier"
+_RECOVERY_REFUSED = "recovery directory is not an owner-only service-owned directory"
+
+PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
 
 
 @dataclass
@@ -144,3 +153,54 @@ class LocalArtifactRoot:
             # `_require_private_owned_directory` raises a `ValueError` that already carries no
             # path and names the failing check more precisely than this message could.
             raise ValueError(_ARTIFACT_ROOT_REFUSED) from None
+
+
+class LocalPayloadCleanup:
+    """Removes an activation's boot payloads by exact name, treating absence as success."""
+
+    def __init__(self, recovery_root: Path) -> None:
+        self._root = recovery_root
+
+    def cleanup(self, root_fd: int, binding: ExternalBootActivationBinding) -> None:
+        # Composed before anything is removed, so a non-canonical binding refuses without
+        # having already deleted the payloads.
+        directory = f"{_canonical_name(binding.system_id)}.{_canonical_name(binding.activation_id)}"
+        for name in PAYLOAD_NAMES:
+            with suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=root_fd)
+        self._remove_archive(directory)
+
+    def _remove_archive(self, directory: str) -> None:
+        """Remove the activation's published archive from its own recovery directory.
+
+        `RecoveryArchiveSink.publish` writes the archive during prepare and
+        `publish_tombstone` unlinks only `intent.json`, so a cleanup confined to `root_fd`
+        leaves it behind — and `finalize_tombstone`, which requires the directory to hold
+        exactly `tombstone.json`, then fails permanently for every activation that captured
+        one. The mechanism holds a `Path`, so it must open the root itself: without
+        `O_NOFOLLOW` that open would follow a substituted symlink, and without re-validating
+        it would trust that the root is still what startup checked, which the read path
+        explicitly refuses to do. Both controls are on the deleting path here.
+        """
+        try:
+            root_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise ValueError(_RECOVERY_REFUSED) from None
+        try:
+            _require_private_owned_directory(root_fd, "recovery root")
+            try:
+                recovery_fd = _open_private_directory(root_fd, directory)
+            except FileNotFoundError:
+                # An activation whose recovery directory never existed has no archive.
+                return
+            except OSError:
+                raise ValueError(_RECOVERY_REFUSED) from None
+            try:
+                with suppress(FileNotFoundError):
+                    os.unlink(_ARCHIVE_NAME, dir_fd=recovery_fd)
+            finally:
+                os.close(recovery_fd)
+        finally:
+            os.close(root_fd)

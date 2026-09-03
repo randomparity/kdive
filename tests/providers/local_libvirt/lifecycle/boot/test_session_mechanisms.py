@@ -3,20 +3,49 @@
 from __future__ import annotations
 
 import errno
+import io
 import os
 import stat
 from pathlib import Path
+from typing import get_args
 from uuid import UUID
 
 import pytest
 
-from kdive.providers.local_libvirt.lifecycle.boot.session import OperationOwnership
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    FinalizeCleanupProof,
+    LocalLibvirtExternalBoot,
+    ModuleArchiveCapture,
+    RecoveryMetadataStore,
+    TargetProjectionV1,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    ExpectedOperationOwnership,
+    LocalExternalBootSession,
+    LocalExternalBootSessionFactory,
+    OperationOwnership,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    PAYLOAD_NAMES,
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLease,
+    LocalPayloadCleanup,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+from kdive.providers.shared.runtime_paths import overlay_path
+from tests.providers.local_libvirt.lifecycle.boot.test_session import (
+    Conn,
+    Domain,
+    Guest,
+    _xml,
+)
+from tests.providers.local_libvirt.test_external_boot import (
+    _BINDING,
+    _metadata,
+    _point,
+    _pre_stop,
+)
 
 SYSTEM_ID = UUID("11111111-1111-1111-1111-111111111111")
 BINDING = ExternalBootActivationBinding(
@@ -41,6 +70,29 @@ def _private_dir(path: Path) -> Path:
     path.mkdir()
     path.chmod(0o700)
     return path
+
+
+_ARCHIVE_DIRECTORY = f"{BINDING.system_id}.{BINDING.activation_id}"
+
+
+def _archive_directory(parent: Path) -> Path:
+    """Build the per-activation recovery directory holding a published archive."""
+    recovery = _private_dir(parent / _ARCHIVE_DIRECTORY)
+    (recovery / "modules.tar").write_bytes(b"archive")
+    return recovery
+
+
+def _cleanup(
+    recovery_root: Path,
+    artifacts: Path,
+    binding: ExternalBootActivationBinding | None = None,
+) -> None:
+    """Run cleanup against a descriptor the caller owns, as the session does."""
+    descriptor = os.open(artifacts, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        LocalPayloadCleanup(recovery_root).cleanup(descriptor, binding or BINDING)
+    finally:
+        os.close(descriptor)
 
 
 def _assert_no_host_path(error: BaseException, root: Path) -> None:
@@ -240,3 +292,244 @@ class TestArtifactRoot:
         # neither inside the configured root nor beside it.
         assert os.listdir(recovery_root) == []
         assert not (recovery_root.parent / "escape").exists()
+
+
+class TestPayloadCleanup:
+    def test_cleanup_removes_only_the_payload_names_under_the_descriptor(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in (*PAYLOAD_NAMES, "keep-me"):
+            (artifacts / name).write_bytes(b"payload")
+
+        _cleanup(recovery_root, artifacts)
+
+        assert sorted(os.listdir(artifacts)) == ["keep-me"]
+
+    def test_cleanup_is_idempotent(self, recovery_root: Path, tmp_path: Path) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in (*PAYLOAD_NAMES, "keep-me"):
+            (artifacts / name).write_bytes(b"payload")
+
+        _cleanup(recovery_root, artifacts)
+        after_first = sorted(os.listdir(artifacts))
+        _cleanup(recovery_root, artifacts)
+
+        assert sorted(os.listdir(artifacts)) == after_first
+
+    def test_cleanup_leaves_foreign_files_in_the_recovery_directory(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        recovery = _archive_directory(recovery_root)
+        (recovery / "foreign.json").write_bytes(b"{}")
+
+        _cleanup(recovery_root, artifacts)
+
+        assert not (recovery / "modules.tar").exists()
+        assert sorted(os.listdir(recovery)) == ["foreign.json"]
+
+    def test_cleanup_refuses_a_wide_mode_recovery_directory(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+        recovery = _archive_directory(recovery_root)
+        recovery.chmod(0o755)
+
+        with pytest.raises(ValueError) as caught:
+            _cleanup(recovery_root, artifacts)
+
+        _assert_no_host_path(caught.value, recovery_root)
+        # Scoped to the second removal: the first already ran, and the archive is untouched.
+        assert os.listdir(artifacts) == []
+        assert (recovery / "modules.tar").exists()
+
+    def test_cleanup_refuses_a_symlinked_recovery_directory(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+        elsewhere = _archive_directory(tmp_path)
+        os.symlink(elsewhere, recovery_root / _ARCHIVE_DIRECTORY)
+
+        with pytest.raises(ValueError) as caught:
+            _cleanup(recovery_root, artifacts)
+
+        _assert_no_host_path(caught.value, recovery_root)
+        _assert_context_suppressed(caught.value)
+        assert os.listdir(artifacts) == []
+        assert (elsewhere / "modules.tar").exists()
+
+    def test_cleanup_refuses_a_non_canonical_binding(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+        impostor = ExternalBootActivationBinding.model_construct(
+            system_id=BINDING.system_id,
+            run_id=BINDING.run_id,
+            activation_id="../escape",
+        )
+
+        with pytest.raises(ValueError, match="canonical identifier"):
+            _cleanup(recovery_root, artifacts, impostor)
+
+        # Refused before anything was deleted, unlike every other refusal here.
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+
+    def test_payload_names_match_the_target_projection_filenames(self) -> None:
+        # Discover the fields rather than listing them. A hard-coded list of the three known
+        # names catches a *rename* and misses an *added* fourth artifact entirely: a new
+        # `dtb_filename: Literal["dtb"]` would never enter `expected`, the equality would
+        # still hold, and cleanup would silently stop removing it.
+        expected = set()
+        for name, field in TargetProjectionV1.model_fields.items():
+            if not name.endswith("_filename"):
+                continue
+            args = get_args(field.annotation)
+            # Literal["x"] -> ("x",);  Literal["x"] | None -> (Literal["x"], NoneType)
+            expected.add(args[0] if isinstance(args[0], str) else get_args(args[0])[0])
+
+        # Not decoration: an unwrapping that silently yielded nothing would make the equality
+        # below vacuous, which is the exact failure this test exists to prevent.
+        assert expected, "no _filename fields discovered -- the unwrapping is wrong"
+        assert set(PAYLOAD_NAMES) == expected
+
+
+def _archived_session(
+    recovery_root: Path, artifacts: Path, *, active: bool
+) -> LocalExternalBootSession:
+    """Open a real session bound to `_BINDING`, with a real artifact descriptor.
+
+    Deliberately not `test_session.py`'s `_factory`, which hard-codes `test_session.BINDING`
+    and hands out the fake descriptor 41. `_ConcreteSession.cleanup_payloads` passes
+    `self._binding` — the one the pinned lease carried — so a session built on the other
+    binding would aim the archive removal at a directory that never existed, hit the
+    idempotence rule, and report success. That is the trap that would make this proof vacuous.
+    """
+    system_id = UUID(_BINDING.system_id)
+    events: list[str] = []
+    domain = Domain(events, _xml(overlay=overlay_path(system_id), system_id=system_id))
+    domain.active = active
+    factory = LocalExternalBootSessionFactory(
+        connect=lambda: Conn(events, domain),
+        pin_lease=LocalOperationLane().pin,
+        open_artifact_root=lambda _ownership: os.open(
+            artifacts, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        ),
+        open_guest=lambda: Guest(events),
+        worker_pid=4242,
+        open_overlay=lambda _path: os.open(os.devnull, os.O_RDONLY),
+        fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
+        close_overlay_descriptor=os.close,
+        cleanup_payloads=LocalPayloadCleanup(recovery_root).cleanup,
+    )
+    lease = LocalOperationLease(system_id=system_id, binding=_BINDING)
+    expected = ExpectedOperationOwnership(
+        system_id, UUID(_BINDING.run_id), UUID(_BINDING.activation_id)
+    )
+    return factory.open(lease, expected)
+
+
+def _recovery_directory(recovery_root: Path) -> Path:
+    return recovery_root / f"{_BINDING.system_id}.{_BINDING.activation_id}"
+
+
+def _archived_activation(store: RecoveryMetadataStore, archive: bytes = b"module archive"):
+    """Drive a real store to a `recovered` activation whose `modules.tar` is really published.
+
+    A stubbed store is the vacuous form this proof exists to avoid, so every step here is the
+    production one. `_metadata()` defaults `capture={"state": "absent"}` and
+    `prior_power="running"`; both are overridden, which is why no existing test reaches this
+    path.
+    """
+    template = _metadata().model_copy(update={"prior_power": "inactive"})
+    intent = _pre_stop(template)
+    reference = store.publish_pre_stop(intent)
+    sink = store.recovery_archive_sink(reference, intent)
+    try:
+        archive_sha256, archive_bytes = sink.publish(io.BytesIO(archive))
+    finally:
+        sink.close()
+    capture = ModuleArchiveCapture(
+        manifest="sha256:" + "3" * 64,
+        entry_count=0,
+        uncompressed_bytes=0,
+        archive_sha256=archive_sha256,
+        archive_bytes=archive_bytes,
+    )
+    completed = store.complete_preparation(
+        reference, intent, template.model_copy(update={"capture": capture})
+    )
+    recovered = store.record_phase(reference, _BINDING, completed, "recovered")
+    return reference, recovered
+
+
+def _finalize(store: RecoveryMetadataStore, reference, recovered) -> None:
+    point = _point(recovered)
+    digest = LocalLibvirtExternalBoot.point_digest(point)
+    store.publish_tombstone(reference, _BINDING, recovered, digest)
+    proof = FinalizeCleanupProof(
+        point_digest=digest,
+        binding=_BINDING,
+        operation_id="00000000-0000-0000-0000-000000000004",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=7,
+        journal_digest="sha256:" + "4" * 64,
+    )
+    store.finalize_tombstone(reference, point, proof)
+
+
+class TestCleanupReachability:
+    def test_finalize_tombstone_succeeds_after_cleanup_of_an_archived_activation(
+        self, tmp_path: Path
+    ) -> None:
+        recovery_root = _private_dir(tmp_path / "recovery")
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+
+        with RecoveryMetadataStore(recovery_root) as store:
+            reference, recovered = _archived_activation(store)
+            assert (_recovery_directory(recovery_root) / "modules.tar").exists()
+
+            # Drive the session, not the mechanism. Calling `LocalPayloadCleanup.cleanup`
+            # directly bypasses `require_inactive()`, so this proof would go green whether or
+            # not that gate blocks the real path.
+            session = _archived_session(recovery_root, artifacts, active=False)
+            session.cleanup_payloads()
+            session.close()
+
+            _finalize(store, reference, recovered)
+
+        assert not _recovery_directory(recovery_root).exists()
+        assert os.listdir(artifacts) == []
+
+    def test_cleanup_is_blocked_while_the_domain_is_active(self, tmp_path: Path) -> None:
+        recovery_root = _private_dir(tmp_path / "recovery")
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+
+        with RecoveryMetadataStore(recovery_root) as store:
+            _archived_activation(store)
+            session = _archived_session(recovery_root, artifacts, active=True)
+            with pytest.raises(RuntimeError, match="domain must be inactive"):
+                session.cleanup_payloads()
+            session.close()
+
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert (_recovery_directory(recovery_root) / "modules.tar").exists()
+        assert not (_recovery_directory(recovery_root) / "tombstone.json").exists()
+
+    # What the test above proves and does not prove. It proves the gate fires on an active
+    # domain. It does NOT exercise `restore_power`, so it does not demonstrate the link from
+    # `prior_power == "running"` to an active domain at cleanup time — that link is
+    # established by reading `restore_power`, whose "running" arm reaches
+    # `record_phase(..., "recovered")` only from the branch requiring `active`. Closing that
+    # gap needs an integration-level test over the whole recover-then-cleanup path, which is
+    # recorded as a residual rather than written here.
