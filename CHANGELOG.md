@@ -1145,6 +1145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the design review dispositions
 - Bound what the pre-create guard actually claims
 - Record the branch review and threat scan
+- Scope the golden-vector claim and record the NFC gap
 
 ### Fixed
 
