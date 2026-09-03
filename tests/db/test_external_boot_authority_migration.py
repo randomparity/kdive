@@ -2395,29 +2395,22 @@ def test_protocol_three_and_generic_external_job_paths_remain_denied(
         )
 
 
-def test_marked_jobs_are_not_claimable_and_no_readiness_switch_exists(
-    migrated_url: str, authority_role_dsns: _RoleDsns
-) -> None:
+def test_no_external_boot_readiness_switch_exists(migrated_url: str) -> None:
+    """0122 installs no function that flips authority-marked work on.
+
+    0122 also made marked jobs unclaimable. Migration
+    ``0127_reopen_external_boot_claim_lane.sql`` reverses that half deliberately (#2201),
+    so the claim behaviour is asserted in
+    ``tests/db/test_migration_0127_reopen_external_boot_claim_lane.py``. The generic
+    finalization half stays fenced and is asserted both there and by
+    ``test_protocol_three_and_generic_external_job_paths_remain_denied`` above.
+    """
     with psycopg.connect(migrated_url) as conn:
-        case = _seed_case(conn, worker_suffix="n")
-        conn.execute(
-            "UPDATE jobs SET state='queued', attempt=0, worker_id=NULL, lease_expires_at=NULL, "
-            "heartbeat_at=NULL WHERE id=%s",
-            (case.job_id,),
-        )
         functions = conn.execute(
             "SELECT proname FROM pg_proc JOIN pg_namespace n ON n.oid=pronamespace "
             "WHERE n.nspname='public' AND proname LIKE '%external_boot%enable%'"
         ).fetchall()
         assert functions == []
-    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
-        assert (
-            worker.execute(
-                "SELECT id FROM claim_worker_job(%s, %s, interval '5 minutes', ARRAY['default'])",
-                (case.worker_id, case.credential),
-            ).fetchone()
-            is None
-        )
 
 
 def test_audit_rows_exclude_credentials_provider_secrets_and_free_text(
