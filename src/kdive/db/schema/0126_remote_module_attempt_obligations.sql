@@ -55,6 +55,12 @@
 -- real document classes, so the day the argument above stops being true, it fails.
 
 CREATE TABLE remote_module_attempt_obligations (
+    -- Both foreign keys cascade on delete, and that is load-bearing rather than incidental.
+    -- ADR-0585's terminal escape — System teardown — has to reclaim an attempt whose mutation
+    -- obligation never discharged, or a worker killed mid-mutation retains its 10 GiB forever.
+    -- Deleting the System deletes this row, the attempt leaves the retained-owner set, and the
+    -- sweep is then free to reclaim its volumes. An ON DELETE RESTRICT here would make teardown
+    -- fail against exactly the attempts the escape exists for.
     system_id                   uuid NOT NULL REFERENCES systems (id) ON DELETE CASCADE,
     run_id                      uuid NOT NULL,
     operation_nonce             text NOT NULL CONSTRAINT remote_module_attempt_nonce
@@ -75,6 +81,11 @@ CREATE TABLE remote_module_attempt_obligations (
     baseline_result_identity    text,
     installed_entry_count       integer,
     installed_content_bytes     bigint,
+    -- Not in #2166's enumerated evidence, and here deliberately. `_recovery_from_reap_marker`
+    -- rebuilds a whole RemoteModuleRecoveryRefV1 from what the `attempt-reap` element carried, and
+    -- that document is persisted nowhere else in this schema. ADR-0588 moved ownership into the
+    -- volume name, but a 135-byte name cannot carry a nine-field document, so without this column
+    -- that named reader has no durable source at all and the reap child cannot land.
     recovery_reference          jsonb,
     created_at                  timestamptz NOT NULL DEFAULT now(),
     updated_at                  timestamptz NOT NULL DEFAULT now(),
