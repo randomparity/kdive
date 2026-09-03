@@ -174,6 +174,7 @@ def provider_resolver(
     supports_diagnostic_sysrq: bool = True,
     supports_crash_watch: bool = True,
     console_reader: object | None = None,
+    external_boot: object | None = None,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -187,6 +188,12 @@ def provider_resolver(
     port behind the gate; it defaults to an unused port for the deny/short-circuit tests.
     ``bootstrap_key_customizer`` (ADR-0289, #963) defaults to the real local-libvirt injector,
     matching production composition; pass ``None`` to model a provider with no local overlay.
+
+    ``external_boot`` (ADR-0583/0584) binds an :class:`ExternalBootPorts` implementation under the
+    **local-libvirt** kind. That pairing is deliberate: the fault-inject composition registers its
+    runtime under ``ResourceKind.FAULT_INJECT``, a value ``ExternalBootAuthorityMarkerV1``'s
+    ``provider_kind`` cannot hold and ``allocate_external_boot_authority`` rejects, so binding the
+    fault-inject *port* here is what makes it usable without the fault-inject *kind*.
     """
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
@@ -264,6 +271,7 @@ def provider_resolver(
                 snapshotter=unused_port, reader_factory=lambda: cast(Any, console_reader)
             )
         ),
+        external_boot=cast(Any, external_boot) if external_boot is not None else None,
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 
