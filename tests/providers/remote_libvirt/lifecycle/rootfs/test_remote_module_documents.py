@@ -96,7 +96,7 @@ def _result(**changes: object) -> dict[str, object]:
     ],
 )
 def test_operation_round_trips_canonical_json_and_matches_appliance_schema(
-    document: dict[str, object],
+    document: dict[str, object], tmp_path: Path
 ) -> None:
     operation = RemoteModuleOperationV1.model_validate(document)
     encoded = operation.to_canonical_json()
@@ -105,7 +105,11 @@ def test_operation_round_trips_canonical_json_and_matches_appliance_schema(
     assert RemoteModuleOperationV1.from_canonical_json(encoded) == operation
     schema = json.loads((APPLIANCE / "operation-v1.schema.json").read_text())
     assert not list(Draft202012Validator(schema).iter_errors(json.loads(encoded)))
-    assert _appliance_module()._validate_operation(json.loads(encoded)) == document
+    # Through the appliance's real reader, not around it: `_validate_operation(json.loads(...))`
+    # tested past the framing and byte-form gates, which is where #2176's defect lived.
+    path = tmp_path / "operation-v1.json"
+    path.write_bytes(operation.to_wire_bytes())
+    assert _appliance_module()._read_operation(path) == document
 
 
 def test_identity_is_stable_sha256_over_protocol_nul_canonical_json() -> None:
@@ -194,15 +198,13 @@ def test_wire_form_is_the_framed_file_the_appliance_reader_accepts(tmp_path: Pat
         appliance._read_operation(path)
 
 
-def test_wire_parser_reads_back_what_the_appliance_writes() -> None:
+def test_wire_parser_reads_back_what_the_appliance_writes(tmp_path: Path) -> None:
     result = RemoteModuleResultV1.model_validate(_result())
-    appliance_written = (
-        json.dumps(json.loads(result.to_canonical_json()), sort_keys=True, separators=(",", ":"))
-        + "\n"
-    ).encode()
+    path = tmp_path / "result-v1.json"
+    _appliance_module()._write_json(path, _result())
 
-    assert RemoteModuleResultV1.from_wire_bytes(appliance_written) == result
-    assert RemoteModuleResultV1.from_wire_bytes(result.to_wire_bytes()) == result
+    assert path.read_bytes() == result.to_wire_bytes()
+    assert RemoteModuleResultV1.from_wire_bytes(path.read_bytes()) == result
 
 
 @pytest.mark.parametrize("framing", [b"", b"\n\n"])
@@ -218,6 +220,61 @@ def test_wire_parser_names_a_framing_error_rather_than_a_canonical_one(framing: 
 def test_wire_parser_bounds_the_file_at_the_appliance_document_limit() -> None:
     with pytest.raises(ValueError, match="framed remote module document exceeds 16384 bytes"):
         RemoteModuleResultV1.from_wire_bytes(b" " * 16_384 + b"\n")
+
+
+def test_a_non_ascii_volume_key_crosses_the_boundary_in_both_directions(tmp_path: Path) -> None:
+    """The one value that can tell the two encodings apart, through both sides' real code.
+
+    Provider writer to appliance reader, then appliance writer to provider reader. Before the
+    ADR-0585 amendment of 2026-09-03 the appliance wrote `"r\\u00fct-1"` and this reader demanded
+    `"rüt-1"`, so an appliance-written result failed the provider's own canonical check.
+    """
+    appliance = _appliance_module()
+    key = "rüt-1"
+    operation_document = _operation(root_volume={"key": key, "identity": DIGESTS["c"]})
+    operation = RemoteModuleOperationV1.model_validate(operation_document)
+    operation_path = tmp_path / "operation-v1.json"
+    result_path = tmp_path / "result-v1.json"
+
+    operation_path.write_bytes(operation.to_wire_bytes())
+    assert appliance._read_operation(operation_path) == operation_document
+
+    result_document = _result(root_volume_key=key)
+    appliance._write_json(result_path, result_document)
+    written = result_path.read_bytes()
+
+    assert key.encode() in written
+    assert b"\\u" not in written
+    result = RemoteModuleResultV1.from_wire_bytes(written)
+    assert result.root_volume_key == key
+    assert result.to_wire_bytes() == written
+    # The key survived both crossings byte-identically, so the identity comparison holds.
+    result.validate_for(operation)
+
+
+@pytest.mark.parametrize(
+    ("key", "accepted"),
+    [("é" * 255, False), ("é" * 127 + "a", True), ("a" * 255, True)],
+)
+def test_volume_key_is_bounded_at_255_utf8_bytes(key: str, accepted: bool) -> None:
+    """The schema's `maxLength: 255` counts characters; the normative bound is bytes.
+
+    A 255-character two-byte key is 510 bytes and can never name a dir-pool volume, yet it
+    satisfies every JSON Schema validator in the path.
+    """
+    schema = json.loads((APPLIANCE / "result-v1.schema.json").read_text())
+    document = _result(root_volume_key=key)
+
+    assert not list(Draft202012Validator(schema).iter_errors(document))
+    if accepted:
+        assert RemoteModuleResultV1.model_validate(document).root_volume_key == key
+        return
+    with pytest.raises(ValidationError, match="510 UTF-8 bytes; the limit is 255 bytes"):
+        RemoteModuleResultV1.model_validate(document)
+    with pytest.raises(ValidationError, match="510 UTF-8 bytes; the limit is 255 bytes"):
+        RemoteModuleOperationV1.model_validate(
+            _operation(root_volume={"key": key, "identity": DIGESTS["c"]})
+        )
 
 
 @pytest.mark.parametrize(

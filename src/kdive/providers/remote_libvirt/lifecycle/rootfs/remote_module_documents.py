@@ -1,16 +1,17 @@
 """Closed provider-private documents for remote module recovery (ADR-0585).
 
-The v1 JSON encoding is not fully settled, and this module deliberately does not settle it. The
-appliance writes results and checkpoints with the ``json.dumps`` default of ``ensure_ascii=True``
-(``deploy/remote_module_appliance/appliance.py``, ``_write_json``) and hashes manifest bytes with
-``ensure_ascii=False`` in the same file, and ADR-0585 calls the result canonical without defining
-an encoding, separators, or framing. This reader requires unescaped UTF-8, matching the sibling
-contract in ``kdive.providers.ports.external_boot``, and reports an ASCII-escaped document as that
-specific mismatch rather than as a bare byte inequality. Only a non-ASCII value can tell the two
-encodings apart, and in the two documents that cross the appliance boundary only the volume key can
+The canonical byte form of a ``remote-module-*-v1`` document is fixed by the ADR-0585 amendment of
+2026-09-03: UTF-8 with no ``\\uXXXX`` escape of a character that needs none, members sorted by code
+point, ``,`` and ``:`` separators with no other whitespace, absent optional fields absent rather
+than null, and -- for a document stored as a file on an appliance volume -- exactly one trailing
+newline. ``deploy/remote_module_appliance/appliance.py`` writes and reads the same bytes through
+its own ``_canonical_bytes``; before that amendment its writer used the ``json.dumps`` default of
+``ensure_ascii=True`` while its manifest digest used ``ensure_ascii=False``, so an ASCII-escaped
+document is the one non-conforming form a reader here is most likely to meet and is reported as
+that specific mismatch rather than as a bare byte inequality. Only a non-ASCII value can tell the
+two apart, and in the two documents that cross the appliance boundary only the volume key can
 carry one; the recovery reference's opaque provider references can carry one too, but never reach
-the appliance. Resolving it takes an ADR amendment binding both sides; until then neither form is
-silently accepted.
+the appliance.
 """
 
 from __future__ import annotations
@@ -56,8 +57,11 @@ type _CanonicalUuid = Annotated[
     Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
 ]
 type _OperationNonce = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+# The character bound mirrors the shipped appliance schemas, where `maxLength` is all JSON Schema
+# can express; the normative bound is _VOLUME_KEY_MAX_BYTES, applied by _volume_name_key below.
 type _BoundedVolumeKey = Annotated[str, Field(min_length=1, max_length=255)]
 
+_VOLUME_KEY_MAX_BYTES = 255
 _OPERATION_MAX_BYTES = 16_384
 _DOCUMENT_MAX_BYTES = 65_536
 # DOCUMENT_LIMIT in deploy/remote_module_appliance/appliance.py, applied there to the whole
@@ -137,8 +141,8 @@ class _RemoteModuleDocument(_ClosedValue):
         if value.to_canonical_json() != data:
             if value._json(ensure_ascii=True) == data:
                 raise ValueError(
-                    "remote module document is ASCII-escaped JSON; this reader requires "
-                    "unescaped UTF-8. The v1 encoding is unsettled; see the module docstring"
+                    "remote module document is ASCII-escaped JSON; the canonical form is "
+                    "unescaped UTF-8 (ADR-0585 amendment 2026-09-03)"
                 )
             raise ValueError("remote module document is not canonical JSON")
         return value
@@ -185,6 +189,24 @@ def _closed_volume_key(value: str) -> str:
     return value
 
 
+def _volume_name_key(value: str) -> str:
+    """Refuse a key that could not name a libvirt volume, by bytes rather than by characters.
+
+    A dir pool inherits the filesystem `NAME_MAX`, so the bound is 255 UTF-8 bytes (ADR-0585
+    amendment 2026-09-03; #2176). This is the first reader to see an operator-provisioned key, and
+    the appliance can only answer with a closed error code, so the byte length and the limit are
+    named here.
+    """
+    value = _closed_volume_key(value)
+    encoded_length = len(value.encode())
+    if encoded_length > _VOLUME_KEY_MAX_BYTES:
+        raise ValueError(
+            f"volume key is {encoded_length} UTF-8 bytes; the limit is "
+            f"{_VOLUME_KEY_MAX_BYTES} bytes"
+        )
+    return value
+
+
 class _RootVolumeV1(_ClosedValue):
     # The pool-scoped volume name resolved by storageVolLookupByName, not the host-path form
     # virStorageVolGetKey returns for file-backed pools: ADR-0585 keeps host paths out of the
@@ -192,7 +214,7 @@ class _RootVolumeV1(_ClosedValue):
     key: _BoundedVolumeKey
     identity: Digest
 
-    _key_is_opaque = field_validator("key")(_closed_volume_key)
+    _key_names_a_volume = field_validator("key")(_volume_name_key)
 
 
 class RemoteModuleOperationV1(_RemoteModuleDocument):
@@ -250,8 +272,8 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
     entry_count: Annotated[int, Field(ge=0, le=200_000)] | None = None
     content_bytes: Annotated[int, Field(ge=0, le=8_589_934_592)] | None = None
 
-    _root_key_is_opaque = field_validator("root_volume_key")(
-        lambda value: None if value is None else _closed_volume_key(value)
+    _root_key_names_a_volume = field_validator("root_volume_key")(
+        lambda value: None if value is None else _volume_name_key(value)
     )
 
     @property

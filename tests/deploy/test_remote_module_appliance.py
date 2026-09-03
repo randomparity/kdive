@@ -91,6 +91,142 @@ def test_operation_document_is_regular_file_only_and_nofollow(tmp_path: Path) ->
         appliance._read_operation(operation)
 
 
+def _framed(document: dict[str, object]) -> bytes:
+    """The ADR-0585 canonical wire bytes, written without going through the appliance."""
+    return (
+        json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        + b"\n"
+    )
+
+
+def test_appliance_hashes_and_writes_one_byte_form(tmp_path: Path) -> None:
+    """The digest input at `_tree_manifest` and the writer at `_write_json` are one encoding.
+
+    Before #2176 the appliance hashed with `ensure_ascii=False` and wrote with the `json.dumps`
+    default of `ensure_ascii=True`, so the bytes it hashed and the bytes it wrote disagreed about
+    the same value.
+    """
+    appliance = _module()
+    document = {"root_volume_key": "rüt-1", "b": "a", "a": "b"}
+    path = tmp_path / "result-v1.json"
+    tree = tmp_path / "modules"
+    tree.mkdir()
+    (tree / "mödule.ko").write_bytes(b"module")
+
+    appliance._write_json(path, document)
+
+    written = path.read_bytes()
+    assert written == b'{"a":"b","b":"a","root_volume_key":"r\xc3\xbct-1"}\n'
+    assert b"\\u" not in written
+    assert written == appliance._canonical_bytes(document) + b"\n"
+
+    manifest, _count, _size = appliance._tree_manifest(tree)
+    entry = {
+        "mode": "0644",
+        "path": "mödule.ko",
+        "sha256": "sha256:" + hashlib.sha256(b"module").hexdigest(),
+        "size": 6,
+        "type": "file",
+    }
+    encoded = _framed({"entries": [entry], "schema": "module-source-manifest-v1"})[:-1]
+    assert "mödule.ko".encode() in encoded and b"\\u" not in encoded
+    digest = hashlib.sha256(b"kdive-module-source-manifest-v1\0" + encoded).hexdigest()
+    assert manifest == f"sha256:{digest}"
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("ascii escape", lambda data: data.replace(b'"root-1"', b'"\\u0072oot-1"')),
+        (
+            "duplicate member",
+            lambda data: data.replace(b'"operation":', b'"operation":"restore","operation":', 1),
+        ),
+        ("unsorted members", lambda data: json.dumps(_operation()).encode() + b"\n"),
+        ("indented", lambda data: json.dumps(_operation(), indent=2).encode() + b"\n"),
+        ("second newline", lambda data: data + b"\n"),
+        ("no newline", lambda data: data[:-1]),
+        ("leading whitespace", lambda data: b" " + data),
+    ],
+)
+def test_operation_reader_refuses_every_non_canonical_byte_form(
+    tmp_path: Path, name: str, mutate: Any
+) -> None:
+    """Driven through `_read_operation`, the real reader, not around it through `json.loads`.
+
+    A duplicate member is the classic parser differential: two readers may disagree about which
+    value wins, so a document the appliance accepted could mean something else to the provider.
+    Nothing in `json.loads` rejects it -- only comparing the re-serialized bytes does.
+    """
+    appliance = _module()
+    path = tmp_path / "operation-v1.json"
+    canonical = _framed(_operation())
+    path.write_bytes(canonical)
+    assert appliance._read_operation(path) == _operation()
+
+    mutated = mutate(canonical)
+    assert mutated != canonical
+    path.write_bytes(mutated)
+    with pytest.raises(appliance.ApplianceError, match="INVALID_DOCUMENT"):
+        appliance._read_operation(path)
+
+
+def test_checkpoint_reader_refuses_a_result_the_writer_would_not_have_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, _destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    document = appliance._validate_operation(operation)
+    appliance.execute(document)
+    checkpoint_path = scratch / "result-v1.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+
+    assert appliance._existing_checkpoint(document) == checkpoint
+    checkpoint_path.write_bytes(json.dumps(checkpoint).encode() + b"\n")
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._existing_checkpoint(document)
+
+
+@pytest.mark.parametrize(
+    ("key", "accepted"),
+    [("é" * 255, False), ("é" * 127 + "a", True), ("a" * 255, True), ("a" * 256, False)],
+)
+def test_volume_key_is_bounded_in_bytes_not_characters(key: str, accepted: bool) -> None:
+    """255 characters of a two-byte character is 510 bytes, which can never name a volume."""
+    appliance = _module()
+    document = _operation()
+    document["root_volume"] = {"key": key, "identity": "sha256:" + "c" * 64}
+    schema_valid = not list(
+        Draft202012Validator(_json("operation-v1.schema.json")).iter_errors(document)
+    )
+
+    assert schema_valid == (len(key) <= 255)
+    if accepted:
+        assert appliance._validate_operation(document) == document
+    else:
+        with pytest.raises(appliance.ApplianceError, match="INVALID_DOCUMENT"):
+            appliance._validate_operation(document)
+
+
+@pytest.mark.parametrize(
+    ("name", "pointer"),
+    [
+        ("operation-v1.schema.json", ("root_volume", "key")),
+        ("result-v1.schema.json", ("root_volume_key",)),
+    ],
+)
+def test_schemas_state_the_length_unit_maxlength_cannot_express(
+    name: str, pointer: tuple[str, ...]
+) -> None:
+    """`maxLength` counts characters, so the schema has to say which unit is normative."""
+    node = cast(dict[str, Any], _json(name)["properties"])
+    for step in pointer[:-1]:
+        node = node[step]["properties"]
+    field = node[pointer[-1]]
+
+    assert field["maxLength"] == 255
+    assert "255 UTF-8 BYTES" in field["description"]
+
+
 def test_result_schema_has_stable_closed_errors_and_failure_coupling() -> None:
     schema = _json("result-v1.schema.json")
     definitions = cast(dict[str, object], schema["$defs"])
@@ -665,7 +801,8 @@ def test_retry_rejects_a_malformed_durable_checkpoint(
     checkpoint_path = scratch / "result-v1.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     checkpoint.pop("entry_count")
-    checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+    # Written canonically so the rejection is the shape rule, not the byte form (#2176).
+    checkpoint_path.write_bytes(appliance._canonical_bytes(checkpoint) + b"\n")
 
     with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
         appliance.execute(appliance._validate_operation(operation))
@@ -751,7 +888,7 @@ def test_accepted_retry_rejects_impossible_checkpoint_shapes(
     }
     if checkpoint.get("error_code") is None:
         checkpoint.pop("error_code")
-    (scratch / "result-v1.json").write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+    (scratch / "result-v1.json").write_bytes(appliance._canonical_bytes(checkpoint) + b"\n")
 
     with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
         appliance._existing_checkpoint(document)

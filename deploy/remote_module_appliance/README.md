@@ -20,6 +20,16 @@ validate against `result-v1.schema.json`. A failure always carries exactly one s
 success never carries one. Console output contains only the phase, stable error code, identities,
 counts, and manifests represented in the result.
 
+Canonical is a byte form, fixed by the ADR-0585 amendment of 2026-09-03 and implemented by
+`_canonical_bytes` in `appliance.py`: UTF-8 with no byte-order mark and no `\uXXXX` escape of a
+character that needs none, object members sorted ascending by code point, `,` and `:` separators
+with no other whitespace, an optional field with no value absent rather than null, and — for a
+document stored as a file on a volume — exactly one trailing newline and nothing after it. Both
+sides re-serialize what they parsed and refuse any document whose bytes differ, so a duplicate
+member or a gratuitous escape is rejected rather than resolved. Schema validation is not
+sufficient on its own: `maxLength` counts characters, while `root_volume.key` and
+`root_volume_key` are bounded at 255 UTF-8 **bytes** — the dir-pool `NAME_MAX`.
+
 Every retry classifies the nonce-owned root-directory names before writing: `D` is the release
 destination, `N` the staged replacement, and `O` the displaced destination. These are the complete
 accepted states; any other phase/name/manifest combination is `RECOVERY_CONFLICT` and performs no
