@@ -111,9 +111,17 @@ marker is rejected at `dump_payload` rather than at `allocate_external_boot_auth
 - Both: `marker.operation` is one of the six enqueueable operations (below).
 
 The marker's `activation_id`/`plan_identity` cannot be checked against the activation row inside
-a Pydantic validator — it has no database. They are checked by the enqueue-side helper
-`build_external_boot_payload` (below), which reads the activation row, and again by
-`allocate_external_boot_authority` at execution.
+a Pydantic validator — it has no database. **Criterion 2's activation cross-check therefore holds
+in two different ways, and the bound is worth stating exactly.** For an enqueue that goes through
+`build_external_boot_payload` (§2) it holds *by construction*: the helper takes `run_id`,
+`system_id`, and `plan_identity` from the row, so a disagreeing marker cannot be built. Nothing
+forces a caller through the helper, and this change ships no `src/` caller of it — so a hand-built
+marker is instead refused at execution, twice: by the runner's step 2 before any authority is
+allocated, and by `allocate_external_boot_authority`'s nine-field re-check
+(`0122…sql:467-474`). The execution-time refusal is safe but not recoverable, because a
+pre-allocation refusal wedges the job per §8; that is why #2204's tools must enqueue through the
+helper rather than composing a marker directly, which is reported to #2204 rather than recorded
+here.
 
 ### 2. Enqueue-side helper
 
@@ -331,9 +339,9 @@ looks like it holds.
 
 | Operation | Kind / purpose | Required activation state | Required activation evidence | Port call | Result variant | Activation after an applied commit |
 |---|---|---|---|---|---|---|
-| `activate` | boot / activate | `activating` ¶ | `materialization`, `recovery_point` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
-| `recover` | boot / recover | `recovering` † ¶ | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
-| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † ¶ | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `activate` | boot / activate | `activating` | `materialization`, `recovery_point` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
+| `recover` | boot / recover | `recovering` † | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
 | `release` | boot / release | `active`, `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `recovery_point`, `ready` reservation row | `observe` | `_ReleaseResult` | reservation released |
 | `cleanup` | boot / release | `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `recovery_point`, release row | `cleanup` | `_CleanupResult` | `cleanup_complete = true` |
 | `teardown` | teardown / teardown | `recovery_conflict`, `recovery_failed` ‡ § | `recovery_point`, release row | `cleanup` | `_TeardownResult` | `cleanup_complete`, System `torn_down` |
@@ -362,15 +370,18 @@ separately:
   requires that no `external_boot_reservation_releases` row exists yet
   (`0122…sql:1319-1335`).
 - **§** `teardown` additionally requires `systems.state = 'failed'` (`0122…sql:1331-1335`).
-- **¶** The commit also conditions these three on rows outside the activation:
-  `activate` on `systems.state = 'ready'` and `runs.state = 'succeeded'`, and
-  `recover`/`resolve-conflict` on `systems.state IN ('ready','crashed')` — plus `'failed'` for
-  `resolve-conflict` — and `runs.state = 'succeeded'` (`0122…sql:1302-1318`). These are checked by
-  the runner alongside the others, not left to `allocate`: `allocate` does check them
-  (`:482-500`), but a refusal there is a `superseded` allocation, which step 3 above shows cannot
-  requeue and wedges the job. Refusing before allocation costs a database read and avoids that.
+**Deliberately not checked here: the System and Run states.** The commit also conditions
+`activate` on `systems.state = 'ready'` and `runs.state = 'succeeded'`, and
+`recover`/`resolve-conflict` on `systems.state IN ('ready','crashed')` (plus `'failed'` for
+`resolve-conflict`) and `runs.state = 'succeeded'` (`0122…sql:1302-1318`). The runner does **not**
+mirror those, because `allocate_external_boot_authority` already performs exactly the same checks
+for every purpose (`0122…sql:482-501`), so a violation is caught at allocation, before any provider
+mutation. Mirroring them in Python would buy only the avoidance of the #2203 wedge — an excluded
+concern — in exchange for predicates duplicating SQL guards with no gate that fails when the two
+drift. The †/‡/§ prerequisites below are different and stay: each is checked **only** at commit,
+so without them a provider mutation happens and is then refused.
 
-**Every one of these — required state, required evidence, and the four footnoted
+**Every one of these — required state, required evidence, and the three footnoted
 prerequisites — is a parameter of the shared runner, not prose.** `run_operation` takes
 `require_activation_state`, `require_activation_evidence`, and a per-operation
 `require_preconditions` callable, and performs them as steps 2a, 2b, and 2c, all before
@@ -382,10 +393,18 @@ them.
 - **activate** requires activation state `activating` at commit (`0122…sql:1302-1306`), so the
   handler refuses a `prepared` activation that the server has not moved to `activating`;
   `allocate` admits both, the commit admits only `activating`, and failing early is cheaper than
-  a superseded commit. `activation_readiness_deadline` comes from the acknowledgement's clock,
-  not the handler's: the handler adds
-  `ACTIVATION_READINESS_WINDOW` (a module constant, 15 minutes) to `now(UTC)` and states the
-  full five-part limit contract in the docstring.
+  a superseded commit. `_ActivateResult.activation_readiness_deadline` is required
+  (`src/kdive/jobs/models.py:115`) so a value must be emitted; the handler adds
+  `ACTIVATION_READINESS_WINDOW` (a module constant, 15 minutes) to `now(UTC)`.
+
+  **The docstring must not state a five-part limit contract for it.** The commit stores the value
+  after a parse check only (`0122…sql:1471-1488`), the schema bounds it in no way, and a search of
+  `src/` finds no reader of `activation_readiness_deadline` outside the model definition. Stating
+  a consequence of violation and a recovery action for a deadline nothing enforces would document
+  a feature that does not exist. The docstring instead names the unit and reference clock, says
+  plainly that **nothing reads this value today**, and names #2202 — which the charter excludes as
+  "deadline reuse" — as the enforcement owner. Every other limit this change emits still carries
+  the full five-part contract.
 - **release** reads the `external_boot_reservations` row in state `ready` and copies
   `store_identity`, `owner_key`, and `reserved_bytes` from it verbatim — the commit re-checks
   all three against the same row (`0122…sql:1535-1541`), so any value the handler invented
@@ -553,9 +572,20 @@ the provider says about identity.
 | Failure context | `_FailureContext` admits one field, `phase`, from a closed `Literal`; no message text crosses into the authority audit |
 | Provider port call (boundary c) | `activate`, `recover`, `resolve-conflict`, and `release` compare the `observe` return against the activation's persisted `materialization.kernel_observation` and refuse to emit terminal evidence when they disagree; the observation is otherwise discarded. `cleanup` and `teardown` have **no** observation control, because their port call is `cleanup` and `ExternalBootPorts` offers nothing to observe a deletion with — stated rather than left for a reader to infer from the table's silence |
 
+**Reachability after this change is zero, and that is the load-bearing safety fact.** Every
+hazard above is reached only by an authority-marked job, and after this change **nothing in
+production enqueues one**: the three MCP tools still return `recovery_executor_unavailable`
+(`src/kdive/mcp/tools/external_boot/recovery_requests.py`, #2204 owns flipping them),
+`build_external_boot_payload` ships with no `src/` caller, and all five swapped `src/` enqueue
+sites construct unmarked payloads. So this change is safe to merge and unsafe to make *reachable*:
+#2199/#2200 must wire an acknowledger and #2203 must supply the reaping before #2204 turns the
+executor on. That ordering is an epic-level constraint on #2118, not missing work here, and it is
+reported rather than recorded in this spec because #2204's and #2118's bodies are outside this
+change's surface.
+
 **Out of scope.** Authenticating the provider-authority peer (ADR-0584's mTLS transport, not
-wired here); rate-limiting enqueue (the MCP admission surface, #2204); the availability leak
-when a commit is superseded (#2203).
+wired here); rate-limiting enqueue (the MCP admission surface, #2204); the reaping of a marked job
+whose handler could not commit (#2203).
 
 ## Testing
 
@@ -639,8 +669,15 @@ fixture's job to solve, and none of them weakens ADR-0593 decision 4.
    `get(kind)` (`src/kdive/jobs/models.py:386-399`), and the `ExternalBootOperations` registry is
    captured in the router closure, so it cannot be read off the returned object. The test
    therefore **drives** it: for each of the six operations it builds a marked job, dispatches it
-   through the handler `build_handler_registry(<stub assembly>)` returned for that operation's
-   `JobKind`, and asserts exactly one operation handler ran and it was the right one. That
+   through the handler the registry returned for that operation's `JobKind`, and asserts exactly
+   one operation handler ran and it was the right one. Prefer
+   `build_production_handler_registry(secret_registry=<stub>, incarnation_credential=<stub>,
+   pool=None)`, which is the entry point the criterion names. If its production process assembly
+   cannot be built in a unit test, fall back to `build_handler_registry(<stub assembly>)` and say
+   so in the test's docstring: the two share `register_all_handlers`
+   (`src/kdive/jobs/assembly.py:87-107`, `:110`), which is the registration path the criterion
+   cares about, so the substitution is exact — but it is stated rather than assumed, the same way
+   §8 states criterion 6's. That
    asserts what the criterion asks — the registry from the production builder resolves each
    marker `operation` to exactly one handler — over the real wiring, including that
    `register_all_handlers` passed the same registry to **both** registrars. Separately:

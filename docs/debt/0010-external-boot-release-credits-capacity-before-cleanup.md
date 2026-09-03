@@ -47,9 +47,12 @@ that an authority-marked job whose handler raises before it can produce a bindin
 (`src/kdive/jobs/worker.py:505-517`), burns one attempt per lease lapse, and then wedges
 permanently `running` once `attempt >= max_attempts` — because `repair_abandoned_jobs` is fenced
 against marked payloads (`src/kdive/reconciler/repairs/jobs.py:42-49`) and both generic finalizers
-are fenced (`0122_external_boot_authority.sql:304-315`). A wedged `cleanup` job is exactly the
-state the shipped default configuration produces while `ExternalBootHandlerPorts.acknowledger` is
-unwired, so the permanent case is the expected one until #2199/#2200 land, not the rare one.
+are fenced (`0122_external_boot_authority.sql:304-315`). A wedged `cleanup` job is what the default
+configuration **will** produce once #2204 enqueues marked jobs while
+`ExternalBootHandlerPorts.acknowledger` is still unwired — so the permanent case is the expected
+one from that point, not the rare one. It is not reachable today: after #2205 nothing in
+production enqueues a marked job at all, so this record describes an ordering hazard for #2118 to
+sequence, not current production behaviour.
 
 ## Why deferred
 

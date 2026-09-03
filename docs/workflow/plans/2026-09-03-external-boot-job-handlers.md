@@ -389,8 +389,13 @@ def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
    `operations = external_boot.build_operations(ExternalBootHandlerPorts(...))` before the two
    registrar calls and pass it to both. In each registrar, wrap the existing lambda:
    `registry.register(JobKind.BOOT, route_marked(operations, lambda conn, job: boot_handler(...)))`.
-5. **Run and confirm they pass**; then `uv run python -m pytest tests/jobs -q` to catch every
-   existing caller of the two registrars that now needs the keyword.
+5. **Run and confirm they pass**; then
+   `uv run python -m pytest tests/jobs tests/mcp/lifecycle -q` to catch every existing caller of
+   the two registrars that now needs the required keyword. Three call sites exist and only one is
+   under `tests/jobs`: `tests/jobs/handlers/test_runs_boot.py:183`,
+   `tests/mcp/lifecycle/test_runs_tools.py:5150`, and
+   `tests/mcp/lifecycle/test_systems_tools.py:2125`. Re-derive them with
+   `rg -n 'register_handlers\(' tests/` rather than trusting these line numbers.
 6. `just lint && just type && just adr-status-check`. The third is not decoration:
    `scripts/guards/check_adr_status.py` fails any ADR whose status keyword is `Proposed` and that
    is cited from `src/` or `tests/`, and this task is where the first `ADR-0593` citation lands
@@ -483,10 +488,12 @@ def authority_result(
    row. This is the spec's §7 *required activation evidence* column and it is checked for every
    operation, not only `activate`.
 2c. `await require_preconditions(conn, activation, marker)` — the per-operation callable carrying
-   the four footnoted prerequisites the spec's §7 names: the recovery-attempt row state (†), the
-   `NOT cleanup_complete` / no-existing-release guards (‡), `systems.state = 'failed'` (§), and
-   the commit's system/run-state conditions (¶). Each refuses with the same terminal
-   `configuration_error`.
+   the three footnoted prerequisites the spec's §7 names: the recovery-attempt row state (†), the
+   `NOT cleanup_complete` / no-existing-release guards (‡), and `systems.state = 'failed'` (§).
+   Each refuses with the same terminal `configuration_error`. The System/Run state conditions are
+   deliberately **not** mirrored here — `allocate_external_boot_authority` already checks them
+   (`0122…sql:482-501`), so duplicating them in Python would add drift surface for a benefit
+   #2203 owns.
 
    Steps 2a-2c all run **before** step 3, so every refusal happens before an authority exists.
    That matters beyond tidiness: a refusal after allocation, or a `superseded` allocation, cannot
@@ -612,8 +619,9 @@ introduces). `failure_context.phase` is `admission` for steps 1–3, `preparatio
      preceded allocation rather than followed it.
    - `test_unmet_precondition_is_refused_before_allocation` — one case per footnote: a `recover`
      whose recovery-attempt row is in the wrong state (†), a `cleanup` on an activation with
-     `cleanup_complete` already true (‡), a `teardown` whose System is not `failed` (§), and an
-     `activate` whose Run is not `succeeded` (¶). Same three assertions.
+     `cleanup_complete` already true (‡), and a `teardown` whose System is not `failed` (§). Same
+     three assertions. There is no `activate`-whose-Run-is-not-succeeded case, because the runner
+     does not check that — `allocate` does.
    - `test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation` — assert
      `_authority_binding_matches(marker, failure.result)` is `True` and
      `failure.result.result.failure_context.phase == "provider-call"`.
