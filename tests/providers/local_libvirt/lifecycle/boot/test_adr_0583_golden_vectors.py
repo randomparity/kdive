@@ -1,10 +1,24 @@
 """ADR-0583's three published golden identity vectors, against local-libvirt (#2159).
 
-ADR-0583 publishes three digests as the conformance vectors for the versioned two-part libvirt
-definition identity — the preserved digest over the inactive definition minus
-``/domain/os/{kernel,initrd,cmdline}``, and the boot projection digest over exactly those three
-fields. They are normative: the algorithm exists to reproduce them, and a constant nobody asserts
-is a decision that can stop being true without anything failing.
+What these three tests pin, exactly: the digests ADR-0583 publishes reproduce against the current
+local-libvirt implementation *for the ADR's own inputs*. A published constant that nothing asserts
+is a decision that can stop being true without anything failing, and that is the gap this closes.
+
+Read the scope narrowly, because it is narrower than "the identity algorithm is covered":
+
+- These vectors do **not** exercise removal of ``/domain/os/{kernel,initrd,cmdline}`` from the
+  preserved digest. The ADR's source document carries none of those elements, so the removal is a
+  no-op on it and deleting the removal loop entirely leaves all three tests here green. That
+  mutant does die, but elsewhere — ``test_session.py`` ``test_inspection_is_exact_immutable_and_
+  validates_ownership``, whose fixture domain does carry boot fields.
+- They do **not** exercise the whitespace normalization that runs before canonicalization, for the
+  same reason: the ADR's source is written without inter-element whitespace. Deleting that
+  normalization leaves the whole of ``tests/providers/`` green — 3551 passed — so it is uncovered
+  locally, and real ``XMLDesc`` output *is* indentation-formatted, where dropping it changes the
+  digest. Anyone changing normalization gets no signal from this module.
+
+So this is a conformance pin on published values, not coverage of the subtraction the algorithm
+performs. Treating it as the latter is the mistake it is worded to prevent.
 
 Local-libvirt carries one implementation and remote-libvirt carries a second, which
 ``tests/providers/remote_libvirt/lifecycle/test_external_boot.py`` pins against the same three
@@ -32,8 +46,13 @@ _GOLDEN_PRESERVED = "sha256:3e3cde0b5115867e991160f1d361fef3ec0734e8a87e2ab003d6
 _GOLDEN_NULL_BOOT = "sha256:c48b5e5a6e9ac64b1129c1d468ce0de305288a86a6575467fb15f71d3c14b925"
 _GOLDEN_UNICODE_BOOT = "sha256:06bf5b2aceb13f19b7debd17181ada54041d883f926c9c5f4c0acae4336f58fb"
 
-# The two non-ASCII fields of the ADR's third vector. Both carry U+00E9, so the source is NFC and
-# `render_target_xml` admits it; a decomposed e + U+0301 would change the digest and fail loudly.
+# The two non-ASCII fields of the ADR's third vector. Both must be written NFC (U+00E9), because
+# the ADR digests the NFC form. Nothing enforces that here: `render_target_xml` applies its NFC
+# check to `source` only, and accepts a decomposed e + U+0301 in these two arguments without
+# complaint. What catches a decomposed literal is the assertion itself — the digest changes — so
+# the test still fails loudly, just not for the reason a reader might assume. The renderer's
+# missing NFC gate on these fields is recorded in
+# docs/debt/0009-libvirt-target-renderer-does-not-nfc-gate-kernel-and-cmdline.md.
 _GOLDEN_KERNEL = "/var/lib/kdive/café"
 _GOLDEN_CMDLINE = "root=LABEL=café"
 
