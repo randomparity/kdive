@@ -211,6 +211,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expose the three recovery contracts as MCP tools
 - Add the durable module-attempt obligation row
 - Reopen the worker claim path for marked external-boot jobs
+- Bind external boot to the authority adapter
+- Gate external-boot advertisement on the authority
 
 ### Changed
 
@@ -1863,6 +1865,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Announce the console-inode handoff on the live run
 - Boot the panicking debug domain with nokaslr
 - Skip authority-marked jobs in the abandoned-job sweep
+- Keep bounded adapter errors at the seam
+- Harden the external-boot authority adapter
+- Bind the composite observation to its activation
 
 ### Security
 
