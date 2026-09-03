@@ -148,6 +148,17 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
   container from every project on the daemon, including any a concurrent run owns. The
   `-r` keeps it a no-op once the backlog is clear rather than an error.
 
+  The real-daemon sweep tests in `tests/support/test_xdist_backend.py` start their
+  containers directly rather than through testcontainers, and under a label key unique to
+  each test invocation, so that concurrent suites cannot reap each other's fixtures
+  (#2219). Neither the command above nor the ADR-0551 sweep can see one that a killed run
+  orphaned. They all carry `kdive.test-scratch`, so clear those separately — again with no
+  test run in flight, since a running one owns its containers:
+
+  ```sh
+  docker ps -aq --filter "label=kdive.test-scratch" | xargs -r docker rm -fv
+  ```
+
 ## Architecture
 
 ### Four runtime roles, one codebase

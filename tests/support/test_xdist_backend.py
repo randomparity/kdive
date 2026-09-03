@@ -43,6 +43,11 @@ def _private_sweep_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 # run's key from it, so the two can never drift into different namespaces.
 _REPO_WIDE_BACKEND_LABEL = "kdive.test-backend"
 
+# Stamped on every container the real-daemon tests below start, and filtered on by
+# nothing: purely so a container orphaned under a per-invocation key stays findable.
+# See `_run_labelled_container`.
+_TEST_SCRATCH_LABEL = "kdive.test-scratch"
+
 
 @pytest.fixture
 def private_backend_label(monkeypatch: pytest.MonkeyPatch) -> str:
@@ -984,13 +989,25 @@ def test_sweep_warns_rather_than_failing_the_run_when_docker_is_unusable() -> No
 
 
 def _run_labelled_container(client: Any, labels: Mapping[str, str]) -> Any:
-    """Start one real container carrying ``labels``.
+    """Start one real container carrying ``labels``, plus a fixed recovery handle.
 
     ``postgres:17`` is the image the db fixtures already use, so this pulls nothing extra;
     the entrypoint is overridden so it starts instantly instead of running initdb.
+
+    ``_TEST_SCRATCH_LABEL`` is the price of ``private_backend_label``. A container these
+    tests start under a per-invocation key is invisible to every sweep on the host —
+    which is the point while the test runs, but means that a run killed outright between
+    the start and the ``finally`` leaks a container *and its anonymous volume* that
+    nothing will ever reap, where the repo-wide key would have had the next run collect
+    it. These containers are not testcontainers-managed either, so the ``org.testcontainers``
+    cleanup in AGENTS.md does not see them. One fixed key nothing filters on costs no
+    isolation and keeps that residual recoverable; AGENTS.md carries the command.
     """
     return client.containers.run(
-        "postgres:17", entrypoint=["sleep", "300"], detach=True, labels=dict(labels)
+        "postgres:17",
+        entrypoint=["sleep", "300"],
+        detach=True,
+        labels={**labels, _TEST_SCRATCH_LABEL: "1"},
     )
 
 
@@ -1104,12 +1121,16 @@ def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
         ),
     }
 
+    started: list[str] = []
     with xdist_backend._liveness_held(control_root, "pg"):
-        control = _run_labelled_container(client, control_labels)
-        subject = _run_labelled_container(
-            client, xdist_backend.backend_container_labels(subject_root, "pg")
-        )
         try:
+            control = _run_labelled_container(client, control_labels)
+            started.append(control.id)
+            subject = _run_labelled_container(
+                client, xdist_backend.backend_container_labels(subject_root, "pg")
+            )
+            started.append(subject.id)
+
             control.reload()
             subject.reload()
             # Read back off the running containers: `labels=` reaching the daemon is what
@@ -1138,4 +1159,4 @@ def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
             control.reload()
             assert control.status == "running"
         finally:
-            _remove_quietly(client, control.id, subject.id)
+            _remove_quietly(client, *started)
