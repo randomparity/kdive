@@ -280,10 +280,10 @@ Every operation handler is the same seven steps, in `operations/common.py`:
    because reading a `NULL` as a finished operation would commit evidence for work nothing
    performed. **No writer produces that state today**: every mutating method on
    `ExternalBootActivationRepository` is `kdive_server`-only (`0121…sql:275`, `:280-285`) and has
-   no production caller (`docs/debt/0003`), so an activation reaching `abandoned` or a recovery
+   no production caller (deferral record 0003), so an activation reaching `abandoned` or a recovery
    state with a `NULL` `recovery_point` is only constructible by a test seeding the row directly.
    Guaranteeing it stays unproducible is the preparation path's job, and that path is #2204's. If
-   #2204 makes it producible, it belongs in `docs/debt/0010` as a second, opposite-signed capacity
+   #2204 makes it producible, it belongs in deferral record 0010 as a second, opposite-signed capacity
    case — over-charging rather than under-charging — not as a fix here.
 3. **Allocate.** `allocate_external_boot_authority` as `kdive_worker`. The SQLSTATE `42501`
    from a non-worker session propagates unchanged, which is what criterion 8 asserts.
