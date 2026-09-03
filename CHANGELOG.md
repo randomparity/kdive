@@ -210,6 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admit the three recovery contracts without writing
 - Expose the three recovery contracts as MCP tools
 - Add the durable module-attempt obligation row
+- Reopen the worker claim path for marked external-boot jobs
 
 ### Changed
 
@@ -1134,6 +1135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the scope audit's ten findings on the design set
 - Retarget the records at the moved contract module
 - Record why the recovery reference and the cascades are there
+- Design the claim-lane reopening for #2201
+- Correct the finalization-fence cross-reference
 
 ### Fixed
 
@@ -1859,6 +1862,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claim the console inode before an in-process boot
 - Announce the console-inode handoff on the live run
 - Boot the panicking debug domain with nokaslr
+- Skip authority-marked jobs in the abandoned-job sweep
 
 ### Security
 
