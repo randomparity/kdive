@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg.sql import SQL, Identifier
 from psycopg.types.json import Jsonb
 
 from tests.db.external_boot_authority_support import (
@@ -92,6 +93,48 @@ def test_rewritten_claim_functions_keep_their_security_attributes(migrated_url: 
                 "SELECT prosecdef, proconfig FROM pg_proc WHERE oid = %s::regprocedure",
                 (signature,),
             ).fetchone() == (True, ['search_path=""']), signature
+
+
+def test_claim_worker_job_authority_gate_survives_an_accidental_grant(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """The in-body authority gate must survive 0127 rebuilding the function.
+
+    Only the EXECUTE ACL is asserted elsewhere; the ``pg_has_role`` gate is the layer that
+    still holds if a grant is ever added by accident. ``count_claimable_worker_jobs`` has
+    this guard in ``tests/db/test_worker_fence_authority.py``; ``claim_worker_job`` had no
+    equivalent, and 0127 redefines its body.
+
+    Granting first is what makes this test bite: without the grant the call fails with
+    ``permission denied for function`` from the ACL layer, never reaching the gate.
+
+    The grant is revoked in ``finally``: the ``migrated_url`` reset restores table data, not
+    function ACLs, so leaving it would leak into every later test in this worker.
+    """
+    server_login = authority_role_dsns.logins["kdive_server"]
+    grant = SQL(
+        "GRANT EXECUTE ON FUNCTION public.claim_worker_job(text,bytea,interval,text[]) TO {}"
+    ).format(Identifier(server_login))
+    revoke = SQL(
+        "REVOKE EXECUTE ON FUNCTION public.claim_worker_job(text,bytea,interval,text[]) FROM {}"
+    ).format(Identifier(server_login))
+    with psycopg.connect(migrated_url, autocommit=True) as owner:
+        owner.execute(grant)
+        try:
+            with (
+                psycopg.connect(authority_role_dsns("kdive_server"), autocommit=True) as server,
+                pytest.raises(
+                    psycopg.errors.InsufficientPrivilege,
+                    match="worker authority is required",
+                ),
+            ):
+                server.execute(
+                    "SELECT id FROM public.claim_worker_job(%s, %s, interval '5 minutes', "
+                    "ARRAY['default'])",
+                    ("w-not-a-worker", b"x" * 32),
+                )
+        finally:
+            owner.execute(revoke)
 
 
 def test_worker_claims_and_counts_an_authority_marked_job(
