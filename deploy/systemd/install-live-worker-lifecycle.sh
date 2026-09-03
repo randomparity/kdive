@@ -548,6 +548,7 @@ credential_temp=""
 config_temp=""
 revision_temp=""
 uri_temp=""
+manifest_temp=""
 
 cleanup() {
   if ! _restore_libvirt_runtime; then
@@ -557,6 +558,7 @@ cleanup() {
   [[ -z $config_temp || ! -e $config_temp ]] || unlink "$config_temp"
   [[ -z $revision_temp || ! -e $revision_temp ]] || unlink "$revision_temp"
   [[ -z $uri_temp || ! -e $uri_temp ]] || unlink "$uri_temp"
+  [[ -z $manifest_temp || ! -e $manifest_temp ]] || unlink "$manifest_temp"
   _cleanup_source_link
 }
 trap cleanup EXIT
@@ -644,6 +646,31 @@ _link_system_guestfs_binding /opt/kdive-live-worker-lifecycle/.venv/bin/python
 chown -R root:root /opt/kdive-live-worker-lifecycle
 # The readiness attestation rejects any replaceable ancestor, independent of the invoking umask.
 _harden_runtime_tree /opt/kdive-live-worker-lifecycle
+
+# The capture bootstrap manifest attests the interpreter and the installed package above, so it is
+# derived from that venv and is only valid for it. Building it here keeps the two in step: every
+# reinstall replaces the package the manifest describes, and a manifest that is stale or absent
+# fails the worker's `capture_bootstrap_manifest` readiness check. That failure is silent in both
+# directions — a not-ready worker skips `dequeue` (ADR-0090 s5) rather than erroring, so the queue
+# simply never drains and neither the worker nor the caller reports anything. It must come after
+# the hardening above, because the manifest records what it finds at that moment.
+manifest_python=/opt/kdive-live-worker-lifecycle/.venv/bin/python
+manifest_builder="$source_root/scripts/generate/build-capture-bootstrap-manifest.py"
+manifest_source_root="$(
+  "$manifest_python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))'
+)"
+manifest_temp="$(mktemp /var/tmp/.kdive-capture-bootstrap-manifest.XXXXXX)"
+"$manifest_python" "$manifest_builder" build \
+  --interpreter "$manifest_python" --source-root "$manifest_source_root" \
+  --output "$manifest_temp"
+"$manifest_python" "$manifest_builder" install \
+  --staged "$manifest_temp" \
+  --destination /usr/share/kdive/capture-bootstrap-manifest.json
+"$manifest_python" "$manifest_builder" verify \
+  --interpreter "$manifest_python" --source-root "$manifest_source_root" \
+  --manifest /usr/share/kdive/capture-bootstrap-manifest.json
+unlink "$manifest_temp"
+manifest_temp=""
 
 revision_temp="$(mktemp /opt/kdive-live-worker-lifecycle/.revision.XXXXXX)"
 git -C "$source_root" rev-parse HEAD >"$revision_temp"
