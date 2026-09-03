@@ -682,6 +682,22 @@ def _xattr_bytes(value: str | bytes) -> bytes:
     return value if isinstance(value, bytes) else value.encode()
 
 
+@dataclass(frozen=True, slots=True)
+class LocalObservedState:
+    """A read of observed provider state that classifies instead of refusing.
+
+    ``observe_running`` requires the exact running target and raises otherwise, so it
+    cannot name the source, mixed, unreadable, or conflicting states an authority
+    observation has to distinguish (ADR-0584). This read reports whatever is there and
+    leaves classification to the caller. ``None`` means that half could not be read; it
+    carries no provider message, path, or output.
+    """
+
+    definition: str | None
+    modules: ComponentState | None
+    active: bool | None
+
+
 class LocalExternalBootOperation(Protocol):
     """One authenticated operation's privileged and durable capabilities."""
 
@@ -693,6 +709,8 @@ class LocalExternalBootOperation(Protocol):
     ) -> LocalRecoveryMetadataV1: ...
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef: ...
     def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1: ...
+    def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1: ...
+    def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState: ...
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
@@ -862,6 +880,38 @@ class _RealLocalExternalBootOperation:
     def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.reopen(recovery.recovery_ref, recovery.binding)
+
+    def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.reopen(_recovery_ref(binding), binding)
+
+    def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
+        # Each half is read independently so a readable definition still classifies when
+        # the guest tree is not reachable. A failed read becomes ``None`` rather than an
+        # exception: the caller must be able to name "unreadable" as an outcome, and no
+        # libvirt or libguestfs message may cross this boundary (ADR-0584).
+        try:
+            inspection = self._session.inspect_closed()
+        except Exception:  # noqa: BLE001 - an unreadable definition is a classification
+            return LocalObservedState(definition=None, modules=None, active=None)
+        modules: ComponentState | None
+        try:
+            with self._session.guest() as opened_guest:
+                tree = LibguestfsAuthenticatedGuestTree(
+                    cast(_GuestfsTreeHandle, opened_guest),
+                    binding=metadata.binding,
+                    release=metadata.release,
+                    root=f"/lib/modules/{metadata.release}",
+                    mutable=False,
+                )
+                modules = self._recovery_writer.observe(tree, metadata.release)
+        except Exception:  # noqa: BLE001 - an unreadable module tree is a classification
+            modules = None
+        return LocalObservedState(
+            definition=inspection.source_boot_identity,
+            modules=modules,
+            active=inspection.active,
+        )
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         if self._host_state(metadata) != ("source", False):
@@ -1441,6 +1491,34 @@ class LocalLibvirtExternalBoot:
             if metadata.phase != "recovered":
                 raise ValueError("external-boot recovery must complete before cleanup")
             operation.cleanup(metadata, self.point_digest(recovery))
+
+    def recovery_point(
+        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+    ) -> RecoveryPoint:
+        """Resolve the durable recovery point an activation already owns.
+
+        The authority seam addresses an activation by its owner identities, not by a
+        recovery point it never held, so the point is rebuilt from the durable record
+        under the same authenticated lease every other operation uses.
+        """
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            metadata = operation.reopen_binding(binding)
+            return RecoveryPoint(
+                binding=metadata.binding,
+                plan_identity=metadata.plan_identity,
+                materialization_identity=metadata.materialization_identity,
+                recovery_ref=operation.recovery_ref(binding),
+                source_state=metadata.source_state,
+                target_state=metadata.target_state,
+            )
+
+    def observe_state(
+        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+    ) -> LocalObservedState:
+        """Read observed provider state for an activation without requiring a phase."""
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            metadata = operation.reopen_binding(binding)
+            return operation.observe_state(metadata)
 
     def finalize_cleanup_tombstone(
         self,

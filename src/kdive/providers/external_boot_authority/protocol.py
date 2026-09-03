@@ -88,6 +88,17 @@ _PURPOSE_OPERATIONS: dict[str, frozenset[AuthorityOperation]] = {
 }
 
 
+def operation_is_permitted(purpose: str, operation: AuthorityOperation) -> bool:
+    """Return whether ``operation`` is a legal commit point for ``purpose``.
+
+    Provider adapters receive ``commit_point`` as a bare ``str`` across the
+    ``AuthorityMutationAdapter`` seam, so the model-layer guarantee below stops there and
+    each adapter has to revalidate. This exposes the one table rather than letting every
+    adapter copy it.
+    """
+    return operation in _PURPOSE_OPERATIONS.get(purpose, frozenset())
+
+
 class _AuthorityBinding(_ClosedValue):
     schema_: Literal["external-boot-authority-v1"] = Field(
         "external-boot-authority-v1", alias="schema"
