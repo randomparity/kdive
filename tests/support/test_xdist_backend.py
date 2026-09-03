@@ -1025,20 +1025,28 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(
     import docker.errors
 
     client = docker.from_env()
-    container = _run_labelled_container(
-        client, xdist_backend.backend_container_labels(tmp_path, "pg")
-    )
-    # A second container whose run is already gone: its liveness file is never locked, so
-    # it is stale from the start. Sweeping both in ONE call is what keeps the spare
-    # assertion honest — an empty result would satisfy `not in` on its own, so the reap of
-    # this one is the evidence that the sweep actually ran and still spared the live one.
     stranded_root = tmp_path / "stranded"
     stranded_root.mkdir()
-    stranded = _run_labelled_container(
-        client, xdist_backend.backend_container_labels(stranded_root, "pg")
-    )
+    started: list[str] = []
     try:
+        # The lock is taken before the container exists, the order `shared_container`
+        # itself holds to, so there is never an instant where a container carries the
+        # liveness label with nothing holding the lock behind it (ADR-0551).
         with xdist_backend._liveness_held(tmp_path, "pg"):
+            container = _run_labelled_container(
+                client, xdist_backend.backend_container_labels(tmp_path, "pg")
+            )
+            started.append(container.id)
+            # A second container whose run is already gone: its liveness file is never
+            # locked, so it is stale from the start. Sweeping both in ONE call is what
+            # keeps the spare assertion honest — an empty result would satisfy `not in`
+            # on its own, so the reap of this one is the evidence that the sweep actually
+            # ran and still spared the live one.
+            stranded = _run_labelled_container(
+                client, xdist_backend.backend_container_labels(stranded_root, "pg")
+            )
+            started.append(stranded.id)
+
             # A concurrently-running suite holds its lock, so a sweep from any other run
             # must leave its backend alone. This is the property that makes the sweep
             # safe on a shared host.
@@ -1053,7 +1061,7 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(
         with pytest.raises(docker.errors.NotFound):
             client.containers.get(container.id)
     finally:
-        _remove_quietly(client, container.id, stranded.id)
+        _remove_quietly(client, *started)
 
 
 def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
