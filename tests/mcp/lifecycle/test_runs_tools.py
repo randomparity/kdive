@@ -3356,6 +3356,7 @@ def test_create_second_run_on_live_system_conflicts(migrated_url: str) -> None:
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
 from kdive.jobs.payloads import (  # noqa: E402
+    BootPayload,
     BuildPayload,
     InstallPayload,
     PayloadValidationError,
@@ -3693,7 +3694,7 @@ async def _seed_installed_and_booted(
                 run_id=run_id, cmdline=installed_cmdline, crashkernel=installed_crashkernel
             ),
         ),
-        (JobKind.BOOT, "boot", RunPayload(run_id=run_id)),
+        (JobKind.BOOT, "boot", BootPayload(run_id=run_id)),
     ):
         async with pool.connection() as conn:
             job = await queue.enqueue(
@@ -4512,7 +4513,7 @@ async def _enqueue_job(
     payload: RunPayload = (
         InstallPayload(run_id=run_id, cmdline=cmdline, crashkernel=crashkernel)
         if kind is JobKind.INSTALL
-        else RunPayload(run_id=run_id)
+        else BootPayload(run_id=run_id)
     )
     async with pool.connection() as conn:
         return await queue.enqueue(

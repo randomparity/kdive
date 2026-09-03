@@ -34,7 +34,7 @@ from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.control import control as control_plane
-from kdive.jobs.payloads import PowerPayload, SystemPayload
+from kdive.jobs.payloads import PowerPayload, SystemPayload, TeardownPayload
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -176,7 +176,9 @@ async def _enqueue(pool: AsyncConnectionPool, kind: JobKind, system_id: str, ded
         return await queue.enqueue(
             conn,
             kind,
-            SystemPayload(system_id=system_id),
+            TeardownPayload(system_id=system_id)
+            if kind is JobKind.TEARDOWN
+            else SystemPayload(system_id=system_id),
             {"principal": "alice", "agent_session": "s", "project": "proj"},
             dedup,
         )

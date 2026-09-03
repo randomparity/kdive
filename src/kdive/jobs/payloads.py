@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
@@ -25,6 +25,32 @@ from kdive.domain.operations.jobs import (
     PowerAction,
 )
 from kdive.domain.operations.sysrq import SysRqCommand
+from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityOperation,
+    operation_is_permitted,
+)
+
+EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: Final = "external_boot_authority_v1"
+"""The top-level JSONB key an authority marker rides under (ADR-0593).
+
+The literal is load-bearing rather than cosmetic: the claim fence, both generic finalizer
+fences, ``repair_abandoned_jobs``, and the two ``SECURITY DEFINER`` authority functions all test
+``payload ? 'external_boot_authority_v1'``, so renaming the field silently detaches a marked job
+from every one of them.
+"""
+
+ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS: Final[frozenset[str]] = frozenset(
+    {"activate", "recover", "resolve-conflict", "release", "cleanup", "teardown"}
+)
+"""The marker operations a job may be enqueued for (ADR-0593 decision 4).
+
+The marker's three remaining operations are commit points, not admissions: ``deadline`` and
+``recovery-attempt`` are mid-operation commits that leave the ``jobs`` row ``running`` on purpose
+(re-entry across them is #2202's), and ``fail`` is a result carrier. Defined here rather than in
+``kdive.jobs.handlers.external_boot`` because the payload validator is its first consumer and
+``payloads.py`` must not import from ``kdive.jobs.handlers``.
+"""
 
 
 class PayloadValidationError(ValueError):
@@ -347,6 +373,77 @@ class ReclaimInvestigationRootfsPayload(_PayloadBase):
         return value
 
 
+def _validated_marker_operation(marker: ExternalBootAuthorityMarkerV1) -> None:
+    """Reject a marker whose operation is not an enqueueable admission for its purpose.
+
+    Two different rejections, checked in this order because the second is the narrower one: an
+    operation outside ``_PURPOSE_OPERATIONS`` for the purpose could never be committed at all,
+    while ``deadline``/``recovery-attempt``/``fail`` are legal commit points that no caller may
+    enqueue. Reversing the order would report the wrong reason for a marker that fails both.
+
+    The ``AuthorityOperation(...)`` coercion is required rather than cosmetic:
+    ``operation_is_permitted`` is annotated ``(purpose: str, operation: AuthorityOperation)`` and
+    the marker's ``operation`` is a bare ``Literal[str]``. It doubles as the closed-set check.
+    """
+    if not operation_is_permitted(marker.purpose, AuthorityOperation(marker.operation)):
+        raise ValueError(
+            f"external boot marker operation {marker.operation!r} "
+            f"is not permitted for purpose {marker.purpose!r}"
+        )
+    if marker.operation not in ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS:
+        raise ValueError(
+            f"external boot marker operation {marker.operation!r} is a commit point, "
+            "not an enqueueable admission"
+        )
+
+
+class BootPayload(RunPayload):
+    """A ``boot`` job, optionally carrying external-boot authority admission facts (ADR-0593).
+
+    The lifecycle operations ride the existing ``boot`` kind because
+    ``allocate_external_boot_authority`` refuses unless the job's kind is exactly ``boot`` or
+    ``teardown`` (``0122_external_boot_authority.sql:465``), so a new ``JobKind`` member would be
+    unallocatable rather than merely undesirable.
+    """
+
+    external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+
+    @model_validator(mode="after")
+    def _marker_agrees_with_the_job(self) -> BootPayload:
+        marker = self.external_boot_authority_v1
+        if marker is None:
+            return self
+        if marker.purpose == "teardown":
+            raise ValueError("external boot marker purpose 'teardown' rides a teardown job")
+        if marker.run_id != UUID(self.run_id):
+            raise ValueError("external boot marker run_id must equal the payload run_id")
+        _validated_marker_operation(marker)
+        return self
+
+
+class TeardownPayload(SystemPayload):
+    """A ``teardown`` job, optionally carrying external-boot authority admission facts (ADR-0593).
+
+    ``teardown`` is the only kind ``allocate_external_boot_authority`` admits for the ``teardown``
+    purpose (``0122_external_boot_authority.sql:465``), and the teardown purpose is the only one it
+    admits on this kind.
+    """
+
+    external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+
+    @model_validator(mode="after")
+    def _marker_agrees_with_the_job(self) -> TeardownPayload:
+        marker = self.external_boot_authority_v1
+        if marker is None:
+            return self
+        if marker.purpose != "teardown":
+            raise ValueError("external boot marker purpose must be 'teardown' on a teardown job")
+        if marker.system_id != UUID(self.system_id):
+            raise ValueError("external boot marker system_id must equal the payload system_id")
+        _validated_marker_operation(marker)
+        return self
+
+
 type _ActivePayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
@@ -365,6 +462,8 @@ type _ActivePayloadModel = (
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
     | type[ReclaimInvestigationRootfsPayload]
+    | type[BootPayload]
+    | type[TeardownPayload]
 )
 type ActivePayloadModel = (
     SystemPayload
@@ -384,6 +483,8 @@ type ActivePayloadModel = (
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
     | ReclaimInvestigationRootfsPayload
+    | BootPayload
+    | TeardownPayload
 )
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
@@ -391,9 +492,9 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.SNAPSHOT: SnapshotPayload,
     JobKind.RESTORE: RestorePayload,
     JobKind.DELETE_SNAPSHOT: SnapshotDeletePayload,
-    JobKind.TEARDOWN: SystemPayload,
+    JobKind.TEARDOWN: TeardownPayload,
     JobKind.INSTALL: InstallPayload,
-    JobKind.BOOT: RunPayload,
+    JobKind.BOOT: BootPayload,
     JobKind.FORCE_CRASH: SystemPayload,
     JobKind.POWER: PowerPayload,
     JobKind.DIAGNOSTIC_SYSRQ: SysRqPayload,
@@ -413,10 +514,15 @@ _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.INSTALL: InstallPayload,
-    JobKind.BOOT: RunPayload,
+    JobKind.BOOT: BootPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     **_HISTORICAL_RUN_PAYLOAD_MODELS,
 }
+# TEARDOWN stays out deliberately: TeardownPayload has no run_id, and giving it one would make
+# the worker's _compensation_run_id transition a Run to failed on every ordinary System-teardown
+# failure — a behaviour change nothing asked for.
+_MARKED_JOB_KINDS: Final[frozenset[JobKind]] = frozenset({JobKind.BOOT, JobKind.TEARDOWN})
+"""The only kinds an authority marker may ride, pinning ``0122…sql:465`` on the wire."""
 
 
 def _validation_error(label: str, exc: ValidationError) -> PayloadValidationError:
@@ -456,7 +562,18 @@ def dump_payload(kind: JobKind, payload: ActivePayloadModel | dict[str, Any]) ->
         model = payload if isinstance(payload, model_class) else model_class.model_validate(payload)
     except ValidationError as exc:
         raise _validation_error(f"{kind.value} payload", exc) from exc
-    return model.model_dump(mode="json", exclude_none=True)
+    dumped = model.model_dump(mode="json", exclude_none=True)
+    if EXTERNAL_BOOT_AUTHORITY_MARKER_KEY in dumped and kind not in _MARKED_JOB_KINDS:
+        # Subclassing leaves one hole, closed here rather than at each of the many call sites:
+        # TeardownPayload *is* a SystemPayload, so the isinstance above accepts a marked one for
+        # PROVISION or FORCE_CRASH, whose registry entry is still bare SystemPayload. The marker
+        # key would then ride a job that routes to the ordinary handler, provisions a System for
+        # real, returns no authority result, and is unreapable afterwards. dump_payload is the
+        # single chokepoint every enqueue funnels through.
+        raise PayloadValidationError(
+            f"{EXTERNAL_BOOT_AUTHORITY_MARKER_KEY} may not ride a {kind.value} payload"
+        )
+    return dumped
 
 
 def load_payload[T: ActivePayloadModel](job: Job, model_class: type[T]) -> T:

@@ -30,7 +30,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
+from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
@@ -200,7 +200,7 @@ async def _enqueue_teardown(pool: AsyncConnectionPool, system_id: str) -> Job:
         return await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
-            SystemPayload(system_id=system_id),
+            TeardownPayload(system_id=system_id),
             {"principal": "system:reconciler", "agent_session": None, "project": "proj"},
             f"{system_id}:teardown",
         )

@@ -39,6 +39,7 @@ from kdive.jobs.payloads import (
     SnapshotDeletePayload,
     SnapshotPayload,
     SystemPayload,
+    TeardownPayload,
     load_payload,
 )
 from kdive.jobs.provider_context import set_provider_kind
@@ -763,7 +764,7 @@ async def teardown_handler(
     artifact_store: RetiredKeyBatchDeleter,
 ) -> str | None:
     """Destroy the domain, reclaim console artifacts, and drive the System ``-> torn_down``."""
-    system_id = UUID(load_payload(job, SystemPayload).system_id)
+    system_id = UUID(load_payload(job, TeardownPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
