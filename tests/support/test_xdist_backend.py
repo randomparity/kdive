@@ -1009,16 +1009,8 @@ def _run_labelled_container(client: Any, labels: Mapping[str, str], started: lis
     container *and its anonymous volume* that no sweep will ever reap, where the repo-wide
     key would have had the next run collect it. These containers are not
     testcontainers-managed either, so the ``org.testcontainers`` cleanup in AGENTS.md does
-    not see them. This one fixed key is what keeps that residual findable, and the
-    recovery is the operator command in AGENTS.md — deliberately not an automatic reap.
-
-    That was tried and removed. A fixture cannot collect the run it exists to clean up
-    after: the orphan keeps sleeping for its full 300 seconds, so the immediate re-run —
-    what an operator actually does after a kill — finds nothing, and collection would land
-    on some later run of this module. In exchange it force-removed containers on a shared
-    host once per xdist worker, up to ``--maxprocesses`` times a run, concurrently with
-    sibling workers holding live containers. A handful of empty volumes is not worth
-    unattended destruction on a host other agents are testing on.
+    not see them. This one fixed key is what keeps that residual findable; the recovery is
+    the operator command in AGENTS.md, which records why it is deliberately not automatic.
     """
     from tests.db import conftest as db_conftest
 
