@@ -194,18 +194,41 @@ Later tasks rely on `BootPayload`, `TeardownPayload`,
      `("activate", "release")` and `("release", "activate")`, both rejected.
    - `test_marker_operation_must_be_enqueueable` — `deadline`, `recovery-attempt`, and `fail`
      rejected by name.
+   - `test_enqueueable_operations_are_exactly_these_six` — one assertion, and it is the only place
+     the six names are pinned:
+
+     ```python
+     assert ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS == frozenset(
+         {"activate", "recover", "resolve-conflict", "release", "cleanup", "teardown"}
+     )
+     ```
+
+     Written as a **literal**, because every other check compares the constant against something
+     the constant already gates: `ExternalBootOperations.register` refuses outside it, the payload
+     validator rejects a marker outside it, and so a `registered_operations() == CONSTANT`
+     assertion compares the constant to itself. Drop `cleanup` from the constant and that
+     assertion still passes while criterion 4's "cleanup … ha[s] a registered handler" silently
+     stops holding. This literal is what turns that rename red.
    - `test_run_id_from_payload_returns_run_for_boot_and_none_for_teardown`.
    - `test_every_marked_payload_kind_is_boot_or_teardown` — iterate
      `_ACTIVE_PAYLOAD_MODELS.items()`, select the models that declare the marker field, assert
-     the kind set is exactly `{JobKind.BOOT, JobKind.TEARDOWN}`. This is criterion 1, and it is
-     asserted against the model registry rather than against a hand-written list, so a future
-     third marked payload fails it.
+     the kind set is exactly `{JobKind.BOOT, JobKind.TEARDOWN}`. Criterion 1 in the registry.
+   - `test_a_marked_payload_cannot_be_dumped_under_another_kind` — criterion 1 **on the wire**,
+     which is where the hole is. `TeardownPayload` is a `SystemPayload`, so
+     `dump_payload(JobKind.PROVISION, TeardownPayload(system_id=…,
+     external_boot_authority_v1=marker))` passes `isinstance` and would emit the marker key on a
+     `provision` job. Parametrize over `JobKind.PROVISION` and `JobKind.FORCE_CRASH`; assert
+     `PayloadValidationError`. The registry-shaped test stays green with this hole open, so it
+     does not substitute for this one.
 2. **Run it and confirm it fails**: `uv run python -m pytest
    tests/jobs/test_external_boot_payloads.py -q` — expect collection errors on
    `BootPayload`/`TeardownPayload` not existing.
 3. **Implement** in `payloads.py`: import `ExternalBootAuthorityMarkerV1` from
-   `kdive.jobs.models` and `operation_is_permitted` from
-   `kdive.providers.external_boot_authority.protocol`; add the two classes with a
+   `kdive.jobs.models` and `operation_is_permitted` plus `AuthorityOperation` from
+   `kdive.providers.external_boot_authority.protocol`; add the `dump_payload` guard that raises
+   `PayloadValidationError` when the serialized dict carries `external_boot_authority_v1` and
+   `kind` is not `JobKind.BOOT`/`JobKind.TEARDOWN`, since subclassing lets a marked
+   `TeardownPayload` satisfy `isinstance(payload, SystemPayload)` for `PROVISION`/`FORCE_CRASH`; add the two classes with a
    `model_validator(mode="after")` each enforcing the cross-field rules above; add them to
    `_ActivePayloadModel`/`ActivePayloadModel`; set
    `_ACTIVE_PAYLOAD_MODELS[JobKind.BOOT] = BootPayload`,
@@ -321,7 +344,11 @@ def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
        half, asserted **through** the production entry point rather than around it.
        `HandlerRegistry` exposes only `register` and `get(kind)`, and the operations registry is
        captured in the router closure, so it cannot be read off the returned object. Parametrize
-       over the six operations: build a marked `Job` for each, fetch the handler
+       over **the literal six names pinned by `test_enqueueable_operations_are_exactly_these_six`**,
+       not over `ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS` — parametrizing over the constant would
+       reintroduce the same self-comparison one level up, because the constant is what
+       `ExternalBootOperations.register` and the payload validator both gate on. Build a marked
+       `Job` for each, fetch the handler
        `build_handler_registry(<stub assembly>)` returns for that operation's `JobKind`, await it,
        and assert exactly one operation handler ran and it was the one bound to that operation.
        Use recording doubles for all six so "exactly one" is asserted against the recorder rather
@@ -423,6 +450,11 @@ async def run_operation(
     *,
     ports: ExternalBootHandlerPorts,
     require_activation_state: frozenset[ExternalBootActivationState],
+    require_activation_evidence: frozenset[str],
+    require_preconditions: Callable[
+        [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1],
+        Awaitable[None],
+    ],
     build_result: Callable[
         [OperationContext, RunningKernelObservation | None], ExternalBootAuthorityResultV1
     ],
@@ -444,8 +476,21 @@ def authority_result(
    `binding.kind.value != marker.provider_kind` or `binding.runtime.external_boot is None`
    (`CategorizedError`, `CONFIGURATION_ERROR`, `terminal=True`).
 2. `activation = await ExternalBootActivationRepository().get(conn, marker.activation_id)`;
-   refuse on absence, on any of `run_id`/`system_id`/`plan_identity` disagreeing with the
-   marker, or on `activation.state not in require_activation_state`.
+   refuse on absence, or on any of `run_id`/`system_id`/`plan_identity` disagreeing with the
+   marker.
+2a. Refuse when `activation.state not in require_activation_state`.
+2b. Refuse when any attribute named in `require_activation_evidence` is `None` on the activation
+   row. This is the spec's §7 *required activation evidence* column and it is checked for every
+   operation, not only `activate`.
+2c. `await require_preconditions(conn, activation, marker)` — the per-operation callable carrying
+   the four footnoted prerequisites the spec's §7 names: the recovery-attempt row state (†), the
+   `NOT cleanup_complete` / no-existing-release guards (‡), `systems.state = 'failed'` (§), and
+   the commit's system/run-state conditions (¶). Each refuses with the same terminal
+   `configuration_error`.
+
+   Steps 2a-2c all run **before** step 3, so every refusal happens before an authority exists.
+   That matters beyond tidiness: a refusal after allocation, or a `superseded` allocation, cannot
+   be committed as a failure and wedges the job (spec §6 step 3, §8).
 3. `allocate_authority(...)`; `None` raises `CategorizedError(STALE_HANDLE, terminal=False)` so
    the job requeues.
 4. `ports.acknowledger` is `None` → `CategorizedError(CONFIGURATION_ERROR, terminal=True)`
@@ -508,6 +553,26 @@ introduces). `failure_context.phase` is `admission` for steps 1–3, `preparatio
      and does not validate as a `RecoveryPoint`. Where an operation needs one, it also seeds the
      `external_boot_recovery_attempts` row in the state §7's † footnote requires, because nothing
      in this change writes that row.
+
+     **It must seed more than the † footnote names, or three operations cannot reach a commit:**
+     - an `external_boot_recovery_attempts` row for **every** state except `abandoned`, not only
+       for `recover`/`resolve-conflict`: `external_boot_activation_state_evidence`
+       (`0121…sql:38-52`) requires `current_attempt_id IS NOT NULL` in
+       `recovering`/`recovered`/`recovery_conflict`/`recovery_failed`, so the activation INSERT
+       itself fails with a `CheckViolation` without one;
+     - an `external_boot_reservations` row in state `ready` whenever the operation's §7 evidence
+       column names one (`release`), because the commit re-checks `store_identity`, `owner_key`,
+       and `reserved_bytes` against it with `NOT EXISTS (…)` (`0122…sql:1535-1541`) and raises
+       `22023` otherwise;
+     - for `cleanup` and `teardown`, either an `external_boot_reservation_releases` row or — the
+       better shape — the test runs the `release` handler first and takes the row the release
+       commit writes, since `0122…sql:1398` compares the cleanup evidence's `release_identity`
+       against `v_release.release_identity` and an absent row makes that comparison
+       unconditionally true, raising `22023`.
+
+     A `22023` from the commit is §8's third route, so each of these would otherwise surface as an
+     untraceable lane-level warning rather than a clean red — slower to diagnose than an ordinary
+     test failure, which is why they are enumerated here rather than left to be discovered.
    - a `provider_resolver` builder binding the vehicle's wrapped port on a `ProviderRuntime`
      under `ResourceKind.LOCAL_LIBVIRT`. The fault-inject composition registers its runtime under
      `ResourceKind.FAULT_INJECT`, a value the marker's `provider_kind` cannot hold, so binding
@@ -534,7 +599,21 @@ introduces). `failure_context.phase` is `admission` for steps 1–3, `preparatio
      assert it recorded none.
    - `test_activation_identity_mismatch_is_refused` — parametrized over `run_id`, `system_id`,
      `plan_identity`.
-   - `test_superseded_allocation_requeues` — `terminal is False`.
+   - `test_superseded_allocation_leaves_the_job_running_without_a_jobs_row` — assert the `jobs`
+     row is byte-identical before and after (state, attempt, error_category, worker_id all
+     unchanged), **not** that `terminal is False`. `terminal` has no consumer on this path,
+     because no authority was allocated and the commit's `fail` branch is the only thing that can
+     requeue a marked job. A test asserting the flag would assert a value nothing reads.
+   - `test_missing_required_evidence_is_refused_before_allocation` — parametrized over
+     (`release`, `recovery_point`), (`cleanup`, `recovery_point`), (`teardown`, `recovery_point`),
+     (`activate`, `materialization`): seed the activation with that column `NULL` in a state the
+     CHECK admits, assert a terminal `configuration_error`, that the port double recorded no call,
+     and that **no `external_boot_authorities` row exists** — the last is what proves the refusal
+     preceded allocation rather than followed it.
+   - `test_unmet_precondition_is_refused_before_allocation` — one case per footnote: a `recover`
+     whose recovery-attempt row is in the wrong state (†), a `cleanup` on an activation with
+     `cleanup_complete` already true (‡), a `teardown` whose System is not `failed` (§), and an
+     `activate` whose Run is not `succeeded` (¶). Same three assertions.
    - `test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation` — assert
      `_authority_binding_matches(marker, failure.result)` is `True` and
      `failure.result.result.failure_context.phase == "provider-call"`.

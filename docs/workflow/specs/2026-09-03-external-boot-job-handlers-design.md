@@ -75,6 +75,24 @@ An unmarked payload is unchanged on the wire: `dump_payload` already serializes 
 `exclude_none=True` (`payloads.py:459`), so `{"run_id": …}` round-trips byte-identically and
 every persisted pre-change job still decodes.
 
+**Subclassing leaves one hole, and it is closed at the single chokepoint rather than per caller.**
+`TeardownPayload` *is* a `SystemPayload`, so `dump_payload`'s `isinstance(payload, model_class)`
+(`payloads.py:456`) accepts a marked `TeardownPayload` for `JobKind.PROVISION` or
+`JobKind.FORCE_CRASH`, whose registry entry is still bare `SystemPayload`, and
+`model_dump(exclude_none=True)` then emits the marker key. Such a job is claimable (0127 reopened
+the lane), routes to `provision_handler` because `route_marked` wraps only `BOOT` and `TEARDOWN`,
+provisions a System for real, returns no authority result, and is then unreapable —
+`worker.py:534-542` writes no `jobs` row, both generic finalizers and `repair_abandoned_jobs` are
+fenced, and `commit_external_boot_authority_result` refuses it because `v_job.kind` is neither
+`boot` nor `teardown` (`0122…sql:465`).
+
+So `dump_payload` raises `PayloadValidationError` when the serialized dict carries
+`external_boot_authority_v1` and `kind` is not `BOOT` or `TEARDOWN`. That is **one** guard in the
+one function every enqueue funnels through (`queue.py:90` is its only caller), not a guard per
+call site. Dropping the subclassing is not the alternative — it is what makes the round-trip
+criterion work. Criterion 1 is pinned on the wire as well as in the registry, because a
+registry-shaped assertion stays green while this hole is open.
+
 **Cross-field validation on the model** (a `model_validator(mode="after")` on each), so a bad
 marker is rejected at `dump_payload` rather than at `allocate_external_boot_authority`:
 
@@ -252,9 +270,33 @@ Every operation handler is the same seven steps, in `operations/common.py`:
    distinguishes them. Without this check the failure is an uncategorized `TypeError` or
    `ValidationError` rather than a categorized refusal, and if it lands after step 3 the authority
    row is already allocated.
-3. **Allocate.** `allocate_external_boot_authority` as `kdive_worker`. `superseded` raises a
-   non-terminal `CategorizedError(stale_handle)`; the SQLSTATE `42501` from a non-worker session
-   propagates unchanged, which is what criterion 8 asserts.
+
+   **The consequence of refusing, stated rather than left to be discovered.** An activation whose
+   required evidence column is `NULL` cannot be released, cleaned up, or torn down by this change
+   at all: every one of the three refuses here, each refusal wedges its job per §8, the
+   reservation stays charged, `cleanup_complete` never becomes true, and
+   `external_boot_activations_one_live_per_system` keeps matching so the System can take no new
+   activation. That is worse than the alternative would look — and the alternative is worse still,
+   because reading a `NULL` as a finished operation would commit evidence for work nothing
+   performed. **No writer produces that state today**: every mutating method on
+   `ExternalBootActivationRepository` is `kdive_server`-only (`0121…sql:275`, `:280-285`) and has
+   no production caller (`docs/debt/0003`), so an activation reaching `abandoned` or a recovery
+   state with a `NULL` `recovery_point` is only constructible by a test seeding the row directly.
+   Guaranteeing it stays unproducible is the preparation path's job, and that path is #2204's. If
+   #2204 makes it producible, it belongs in `docs/debt/0010` as a second, opposite-signed capacity
+   case — over-charging rather than under-charging — not as a fix here.
+3. **Allocate.** `allocate_external_boot_authority` as `kdive_worker`. The SQLSTATE `42501`
+   from a non-worker session propagates unchanged, which is what criterion 8 asserts.
+
+   A `superseded` allocation raises `CategorizedError(stale_handle)`, and **that does not
+   requeue the job.** No authority was allocated, so the worker has no binding to commit a
+   failure through, and the commit's `fail` branch — the only path that can set
+   `jobs.state = 'queued'` for a marked job (`0122…sql:1660-1669`) — is unreachable. The worker
+   logs and returns (`worker.py:505-517`), the job keeps its lease until it lapses,
+   `claim_worker_job` re-claims it and burns one attempt, and it wedges like every other
+   pre-allocation refusal in §8. The `terminal` flag is inert on this path. A superseded
+   allocation is in fact the **most common** of those refusals, because every concurrent
+   generation bump produces one.
 4. **Acknowledge.** Through the seam, binding every allocated fact. A `superseded`
    acknowledgement raises `stale_handle` before the provider is touched.
 5. **Call the port**, on a thread (`asyncio.to_thread`) because `ExternalBootPorts` is sync,
@@ -289,9 +331,9 @@ looks like it holds.
 
 | Operation | Kind / purpose | Required activation state | Required activation evidence | Port call | Result variant | Activation after an applied commit |
 |---|---|---|---|---|---|---|
-| `activate` | boot / activate | `activating` | `materialization`, `recovery_point` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
-| `recover` | boot / recover | `recovering` † | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
-| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `activate` | boot / activate | `activating` ¶ | `materialization`, `recovery_point` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
+| `recover` | boot / recover | `recovering` † ¶ | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † ¶ | `materialization`, `recovery_point` | `recover` then `observe` | `_RecoverResult` | `recovered` |
 | `release` | boot / release | `active`, `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `recovery_point`, `ready` reservation row | `observe` | `_ReleaseResult` | reservation released |
 | `cleanup` | boot / release | `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `recovery_point`, release row | `cleanup` | `_CleanupResult` | `cleanup_complete = true` |
 | `teardown` | teardown / teardown | `recovery_conflict`, `recovery_failed` ‡ § | `recovery_point`, release row | `cleanup` | `_TeardownResult` | `cleanup_complete`, System `torn_down` |
@@ -320,6 +362,22 @@ separately:
   requires that no `external_boot_reservation_releases` row exists yet
   (`0122…sql:1319-1335`).
 - **§** `teardown` additionally requires `systems.state = 'failed'` (`0122…sql:1331-1335`).
+- **¶** The commit also conditions these three on rows outside the activation:
+  `activate` on `systems.state = 'ready'` and `runs.state = 'succeeded'`, and
+  `recover`/`resolve-conflict` on `systems.state IN ('ready','crashed')` — plus `'failed'` for
+  `resolve-conflict` — and `runs.state = 'succeeded'` (`0122…sql:1302-1318`). These are checked by
+  the runner alongside the others, not left to `allocate`: `allocate` does check them
+  (`:482-500`), but a refusal there is a `superseded` allocation, which step 3 above shows cannot
+  requeue and wedges the job. Refusing before allocation costs a database read and avoids that.
+
+**Every one of these — required state, required evidence, and the four footnoted
+prerequisites — is a parameter of the shared runner, not prose.** `run_operation` takes
+`require_activation_state`, `require_activation_evidence`, and a per-operation
+`require_preconditions` callable, and performs them as steps 2a, 2b, and 2c, all before
+allocation and all raising the same terminal `configuration_error`. A prerequisite stated in this
+table with no parameter carrying it is a specification defect, not a documentation nicety: the
+tests that assert those refusals would otherwise be written against a runner that cannot make
+them.
 
 - **activate** requires activation state `activating` at commit (`0122…sql:1302-1306`), so the
   handler refuses a `prepared` activation that the server has not moved to `activating`;

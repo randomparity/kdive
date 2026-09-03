@@ -127,46 +127,29 @@ the server half only.
   site must pass the operations registry; that is the point, since a call site that omitted it
   would silently reopen the wrong-operation path.
 - The production handler registry registers all six operations, and every one of them fails
-  closed on the absent acknowledger until an adapter issue supplies it. **That failure is not
-  visible in the `jobs` table, and `terminal=True` is inert on this path.** When a marked job's
-  handler raises anything that is not an `ExternalBootAuthorityFailure` whose binding matches the
-  marker, `src/kdive/jobs/worker.py:505-517` logs `marked external boot job %s failed without
-  authority result` and returns without reaching `_fail_job_and_run`. No `jobs` row is written and
-  no `error_category` is set. The job's lease then lapses, `claim_worker_job` re-claims it and
-  increments `attempt` — the lane #2201's `0127` migration reopened — and the same failure repeats
-  once per lease lapse until `attempt >= max_attempts`, at which point the row is permanently
-  `running`, because `repair_abandoned_jobs` is fenced against marked payloads
-  (`src/kdive/reconciler/repairs/jobs.py:42-49`) and both generic finalizers are fenced
-  (`0122…sql:304-315`). This is the shipped default configuration until #2199/#2200 wire an
-  acknowledger, and it is reached by every pre-allocation refusal — absent acknowledger, absent
-  port, provider-kind mismatch, activation identity mismatch, wrong activation state. The only
-  observable is the log line.
-- **The window in which a marked job is left `running` is a re-execution window, not an
-  availability window.** A lapsed-lease `running` job with `attempt < max_attempts` is re-claimed
-  and the handler restarts at step 1, which includes the provider call at step 5. So a worker that
-  dies between the port call and the commit, a commit that returns `superseded`, or a result the
-  worker's `_authority_binding_matches` rejects, all leave a System the first attempt already
-  mutated and an activation whose state never moved — so the allocate preconditions still hold and
-  the second attempt re-runs the same mutation. For `cleanup` and `teardown` that is a re-run
-  deletion. Nothing here makes the port calls idempotent or gates re-entry on an observation:
-  idempotency under a later authority generation is the adapter's obligation under ADR-0584, and
-  observe-driven re-entry is #2202's. This decision does not close that window; it names it
-  correctly. #2203 owns the reaping half.
-- **A third route reaches the same wedge, through the commit rather than the handler.**
-  `_finalize_handler` calls `_commit_external_result` outside its `try/except`
-  (`src/kdive/jobs/worker.py:539` against `:505-533`), and `_dispatch` has no `except`
-  (`:439-444`), so an exception from `commit_external_boot_authority_result` propagates to
-  `_claim_loop`'s generic handler (`:417-427`). The observable is a lane-level warning with no job
-  attribution — weaker than the marked-job log line the bullet above describes — and the commit
-  raises SQLSTATE `22023` on several evidence-content paths a handler composes. Keeping every
-  evidence `objects` entry inside the commit's `known_refs` set is what keeps handlers off it.
-- **The adapter's admission watermark fences the concurrent case, not the sequential one.**
-  `_require_admissible_generation`
-  (`src/kdive/providers/local_libvirt/external_boot_authority.py:149-158`) rejects a *lower*
-  generation and does not constrain a higher one, so it does nothing for the re-execution window
-  above, where the re-claim allocates a higher generation. It does fence a still-live worker whose
-  lease lapsed while it was mid-provider-call and whose replacement has already allocated a later
-  generation — a concurrency case, not a sequential one.
+  closed on the absent acknowledger until #2199/#2200 wire one. **That failure is invisible in the
+  `jobs` table.** A marked job whose handler raises anything that is not a binding-matching
+  `ExternalBootAuthorityFailure` reaches `src/kdive/jobs/worker.py:505-517`, which logs and
+  returns without writing a `jobs` row, so `terminal=True` is inert; the job then burns one
+  attempt per lease lapse and ends permanently `running`. Every pre-allocation refusal reaches it
+  — absent acknowledger, absent port, provider-kind mismatch, activation identity mismatch, wrong
+  activation state, missing required evidence, an unmet non-state prerequisite, and a `superseded`
+  allocation, which is the most common because every concurrent generation bump produces one.
+  The specification's §8 is the single full statement of the three routes, their citations, and
+  the tests that pin them; this record does not restate it. #2202 owns re-entry, #2203 the reaping.
+- The window in which such a job sits `running` is a **re-execution** window, not an availability
+  one: a lapsed-lease job is re-claimed and the handler restarts at step 1, provider call included,
+  on a System the first attempt may already have mutated. This decision does not close it; it
+  names it correctly.
+- Two further routes reach the same wedge: an exception from the commit itself, which escapes
+  `_finalize_handler` (the call at `src/kdive/jobs/worker.py:539` sits outside its `try/except`)
+  and surfaces only as a lane-level warning with no job attribution; and a `superseded`
+  allocation, which is the most common of them. The specification's §8 enumerates all three
+  routes with their citations and names the tests that pin them; it is the single full statement
+  and this record does not duplicate it. The adapter's admission watermark
+  (`src/kdive/providers/local_libvirt/external_boot_authority.py:149-158`) fences a still-live
+  worker holding an older generation, not the higher generation a re-claim allocates, so it does
+  not bear on the sequential case. #2202 owns re-entry; #2203 owns the reaping.
 - The `release` operation credits the recovery-store reservation back while the objects it covers
   still exist, because ADR-0584's adapter makes deletion belong to `cleanup` under a later
   generation. That departs from ADR-0583's stated ordering and under-charges
