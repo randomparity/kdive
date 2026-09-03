@@ -1846,6 +1846,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Guard behind the replay at the four unkeyed sites
 - Close the guard-versus-replay class with a derived gate
 - Probe the exact dedup key, and cover the settled arms
+- Give the sweep tests a lock that is not host-global
 
 ### Security
 
