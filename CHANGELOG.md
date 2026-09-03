@@ -215,6 +215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gate external-boot advertisement on the authority
 - Add the local external-boot recovery root setting
 - Create and gate the external-boot recovery roots
+- Add the service-constructed authority commit context
+- Bind target_xml to its own digest on both records
+- Carry the anchored journal proof to the commit seam
 
 ### Changed
 
@@ -1148,6 +1151,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the branch review and threat scan
 - Scope the golden-vector claim and record the NFC gap
 - Make the scratch-container cleanup safe under concurrency
+- Design the authority commit context seam
+- Harden the commit-context design after review
+- Stop inferring cleanup state from absence
+- Weight the cleanup guarantees as the audit found them
+- Fix both pre-provider refusal arms, not just the new one
+- Withdraw N4a, which the journal's own ordering forbids
 
 ### Fixed
 
@@ -1881,6 +1890,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the recovery-root symlink and owner-gate gaps
 - Drop the per-slot group requirement
 - Report an unresolvable recovery-root owner
+- Finalize only a tombstone the same commit published
+- Correct the provenance claims and pin the real outcome
 
 ### Security
 
