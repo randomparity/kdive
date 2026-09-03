@@ -456,8 +456,8 @@ three more sites: enumeration by discovery kept sampling the class instead of cl
 | `vmcore.fetch` | `{run}:capture_vmcore:{method}`, `NEVER` | prior job, terminal included | replay probed first |
 | `systems.reprovision` | `{sys}:reprovision:{digest}` | prior job via the `REPROVISIONING` branch | guard below that branch |
 | `systems.teardown` | `{uid}:teardown`, `NEVER` | prior job | replay and the `TORN_DOWN` short-circuit both ahead of the guard |
-| `systems.restore` | `{uid}:restore:{name}:{paused}`, `TERMINAL` | **nothing** — `_active_snapshot_op` refuses first | not in the class |
-| `runs.install`, `runs.boot` | `{run}:{step}` | prior job | guard already behind the lookup |
+| `systems.restore` | `{uid}:restore:{name}:{paused}`, `TERMINAL` | **nothing** — the first restore leaves the System `RESTORING`, which the `READY` precondition rejects before the guard | not in the class |
+| `runs.install`, `runs.boot` | `{run}:{step}`, `NEVER` when the step's `run_steps` row exists else `TERMINAL` | prior job — including a `succeeded` one under `NEVER` and a `canceled` one under `TERMINAL` | `_settled_replay` gates the guard with the policy the enqueue will use; the live-poll `_in_flight_job` stays narrow because `runs.install` uses it to short-circuit re-staging |
 | `runs.create`, `runs.bind`, `runs.cancel`, `debug.*`, the two recovery contracts | — | enqueue no job | nothing to preempt |
 
 Replay-eligible states are a function of the site's `recycle` policy, not a hand-listed set:
@@ -465,13 +465,34 @@ Replay-eligible states are a function of the site's `recycle` policy, not a hand
 a terminal one. `dedup_replay` derives them from the same enum `enqueue` branches on, because a
 hand-listed set is exactly what got `vmcore.fetch` wrong on the first attempt.
 
-The probes are scoped to the unkeyed path wherever a keyed one exists. A fresh idempotency key is a
-new logical request and the matrix decides it even when it would map onto an existing job.
+Each probe asks about the exact dedup key its own `enqueue` will use, and runs unconditionally.
+Scoping it on whether an idempotency key was *supplied* is the wrong question: what matters is
+whether the key *varies* with it. Where it does (`control.power`, `control.diagnostic_sysrq`,
+`control.capture_traffic`) a fresh key mints a new key with no prior row, so the probe finds
+nothing and the matrix decides, correctly. Where the key is fixed, a fresh key cannot mint fresh
+work and denying it is the same divergence as denying an unkeyed repeat. An earlier revision
+scoped on the supplied-key question and left the defect open on the keyed path at three sites.
 
 `test_every_guarded_tool_is_classified_for_the_replay_gate` derives its coverage from
 `GUARDED_TOOLS` rather than a hand-written list, so a newly guarded tool fails the gate until it is
-classified — the same inverted-gate technique that proves the matrix is closed. Disabling all the
-probes turns exactly the six affected tools red.
+classified — the same inverted-gate technique that proves the matrix is closed.
+`test_a_keyed_mutation_admitted_before_the_activation_still_replays` likewise decides from an
+unrestricted control arm whether a tool's key varies, rather than hand-listing the two groups.
+
+What the gates do and do not cover, measured rather than asserted:
+
+- Disabling every dedup probe turns exactly the six affected tools red.
+- The differential test decides "did the repeat mint a job?" from the `jobs` table, not from
+  envelope equality — `runs.boot` replays the same job while flipping `data.replayed`, which an
+  envelope comparison classified as fresh work and skipped.
+- It still reaches only a **queued** prior job. The settled and canceled arms, which are the ones
+  the step sites got wrong, are covered separately by
+  `test_a_settled_step_repeat_still_replays_under_an_activation`.
+- `systems.restore` is skipped because its repeat is refused by its own precondition, not because
+  it replays; that is a real exclusion, not a gap.
+- `_NO_JOB_PATH` is falsified for the three entries this module can invoke. The other four —
+  `debug.start_session`, `debug.end_session`, and the two recovery contracts — rest on their
+  stated reason alone.
 
 Verification for this issue runs on x86_64; the native ppc64le proof is deferred to a separate later
 run on native POWER hardware.

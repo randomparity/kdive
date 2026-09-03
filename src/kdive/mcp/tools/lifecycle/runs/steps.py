@@ -28,7 +28,7 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
-from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -160,15 +160,34 @@ async def _reject_crashkernel_off_kdump(
 async def _in_flight_job(conn: AsyncConnection, run_id: UUID, step: str) -> Job | None:
     """The queued or running job for this step, if there is one.
 
-    A repeat call that finds one enqueues nothing and returns that job unchanged, so it is a
-    poll rather than fresh work. That is why the external-boot guard sits behind this lookup at
-    both step sites (ADR-0583): an activation must not turn an agent's own in-flight job into a
-    conflict, which is what idempotent replay is for.
+    Deliberately narrow, and not the same question as "would a repeat return a prior job".
+    ``runs.install`` uses this as an early return that short-circuits the whole re-stage path,
+    so a *settled* job must not answer it: a ``succeeded`` install is a re-stage candidate, not
+    something to poll. Broadening this disables re-staging.
+
+    Whether the guard may be skipped is the other question, and :func:`_settled_replay` answers
+    it — a call that re-enqueues nothing must not be refused just because an activation appeared.
     """
     prior = await queue.get_by_dedup_key(conn, f"{run_id}:{step}")
     if prior is None or prior.state not in {JobState.QUEUED, JobState.RUNNING}:
         return None
     return prior
+
+
+async def _settled_replay(
+    conn: AsyncConnection, run_id: UUID, step: str, *, policy: queue.JobRecyclePolicy
+) -> Job | None:
+    """The job this call would return unchanged, given the policy its enqueue will use.
+
+    Gates the external-boot guard at both step sites (ADR-0583): when this is not ``None`` the
+    call commits nothing, so denying it would refuse work that was already admitted and enqueued
+    while telling the agent something the System will not do.
+
+    ``policy`` is passed rather than derived because the caller knows what the enqueue will
+    actually see — a ``force`` boot and an install re-stage both delete the ``run_steps`` row
+    first, which changes the policy from ``NEVER`` to ``TERMINAL`` (#2117 review).
+    """
+    return await dedup_replay(conn, f"{run_id}:{step}", recycle=policy)
 
 
 async def _restage_and_enqueue_install(
@@ -228,22 +247,34 @@ async def _restage_and_enqueue_install(
         prior = await _in_flight_job(conn, run.id, "install")
         if prior is not None:
             return run_job_envelope(prior, run.id)
-        # After the replay return, so a poll of an install admitted and enqueued before the
-        # activation appeared still gets its own job back; only a fresh enqueue is guarded.
-        try:
-            await check_external_boot_admission(
-                conn,
-                system_id,
-                ExternalBootOperation.RUN_INSTALL,
-                project=run.project,
-                run_id=run.id,
-            )
-        except ExternalBootDenied as exc:
-            return _external_boot_denial(str(run.id), exc, ctx)
         variant_changed = (
             progress.installed_cmdline != requested_cmdline
             or progress.installed_crashkernel != requested_crashkernel
         )
+        # A settled install whose variant is unchanged re-enqueues nothing: no row is deleted, so
+        # `_locked_enqueue` runs under the `NEVER` the present `run_steps` row selects and returns
+        # the prior job as it stands. A changed variant deletes the row below and recycles, which
+        # is fresh work the matrix must decide — so only the unchanged case skips the guard.
+        settled = (
+            None
+            if variant_changed
+            else await _settled_replay(
+                conn, run.id, "install", policy=await _step_recycle(conn, run.id, "install")
+            )
+        )
+        # After the replay returns, so a poll of an install admitted and enqueued before the
+        # activation appeared still gets its own job back; only a fresh enqueue is guarded.
+        if settled is None:
+            try:
+                await check_external_boot_admission(
+                    conn,
+                    system_id,
+                    ExternalBootOperation.RUN_INSTALL,
+                    project=run.project,
+                    run_id=run.id,
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(str(run.id), exc, ctx)
         if progress.install != RUN_STEP_SUCCEEDED or variant_changed:
             build_error = await _reusable_build_install_error(conn, locked_run)
             if build_error is not None:
@@ -408,6 +439,19 @@ async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
 _RECYCLABLE_JOB_STATES = frozenset({JobState.FAILED, JobState.SUCCEEDED})
 
 
+async def _step_recycle(conn: AsyncConnection, run_id: UUID, step: str) -> queue.JobRecyclePolicy:
+    """The recycle policy this step's enqueue uses — ledger-driven, per ADR-0299.
+
+    One expression, read by both :func:`_locked_enqueue` (which passes it to ``queue.enqueue``)
+    and :func:`_in_flight_job` (which asks what a repeat call would return under it). They must
+    not drift: a probe narrower than the policy turns an idempotent replay into a refusal, which
+    is what a hand-listed state set did here.
+    """
+    if await _has_step_row(conn, run_id, step):
+        return queue.JobRecyclePolicy.NEVER
+    return queue.JobRecyclePolicy.TERMINAL
+
+
 async def _locked_enqueue(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -434,7 +478,8 @@ async def _locked_enqueue(
     which a row-presence proxy would miss.
     """
     dedup_key = f"{run.id}:{step}"
-    recycle = not await _has_step_row(conn, run.id, step)
+    policy = await _step_recycle(conn, run.id, step)
+    recycle = policy is queue.JobRecyclePolicy.TERMINAL
     prior = await queue.get_by_dedup_key(conn, dedup_key)
     job = await queue.enqueue(
         conn,
@@ -442,7 +487,7 @@ async def _locked_enqueue(
         payload,
         job_authorizing(ctx, run.project),
         dedup_key,
-        recycle=(queue.JobRecyclePolicy.TERMINAL if recycle else queue.JobRecyclePolicy.NEVER),
+        recycle=policy,
     )
     # A prior job is reset in place only when ``recycle`` fires on a recyclable (terminal) state;
     # otherwise a prior job is returned unchanged (a replay) and an absent prior is a fresh insert.
@@ -500,7 +545,15 @@ async def _enqueue_step(
         # Behind the replay lookup, so a poll of a boot enqueued before the activation appeared
         # still gets its own job back from `_locked_enqueue`; only a fresh enqueue is guarded.
         # It stays ahead of the `force` re-stage, whose `delete_run_step` is a write.
-        if await _in_flight_job(conn, run.id, step) is None:
+        #
+        # `force` deletes the `run_steps` row below, so the enqueue that follows runs under
+        # `TERMINAL` rather than whatever the present row selects — a forced re-boot of a settled
+        # step really is fresh work and must be decided, while a forced call landing on a job
+        # that is still queued re-enqueues nothing and must not be.
+        boot_policy = (
+            queue.JobRecyclePolicy.TERMINAL if force else await _step_recycle(conn, run.id, step)
+        )
+        if await _settled_replay(conn, run.id, step, policy=boot_policy) is None:
             try:
                 await check_external_boot_admission(
                     conn,

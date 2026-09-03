@@ -301,13 +301,13 @@ async def _fetch_vmcore(
                 # genuinely fresh work and needs no probe. `control.force_crash` and
                 # `control.watch_for_crash` use stable keys with no suffix and do need one.
                 #
-                # Unkeyed only, deliberately: a fresh key is a new logical request and the matrix
-                # decides it even when it would map onto an existing job
-                # (`test_a_keyed_mutation_admitted_before_the_activation_still_replays` pins it).
-                if idempotency_key is None:
-                    replay = await dedup_replay(conn, dedup_key)
-                    if replay is not None:
-                        return job_envelope(replay, "run_id", uid)
+                # Unconditional, and against the exact key the enqueue uses. `dedup_key` here
+                # does not vary with `idempotency_key`, so a fresh key cannot mint fresh work --
+                # `queue.enqueue` returns the prior row either way -- and denying it would be the
+                # same divergence as denying an unkeyed repeat (#2117 review).
+                replay = await dedup_replay(conn, dedup_key)
+                if replay is not None:
+                    return job_envelope(replay, "run_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn,

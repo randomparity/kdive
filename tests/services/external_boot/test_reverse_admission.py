@@ -462,14 +462,32 @@ def test_a_keyed_mutation_admitted_before_the_activation_still_replays(
     """The guard sits inside ``do_work``, behind ``keyed_mutation``'s replay lookup.
 
     A repeated idempotency key must return the stored envelope of work that was already
-    committed — the caller stored the key precisely so it could recover the job id it lost —
-    while a *fresh* key on the same restricted System is still denied. The install and boot
-    steps carry the same rule; these six are the ``keyed_mutation`` sites.
+    committed — the caller stored the key precisely so it could recover the job id it lost.
+
+    What a *fresh* key means then depends on whether the tool's dedup key varies with it, and
+    the test decides that from an unrestricted control arm rather than a hand-written list.
+    Where the key varies (`control.power`, `control.diagnostic_sysrq`,
+    `control.capture_traffic`), a fresh key really does mint a new job, so the matrix must
+    decide it. Where the key is fixed (`control.force_crash`, `control.watch_for_crash`,
+    `vmcore.fetch`), `queue.enqueue` returns the prior row whatever key was supplied, so a
+    denial would refuse a call that commits nothing while its job stays queued and runs — the
+    same divergence as denying an unkeyed repeat (#2117 review). An earlier version of this
+    test asserted the denial for all six and so pinned the wrong contract at three of them.
     """
     case = _REPLAY_CASES[tool]
 
-    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse]:
+    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse, bool]:
         async with runs_support.pool(migrated_url) as conn_pool:
+            # Control arm: no activation, so a fresh key here shows what the dedup key does.
+            plain_system, plain_run = await _ready_system_with_run(conn_pool)
+            if case.prepare is not None:
+                await case.prepare(conn_pool, plain_system)
+            plain_first = await case.invoke(conn_pool, plain_system, plain_run, f"replay-{uuid4()}")
+            plain_fresh = await case.invoke(conn_pool, plain_system, plain_run, f"replay-{uuid4()}")
+            # `job_envelope` keys the envelope on the job id, so a different `object_id` is a
+            # different job — i.e. the fresh key minted one.
+            key_varies = plain_fresh.object_id != plain_first.object_id
+
             system_id, run_id = await _ready_system_with_run(conn_pool)
             if case.prepare is not None:
                 await case.prepare(conn_pool, system_id)
@@ -478,16 +496,20 @@ def test_a_keyed_mutation_admitted_before_the_activation_still_replays(
             await _restrict(conn_pool, seeded_activation, system_id, run_id, case.state)
             replay = await case.invoke(conn_pool, system_id, run_id, key)
             fresh = await case.invoke(conn_pool, system_id, run_id, f"replay-{uuid4()}")
-            return first, replay, fresh
+            return first, replay, fresh, key_varies
 
-    first, replay, fresh = asyncio.run(_run())
+    first, replay, fresh, key_varies = asyncio.run(_run())
     assert first.status == "queued", first.model_dump()
     assert replay.error_category is None, replay.model_dump()
     assert replay.model_dump() == first.model_dump()
-    denied_actions = (
-        _CONFLICT_ACTIONS if case.state is _STATE.RECOVERY_CONFLICT else _ACTIVE_ACTIONS
-    )
-    _assert_denied(fresh, denied_actions)
+    if key_varies:
+        denied_actions = (
+            _CONFLICT_ACTIONS if case.state is _STATE.RECOVERY_CONFLICT else _ACTIVE_ACTIONS
+        )
+        _assert_denied(fresh, denied_actions)
+    else:
+        assert fresh.error_category is None, fresh.model_dump()
+        assert fresh.model_dump() == first.model_dump()
 
 
 @pytest.mark.parametrize("operation", sorted(_READY_DENIED))
@@ -996,14 +1018,61 @@ def test_every_guarded_tool_is_classified_for_the_replay_gate() -> None:
     assert classified - GUARDED_TOOLS.keys() == set()
     assert _JOB_TOOLS.keys().isdisjoint(_NO_JOB_PATH)
     assert all(reason.strip() for reason in _NO_JOB_PATH.values())
+    # Every name with a recipe must be exercisable by the falsification test below, so a tool
+    # cannot be parked in `_NO_JOB_PATH` and also left unexercised.
+    assert _NO_JOB_PATH_INVOCATIONS.keys() <= _NO_JOB_PATH.keys()
+
+
+# The `_NO_JOB_PATH` entries this module can already invoke. The remaining four
+# (`debug.start_session`, `debug.end_session`, and the two recovery contracts) rest on their
+# stated reason alone: they are exercised elsewhere and reaching them here would need fixtures
+# this module does not otherwise build. Partial coverage stated as partial, not as closed.
+_NO_JOB_PATH_INVOCATIONS: dict[str, Callable[[_Restricted], Awaitable[ToolResponse]]] = {
+    "runs.bind": _bind_other_run,
+    "runs.cancel": _cancel_other_run,
+    "runs.create": _create_other_run,
+}
+
+
+@pytest.mark.parametrize("tool", sorted(_NO_JOB_PATH_INVOCATIONS))
+def test_a_no_job_path_tool_really_enqueues_nothing(migrated_url: str, tool: str) -> None:
+    """`_NO_JOB_PATH` is prose, and prose is what the replaced hand-written table was.
+
+    Without this a guarded tool that does enqueue a job can be parked there with any reason and
+    escape the replay gate entirely — the same "covers what someone remembered" failure moved one
+    level up (#2117 review).
+    """
+
+    async def _run() -> tuple[int, int]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            restricted = _Restricted(pool=conn_pool, system_id=system_id, owning_run_id=run_id)
+            before = await _job_count(conn_pool)
+            await _NO_JOB_PATH_INVOCATIONS[tool](restricted)
+            return before, await _job_count(conn_pool)
+
+    before, after = asyncio.run(_run())
+    assert after == before
+
+
+async def _job_count(pool: AsyncConnectionPool) -> int:
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM jobs")
+        row = await cur.fetchone()
+    return 0 if row is None else int(row[0])
 
 
 async def _unkeyed_repeat(
     pool: AsyncConnectionPool,
     case: _JobTool,
     seed: SeedActivation | None,
-) -> tuple[ToolResponse, ToolResponse]:
-    """Call the tool unkeyed twice, restricting between the calls when ``seed`` is given."""
+) -> tuple[ToolResponse, ToolResponse, bool]:
+    """Call the tool unkeyed twice, restricting between the calls when ``seed`` is given.
+
+    Also reports whether the *repeat* minted a job row. Envelope inequality is not the same
+    question: `runs.boot` replays the same job while flipping `data.replayed`, so comparing
+    envelopes classified a real replay as fresh work and skipped its assertion (#2117 review).
+    """
     system_id, run_id = await _ready_system_with_run(pool)
     restricted = _Restricted(pool=pool, system_id=system_id, owning_run_id=run_id)
     if case.prepare is not None:
@@ -1011,7 +1080,9 @@ async def _unkeyed_repeat(
     first = await case.invoke(restricted)
     if seed is not None:
         await _restrict(pool, seed, system_id, run_id, case.state)
-    return first, await case.invoke(restricted)
+    before = await _job_count(pool)
+    second = await case.invoke(restricted)
+    return first, second, await _job_count(pool) > before
 
 
 @pytest.mark.parametrize("tool", sorted(_JOB_TOOLS))
@@ -1031,21 +1102,95 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
     """
     case = _JOB_TOOLS[tool]
 
-    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse, ToolResponse]:
+    async def _run() -> tuple[ToolResponse, ToolResponse, bool, ToolResponse, ToolResponse]:
         async with runs_support.pool(migrated_url) as conn_pool:
-            plain_first, plain_second = await _unkeyed_repeat(conn_pool, case, None)
-            held_first, held_second = await _unkeyed_repeat(conn_pool, case, seeded_activation)
-            return plain_first, plain_second, held_first, held_second
+            plain_first, plain_second, plain_minted = await _unkeyed_repeat(conn_pool, case, None)
+            held_first, held_second, _ = await _unkeyed_repeat(conn_pool, case, seeded_activation)
+            return plain_first, plain_second, plain_minted, held_first, held_second
 
-    plain_first, plain_second, held_first, held_second = asyncio.run(_run())
+    plain_first, plain_second, plain_minted, held_first, held_second = asyncio.run(_run())
     assert plain_first.status == "queued", plain_first.model_dump()
-    if plain_second.model_dump() != plain_first.model_dump():
+    if plain_minted:
         # The repeat enqueued fresh work, which the matrix is entitled to deny; the denial
         # itself is `test_a_restricting_activation_denies_every_reverse_operation`'s.
         return
+    if plain_second.error_category is not None:
+        # The repeat is refused for a reason of the tool's own (`systems.restore` leaves the
+        # System `RESTORING`, which its own precondition rejects). Nothing was replayed, so
+        # there is no replay for the guard to preempt.
+        return
     assert held_first.status == "queued", held_first.model_dump()
     assert held_second.error_category is None, held_second.model_dump()
-    assert held_second.model_dump() == held_first.model_dump()
+    # The same job, not the same envelope: a replay may annotate itself (`data.replayed`).
+    assert held_second.object_id == held_first.object_id
+
+
+async def _force_job_state(pool: AsyncConnectionPool, dedup_key: str, state: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE jobs SET state = %s WHERE dedup_key = %s", (state, dedup_key))
+
+
+async def _mark_step(pool: AsyncConnectionPool, run_id: str, step: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state) VALUES (%s, %s, 'succeeded')",
+            (UUID(run_id), step),
+        )
+
+
+# (step, prior job state, whether the step's `run_steps` row exists). Both rows are replays the
+# hand-listed `{QUEUED, RUNNING}` probe reported as absent: under `NEVER` (row present) a
+# `succeeded` job is returned unchanged, and under `TERMINAL` (no row) a `canceled` one is.
+_SETTLED_STEP_ARMS = [
+    ("install", "succeeded", True),
+    ("install", "canceled", False),
+    ("boot", "succeeded", True),
+    ("boot", "canceled", False),
+]
+
+
+@pytest.mark.parametrize(("step", "prior_state", "has_row"), _SETTLED_STEP_ARMS)
+def test_a_settled_step_repeat_still_replays_under_an_activation(
+    migrated_url: str,
+    seeded_activation: SeedActivation,
+    step: str,
+    prior_state: str,
+    has_row: bool,
+) -> None:
+    """The step sites' replay is wider than a live job, and the guard must sit behind all of it.
+
+    `_locked_enqueue` passes `NEVER` when the step's `run_steps` row is present and `TERMINAL`
+    when it is absent, so a `succeeded` job under the first and a `canceled` job under the second
+    are both returned unchanged — the repeat commits nothing. The differential gate above only
+    ever reaches a `queued` prior, which is why these arms are their own test (#2117 review).
+    """
+
+    async def _run() -> tuple[ToolResponse, ToolResponse]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            await _mark_installed(conn_pool, run_id)
+            if step == "install":
+                first = await runs_support.install(conn_pool, _ctx(), run_id)
+            else:
+                first = await boot_run(conn_pool, _ctx(), run_id)
+            await _force_job_state(conn_pool, f"{run_id}:{step}", prior_state)
+            if has_row and step == "boot":
+                await _mark_step(conn_pool, run_id, "boot")
+            if not has_row:
+                async with conn_pool.connection() as conn:
+                    await conn.execute(
+                        "DELETE FROM run_steps WHERE run_id = %s AND step = %s",
+                        (UUID(run_id), step),
+                    )
+            await _restrict(conn_pool, seeded_activation, system_id, run_id, _STATE.ACTIVE)
+            if step == "install":
+                return first, await runs_support.install(conn_pool, _ctx(), run_id)
+            return first, await boot_run(conn_pool, _ctx(), run_id)
+
+    first, repeat = asyncio.run(_run())
+    assert first.status == "queued", first.model_dump()
+    assert repeat.error_category is None, repeat.model_dump()
+    assert repeat.object_id == first.object_id
 
 
 def test_a_cancel_refuses_a_run_bound_after_its_pre_lock_read(

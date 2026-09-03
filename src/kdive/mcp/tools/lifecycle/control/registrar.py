@@ -92,6 +92,9 @@ _FORCE_CRASH_KIND = "control.force_crash"
 _DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
 _WATCH_FOR_CRASH_KIND = "control.watch_for_crash"
 _CAPTURE_TRAFFIC_KIND = "control.capture_traffic"
+# `watch_for_crash` recycles a terminal-or-canceled watch into a fresh one, so only a live
+# row is a replay. Named once: the probe and the enqueue must pass the same policy.
+_WATCH_RECYCLE = queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
 
 # capture_traffic bounds (ADR-0385, #1258). Single source of truth for the tool's `Field`
 # constraints and descriptions — interpolated into both so an agent never sees a hardcoded bound.
@@ -257,6 +260,13 @@ async def force_crash_system(
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
 
+            # Canonical uid (not the raw agent string, which UUID() accepts in non-canonical
+            # forms): the reconciler's leak-recovery predicate matches this dedup_key against
+            # `s.id::text` (canonical), so a non-canonical key would hide a live force_crash job
+            # and trigger premature recovery (#1078). One expression, shared by the replay probe
+            # and the enqueue, so the two cannot ask about different keys.
+            dedup_key = f"{uid}:force_crash"
+
             async def _enqueue() -> ToolResponse:
                 # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
                 # fresh enqueue is guarded: an activation must not un-idempotent a retry.
@@ -269,13 +279,14 @@ async def force_crash_system(
                 # unkeyed repeat returns the prior job unchanged. That must stay a replay: the
                 # crash job is queued and will fire, and telling the agent it was refused
                 # diverges what it believes from what the System is about to do.
-                # Unkeyed only: the keyed path already replays through `keyed_mutation`, and a
-                # *fresh* key is a new logical request the matrix decides even when it would map
-                # onto the existing job.
-                if idempotency_key is None:
-                    replay = await dedup_replay(conn, f"{uid}:force_crash")
-                    if replay is not None:
-                        return job_envelope(replay, "system_id", uid)
+                # Probed against the exact key the enqueue below uses, unconditionally. The
+                # question is not whether a key was supplied but whether the key *varies* with
+                # it: this one does not, so a fresh idempotency key cannot mint fresh work here
+                # -- `queue.enqueue` returns the prior row either way -- and denying it would be
+                # the same divergence as denying an unkeyed repeat (#2117 review).
+                replay = await dedup_replay(conn, dedup_key)
+                if replay is not None:
+                    return job_envelope(replay, "system_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
@@ -287,11 +298,7 @@ async def force_crash_system(
                     JobKind.FORCE_CRASH,
                     SystemPayload(system_id=system_id),
                     job_authorizing(ctx, system.project),
-                    # Canonical uid (not the raw agent string, which UUID() accepts in
-                    # non-canonical forms): the reconciler's leak-recovery predicate matches this
-                    # dedup_key against `s.id::text` (canonical), so a non-canonical key would hide
-                    # a live force_crash job and trigger premature recovery (#1078).
-                    f"{uid}:force_crash",
+                    dedup_key,
                 )
                 return job_envelope(job, "system_id", uid)
 
@@ -424,6 +431,9 @@ async def watch_for_crash_system(
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
 
+            # One expression for the probe and the enqueue below, so they cannot diverge.
+            dedup_key = f"{system_id}:watch_for_crash"
+
             async def _enqueue() -> ToolResponse:
                 # Stable per-System dedup key caps in-flight watches to one per System: a second
                 # call while a watch is queued/running returns that same job (there is no reason to
@@ -444,15 +454,11 @@ async def watch_for_crash_system(
                 # The stable key described above is exactly a replay, so it is probed ahead of
                 # the guard. Terminal-or-canceled rows are recycled into a fresh watch, so
                 # `dedup_replay` correctly reports those as fresh work the matrix must decide.
-                # Unkeyed only, for the reason given at `force_crash`.
-                if idempotency_key is None:
-                    replay = await dedup_replay(
-                        conn,
-                        f"{system_id}:watch_for_crash",
-                        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
-                    )
-                    if replay is not None:
-                        return job_envelope(replay, "system_id", uid)
+                # Unconditional and against the exact key, for the reason given at
+                # `force_crash`: this key does not vary with `idempotency_key` either.
+                replay = await dedup_replay(conn, dedup_key, recycle=_WATCH_RECYCLE)
+                if replay is not None:
+                    return job_envelope(replay, "system_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project
@@ -464,8 +470,8 @@ async def watch_for_crash_system(
                     JobKind.WATCH_FOR_CRASH,
                     WatchForCrashPayload(system_id=system_id, deadline_s=clamped),
                     job_authorizing(ctx, system.project),
-                    f"{system_id}:watch_for_crash",
-                    recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+                    dedup_key,
+                    recycle=_WATCH_RECYCLE,
                 )
                 return job_envelope(job, "system_id", uid)
 

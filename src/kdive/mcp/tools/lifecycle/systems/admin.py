@@ -66,6 +66,12 @@ _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
 
 
+def _teardown_dedup_key(system_id: UUID) -> str:
+    """One expression for the replay probe and the enqueue; the key does not vary with
+    ``idempotency_key``, so the probe runs unconditionally."""
+    return f"{system_id}:teardown"
+
+
 @dataclass(frozen=True, slots=True)
 class SystemAdminHandlers:
     """Destructive system handlers with provider validation seams bound at construction."""
@@ -400,10 +406,9 @@ async def _teardown_locked(
             )
         # `{uid}:teardown` is stable and recycles nothing, so an unkeyed repeat while the teardown
         # job is live replays it. Both replays sit above the guard, matching every other site.
-        if idempotency_key is None:
-            replay = await dedup_replay(conn, f"{uid}:teardown")
-            if replay is not None:
-                return job_envelope(replay, "system_id", uid)
+        replay = await dedup_replay(conn, _teardown_dedup_key(uid))
+        if replay is not None:
+            return job_envelope(replay, "system_id", uid)
         # ADR-0583 admits teardown in every restricted state, so this cannot deny today. Ordered
         # and handled as if it could, because teardown is the one operation admitted everywhere:
         # `_ESCALATION_HINT` and the recovery rows of `_STATE_NEXT_ACTIONS` steer every denied
@@ -425,7 +430,7 @@ async def _teardown_locked(
             JobKind.TEARDOWN,
             SystemPayload(system_id=str(uid)),
             job_authorizing(ctx, system.project),
-            f"{uid}:teardown",
+            _teardown_dedup_key(uid),
         )
         envelope = job_envelope(job, "system_id", uid)
         if idempotency_key is not None:
