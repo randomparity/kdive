@@ -220,9 +220,18 @@ euid; it trusts nothing the peer sends.
 - Commit seam: the context is constructed only by the service, only from a record it
   anchored, and only in `mutation-started` phase (N3), then checked against the trusted head
   (N4). The peer's request never reaches either field (N2). Failure leaks a category name.
-- Cleanup finalization: `finalize_cleanup_tombstone` already compares `proof.binding` and
+- Cleanup finalization: `finalize_cleanup_tombstone` compares `proof.binding` and
   `proof.point_digest` against the recovery point, and the store re-reads and re-compares the
-  tombstone before unlinking. Those are the existing controls and they are kept.
+  tombstone before unlinking. Those are the existing controls and they are kept. **State the
+  residual, because this change makes the path production-reachable for the first time:** the
+  delete carries no operation-lease pin, unlike every sibling coordinator call, which reaches
+  durable state through `self._io.open(authority, _expected_binding(...))` and is refused
+  unless the pinned ownership facts match. That is deliberate and pre-existing —
+  `test_real_adapter_finalization_replays_exact_proof_without_session` asserts finalization
+  resolves no lease and opens no session, because it is a durable-store delete needing no
+  libvirt or guest access. Adding the pin would change the finalization seam's shape, which
+  belongs to ADR-0586, so it is recorded here rather than taken. `authority` is accepted by
+  the coordinator and knowingly unused; the code says so where a reader will meet it.
 - Unresolvable recovery point: refused as `provider_conflict` with no branch of any kind, so
   `_require_matching_identities` and `_ownership_is_proven(require_named=True)` are reached on
   every path that could delete recovery evidence (N6). There is no absence-derived success
@@ -231,6 +240,16 @@ euid; it trusts nothing the peer sends.
   `source_xml_sha256`, on both records, because `_metadata_extends_intent` compares the pair
   to each other and a consistently tampered pair would otherwise pass. This is an integrity
   check against corruption and an asymmetry fix, not a control against the actor above.
+
+**Known interleaving, not a control gap.** The cleanup arm runs three lease scopes back to
+back — `cleanup_is_accounted`, then `cleanup`, then the finalize — so `accounted` can be stale
+by the time it is acted on. Reaching that needs two authority instances sharing the provider
+host, since `execute_mutation` refuses a second operation on an occupied lane. Both orderings
+were traced and neither loses or double-deletes evidence: the loser's `cleanup` short-circuits
+on `cleanup_complete`, and its finalize meets the store's post-delete-absence arm and returns.
+The only effect is a spurious `provider_conflict` on the losing side, which is the safe
+direction. Widening `cleanup`'s provider-neutral signature to make the decision atomic is
+declined for the reason its own comment gives.
 
 **Explicitly out of scope.** An attacker who can write the recovery directory can still
 substitute a *self-consistent* record whose digests match its own bytes; nothing here signs

@@ -394,9 +394,13 @@ class LocalExternalBootAuthorityAdapter:
 def _cleanup_proof(context: AuthorityCommitContextV1, point: RecoveryPoint) -> FinalizeCleanupProof:
     """Tie this cleanup to the exact authority record the service anchored for it.
 
-    Every field is either the recovery point this adapter resolved or a value the authority
-    read out of its own journal. Nothing is defaulted or derived from protocol input —
-    ``phase`` included, which is why ``FinalizeCleanupProof`` no longer defaults it.
+    No field is defaulted — ``phase`` included, which is why ``FinalizeCleanupProof`` no
+    longer defaults it. Provenance is not uniform, though, and the store treats these fields
+    accordingly: ``point_digest`` and ``binding`` come from the recovery point this adapter
+    resolved and are what ``finalize_tombstone`` actually compares; ``journal_sequence`` and
+    ``journal_digest`` are the authority's own, and are what make the caller unable to forge a
+    finalization; ``operation_id`` and ``attempt_id`` are peer-sent values carried through the
+    anchored record, so they identify the operation but authenticate nothing.
     """
     return FinalizeCleanupProof(
         point_digest=LocalLibvirtExternalBoot.point_digest(point),

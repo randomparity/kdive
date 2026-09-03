@@ -200,6 +200,11 @@ class _FakeIO:
         self.actions.append("reopen")
         if self.reopen_error is not None:
             raise self.reopen_error
+        if not self.intent_present:
+            # `publish_tombstone` unlinked `intent.json`, so the real store can no longer
+            # rebuild the record. Without this the double would exhibit "cleanup completed,
+            # record still resolvable", which production cannot reach.
+            raise FileNotFoundError("intent.json")
         if self.reopen_fault:
             raise LookupError("libguestfs: /var/lib/kdive/secret.key unreadable")
         return self.metadata
@@ -437,13 +442,10 @@ async def test_a_commit_point_that_is_not_an_operation_cannot_reach_the_adapter(
     cannot carry a non-member and the adapter can no longer be handed one. The check is now
     at construction, which is where it belongs, and it still fails closed.
     """
-    io = _FakeIO()
     values = _context().model_dump(mode="json", by_alias=True)
 
     with pytest.raises(ValidationError):
         AuthorityCommitContextV1.model_validate(values | {"commit_point": "rm -rf /"})
-
-    assert io.actions == []
 
 
 # --------------------------------------------------------------------------------------
@@ -992,6 +994,14 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert proof.phase == "mutation-started"
     assert proof.binding == _BINDING
     assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(_point(io.metadata))
+
+    # Cleanup destroys the record the post-commit observation reads, so the observation is
+    # `unreadable` and the lane terminates `conflict`. ADR-0592 documents that; this pins it.
+    terminal = repository.records[-1]
+    assert terminal.phase is JournalPhase.TERMINAL
+    assert terminal.outcome == "conflict"
+    assert terminal.observation is not None
+    assert terminal.observation.category == "unreadable"
 
 
 async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path) -> None:

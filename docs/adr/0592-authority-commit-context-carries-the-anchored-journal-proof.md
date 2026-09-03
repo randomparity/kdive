@@ -154,6 +154,16 @@ Three residuals this decision does not close, all inherited and none made worse 
   or an operator reconciles it. That is the right visible answer for a head the service cannot
   reconcile, and it is stated here rather than left for a reader to discover; adding
   reconciliation machinery is not this charter's to authorize.
+- **A `cleanup` commit over an interrupted publish reports success while knowingly leaving the
+  directory populated.** The window is a crash inside `publish_tombstone` between the tombstone
+  write and the `intent.json` unlink. `cleanup` then short-circuits on `cleanup_complete`
+  without completing the unlink, and the adapter declines to finalize because
+  `finalize_tombstone` refuses a directory holding more than the tombstone. The commit returns
+  a success observation, and nothing else in the tree writes to that directory, so the record
+  survives a cleanup the journal recorded as done. Say it plainly rather than only saying that
+  finalizing would fail. The alternative — dropping `cleanup`'s `cleanup_complete` early return
+  so the publish self-heals — was rejected: it would re-run a provider mutation on a retry,
+  which is precisely what this issue's amended criterion 8 forbids.
 - **A crash between `cleanup()` and finalization strands the tombstone with no recovery path.**
   Recovering it would need finalization addressable without a `RecoveryPoint`, and that is not
   constructible: `FinalizeCleanupProof.point_digest` is computed from the recovery point, so

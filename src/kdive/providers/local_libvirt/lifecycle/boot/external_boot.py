@@ -1572,6 +1572,15 @@ class LocalLibvirtExternalBoot:
         # ``AuthorityCommitContextV1`` (ADR-0592).  The local seam deliberately does not
         # decode it; it compares the closed owner/point fields and handles present or
         # post-delete absence idempotently.
+        #
+        # ``authority`` is accepted and deliberately not used to open an operation session:
+        # ``test_real_adapter_finalization_replays_exact_proof_without_session`` asserts that
+        # finalization resolves no lease and opens no session, because this is a durable-store
+        # delete under the recovery root that needs no libvirt or guest access. What bounds it
+        # instead is the pair of comparisons above plus the store's own re-read of the
+        # tombstone. The residual — that the delete carries no lease pin, unlike its sibling
+        # calls — is recorded in the design's threat model rather than closed here, because
+        # the finalization seam's shape belongs to ADR-0586.
         self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(

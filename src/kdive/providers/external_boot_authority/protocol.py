@@ -350,10 +350,21 @@ class AuthorityCommitContextV1(_ClosedValue):
     """Service-constructed proof of the anchored ``mutation-started`` record (ADR-0592).
 
     Carried across the ``AuthorityMutationAdapter`` seam so a provider adapter can tie its own
-    commit to the exact authority journal record without reading the journal itself. Every
-    field comes from a record the authority anchored; none is reachable from
-    ``AuthorityMutationRequestV1``, which is peer-supplied and carries no journal field, so a
-    client cannot assert a journal sequence it did not cause.
+    commit to the exact authority journal record without reading the journal itself.
+
+    Provenance differs per field, and the distinction is the point of the value:
+
+    - ``journal_sequence`` and ``journal_digest`` are **service-owned**. They are the anchored
+      record's own sequence and digest, computed here, and are unreachable from
+      ``AuthorityMutationRequestV1`` — which carries no journal field and is closed — so a
+      peer cannot assert a journal position it did not cause.
+    - ``commit_point`` and ``phase`` are **pinned**: the phase to a single literal, and the
+      commit point to the operation the anchored record carries.
+    - ``operation_identity`` and ``attempt_id`` are **peer-sent values that round-trip through
+      the anchored record**. ``_binding_matches`` requires the identity to equal the trusted
+      binding before the record is anchored, so it is constrained; ``attempt_id`` is
+      peer-chosen and carried, not verified. Neither is an authenticity token, and a
+      downstream proof must not treat them as one.
     """
 
     schema_: Literal["external-boot-authority-v1"] = Field(
