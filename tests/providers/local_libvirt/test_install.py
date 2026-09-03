@@ -52,6 +52,7 @@ from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
 from tests.live_vm import require_live_vm_provisioned
+from tests.live_vm.console_actor import claim_console_inode
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -1455,8 +1456,16 @@ def test_live_vm_real_install_boot() -> None:  # pragma: no cover - live_vm
     # drives the real _real_readiness console probe; a clean kdive-ready boot resolves without
     # raising. The vulnerable-vs-fixed A/B is exercised host-free by the committed crash/clean
     # fixtures (test_*_fixture_classifies_*) and end-to-end by the #123 integration harness.
+    system_id = UUID(contract.system_id)
+    # scripts/live-vm/mint-system.sh provisions the System through the MCP stack, so the fixed
+    # worker account — not this process — created its console inode and performed the provisioning
+    # start. Minting is where ownership transfers: from here this process is the System's sole
+    # starting actor, so claim the inode before the seam checks it (ADR-0576, tests.live_vm
+    # .console_actor). Without this the boot below fails the identity check on a readable but
+    # peer-owned log, and leaves the domain destroyed for the kdump acceptance test that follows.
+    claim_console_inode(system_id)
     booter = LocalLibvirtInstall.from_env()
-    booter.boot(UUID(contract.system_id))  # no raise == readiness resolved ok at the marker
+    booter.boot(system_id)  # no raise == readiness resolved ok at the marker
 
 
 # --- classify_console: the pure readiness verdict core (ADR-0055) --------------------
