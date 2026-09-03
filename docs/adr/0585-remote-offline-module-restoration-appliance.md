@@ -158,6 +158,56 @@ retains against is the set of un-discharged recovery obligations, so a scratch v
 writing attempt has ended. The appliance, isolation, retry, restoration, and teardown decisions
 here remain in force.
 
+### Amendment (2026-09-03): canonical is a byte form, and 255 is bytes (#2176)
+
+This is an amendment because it gives content to two contract words this record already used
+without defining them; it reverses no decision. The claims it qualifies are "The appliance writes
+a canonical `remote-module-recovery-v1` result" and "The appliance discovers the root filesystem
+from a closed, versioned operation document", both above. "Canonical" bound nothing, so three
+implementations chose three encodings, and the appliance's own manifest digest and result writer
+disagreed with each other about the same value. The shipped schemas bound the root volume key at
+"255" without a unit, which a JSON Schema validator reads as characters.
+
+Read the protocol names from the shipped schemas, not from this record's prose: the two documents
+that cross the appliance boundary are `remote-module-operation-v1`
+(`deploy/remote_module_appliance/operation-v1.schema.json`) and `remote-module-result-v1`
+(`result-v1.schema.json`), the latter being the document the paragraph above calls
+`remote-module-recovery-v1`. `remote-module-recovery-ref-v1` is provider-private and never reaches
+the appliance. All three, and every later `remote-module-*-v1` document, have exactly one byte
+form:
+
+- **Encoding.** UTF-8, no byte-order mark. A character outside ASCII is written as its UTF-8
+  bytes, never as a `\uXXXX` escape. Only the escapes RFC 8259 requires appear: `"`, `\`, and
+  U+0000–U+001F.
+- **Member order.** Every object's member names are sorted ascending by Unicode code point.
+- **Separators.** One `,` between members and between array elements, one `:` between a member
+  name and its value, and no other whitespace anywhere in the document.
+- **Absent fields.** An optional field with no value is absent from the document. It is never
+  written as `null`.
+- **Framing.** A document stored as a file on an appliance volume is those bytes followed by
+  exactly one U+000A and nothing else. The unframed bytes, without that newline, are what a
+  digest covers.
+
+Both sides read and write those bytes. A reader re-serializes what it parsed and refuses any
+document whose bytes differ from the form above, which is also what closes the duplicate-member
+and gratuitous-escape parser differentials: two JSON parsers may disagree about which duplicate
+member wins, so a document one side accepts could mean something else to the other. Nothing in a
+schema or a model rejects either shape; only comparing bytes does.
+
+**Length is bytes.** Wherever this protocol bounds a value that can name a libvirt volume —
+`root_volume.key` in the operation document and `root_volume_key` in the result — the bound is 255
+bytes of the UTF-8 encoding above, never 255 characters. That is the filesystem `NAME_MAX` a
+libvirt dir pool inherits, as established by
+[ADR-0588](0588-remote-module-volume-ownership-lives-in-the-volume-name.md) — **Proposed**, and
+Accepted when the pull request implementing it merges — which measured a dir-pool name round-trip
+byte-identically up to 255 bytes and refused at 256. JSON Schema's `maxLength` counts characters,
+so `"maxLength": 255` in either schema is a necessary bound and not a sufficient one: a
+255-character non-ASCII key satisfies it at up to 1020 bytes and can never name a real volume. The
+schemas state the unit in their `description`, and the first reader that sees such a value refuses
+it by byte length, naming that length and the limit. Values this protocol constrains to ASCII —
+`release`, the digests, the UUIDs, the nonce — have equal byte and character lengths, so their
+bounds are unaffected.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor
