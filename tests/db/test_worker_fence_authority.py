@@ -41,41 +41,46 @@ from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
 _ROLE_LOCK_QUEUE_TIMEOUT_S = 90.0
-"""Budget for waits on a participant *completing* in this module's runtime-role races.
+"""Budget for a wait that is queued behind `db_conftest._cluster_global_role_lock`.
 
-Those completions sit downstream of `db_conftest._cluster_global_role_lock`, which is
-cluster-global rather than per-worker: the function-scoped `pg_conn` fixture holds it for
-the whole body of every test that uses it, and `_migrated_db` holds it across a full
-`apply_migrations`. Under the gate's `-n auto --maxprocesses=16` every worker queues on
+That lock is cluster-global rather than per-worker: the function-scoped `pg_conn` fixture
+holds it for the whole body of every test that uses it, and `_migrated_db` holds it across a
+full `apply_migrations`. Under the gate's `-n auto --maxprocesses=16` every worker queues on
 that one lock, so what bounds such a wait is the depth of that queue. Sizing it against the
 work instead — 5s, the state-observation budget in `tests/db_waits.py` — made the outcome a
 function of machine load (#2177): at that budget the migration's wait for the lock was
-measured failing at 5.015s on the first `-n auto --maxprocesses=16` run of `tests/db` on an
-otherwise idle 48-core host.
+measured failing at 5.015s.
 
-Measured over three such runs after the split below, that queue wait peaked at 5.86s while
-every wait taken under the lock stayed at or below 0.021s — three orders of magnitude apart,
-which is the separation this budget and `_LOCK_HELD_STEP_TIMEOUT_S` exist to keep distinct.
+Two waits use it: the migration waiting to be granted the lock, and the drop completing.
+Everything performed while this module *holds* the lock uses `_LOCK_HELD_STEP_TIMEOUT_S`
+instead, because a generous budget under the lock would push this module past the 60s
+ceiling every other acquisition is bounded by.
 
-It applies only to the two waits that are queued behind the lock while holding nothing: the
-migration waiting to be granted it, and the drop completing once it is released. Everything
-performed while this module *holds* the lock is bounded by `_LOCK_HELD_STEP_TIMEOUT_S`
-instead — a distinction that matters, because a generous budget under the lock would push
-this module past the 60s ceiling every other acquisition is bounded by.
+**This constant is not the margin that binds.** Both waits spend their queued phase inside a
+`_cluster_global_role_lock` acquisition, which is itself capped at 60s (`timeout_ms` in
+`db_conftest`) and raises there naming the backend PIDs holding it. So a queue deeper than
+60s is a red test by that error, never by this budget, and the real headroom over the
+measured peak is 60s. This sits above it only so that the lock's own diagnostic wins the
+race instead of being pre-empted by a bare timeout here. Raising the 60s ceiling would mean
+editing `tests/db/conftest.py`, which is outside this change.
 
-The lock's own acquisition budget is that same 60s (`timeout_ms` in `db_conftest`), and on
-expiry it raises naming the backend PIDs holding it. This sits clear above it, so the lock's
-own diagnostic wins the race rather than being pre-empted by a bare timeout here. A queue
-wait longer than 60s is therefore still a red test — by that error rather than this budget.
-Raising that ceiling would mean editing `tests/db/conftest.py`, which is outside this
-change.
+The drop-completion wait is the one that can outlive its queued phase: past the 60s cap it
+has been *granted* the lock, so the rest of that budget runs with the lock held. What bounds
+the hold there is `_LOCKED_STATEMENT_TIMEOUT_MS`, not this constant.
+
+Measurement scope, stated because it is narrower than the topology this must survive: three
+`-n auto --maxprocesses=16` runs of `tests/db` alone, on an otherwise idle 48-core host,
+where the queue wait peaked at 5.86s and every wait under the lock stayed at or below
+0.021s. #2177 was observed in a full `just ci` gate, whose queue is deeper than a
+`tests/db`-only run's; the three-orders-of-magnitude separation between the two classes is
+the part that generalizes, not the absolute figures.
 
 It is a backstop, not the synchronization. Ordering is established by observing `pg_locks`
 state, and every wait below also ends the moment its future completes, so a genuine
 regression is reported at once instead of after this budget expires.
 """
 
-_LOCK_HELD_STEP_TIMEOUT_S = 12.0
+_LOCK_HELD_STEP_TIMEOUT_S = 8.0
 """Budget for a wait performed *while* this module holds the cluster-global fixture lock.
 
 Every other acquisition of that lock is bounded at 60s (`timeout_ms` in `db_conftest`), and
@@ -83,32 +88,48 @@ that expiry is a fixture error rather than a test failure — it costs a worker 
 `migrated_url` for the rest of the run. So a failure here must release the lock well before
 60s, or one red test in this module errors every other worker again by a second route.
 
-The four waits that can run under the lock — the pause edge, the drop's connect, the drop
-queueing, and the migration completing — are budgeted at this value each, so their worst
-case sums to 48s and stays under that ceiling. Raising it, or adding a fifth wait under the
-lock, must keep that sum under 60s.
+Four waits can run under the lock: the pause edge, the drop's connect, the drop queueing,
+and the migration completing. They are budgeted at this value each, so a failing run spends
+at most 32s in them — and then hands the remainder to the executor join, which holds the
+lock too and is bounded by `_LOCKED_STATEMENT_TIMEOUT_MS`. The two together are what must
+stay under 60s, not these four alone.
 
-Staying small costs nothing, because none of these four is queue-bound: over three
+Staying small costs nothing, because none of the four is queue-bound: over three
 `-n auto --maxprocesses=16` runs of `tests/db` on a 48-core host they peaked at 0.021s,
-0.006s, 0.021s and 0.004s respectively. The wait that genuinely needs a large budget is the
-one *before* the grant, where this module holds nothing, and keeping the two apart is what
-lets this one stay under the ceiling.
+0.006s, 0.021s and 0.004s respectively — this budget is some 380x the largest. The wait that
+genuinely needs a large budget is the one *before* the grant, where this module holds
+nothing, and keeping the two apart is what lets this one stay under the ceiling.
 """
 
-_WORKER_STATEMENT_TIMEOUT_MS = 180_000
-"""Server-side ceiling on the worker connections the races below drive from threads.
+_LOCKED_STATEMENT_TIMEOUT_MS = 40_000
+"""Server-side ceiling while a worker thread's statement runs under the fixture lock.
 
-`ThreadPoolExecutor.__exit__` is `shutdown(wait=True)`, so the join is only as bounded as
-the slowest worker statement. Without a ceiling a wedged backend makes that join — and the
-test — hang forever rather than report, which is the failure mode that made a single flake
-cost a whole run (#2177).
+`ThreadPoolExecutor.__exit__` is `shutdown(wait=True)`, so a failed wait does not end the
+test: it falls through to a join that waits on the worker, which is still holding the lock.
+The hold therefore lasts until the worker's statement ends, and this is what ends it.
 
-Sized against the longest *single* statement in flight, not the sum of every budget above:
-`statement_timeout` clocks one statement, and no statement spans all of them. The longest is
-the unguarded control's `role_sql`, issued before the drop runs and in flight across that
-drop's completion budget plus its own — 90 + 12 = 102s. The guarded arm's is shorter, since
-its `role_sql` is issued only after the grant. The remaining margin is what keeps a backstop
-expiry reporting first, with this bounding only the join behind it.
+It bounds the whole hold, not just the join: whenever the last wait expires, the worker
+statement started at the grant, so its own clock caps the total at this value. 40s leaves
+20s of margin under the 60s sibling ceiling.
+
+It must also stay *above* what the guarded arm legitimately needs, or a slow run is
+cancelled rather than reported: `role_sql` is issued at the grant and stays in flight across
+the pause edge, the drop's connect, the drop queueing and its own completion — four
+`_LOCK_HELD_STEP_TIMEOUT_S` budgets, 32s. Both bounds move with that constant: keep
+`4 * _LOCK_HELD_STEP_TIMEOUT_S` below this, and this below 60s.
+"""
+
+_WORKER_STATEMENT_TIMEOUT_MS = 240_000
+"""Server-side ceiling where no fixture lock is held — the unguarded control arm.
+
+Same purpose as `_LOCKED_STATEMENT_TIMEOUT_MS`: without a ceiling, a wedged backend makes
+the join hang forever rather than report, which is the failure mode that made a single flake
+cost a whole run (#2177). Nothing else is waiting on this arm, so it is sized purely to sit
+above the longest *single* statement in flight rather than under a sibling's ceiling.
+
+`statement_timeout` clocks one statement, not the test, and no statement spans every budget.
+The longest is the control's `role_sql`, issued when the migration is submitted and in
+flight across the pause edge, the drop's completion, and its own — 8 + 90 + 90 = 188s.
 """
 _PROTECTED_TABLES = {
     "capture_operation_cutoff",
@@ -2012,7 +2033,8 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
 
     creator = psycopg.connect(postgres_url)
     contender = psycopg.connect(postgres_url, autocommit=True)
-    _bound_worker_statements(contender)
+    # `pg_conn` holds the fixture lock for this whole body, so the join below holds it too.
+    _bound_worker_statements(contender, _LOCKED_STATEMENT_TIMEOUT_MS)
     first_role = roles["kdive_server"]
     started = Event()
 
@@ -2070,11 +2092,11 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
                 pg_conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
 
 
-def _bound_worker_statements(conn: psycopg.Connection) -> None:
+def _bound_worker_statements(conn: psycopg.Connection, timeout_ms: int) -> None:
     """Cap statements on a connection a worker thread drives, so the executor join is bounded."""
     conn.execute(
         "SELECT set_config('statement_timeout', %s, false)",
-        (f"{_WORKER_STATEMENT_TIMEOUT_MS}ms",),
+        (f"{timeout_ms}ms",),
     )
 
 
@@ -2204,8 +2226,11 @@ def test_cluster_global_role_lock_closes_validation_to_drop_window(
         blocker = psycopg.connect(migration_url)
         contender = psycopg.connect(migration_url, autocommit=True)
         dropper = psycopg.connect(drop_url, autocommit=True)
+        # The guarded arm runs its worker statements under the fixture lock, so its ceiling
+        # is what bounds how long a failure holds that lock; the control arm holds nothing.
+        ceiling_ms = _LOCKED_STATEMENT_TIMEOUT_MS if guarded else _WORKER_STATEMENT_TIMEOUT_MS
         for worker_conn in (contender, dropper):
-            _bound_worker_statements(worker_conn)
+            _bound_worker_statements(worker_conn, ceiling_ms)
         observer = psycopg.connect(
             db_conftest._server_url_without_db(postgres_url), autocommit=True
         )
