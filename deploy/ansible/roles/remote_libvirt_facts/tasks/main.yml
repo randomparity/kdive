@@ -129,7 +129,8 @@
       {{ inventory_hostname }}: could not inspect
       {{ storage_pool_target }}/{{ volume_name }}.qcow2 for the external-boot guest userland
       (ADR-0590). guestfish exited {{ probe.rc | default('(not run)') }}:
-      {{ probe.stderr | default(probe.msg | default('no output')) | trim }}.
+      {{ (probe.stderr | default('') | trim) or (probe.msg | default('') | trim)
+         or 'no output' }}.
       This is not a verdict about the image — the check could not run, so the volume is neither
       confirmed nor denied. Install libguestfs-tools on this host, or set
       remote_libvirt_facts_userland_verify=false to declare volumes unverified.
