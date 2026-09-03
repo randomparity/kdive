@@ -72,6 +72,10 @@ class _ContractIO:
     def __init__(self) -> None:
         self.metadata: LocalRecoveryMetadataV1 | None = None
         self.tombstone = False
+        # `publish_tombstone` unlinks `intent.json`, so the real store cannot rebuild the
+        # record after a cleanup. Tracked here so this double is not more permissive than the
+        # store it stands in for.
+        self.record_unlinked = False
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _ContractContext:
@@ -104,6 +108,7 @@ class _ContractIO:
             source_boot=_SOURCE_BOOT,
             target_boot=_TARGET_BOOT,
             target_projection_sha256="sha256:" + "d" * 64,
+            target_xml_sha256="sha256:" + hashlib.sha256(_TARGET_XML.encode()).hexdigest(),
             target_xml=_TARGET_XML,
             expected_running=materialization.kernel_observation,
             source_state=ProviderStateIdentity(
@@ -171,8 +176,11 @@ class _ContractIO:
         del point_digest
         self.record_phase(metadata, "cleaned")
         self.tombstone = True
+        self.record_unlinked = True
 
     def _required(self) -> LocalRecoveryMetadataV1:
+        if self.record_unlinked:
+            raise FileNotFoundError("intent.json")
         if self.metadata is None:
             raise LookupError("no prepared external-boot recovery record")
         return self.metadata
