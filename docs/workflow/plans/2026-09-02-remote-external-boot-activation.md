@@ -648,8 +648,11 @@ def prepare_target_definition(
    `activation_id` that differ, proving they are **not** compared;
    `materialization.plan_identity != plan.identity`; an `initrd_path` supplied when the plan has no
    initrd and the reverse; each rejected artifact-path shape (empty, non-NFC, relative, over 1024
-   bytes, containing NUL, containing a `..` segment), asserting `CONFLICT` and
-   `details["rule"] == "artifact-path"`; a model instance whose `target_definition` is edited to a
+   bytes, containing NUL, containing a `..` segment, containing an XML-illegal C0 control),
+   asserting `CONFLICT` and `details["rule"] == "artifact-path"`; a plan command line that is not
+   NFC (`rule="cmdline-nfc"`) and one carrying an XML-illegal C0 control (`rule="cmdline-xml"`),
+   both built through `ExternalBootPlan`'s own validators so each proves the shared contract admits
+   the value; a model instance whose `target_definition` is edited to a
    wrong digest (construct via `model_validate` on a mutated dump) rejected with `ValidationError`;
    an XML field whose character count is under `MAX_DEFINITION_BYTES` but whose UTF-8 byte count is
    over it, rejected with `ValidationError` — a character-counting bound would let this through; and
@@ -693,10 +696,13 @@ def prepare_target_definition(
    `materialization.plan_identity == plan.identity` (`rule="plan-identity"`); initrd presence
    (`rule="initrd-presence"`) — `initrd_path` must be supplied exactly when `plan.initrd is not
    None` and `materialization.artifacts.initrd is not None`, and a disagreement among the three
-   fails; then each supplied artifact path (`rule="artifact-path"`) checked nonempty, NFC,
-   `startswith("/")`, at most 1024 UTF-8 bytes, no `"\0"`, and no `".."` among its `"/"`-split
-   segments. It then calls `require_disk_grub_source`, renders the target from `kernel_path`,
-   `initrd_path`, and `plan.cmdline` verbatim, and sets
+   fails; then the command line, which must be NFC (`rule="cmdline-nfc"`) and free of characters
+   XML 1.0 cannot represent (`rule="cmdline-xml"`) — `ExternalBootPlan` admits both, and ADR-0583
+   forbids normalizing the command line here, so each is refused by name; then each supplied
+   artifact path (`rule="artifact-path"`) checked nonempty, NFC, `startswith("/")`, at most 1024
+   UTF-8 bytes, no `"\0"`, no `".."` among its `"/"`-split segments, and representable in XML. It
+   then calls `require_disk_grub_source`, renders the target from `kernel_path`, `initrd_path`, and
+   `plan.cmdline` verbatim, and sets
    `expected_running = materialization.kernel_observation` and `expected_cmdline = plan.cmdline`.
 
    State in the docstring that `source_xml` must be `XMLDesc(VIR_DOMAIN_XML_INACTIVE)` output per

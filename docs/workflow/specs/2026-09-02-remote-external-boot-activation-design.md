@@ -41,6 +41,7 @@ Not owned here, with owners:
 | Boot-artifact capacity, reaping, provisioning | #2119 |
 | Job execution and reconciliation | #2118 |
 | Native live-tier proof | #2121 |
+| Command-line bytes across the shared port, and core's comparison | #2175 |
 
 x86_64 work and verification complete first; the native ppc64le proof is deferred to a separate
 later run on native POWER hardware.
@@ -196,7 +197,16 @@ a module-tree component state, and the module tree is #2129's. #2120 composes th
 Pure. Validates, in order, each failure raising `CONFLICT` with the named `rule`: ownership
 (`rule="ownership"`), `materialization.plan_identity == plan.identity` (`rule="plan-identity"`),
 and initrd presence agreement across the plan, the materialization, and the supplied path
-(`rule="initrd-presence"`), then artifact-path shape (`rule="artifact-path"`).
+(`rule="initrd-presence"`), then the command line — NFC (`rule="cmdline-nfc"`) and
+representable in XML (`rule="cmdline-xml"`) — then artifact-path shape (`rule="artifact-path"`).
+
+`ExternalBootPlan` admits both command-line defects, and ADR-0583 forbids a provider normalizing
+the command line, so each is refused by name rather than repaired. Left unnamed they compose a
+target XML that this module's own `parse_domain_xml` then rejects, reporting the *domain XML* as
+the subject with no rule and no System — and, in the XML case, as a retryable
+`INFRASTRUCTURE_FAILURE`, so the caller re-dispatches and burns the readiness deadline re-deriving
+a definition that can never parse. A platform argument reaches this point carrying an XML-illegal
+C0 control because `_validate_platform_argument` rejects only NUL and whitespace.
 
 It does not check that the materialization carries a kernel reference. `MaterializedArtifacts.kernel`
 is a required field on a closed frozen model, so one without a kernel reference cannot be
@@ -225,8 +235,9 @@ The kernel and initrd paths written into the XML are resolved by the caller from
 references #2109 minted, because ADR-0583 forbids a provider path crossing the shared seam and this
 module never learns the host's pool directory. They are host filesystem paths libvirt hands QEMU, so
 this function checks each is nonempty, NFC, absolute, at most 1024 bytes, free of NUL and of a `..`
-segment, and rejects otherwise with `CONFLICT` and `rule="artifact-path"`. That is a shape check on
-a trusted caller's value, not a substitute for the caller's own resolution.
+segment, and representable in XML 1.0, and rejects otherwise with `CONFLICT` and
+`rule="artifact-path"`. That is a shape check on a trusted caller's value, not a substitute for the
+caller's own resolution.
 
 Nothing is re-derived: `cmdline` is `plan.cmdline` verbatim, passed to libvirt as one string with no
 tokenizing, quoting, normalization, or shell.
@@ -468,10 +479,12 @@ silently make the boundary load-bearing without anyone noticing.
 **Explicitly out of scope.** Carrying the observed command-line bytes across the shared seam to
 core, which `ExternalBootPorts.observe`'s return type cannot express today; until it widens, the
 provider's own comparison is the only enforcement. ADR-0583 assigns that comparison to core, so this
-is a conformance gap on a settled record rather than a design preference, and it has no owner as of
-this writing — the orchestrator has been asked to assign one, and this paragraph is to be updated
-with the owning issue before the epic closes. It is named here rather than worked around because
-widening `providers/ports/` is outside this change's surface. A guest that deliberately reports the expected release, machine, build
+is a conformance gap on a settled record rather than a design preference. #2175 owns both halves —
+widening the port to carry the bytes and adding core's comparison — and is blocked by #2118. The gap
+is not specific to this provider: nothing anywhere in `src/kdive` or `tests` reads `/proc/cmdline`
+today, so the clause is equally unimplemented on the already-merged `local_libvirt` path, and #2175
+closes it across all providers at once. It is named here rather than worked around because widening
+`providers/ports/` is outside this change's surface. A guest that deliberately reports the expected release, machine, build
 ID, and command line while running something else — the identity proof measures divergence, not
 deception, and closing it would take attestation. Mutation fencing against a stale worker (#2140, ADR-0584) — this module
 performs its compare-and-set against observed state and documents that its caller owns the fence.
@@ -501,7 +514,9 @@ element.
 `CONFLICT` and its `rule` value.
 
 **Definition value.** Ownership mismatch between binding, plan, and materialization; a
-materialization whose initrd presence disagrees with the plan's; each rejected artifact-path shape;
+materialization whose initrd presence disagrees with the plan's; each rejected artifact-path shape,
+including one carrying an XML-illegal control; a plan command line that is not NFC and one carrying
+an XML-illegal control, each asserting its own `rule`;
 a JSON round trip; a digest that does not recompute from its recorded XML; and `source_xml`
 that does not parse, asserting `ValidationError` rather than a bare `CategorizedError`. The byte
 cap gets a multibyte case: XML under 65536 characters and over 65536 bytes must be rejected, which a

@@ -317,6 +317,24 @@ class RemoteExternalBootDefinition(BaseModel):
         return self
 
 
+def _round_trips_in_xml(value: str) -> bool:
+    """True when every character is XML 1.0 character data that reads back unchanged.
+
+    XML 1.0 forbids the C0 controls other than tab, newline, and carriage return, and forbids lone
+    surrogates and the two noncharacters; a parser also folds a carriage return into a newline, so
+    ``\\r`` is legal but does not round-trip. ``ET.tostring`` emits every one of them without
+    complaint, so a value carrying one composes a target XML that this module's own parse gate
+    then rejects as malformed — naming the domain XML rather than the value that spoiled it.
+    """
+    return all(
+        code in (0x09, 0x0A)
+        or 0x20 <= code <= 0xD7FF
+        or 0xE000 <= code <= 0xFFFD
+        or code >= 0x10000
+        for code in map(ord, value)
+    )
+
+
 def _require_artifact_path(value: str, *, system_id: UUID, what: str) -> str:
     """Shape-check a caller-resolved host path before it is written into the domain XML.
 
@@ -331,9 +349,11 @@ def _require_artifact_path(value: str, *, system_id: UUID, what: str) -> str:
         or len(value.encode()) > MAX_ARTIFACT_PATH_BYTES
         or "\0" in value
         or ".." in value.split("/")
+        or not _round_trips_in_xml(value)
     ):
         raise _conflict(
-            f"{what} path is empty, non-NFC, relative, oversized, or carries a traversal segment",
+            f"{what} path is empty, non-NFC, relative, oversized, unrepresentable in XML, "
+            "or carries a traversal segment",
             system_id=system_id,
             rule="artifact-path",
         )
@@ -397,6 +417,17 @@ def prepare_target_definition(
             "the plan command line is not NFC and this provider may not normalize it",
             system_id=system_id,
             rule="cmdline-nfc",
+        )
+    # Same shape, different gate: ExternalBootPlan admits a platform argument carrying an XML-
+    # illegal C0 control (it rejects only NUL and whitespace), which composes a target XML that
+    # parse_domain_xml then reports as a malformed *domain XML* — a retryable
+    # INFRASTRUCTURE_FAILURE with no rule and no system_id, so the caller re-dispatches and burns
+    # the readiness deadline re-deriving a definition that can never parse. Name it here instead.
+    if not _round_trips_in_xml(plan.cmdline):
+        raise _conflict(
+            "the plan command line carries a character XML cannot represent",
+            system_id=system_id,
+            rule="cmdline-xml",
         )
     _require_artifact_path(kernel_path, system_id=system_id, what="kernel")
     if initrd_path is not None:

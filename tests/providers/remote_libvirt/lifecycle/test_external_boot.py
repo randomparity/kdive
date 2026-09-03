@@ -402,8 +402,15 @@ def test_prepare_rejects_initrd_presence_disagreement(
 
 @pytest.mark.parametrize(
     "kernel_path",
-    ["", "relative/kernel.img", "/var/lib/kdive/../../etc/shadow", "/a\x00b", "/" + "x" * 1025],
-    ids=["empty", "relative", "traversal", "nul", "oversized"],
+    [
+        "",
+        "relative/kernel.img",
+        "/var/lib/kdive/../../etc/shadow",
+        "/a\x00b",
+        "/" + "x" * 1025,
+        "/var/lib/kdive/k\x01.img",
+    ],
+    ids=["empty", "relative", "traversal", "nul", "oversized", "xml-illegal-control"],
 )
 def test_prepare_rejects_an_ill_shaped_artifact_path(kernel_path: str) -> None:
     with pytest.raises(CategorizedError) as caught:
@@ -687,7 +694,13 @@ def _rendered_chain(error: BaseException) -> str:
         details = getattr(current, "details", None)
         if details is not None:
             parts.append(str(details))
-        current = current.__cause__ or current.__context__
+        # `traceback`'s own rule: a cause always chains, a context only while `raise ... from
+        # None` has not suppressed it. Walking a suppressed context would assert a leak that no
+        # traceback, log record, or message can render — `security/secrets/redaction.py` formats
+        # log records with `traceback.format_exception`, which honours the same flag.
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
     return "".join(parts)
 
 
@@ -819,6 +832,25 @@ def test_prepare_rejects_a_non_nfc_plan_command_line_naming_itself() -> None:
     assert caught.value.details["system_id"] == str(_SYSTEM_ID)
 
 
+def test_prepare_rejects_a_command_line_xml_cannot_represent() -> None:
+    """`_validate_platform_argument` rejects only NUL and whitespace, so a C0 control gets through.
+
+    Built through `ExternalBootPlan`'s own validators rather than `model_copy`, because the point
+    is that the shared contract admits this value, not that a corrupted one can be forced past it.
+    Left alone it composes a target XML that `parse_domain_xml` reports as a malformed domain XML
+    — a retryable `INFRASTRUCTURE_FAILURE` naming neither the rule nor the System.
+    """
+    payload = _plan().model_dump(mode="json", by_alias=True)
+    payload["platform_arguments"] = ["root=/dev/vda1", "console=ttyS0\x01"]
+    payload["cmdline"] = "root=/dev/vda1 console=ttyS0\x01"
+    plan = ExternalBootPlan.model_validate(payload)
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(plan=plan, materialization=_materialization(plan=plan))
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["rule"] == "cmdline-xml"
+    assert caught.value.details["system_id"] == str(_SYSTEM_ID)
+
+
 def test_definition_rejects_an_expected_cmdline_the_target_xml_does_not_carry() -> None:
     payload = _prepare().model_dump()
     payload["expected_cmdline"] = "root=/dev/sda9 console=none"
@@ -836,6 +868,21 @@ def test_observation_reports_an_unreadable_domain_name_as_infrastructure_failure
         observe_guest_identity(agent, _StaleDomain(), _prepare())
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert agent.argvs == []
+
+
+def test_observation_does_not_leak_the_guest_value_pydantic_rejected() -> None:
+    """A release `_single_field` accepts but `KernelRelease` rejects reaches pydantic.
+
+    That is the only path where a chained `ValidationError` would carry the guest's bytes verbatim
+    in its own message, so it is the path that proves `raise ... from None` keeps them out.
+    """
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(
+            _FakeAgentExec(_replies(release=b"6.9.0-kdive#S3KRIT\n")), _guest(), _prepare()
+        )
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+    assert "S3KRIT" not in _rendered_chain(caught.value)
 
 
 def test_observation_rejects_an_overlong_field_before_it_reaches_the_shared_model() -> None:
