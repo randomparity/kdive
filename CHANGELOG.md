@@ -196,6 +196,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Host authenticated dormant boundary
 - Provision dormant authority endpoint
 - Supervise external boot authority
+- Add provider-private remote module documents
 
 ### Changed
 
@@ -1778,6 +1779,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound transport JSON nesting
 - Revalidate host access boundary
 - Clean up authority failure paths
+- Frame module documents the way the appliance reads them
+- Close the four review notes on the module documents
+- Keep appliance-controlled bytes out of parser errors
+- Close the parser differential and the recovery-ref name collision
 
 ### Security
 
