@@ -27,6 +27,7 @@ from kdive.jobs.assembly import (
     register_all_handlers,
 )
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
+from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.external_boot.operations import (
     DuplicateExternalBootHandler,
     ExternalBootOperationHandler,
@@ -34,6 +35,7 @@ from kdive.jobs.handlers.external_boot.operations import (
 )
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
+from kdive.jobs.handlers.runs import registrar as runs_registrar
 from kdive.jobs.models import (
     DuplicateHandler,
     ExternalBootAuthorityMarkerV1,
@@ -187,20 +189,47 @@ def test_production_registry_resolves_every_operation_to_one_handler(
     ``register_all_handlers`` → both registrars → ``route_marked`` → the operations registry — is
     the production path, so this is the entry point the criterion names rather than a substitute
     for it.
+
+    Three assertions, and each exists because a bite proof showed the others do not cover it:
+
+    - ``build_calls == 1`` is what pins **one shared** registry. An earlier draft claimed the
+      dispatch assertion proved it; injecting a second ``build_operations`` call for the systems
+      registrar left that draft green, because a per-call recorder registry appending to one list
+      is indistinguishable from a shared one. The claim was false and this assertion is what makes
+      it true.
+    - ``ordinary == []`` is what pins that the **marked** job never reached ``boot_handler`` or
+      ``teardown_handler``. Without the ordinary doubles, un-wrapping the router made the real
+      handler run against a ``None`` connection and the test died with an ``AttributeError`` — a
+      crash indistinguishable from a broken fixture, not evidence.
+    - ``calls == [operation]`` is the dispatch itself, asserted against a recorder rather than
+      inferred, so "exactly one handler ran" is observed.
     """
     calls: list[str] = []
+    ordinary: list[str] = []
+    built: list[ExternalBootOperations] = []
+    shared = ExternalBootOperations()
+    for name in OPERATIONS:
+        shared.register(name, _recorder(name, calls))
 
     def recording_build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
         del ports
-        operations = ExternalBootOperations()
-        for name in OPERATIONS:
-            operations.register(name, _recorder(name, calls))
-        return operations
+        built.append(shared)
+        return shared
+
+    async def ordinary_double(label: str) -> str:
+        ordinary.append(label)
+        return label
 
     monkeypatch.setattr(
         jobs_assembly, "build_production_worker_handler_assembly", lambda **_: _stub_assembly()
     )
     monkeypatch.setattr(jobs_assembly.external_boot, "build_operations", recording_build_operations)
+    monkeypatch.setattr(
+        runs_registrar, "boot_handler", lambda *_a, **_kw: ordinary_double("boot_handler")
+    )
+    monkeypatch.setattr(
+        systems_handlers, "teardown_handler", lambda *_a, **_kw: ordinary_double("teardown_handler")
+    )
 
     registry = build_production_handler_registry(
         secret_registry=SecretRegistry(), incarnation_credential=CREDENTIAL, pool=None
@@ -211,6 +240,8 @@ def test_production_registry_resolves_every_operation_to_one_handler(
 
     asyncio.run(handler(cast(AsyncConnection, None), job))
 
+    assert len(built) == 1, "register_all_handlers must build one registry and share it"
+    assert ordinary == []
     assert calls == [operation]
 
 
