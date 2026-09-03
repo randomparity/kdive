@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import os
+import warnings
 from pathlib import Path
 from uuid import UUID
 
@@ -38,8 +39,9 @@ def _console_log(tmp_path: Path) -> Path:
 def test_discards_a_foreign_owned_regular_log(tmp_path: Path) -> None:
     """The runner's case: a readable, peer-owned 0664 log the seam would (correctly) reject."""
     log = _console_log(tmp_path)
+    owner = log.stat().st_uid
 
-    assert _claim_console_inode(log, _FOREIGN_UID) is True
+    assert _claim_console_inode(log, _FOREIGN_UID) == owner
     assert not log.exists()
 
 
@@ -47,13 +49,13 @@ def test_keeps_a_log_this_process_already_owns(tmp_path: Path) -> None:
     """A single-actor System has nothing to hand over; its current boot window must survive."""
     log = _console_log(tmp_path)
 
-    assert _claim_console_inode(log, os.geteuid()) is False
+    assert _claim_console_inode(log, os.geteuid()) is None
     assert log.read_bytes() == b"[    0.00] a prior actor's boot\n"
 
 
 def test_absent_log_is_nothing_to_claim(tmp_path: Path) -> None:
     """The seam creates the log when absent, so an absent path is already the wanted state."""
-    assert _claim_console_inode(tmp_path / f"{_SYS}.log", _FOREIGN_UID) is False
+    assert _claim_console_inode(tmp_path / f"{_SYS}.log", _FOREIGN_UID) is None
 
 
 def test_keeps_a_symlink_for_the_seam_to_reject(tmp_path: Path) -> None:
@@ -63,7 +65,7 @@ def test_keeps_a_symlink_for_the_seam_to_reject(tmp_path: Path) -> None:
     log = tmp_path / f"{_SYS}.log"
     log.symlink_to(target)
 
-    assert _claim_console_inode(log, _FOREIGN_UID) is False
+    assert _claim_console_inode(log, _FOREIGN_UID) is None
     assert log.is_symlink()
 
 
@@ -72,7 +74,7 @@ def test_keeps_a_hard_linked_log_for_the_seam_to_reject(tmp_path: Path) -> None:
     log = _console_log(tmp_path)
     (tmp_path / "second-name.log").hardlink_to(log)
 
-    assert _claim_console_inode(log, _FOREIGN_UID) is False
+    assert _claim_console_inode(log, _FOREIGN_UID) is None
     assert log.exists()
 
 
@@ -90,9 +92,41 @@ def test_claim_targets_the_systems_own_console_path(
     monkeypatch.setattr(console_actor, "console_log_path", _fake_path)
     monkeypatch.setattr(console_actor.os, "geteuid", lambda: _FOREIGN_UID)
 
-    assert claim_console_inode(_SYS) is True
+    with pytest.warns(UserWarning):
+        assert claim_console_inode(_SYS) is True
     assert seen == [_SYS]
     assert not log.exists()
+
+
+def test_a_discard_announces_the_path_and_the_uid_it_took(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live run must show the handoff happened; a silent delete cannot be told from a no-op."""
+    log = _console_log(tmp_path)
+    owner = log.stat().st_uid
+    monkeypatch.setattr(console_actor, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(console_actor.os, "geteuid", lambda: _FOREIGN_UID)
+
+    with pytest.warns(UserWarning) as caught:
+        claim_console_inode(_SYS)
+
+    announced = str(caught[0].message)
+    assert str(log) in announced
+    assert f"uid {owner}" in announced
+    assert str(_SYS) in announced
+
+
+def test_nothing_is_announced_when_nothing_is_claimed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Silence is the honest signal for the no-op path, and keeps the live run's output clean."""
+    log = _console_log(tmp_path)
+    monkeypatch.setattr(console_actor, "console_log_path", lambda _sid: log)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here fails the test
+        assert claim_console_inode(_SYS) is False
+    assert log.exists()
 
 
 def _first_statement_calling(body: list[ast.stmt], callee: str) -> int | None:

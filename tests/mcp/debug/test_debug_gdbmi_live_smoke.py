@@ -220,6 +220,33 @@ def _panicking_domain_xml(tmp_path: Path) -> str:
 
 
 @pytest.mark.parametrize("render", [_stepping_domain_xml, _panicking_domain_xml])
+def test_live_debug_domains_pin_the_kernel_base_for_symbol_lookups(
+    render: Callable[[Path], str], tmp_path: Path
+) -> None:
+    """Both live-debug domains must boot ``nokaslr``, from exactly one ``<cmdline>`` (#711).
+
+    A gdbstub debug session resolves symbols out of the fetched vmlinux's symbol table
+    (``resolve_symbol`` evaluates ``&name``), so a kernel relocated by KASLR puts every resolved
+    address somewhere the inferior does not map: a symbol breakpoint never fires and a
+    symbol-addressed disassemble returns no instructions. These domains are rendered by the tests
+    rather than by the runs lane, so they do not inherit the ``nokaslr`` that
+    ``system_required_cmdline`` adds to a real gdbstub System.
+
+    The single-element assertions are the other half: a second ``<kernel>`` or ``<cmdline>`` in one
+    ``<os>`` leaves the effective boot arguments to libvirt's element precedence, so the token
+    could be present in the XML and absent from the booted kernel.
+    """
+    os_element = ET.fromstring(render(tmp_path)).find("os")  # noqa: S314 - kdive-rendered, trusted
+    assert os_element is not None
+
+    assert len(os_element.findall("kernel")) == 1, "a second <kernel> makes the boot ambiguous"
+    cmdlines = os_element.findall("cmdline")
+    assert len(cmdlines) == 1, "a second <cmdline> makes the effective boot args ambiguous"
+    assert cmdlines[0].text is not None
+    assert "nokaslr" in cmdlines[0].text.split()
+
+
+@pytest.mark.parametrize("render", [_stepping_domain_xml, _panicking_domain_xml])
 def test_transient_live_debug_domain_claims_no_production_ownership(
     render: Callable[[Path], str], tmp_path: Path
 ) -> None:
