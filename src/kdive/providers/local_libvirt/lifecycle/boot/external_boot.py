@@ -117,6 +117,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     source_boot: Digest
     target_boot: Digest
     target_projection_sha256: Digest
+    target_xml_sha256: Digest
     target_xml: str
     expected_running: RunningKernelObservation
     source_state: ProviderStateIdentity
@@ -126,13 +127,16 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     phase: RecoveryPhase
 
     @model_validator(mode="after")
-    def _source_xml_matches_digest(self) -> LocalRecoveryMetadataV1:
+    def _domain_xml_matches_digests(self) -> LocalRecoveryMetadataV1:
         xml_values = (self.source_xml, self.target_xml)
         if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
             raise ValueError("source and target domain XML must be NFC")
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
+        target_digest = "sha256:" + hashlib.sha256(self.target_xml.encode()).hexdigest()
+        if target_digest != self.target_xml_sha256:
+            raise ValueError("target domain XML digest does not match bytes")
         if self.expected_running.release != self.release:
             raise ValueError("expected running release does not match recovery release")
         return self
@@ -157,18 +161,22 @@ class LocalPreStopIntentV1(_ClosedValue):
     source_boot: Digest
     target_boot: Digest
     target_projection_sha256: Digest
+    target_xml_sha256: Digest
     target_xml: str
     expected_running: RunningKernelObservation
     prior_power: Literal["running", "inactive"]
 
     @model_validator(mode="after")
-    def _source_xml_matches_digest(self) -> LocalPreStopIntentV1:
+    def _domain_xml_matches_digests(self) -> LocalPreStopIntentV1:
         xml_values = (self.source_xml, self.target_xml)
         if any(unicodedata.normalize("NFC", value) != value for value in xml_values):
             raise ValueError("source and target domain XML must be NFC")
         digest = "sha256:" + hashlib.sha256(self.source_xml.encode()).hexdigest()
         if digest != self.source_xml_sha256:
             raise ValueError("source domain XML digest does not match bytes")
+        target_digest = "sha256:" + hashlib.sha256(self.target_xml.encode()).hexdigest()
+        if target_digest != self.target_xml_sha256:
+            raise ValueError("target domain XML digest does not match bytes")
         if self.expected_running.release != self.release:
             raise ValueError("expected running release does not match recovery release")
         return self
@@ -177,11 +185,18 @@ class LocalPreStopIntentV1(_ClosedValue):
 class FinalizeCleanupProof(_ClosedValue):
     point_digest: Digest
     binding: ExternalBootActivationBinding
-    operation_id: Annotated[str, Field(pattern=r"^[0-9a-f-]{36}$")]
+    # The authority's operation identifier is ``_AuthorityBinding.operation_identity``:
+    # bounded text (ADR-0584), not a UUID. Deriving one here would make this field
+    # synthesized, which is what the proof exists to avoid. ``attempt_id`` keeps its UUID
+    # pattern because the journal's ``attempt_id`` really is a ``UUID``.
+    operation_id: Annotated[str, Field(min_length=1, max_length=255)]
     attempt_id: Annotated[str, Field(pattern=r"^[0-9a-f-]{36}$")]
     journal_sequence: Annotated[int, Field(ge=1)]
     journal_digest: Digest
-    phase: Literal["mutation-started"] = "mutation-started"
+    # No default: with one, this field carried no information, because
+    # ``AuthorityCommitContextV1.phase`` pins the same single literal and nothing could
+    # distinguish a carried value from a defaulted one (ADR-0592).
+    phase: Literal["mutation-started"]
 
 
 class CleanupTombstoneV1(_ClosedValue):
@@ -1535,9 +1550,9 @@ class LocalLibvirtExternalBoot:
     ) -> None:
         if proof.binding != recovery.binding or proof.point_digest != self.point_digest(recovery):
             raise ValueError("external-boot cleanup proof does not match recovery point")
-        # #2140 authenticates ``authority`` and supplies only an unresolved exact
-        # mutation-started proof.  The local seam deliberately does not decode it;
-        # it compares the closed owner/point fields and handles present or
+        # The authority supplies the anchored mutation-started proof as
+        # ``AuthorityCommitContextV1`` (ADR-0592).  The local seam deliberately does not
+        # decode it; it compares the closed owner/point fields and handles present or
         # post-delete absence idempotently.
         self._io.finalize_tombstone(recovery, proof)
 
@@ -1991,6 +2006,7 @@ def _metadata_extends_intent(
         "source_boot",
         "target_boot",
         "target_projection_sha256",
+        "target_xml_sha256",
         "target_xml",
         "expected_running",
         "prior_power",

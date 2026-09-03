@@ -576,6 +576,8 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         source_boot="sha256:" + "b" * 64,
         target_boot="sha256:" + "c" * 64,
         target_projection_sha256="sha256:" + "d" * 64,
+        target_xml_sha256="sha256:"
+        + hashlib.sha256(_SOURCE_XML.replace("/old", "/new").encode()).hexdigest(),
         target_xml=_SOURCE_XML.replace("/old", "/new"),
         expected_running=RunningKernelObservation(
             architecture="x86_64",
@@ -1091,6 +1093,7 @@ def test_cleanup_tombstone_finalization_is_exact_and_absent_retry_is_idempotent(
         attempt_id="00000000-0000-0000-0000-000000000005",
         journal_sequence=7,
         journal_digest="sha256:" + "4" * 64,
+        phase="mutation-started",
     )
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
@@ -2627,6 +2630,7 @@ def test_fresh_finalization_resumes_around_tombstone_deletion(
         attempt_id="00000000-0000-0000-0000-000000000005",
         journal_sequence=7,
         journal_digest="sha256:" + "4" * 64,
+        phase="mutation-started",
     )
     original = RecoveryMetadataStore.finalize_tombstone
 
@@ -3325,10 +3329,27 @@ def test_real_adapter_retry_rejects_substituted_expected_kernel_before_host_acce
 
 
 @pytest.mark.parametrize(
-    ("field", "substitution"),
+    ("field", "substitution", "refusal", "intent_reopenable"),
     [
-        ("target_projection_sha256", "sha256:" + "f" * 64),
-        ("target_xml", "<domain><name>substituted</name></domain>"),
+        # Refused by `_validate_preparation_inspection`, which compares the reopened intent
+        # against the host it re-inspected. The record itself stays internally consistent, so
+        # it can still be reopened.
+        (
+            "target_projection_sha256",
+            "sha256:" + "f" * 64,
+            "changed before recovery capture",
+            True,
+        ),
+        # Refused earlier, by the record's own `target_xml_sha256` binding: substituting the
+        # XML alone makes the record fail validation, so it cannot even be rebuilt. The
+        # guarantee this test exists for — no `define:` reaches the session — holds either
+        # way, and now holds one layer sooner.
+        (
+            "target_xml",
+            "<domain><name>substituted</name></domain>",
+            "target domain XML digest does not match bytes",
+            False,
+        ),
     ],
 )
 def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_definition(
@@ -3336,6 +3357,8 @@ def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_
     monkeypatch: pytest.MonkeyPatch,
     field: str,
     substitution: str,
+    refusal: str,
+    intent_reopenable: bool,
 ) -> None:
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
@@ -3364,12 +3387,16 @@ def test_real_adapter_rejects_substituted_target_metadata_before_publication_or_
 
     monkeypatch.setattr(session, "stop_and_require_inactive", substitute_after_stop)
 
-    with pytest.raises(ValueError, match="changed before recovery capture"):
+    with pytest.raises(ValueError, match=refusal):
         _real_prepare(io, materialization)
 
     point = _point(metadata)
     with RecoveryMetadataStore(root) as store:
-        assert store.reopen_pre_stop(point.recovery_ref, metadata.binding) == substituted
+        if intent_reopenable:
+            assert store.reopen_pre_stop(point.recovery_ref, metadata.binding) == substituted
+        else:
+            with pytest.raises(ValueError, match=refusal):
+                store.reopen_pre_stop(point.recovery_ref, metadata.binding)
         with pytest.raises(FileNotFoundError):
             store.reopen(point.recovery_ref, metadata.binding)
     assert not any(action.startswith("define:") for action in preparation.actions)
@@ -3557,6 +3584,7 @@ def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path:
         attempt_id="00000000-0000-0000-0000-000000000005",
         journal_sequence=7,
         journal_digest="sha256:" + "4" * 64,
+        phase="mutation-started",
     )
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
@@ -3637,6 +3665,7 @@ def test_finalize_requires_exact_cleanup_proof_binding_and_point() -> None:
         attempt_id="00000000-0000-0000-0000-000000000005",
         journal_sequence=1,
         journal_digest="sha256:" + "d" * 64,
+        phase="mutation-started",
     )
     ports.finalize_cleanup_tombstone(point, proof, OpaqueProviderRef(ref="authority/current"))
     assert io.actions[-2:] == ["cleanup", "finalize"]
@@ -3657,6 +3686,7 @@ def test_finalize_passes_authenticated_journal_fields_without_local_interpretati
         attempt_id="00000000-0000-0000-0000-000000000098",
         journal_sequence=999,
         journal_digest="sha256:" + "f" * 64,
+        phase="mutation-started",
     )
     ports.finalize_cleanup_tombstone(
         point, proof, OpaqueProviderRef(ref="authority/authenticated-by-2140")
@@ -3674,3 +3704,80 @@ def test_finalize_passes_authenticated_journal_fields_without_local_interpretati
         ports.finalize_cleanup_tombstone(
             point, crossed, OpaqueProviderRef(ref="authority/authenticated-by-2140")
         )
+
+
+def test_recovery_metadata_refuses_a_substituted_target_xml() -> None:
+    values = _metadata().model_dump(mode="json", by_alias=True)
+    values["target_xml"] = values["target_xml"] + " "
+    with pytest.raises(ValidationError, match="target domain XML digest"):
+        LocalRecoveryMetadataV1.model_validate(values)
+
+
+def test_pre_stop_intent_refuses_a_substituted_target_xml() -> None:
+    values = _pre_stop(_metadata()).model_dump(mode="json", by_alias=True)
+    values["target_xml"] = values["target_xml"] + " "
+    with pytest.raises(ValidationError, match="target domain XML digest"):
+        LocalPreStopIntentV1.model_validate(values)
+
+
+def _substitute_target_xml_on_disk(root: Path, name: str) -> str:
+    """Rewrite ``target_xml`` in a published record, leaving every other field alone."""
+    record = root / name / "intent.json"
+    payload = json.loads(record.read_text())
+    payload["target_xml"] = payload["target_xml"] + " "
+    record.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    return cast(str, payload["target_xml"])
+
+
+def test_a_target_xml_substituted_on_disk_is_refused_at_reopen(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        name = recovery_directory_name(reference, metadata.binding)
+        _substitute_target_xml_on_disk(root, name)
+        with pytest.raises(ValueError):
+            store.reopen(reference, metadata.binding)
+
+
+def test_activate_never_defines_a_target_xml_substituted_on_disk(tmp_path: Path) -> None:
+    """The digest binding stops a substituted record before the coordinator can use it.
+
+    ``define_target`` reaches ``self._session.define_xml(metadata.target_xml)``, and
+    ``_host_state`` compares ``inspection.xml`` against ``metadata.target_xml.encode()``, so
+    both take a ``LocalRecoveryMetadataV1``. Binding ``target_xml`` to its own digest means no
+    such instance can carry substituted bytes: the store refuses to rebuild one, and
+    ``activate`` fails at ``_reopen`` before any host access.
+
+    The discriminating assertion is the ``match``, not the absent ``define:`` action. Delete
+    the ``target_xml_sha256`` comparison from the validator and the substituted record
+    validates, so the failure changes to ``_host_state``'s "observed domain XML does not
+    match recovery metadata" and this test goes red on the message it required.
+    """
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("module-restored")
+    host = _RealPreparation(metadata, root)
+    io, _session = _real_io(root, host)
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        name = recovery_directory_name(reference, metadata.binding)
+    _substitute_target_xml_on_disk(root, name)
+
+    with pytest.raises(ValidationError, match="target domain XML digest"):
+        LocalLibvirtExternalBoot(io).activate(
+            _point(metadata), OpaqueProviderRef(ref="authority/current")
+        )
+
+    assert [action for action in host.actions if action.startswith("define:")] == []
+
+
+def test_target_projection_digest_still_measures_projection_inputs() -> None:
+    projection = _projection()
+    canonical = projection.canonical_bytes()
+
+    assert projection.digest == "sha256:" + hashlib.sha256(canonical).hexdigest()
+    assert "<domain" not in canonical.decode()
+    changed = projection.model_copy(update={"cmdline": projection.cmdline + " quiet"})
+    assert changed.digest != projection.digest

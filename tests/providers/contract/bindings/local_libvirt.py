@@ -104,6 +104,7 @@ class _ContractIO:
             source_boot=_SOURCE_BOOT,
             target_boot=_TARGET_BOOT,
             target_projection_sha256="sha256:" + "d" * 64,
+            target_xml_sha256="sha256:" + hashlib.sha256(_TARGET_XML.encode()).hexdigest(),
             target_xml=_TARGET_XML,
             expected_running=materialization.kernel_observation,
             source_state=ProviderStateIdentity(
