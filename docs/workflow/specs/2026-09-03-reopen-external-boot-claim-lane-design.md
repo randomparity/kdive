@@ -7,9 +7,10 @@ Debt record: `docs/debt/0003-external-boot-contracts-await-their-executor.md`.
 ## Goal
 
 Make a job whose payload carries the `external_boot_authority_v1` key claimable by a worker
-and visible to the queue-depth count, while leaving the generic finalization fence installed
-so `commit_external_boot_authority_result` stays the only path that can terminalize such a
-job.
+and visible to the queue-depth count, while keeping `commit_external_boot_authority_result`
+the only path that can terminalize such a job. That takes two things, not one: leaving the
+generic finalization fence installed, **and** adding the payload predicate that
+`repair_abandoned_jobs` never needed while these jobs were unclaimable.
 
 ## Context
 
@@ -142,14 +143,39 @@ claim functions begin with `pg_has_role(session_user, 'kdive_worker', 'member')`
 - *Which row a claim may take* — the credential-bound worker-incarnation check
   (`0112...sql:1269-1286`) and `FOR UPDATE ... SKIP LOCKED` are likewise untouched.
 - *Who may terminalize an authority-marked job* — the finalizer fence, retained and asserted
-  by this migration's third guard and by a test.
+  by this migration's third guard and by a test, **plus** an explicit payload predicate added
+  to `repair_abandoned_jobs` (`src/kdive/reconciler/repairs/jobs.py`). See below: the fence
+  alone is not sufficient once this change lands.
 - *What the widened set exposes* — nothing new. A worker already had `SELECT` on `jobs`; the
   fence governed claimability, not visibility.
 
+**The reconciler path this change opens, and closes.** The claim "the finalizer fence leaves
+`commit_external_boot_authority_result` as the only path that can terminalize an
+authority-marked job" is true today only because such jobs cannot be claimed, so they never
+acquire a lease that can expire. `repair_abandoned_jobs`
+(`src/kdive/reconciler/repairs/jobs.py:25-74`) is raw SQL that 0122 never fenced: it selects
+`jobs WHERE state = 'running' AND lease_expires_at < now() AND attempt >= max_attempts`, sets
+them `failed` with `lease_expired`, and drives the owning Run to `failed` — all outside the
+`SECURITY DEFINER` commit. Reopening the claim lane is what makes that path reachable, so this
+change adds the missing predicate there rather than leaving the window open. The change that
+opens a window closes it.
+
+**Accepted consequence: a leak window until #2203.** Skipping these jobs is the correct trade —
+an unfenced terminalization that corrupts authority state is worse than a job that lingers —
+but it is a visible leak, not a neutral choice. After this change, an authority-marked job
+whose worker dies sits `running` with an expired lease and **nothing reaps it**. It stays that
+way until #2203 adds the reconciler detection lane that routes it to the authority path
+instead of writing to it directly. #2203 is the right owner: `0121...sql:280-285` grants
+`kdive_reconciler` `SELECT` only on the external-boot tables, so the reconciler can detect and
+enqueue but cannot itself commit an authority result. This window is accepted deliberately and
+recorded here so it is read rather than discovered.
+
 **Out of scope.** Authority allocation and commit semantics (ADR-0584, already accepted and
 unchanged here); the payload shape and handlers that will populate
-`external_boot_authority_v1` (sibling issue); the `SELECT`-only grants at
-`0121...sql:280-285` (asserted unchanged, not modified).
+`external_boot_authority_v1` (sibling issue); the reconciler detection lane that will drain
+the leak above (#2203 — this change adds one predicate to `repair_abandoned_jobs` and no
+detection logic); the `SELECT`-only grants at `0121...sql:280-285` (asserted unchanged, not
+modified).
 
 ## Testing
 
@@ -171,5 +197,10 @@ All tests run against the disposable-Postgres fixture with the full migration se
    `v_job.kind` CHECK constraints are unchanged.
 7. **Idempotency** — a second `apply_migrations` call returns no newly applied versions.
 
+8. **Reconciler non-regression** — `repair_abandoned_jobs` leaves an authority-marked job with
+   an expired lease and exhausted attempts `running`, while still reaping an unmarked one in
+   the same sweep.
+
 Test 2 is proven to bite by deliberately extending the migration's reversal to the finalizer
-pair and observing the assertion fail, then reverting.
+pair and observing the assertion fail, then reverting. Test 8 is proven to bite by removing
+the payload predicate from `repair_abandoned_jobs` and observing the marked job terminalized.
