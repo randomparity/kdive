@@ -228,6 +228,19 @@ slot root as already converged. Symlink substitution afterwards is refused by th
 `O_NOFOLLOW` open. The setting's `parse` adds a third, earlier refusal at configuration
 resolution.
 
+**What the pre-create guard is, and is not.** It is a detector for a wrong state that
+already exists — a prior layout, an operator's hand-edit, a partially-run play — not a
+defence against a concurrent attacker. Ansible's `stat` and `file` are separate operations,
+so a race between them is possible in principle; but writing an entry into the `0711`
+root-owned parent requires root or that parent's owner, and such an actor can defeat the
+whole arrangement by other means. The guard's value is that it converts a silently
+"converged" wrong tree into a loud failure, which is the case that actually occurs.
+
+Likewise, validation at configuration resolution does not survive to use: the root could be
+changed between process start and the store's open. That is why the stores re-check on every
+open and why this change does not weaken them. The setting's `parse` is an early, loud
+failure for the common misconfiguration, not a substitute for the guard at the point of use.
+
 **Out of scope.** A root-equivalent local actor can defeat any of this and is not modelled.
 Backup and retention of recovery payloads is ADR-0586's accounting, not this change's.
 Whether the eight slots should share one account is settled by the fixed-worker contract
