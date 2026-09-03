@@ -1104,6 +1104,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reconcile the two documents' rule inventories
 - Stop claiming core enforces the command line
 - Ruff-format the plan's python blocks
+- Design the libvirt storage double fidelity proofs
+- Model backingStore and harden the storage-double gate
+- Classify every modelled field as retained, derived or rejected
+- Name overriding and rejecting as forms of echoing
+- Model libvirt's capacity-unit rule and latch the gate probe
+- Make the live value comparison discriminating and model five refusals
+- Observe every capacity multiplier rather than transcribe
+- Align the capacity table with the observed multipliers
+- Rule out name length as a refusal and count the doubles precisely
 
 ### Fixed
 
