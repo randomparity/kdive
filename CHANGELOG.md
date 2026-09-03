@@ -372,6 +372,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse authority journal lane cache
 - Simplify authority core
 - Bind external boot to activation
+- Name the lock-queue report once
 
 ### Documentation
 
@@ -1850,6 +1851,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Probe the exact dedup key, and cover the settled arms
 - Give the sweep tests a lock that is not host-global
 - Revoke the trigger function's PUBLIC EXECUTE and repin the tail
+- Bound role-lock races on the queue they wait in
+- Bound the executor join and scope the lock diagnostic
+- Split the queue wait from the waits under the held lock
+- Bound the lock hold through the executor join, per arm
+- Report statement-ceiling expiry and unblock cleanup
+- Claim the console inode before an in-process boot
 
 ### Security
 
