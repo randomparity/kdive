@@ -202,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Derive the external-boot target definition
 - Activate the external-boot target definition
 - Prove external-boot kernel and command-line identity
+- Verify the guest userland before declaring a volume
 
 ### Changed
 
@@ -1113,6 +1114,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Observe every capacity multiplier rather than transcribe
 - Align the capacity table with the observed multipliers
 - Rule out name length as a refusal and count the doubles precisely
+- Record the external-boot guest userland contract
+- Apply design-review findings to ADR-0590 and its plan
+- State ADR-0590's contract generally and fix a #2110 claim
 
 ### Fixed
 
@@ -1808,6 +1812,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the parser differential and the recovery-ref name collision
 - Close the external-boot review findings
 - Refuse a command line XML cannot represent
+- Declare and verify the external-boot guest userland
+- Apply branch-review findings to ADR-0590 and its tests
+- Create the verdict cache dir before writing to it
+- Name the cause when guestfish never runs
+- Refuse an empty userland contract and sharpen the cache key
 
 ### Security
 
