@@ -9,7 +9,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event
 from typing import Any, LiteralString
 from uuid import UUID, uuid4
@@ -40,6 +40,126 @@ from tests.db_waits import DEFAULT_WAIT_TIMEOUT_S, wait_until_blocked_by
 
 _LOGIN_AUTHENTICATION = "worker-fence-test-authentication"
 _BINDING_MAX_BYTES = 4096
+_ROLE_LOCK_QUEUE_TIMEOUT_S = 90.0
+"""Budget for a wait that is queued behind `db_conftest._cluster_global_role_lock`.
+
+That lock is cluster-global rather than per-worker: the function-scoped `pg_conn` fixture
+holds it for the whole body of every test that uses it, and `_migrated_db` holds it across a
+full `apply_migrations`. Under the gate's `-n auto --maxprocesses=16` every worker queues on
+that one lock, so what bounds such a wait is the depth of that queue. Sizing it against the
+work instead — 5s, the state-observation budget in `tests/db_waits.py` — made the outcome a
+function of machine load (#2177).
+
+Four call sites take it: the migration waiting to be granted the lock, which is the one the
+constant is named for, and the three completion waits that take it as the parameter default
+— the guarded drop (which overrides it with `_DROP_COMPLETION_TIMEOUT_S`) and both control-arm
+completions. The control arm queues behind nothing, so there the budget is generosity rather
+than a queue allowance; it is what makes `_WORKER_STATEMENT_TIMEOUT_MS` as large as it is.
+Everything performed while this module *holds* the lock uses `_LOCK_HELD_STEP_TIMEOUT_S`
+instead, because a generous budget under the lock would push this module past the 60s
+ceiling every other acquisition is bounded by.
+
+Two distinct failures sit behind #2177, and only one of them is reproduced here. This module
+reproduced the migration's pre-grant wait expiring at 5.015s, which raises `AssertionError`.
+The gate symptom the issue records is a `TimeoutError`, which in the pre-change code could
+only come from one of the two `future.result(timeout=5)` calls; quest-2163's log does not say
+which, and it is not attributable from the issue record. Both are downstream of the same
+inversion — every wait in the arm shared one 5s budget — so the split below addresses both,
+but the 5.015s figure should be read as this module's own reproduction rather than as a
+measurement of the gate's failure.
+
+**This constant is not the margin that binds.** Both waits spend their queued phase inside a
+`_cluster_global_role_lock` acquisition, which is itself capped at 60s (`timeout_ms` in
+`db_conftest`) and raises there naming the backend PIDs holding it. So a queue deeper than
+60s is a red test by that error, never by this budget, and the real headroom over the
+measured peak is 60s. This sits above it only so that the lock's own diagnostic wins the
+race instead of being pre-empted by a bare timeout here. Raising the 60s ceiling would mean
+editing `tests/db/conftest.py`, which is outside this change.
+
+The drop-completion wait is the one that can outlive its queued phase: past the 60s cap it
+has been *granted* the lock, so the rest of that budget runs with the lock held. What bounds
+the hold there is `_LOCKED_STATEMENT_TIMEOUT_MS`, not this constant.
+
+Measurement scope, stated because it is narrower than the topology this must survive: three
+`-n auto --maxprocesses=16` runs of `tests/db` alone, on an otherwise idle 48-core host,
+where the queue wait peaked at 5.86s and every wait under the lock stayed at or below
+0.021s. #2177 was observed in a full `just ci` gate, whose queue is deeper than a
+`tests/db`-only run's; the three-orders-of-magnitude separation between the two classes is
+the part that generalizes, not the absolute figures.
+
+It is a backstop, not the synchronization. Ordering is established by observing `pg_locks`
+state, and every wait below also ends the moment its future completes, so a genuine
+regression is reported at once instead of after this budget expires.
+"""
+
+_LOCK_HELD_STEP_TIMEOUT_S = 8.0
+"""Budget for a wait performed *while* this module holds the cluster-global fixture lock.
+
+Every other acquisition of that lock is bounded at 60s (`timeout_ms` in `db_conftest`), and
+that expiry is a fixture error rather than a test failure — it costs a worker `pg_conn` and
+`migrated_url` for the rest of the run. So a failure here must release the lock well before
+60s, or one red test in this module errors every other worker again by a second route.
+
+Four waits can run under the lock: the pause edge, the drop's connect, the drop queueing,
+and the migration completing. They are budgeted at this value each, so a failing run spends
+at most 32s in them — and then hands the remainder to the executor join, which holds the
+lock too and is bounded by `_LOCKED_STATEMENT_TIMEOUT_MS`. The two together are what must
+stay under 60s, not these four alone.
+
+The pause-edge wait also takes this budget in the control arm, where no lock is held and the
+value is simply a short, sufficient one rather than a ceiling constraint.
+
+Staying small costs nothing, because none of the four is queue-bound: over three
+`-n auto --maxprocesses=16` runs of `tests/db` on a 48-core host they peaked at 0.021s,
+0.006s, 0.021s and 0.004s respectively — this budget is some 380x the largest. The wait that
+genuinely needs a large budget is the one *before* the grant, where this module holds
+nothing, and keeping the two apart is what lets this one stay under the ceiling.
+"""
+
+_DROP_COMPLETION_TIMEOUT_S = 120.0
+"""Budget for the guarded arm's wait on the role drop finishing.
+
+Larger than `_ROLE_LOCK_QUEUE_TIMEOUT_S` because this participant composes two independent
+bounds it may legitimately spend in series: up to 60s queued for the fixture lock behind
+whichever sibling holds it once the migration releases it (`timeout_ms` in `db_conftest`),
+and then up to `_LOCKED_STATEMENT_TIMEOUT_MS` for the `DROP ROLE` itself. A 90s budget would
+fire at 90s on a drop still inside both of its own bounds, reporting a race that had not yet
+gone wrong.
+
+It does not lengthen how long the fixture lock is held: once granted, the drop's hold is
+bounded by the statement ceiling, not by this budget.
+"""
+
+_LOCKED_STATEMENT_TIMEOUT_MS = 40_000
+"""Server-side ceiling while a worker thread's statement runs under the fixture lock.
+
+`ThreadPoolExecutor.__exit__` is `shutdown(wait=True)`, so a failed wait does not end the
+test: it falls through to a join that waits on the worker, which is still holding the lock.
+The hold therefore lasts until the worker's statement ends, and this is what ends it.
+
+It bounds the whole hold, not just the join: whenever the last wait expires, the worker
+statement started at the grant, so its own clock caps the total at this value. 40s leaves
+20s of margin under the 60s sibling ceiling.
+
+It must also stay *above* what the guarded arm legitimately needs, or a slow run is
+cancelled rather than reported: `role_sql` is issued at the grant and stays in flight across
+the pause edge, the drop's connect, the drop queueing and its own completion — four
+`_LOCK_HELD_STEP_TIMEOUT_S` budgets, 32s. Both bounds move with that constant: keep
+`4 * _LOCK_HELD_STEP_TIMEOUT_S` below this, and this below 60s.
+"""
+
+_WORKER_STATEMENT_TIMEOUT_MS = 240_000
+"""Server-side ceiling where no fixture lock is held — the unguarded control arm.
+
+Same purpose as `_LOCKED_STATEMENT_TIMEOUT_MS`: without a ceiling, a wedged backend makes
+the join hang forever rather than report, which is the failure mode that made a single flake
+cost a whole run (#2177). Nothing else is waiting on this arm, so it is sized purely to sit
+above the longest *single* statement in flight rather than under a sibling's ceiling.
+
+`statement_timeout` clocks one statement, not the test, and no statement spans every budget.
+The longest is the control's `role_sql`, issued when the migration is submitted and in
+flight across the pause edge, the drop's completion, and its own — 8 + 90 + 90 = 188s.
+"""
 _PROTECTED_TABLES = {
     "capture_operation_cutoff",
     "capture_operations",
@@ -1944,6 +2064,8 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
 
     creator = psycopg.connect(postgres_url)
     contender = psycopg.connect(postgres_url, autocommit=True)
+    # `pg_conn` holds the fixture lock for this whole body, so the join below holds it too.
+    _bound_worker_statements(contender, _LOCKED_STATEMENT_TIMEOUT_MS)
     first_role = roles["kdive_server"]
     started = Event()
 
@@ -1959,19 +2081,38 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
             ).format(Identifier(first_role))
         )
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(apply_role_migration)
-            assert started.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
-            wait_until_blocked_by(
-                pg_conn,
-                waiter_pid=contender.info.backend_pid,
-                blocker_pid=creator.info.backend_pid,
-                future=future,
-                expectation="role migration did not block on concurrent exact role creation",
-            )
-            with pytest.raises(TimeoutError):
-                future.result(timeout=0.5)
-            creator.commit()
-            future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
+            try:
+                future = executor.submit(apply_role_migration)
+                assert started.wait(timeout=DEFAULT_WAIT_TIMEOUT_S)
+                wait_until_blocked_by(
+                    pg_conn,
+                    waiter_pid=contender.info.backend_pid,
+                    blocker_pid=creator.info.backend_pid,
+                    future=future,
+                    expectation="role migration did not block on concurrent exact role creation",
+                )
+                with pytest.raises(TimeoutError):
+                    future.result(timeout=0.5)
+                creator.commit()
+                # `pg_conn` holds the cluster-global fixture lock for this whole body, so
+                # this wait is one of the ones bounded under that lock's 60s sibling ceiling.
+                # No observer: `pg_conn` is on the worker database, not the maintenance
+                # database the lock is taken on.
+                _result_or_race_report(
+                    future,
+                    observer=None,
+                    participants={"migration": future},
+                    expectation="role migration did not finish once the creator committed",
+                    timeout_s=_LOCK_HELD_STEP_TIMEOUT_S,
+                )
+            finally:
+                # End `creator`'s transaction before the executor is joined, for the same
+                # reason as the role-drop race below: `shutdown(wait=True)` would otherwise
+                # join a migration thread still blocked on the role lock this transaction
+                # holds, and this test holds the cluster-global fixture lock through
+                # `pg_conn` for its whole body, so the deadlock would strand that lock too
+                # (#2177). A rollback after the happy path's commit is a no-op.
+                creator.rollback()
     finally:
         creator.rollback()
         contender.close()
@@ -1980,6 +2121,129 @@ def test_concurrent_exact_runtime_role_creation_is_idempotent(
             if pg_conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
                 pg_conn.execute(SQL("DROP OWNED BY {}").format(Identifier(role)))
                 pg_conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
+
+
+def _bound_worker_statements(conn: psycopg.Connection, timeout_ms: int) -> None:
+    """Cap statements on a connection a worker thread drives, so the executor join is bounded."""
+    conn.execute(
+        "SELECT set_config('statement_timeout', %s, false)",
+        (f"{timeout_ms}ms",),
+    )
+
+
+def _future_states(futures: dict[str, Future[Any]]) -> str:
+    """Each participant's outcome, for a timeout report."""
+    states = []
+    for name, future in futures.items():
+        if not future.done():
+            states.append(f"{name}=still running")
+        elif (error := future.exception()) is not None:
+            states.append(f"{name}=raised {error!r}")
+        else:
+            states.append(f"{name}=returned {future.result()!r}")
+    return ", ".join(states)
+
+
+def _role_lock_state(observer: psycopg.Connection) -> list[tuple[Any, ...]]:
+    """Every backend holding or queued for the cluster-global role lock, for a timeout report.
+
+    Ungranted rows are the queue this module's waits sit in, so a report that omits them
+    cannot distinguish a genuine ordering regression from a backend still waiting its turn.
+
+    Scoped to the observer's own database like its two sibling probes, because the same lock
+    key is taken per-database by `migrate.apply_migrations`: unscoped, every other worker's
+    routine migration lock would be reported as this queue.
+
+    Never raises. This runs inside a failure handler that is already building the only report
+    the caller will get, so a broken observer must not replace that report with its own error.
+    """
+    try:
+        return observer.execute(
+            "SELECT l.pid, l.granted, a.state, a.wait_event_type, a.wait_event, "
+            "left(a.query, 120) FROM pg_locks AS l "
+            "LEFT JOIN pg_stat_activity AS a ON a.pid = l.pid "
+            "WHERE l.locktype = 'advisory' AND l.database = ("
+            "SELECT oid FROM pg_database WHERE datname = current_database()) "
+            "AND l.classid = %s AND l.objid = %s AND l.objsubid = 2 "
+            "ORDER BY l.granted DESC, l.pid",
+            (migrate._LOCK_CLASS_MIGRATION, migrate._LOCK_OBJID),
+        ).fetchall()
+    except psycopg.Error as exc:
+        return [("unavailable", repr(exc))]
+
+
+def _lock_state_report(observer: psycopg.Connection) -> str:
+    """The lock queue, labelled, for any failure report in this module."""
+    return (
+        "Cluster-global role lock (pid, granted, state, wait_event_type, wait_event, query): "
+        f"{_role_lock_state(observer)}"
+    )
+
+
+def _result_or_race_report(
+    future: Future[Any],
+    *,
+    observer: psycopg.Connection | None,
+    participants: dict[str, Future[Any]],
+    expectation: str,
+    timeout_s: float = _ROLE_LOCK_QUEUE_TIMEOUT_S,
+) -> Any:
+    """Return `future`'s result, or report which side of the race was where when time ran out.
+
+    `Future.result` raises a bare `TimeoutError` that names neither the expectation nor the
+    state, which is what made #2177's gate failures unreadable.
+
+    `observer` is omitted by a caller with no connection to the database the fixture lock is
+    taken on; the participant states are still reported. Probing the wrong database would
+    report an empty queue, which is worse than reporting none.
+    """
+    try:
+        return future.result(timeout=timeout_s)
+    except TimeoutError as exc:
+        if future.done() and future.exception() is exc:
+            # The participant itself raised `TimeoutError` and `result` re-raised it.
+            # Reporting that as this wait expiring would name the wrong thing entirely.
+            # Identity, not `done()`: a future that merely completed between the expiry and
+            # this check still needs the report below, which will say it completed.
+            raise
+        raise AssertionError(
+            f"{expectation}; nothing completed within {timeout_s}s. "
+            f"{_race_state(observer, participants)}"
+        ) from exc
+    except psycopg.errors.QueryCanceled as exc:
+        # A statement ceiling fired, so the participant was terminated server-side instead
+        # of completing. That is one of this change's own backstops, and it deserves the
+        # same report as the timeout above. A note rather than a new exception: two callers
+        # match this through `pytest.raises`, and replacing the type would break them.
+        exc.add_note(
+            f"{expectation}; the participant hit its statement ceiling. "
+            f"{_race_state(observer, participants)}"
+        )
+        raise
+
+
+def _raise_participant_failure(
+    future: Future[Any], observer: psycopg.Connection, *, expectation: str
+) -> None:
+    """Report a participant that raised on its way to an expected state; return if it did not.
+
+    A bare `future.result()` re-raise loses the expectation and the lock queue, at exactly the
+    point where the reader has neither — the same reason `wait_until_blocked_by` formats the
+    participant's exception into its own message rather than propagating it.
+    """
+    error = future.exception()
+    if error is None:
+        return
+    raise AssertionError(
+        f"{expectation}; the participant raised before reaching that state: {error!r}. "
+        f"{_lock_state_report(observer)}"
+    ) from error
+
+
+def _race_state(observer: psycopg.Connection | None, participants: dict[str, Future[Any]]) -> str:
+    """Who was where, for any backstop's expiry report."""
+    lock_state = "" if observer is None else f" {_lock_state_report(observer)}"
+    return f"Participants: {_future_states(participants)}.{lock_state}"
 
 
 @pytest.mark.parametrize("guarded", [False, True], ids=["unguarded-control", "fixture-lock"])
@@ -2029,50 +2293,118 @@ def test_cluster_global_role_lock_closes_validation_to_drop_window(
         blocker = psycopg.connect(migration_url)
         contender = psycopg.connect(migration_url, autocommit=True)
         dropper = psycopg.connect(drop_url, autocommit=True)
+        # The guarded arm runs its worker statements under the fixture lock, so its ceiling
+        # is what bounds how long a failure holds that lock; the control arm holds nothing.
+        ceiling_ms = _LOCKED_STATEMENT_TIMEOUT_MS if guarded else _WORKER_STATEMENT_TIMEOUT_MS
+        for worker_conn in (contender, dropper):
+            _bound_worker_statements(worker_conn, ceiling_ms)
         observer = psycopg.connect(
             db_conftest._server_url_without_db(postgres_url), autocommit=True
         )
         try:
             blocker.execute("SELECT pg_advisory_xact_lock(%s)", (pause_key,))
             with ThreadPoolExecutor(max_workers=2) as executor:
-                drop_lock_pids: Queue[int] = Queue(maxsize=1)
-                migration_future = executor.submit(
-                    _apply_role_sql,
-                    migration_url,
-                    contender,
-                    role_sql,
-                    guarded=guarded,
-                )
-                wait_until_blocked_by(
-                    observer,
-                    waiter_pid=contender.info.backend_pid,
-                    blocker_pid=blocker.info.backend_pid,
-                    future=migration_future,
-                    expectation="role migration did not reach the pre-grant pause",
-                )
-                drop_future = executor.submit(
-                    _drop_role,
-                    drop_url,
-                    dropper,
-                    roles["kdive_server"],
-                    guarded=guarded,
-                    lock_backend_pids=drop_lock_pids,
-                )
-                if guarded:
-                    _wait_for_cluster_role_lock_waiter(
-                        observer,
-                        drop_future,
-                        waiter_pid=drop_lock_pids.get(timeout=DEFAULT_WAIT_TIMEOUT_S),
+                try:
+                    drop_lock_pids: Queue[int] = Queue(maxsize=1)
+                    migration_lock_pids: Queue[int] = Queue(maxsize=1)
+                    migration_future = executor.submit(
+                        _apply_role_sql,
+                        migration_url,
+                        contender,
+                        role_sql,
+                        guarded=guarded,
+                        lock_backend_pids=migration_lock_pids,
                     )
-                    blocker.commit()
-                    migration_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
-                    with pytest.raises(psycopg.errors.DependentObjectsStillExist):
-                        drop_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
-                else:
-                    drop_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
-                    blocker.commit()
-                    with pytest.raises(psycopg.errors.UndefinedObject):
-                        migration_future.result(timeout=DEFAULT_WAIT_TIMEOUT_S)
+                    solo = {"migration": migration_future}
+                    if guarded:
+                        # Queued behind the fixture lock and holding nothing yet, so the
+                        # generous budget belongs here and only here. Everything after the
+                        # grant runs while this test holds the lock.
+                        _wait_for_cluster_role_lock(
+                            observer,
+                            migration_future,
+                            backend_pid=_lock_backend_pid(
+                                migration_lock_pids, observer, migration_future, solo, "migration"
+                            ),
+                            granted=True,
+                            expectation="role migration never took the cluster-global fixture lock",
+                            timeout_s=_ROLE_LOCK_QUEUE_TIMEOUT_S,
+                        )
+                    wait_until_blocked_by(
+                        observer,
+                        waiter_pid=contender.info.backend_pid,
+                        blocker_pid=blocker.info.backend_pid,
+                        future=migration_future,
+                        expectation="role migration did not reach the pre-grant pause",
+                        timeout_s=_LOCK_HELD_STEP_TIMEOUT_S,
+                    )
+                    drop_future = executor.submit(
+                        _drop_role,
+                        drop_url,
+                        dropper,
+                        roles["kdive_server"],
+                        guarded=guarded,
+                        lock_backend_pids=drop_lock_pids,
+                    )
+                    participants = {"migration": migration_future, "drop": drop_future}
+                    if guarded:
+                        _wait_for_cluster_role_lock(
+                            observer,
+                            drop_future,
+                            backend_pid=_lock_backend_pid(
+                                drop_lock_pids, observer, drop_future, participants, "drop"
+                            ),
+                            granted=False,
+                            expectation="role drop did not queue for the fixture lock",
+                            timeout_s=_LOCK_HELD_STEP_TIMEOUT_S,
+                        )
+                        blocker.commit()
+                        _result_or_race_report(
+                            migration_future,
+                            observer=observer,
+                            participants=participants,
+                            expectation="role migration did not finish once the pause was released",
+                            timeout_s=_LOCK_HELD_STEP_TIMEOUT_S,
+                        )
+                        with pytest.raises(psycopg.errors.DependentObjectsStillExist):
+                            _result_or_race_report(
+                                drop_future,
+                                observer=observer,
+                                participants=participants,
+                                expectation=(
+                                    "role drop did not reach its dependency failure once the "
+                                    "migration released the fixture lock"
+                                ),
+                                timeout_s=_DROP_COMPLETION_TIMEOUT_S,
+                            )
+                    else:
+                        _result_or_race_report(
+                            drop_future,
+                            observer=observer,
+                            participants=participants,
+                            expectation="unguarded role drop did not finish",
+                        )
+                        blocker.commit()
+                        with pytest.raises(psycopg.errors.UndefinedObject):
+                            _result_or_race_report(
+                                migration_future,
+                                observer=observer,
+                                participants=participants,
+                                expectation=(
+                                    "unguarded role migration did not fail on the role the "
+                                    "control dropped out from under it"
+                                ),
+                            )
+                finally:
+                    # Release the pause before `ThreadPoolExecutor.__exit__` joins the
+                    # workers. That exit is `shutdown(wait=True)`, so a failure anywhere
+                    # above would otherwise join a migration thread still blocked on this
+                    # advisory lock — which only this thread can release. That is a
+                    # permanent deadlock, and it strands the cluster-global role lock the
+                    # migration holds, so every other xdist worker's `pg_conn` then errors
+                    # for the rest of the run (#2177). A rollback after the happy path's
+                    # commit is a no-op.
+                    blocker.rollback()
         finally:
             blocker.rollback()
             observer.close()
@@ -2080,9 +2412,16 @@ def test_cluster_global_role_lock_closes_validation_to_drop_window(
             contender.close()
             blocker.close()
     finally:
-        _drop_isolated_roles(postgres_url, migration_url, drop_url, roles.values())
-        db_conftest._drop_worker_db(postgres_url, drop_db)
-        db_conftest._drop_worker_db(postgres_url, migration_db)
+        try:
+            # Role cleanup takes the fixture lock and can raise on its own (a 60s acquisition
+            # timeout, or a DDL failure). Sequenced plainly, that raise would skip both
+            # database drops and strand `kdive_role_migration_*` / `kdive_role_drop_*` — which
+            # outlive the run entirely on a `KDIVE_TEST_PG_URL` backend, since nothing sweeps
+            # a database the way ADR-0551 sweeps a container.
+            _drop_isolated_roles(postgres_url, migration_url, drop_url, roles.values())
+        finally:
+            db_conftest._drop_worker_db(postgres_url, drop_db)
+            db_conftest._drop_worker_db(postgres_url, migration_db)
 
 
 def _drop_isolated_roles(
@@ -2100,9 +2439,16 @@ def _drop_isolated_roles(
                 conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
 
 
-def _apply_role_sql(url: str, conn: psycopg.Connection, role_sql: bytes, *, guarded: bool) -> None:
+def _apply_role_sql(
+    url: str,
+    conn: psycopg.Connection,
+    role_sql: bytes,
+    *,
+    guarded: bool,
+    lock_backend_pids: Queue[int],
+) -> None:
     if guarded:
-        with db_conftest._cluster_global_role_lock(url):
+        with db_conftest._cluster_global_role_lock(url, _on_connect=lock_backend_pids.put):
             conn.execute(role_sql)
     else:
         conn.execute(role_sql)
@@ -2123,26 +2469,82 @@ def _drop_role(
         conn.execute(SQL("DROP ROLE {}").format(Identifier(role)))
 
 
-def _wait_for_cluster_role_lock_waiter(
-    observer: psycopg.Connection, future: Future[Any], *, waiter_pid: int
+def _lock_backend_pid(
+    lock_backend_pids: Queue[int],
+    observer: psycopg.Connection,
+    future: Future[Any],
+    participants: dict[str, Future[Any]],
+    role: str,
+) -> int:
+    """The backend a participant takes the fixture lock on, once it has connected.
+
+    Polls rather than blocking on the queue so a thread that died before publishing its pid is
+    reported by its own exception, instead of by a "never connected" message after the whole
+    budget has burned.
+    """
+    deadline = time.monotonic() + _LOCK_HELD_STEP_TIMEOUT_S
+    while True:
+        try:
+            return lock_backend_pids.get(timeout=0.02)
+        except Empty:
+            pass
+        if future.done():
+            # One last look before reporting: the pid may have been published in the gap
+            # between the poll above and the future completing.
+            try:
+                return lock_backend_pids.get_nowait()
+            except Empty:
+                pass
+            _raise_participant_failure(
+                future,
+                observer,
+                expectation=f"role {role} never published its lock backend pid",
+            )
+            raise AssertionError(f"role {role} finished without publishing its lock backend pid")
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"role {role} never connected to take the cluster-global fixture lock within "
+                f"{_LOCK_HELD_STEP_TIMEOUT_S}s. {_race_state(observer, participants)}"
+            )
+
+
+def _wait_for_cluster_role_lock(
+    observer: psycopg.Connection,
+    future: Future[Any],
+    *,
+    backend_pid: int,
+    granted: bool,
+    expectation: str,
+    timeout_s: float,
 ) -> None:
-    deadline = time.monotonic() + DEFAULT_WAIT_TIMEOUT_S
-    while time.monotonic() < deadline:
-        waiting = observer.execute(
+    """Poll until `backend_pid` holds the fixture lock, or is queued for it.
+
+    Both are observable transitions rather than elapsed time, and both end early when the
+    participant's future completes, so a thread that died on the way is reported by its own
+    exception instead of by this wait expiring.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        row = observer.execute(
             "SELECT 1 FROM pg_locks AS l WHERE l.pid = %s AND l.locktype = 'advisory' "
             "AND l.database = ("
             "SELECT oid FROM pg_database WHERE datname = current_database()) "
             "AND l.classid = %s AND l.objid = %s AND l.objsubid = 2 "
-            "AND NOT l.granted LIMIT 1",
-            (waiter_pid, migrate._LOCK_CLASS_MIGRATION, migrate._LOCK_OBJID),
+            "AND l.granted = %s LIMIT 1",
+            (backend_pid, migrate._LOCK_CLASS_MIGRATION, migrate._LOCK_OBJID, granted),
         ).fetchone()
-        if waiting is not None:
+        if row is not None:
             return
         if future.done():
-            future.result()
-            raise AssertionError("role drop returned before waiting for the fixture lock")
+            _raise_participant_failure(future, observer, expectation=expectation)
+            raise AssertionError(f"{expectation}; it finished without ever reaching that state")
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{expectation}; pid {backend_pid} did not "
+                f"{'hold' if granted else 'queue for'} the cluster-global fixture lock within "
+                f"{timeout_s}s. {_lock_state_report(observer)}"
+            )
         time.sleep(0.02)
-    raise AssertionError("role drop did not wait for the cluster-global fixture lock")
 
 
 def test_acquire_derives_exact_locked_job_claim(
