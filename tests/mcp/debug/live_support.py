@@ -16,6 +16,9 @@ from tests.support.domain_ownership import drop_ownership_metadata
 def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
     """Render the preserved gdbstub domain used by live early-panic tests.
 
+    The rendered cmdline carries ``nokaslr`` so a symbol-addressed live debug command resolves
+    against the running kernel's base rather than the vmlinux's link-time base (#711).
+
     Args:
         bzimage: Kernel image path to boot directly.
         disk: Empty disk path that causes the expected VFS panic.
@@ -44,12 +47,19 @@ def render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
     root = ET.fromstring(base)  # noqa: S314 - kdive-rendered, trusted
     drop_ownership_metadata(root)
     name = root.find("name")
-    assert name is not None
+    cmdline = root.find("./os/cmdline")
+    assert name is not None and cmdline is not None and cmdline.text is not None
     name.text = "kdive-x"  # seed_system's domain_name, so the connector lookup resolves it
-    os_element = root.find("os")
-    assert os_element is not None
-    ET.SubElement(os_element, "kernel").text = bzimage
-    ET.SubElement(os_element, "cmdline").text = "console=ttyS0 panic=0 root=/dev/vda"
+    # ``render_domain_xml`` already emitted <kernel> (this same bzimage) and the arch-resolved
+    # baseline <cmdline>, so extend that element rather than appending a second pair whose
+    # precedence is libvirt's to decide. ``panic=0`` holds the panicked guest for the gdbstub
+    # instead of rebooting away from it. ``nokaslr`` pins the running kernel base to the fetched
+    # vmlinux's link-time symbol addresses (#711): the baseline cmdline carries no gdbstub tokens
+    # because ``nokaslr`` comes from the runs lane's ``system_required_cmdline``, which a
+    # test-rendered transient domain never goes through, and without it a symbol-addressed
+    # ``debug.disassemble`` reads unmapped memory and gdb/MI returns no instructions. The stepping
+    # domain in test_debug_gdbmi_live_smoke.py appends the same token for the same reason.
+    cmdline.text = f"{cmdline.text} panic=0 nokaslr"
     serial_log = root.find("./devices/serial/log")
     assert serial_log is not None
     serial_log.set("file", str(console))
