@@ -445,6 +445,31 @@ def test_installer_reads_dsn_from_stdin_and_pins_install_order() -> None:
     assert 'usermod -G "$libvirt_group,kvm" "$worker"' in source
 
 
+def test_installer_builds_the_capture_manifest_after_the_venv_it_attests() -> None:
+    """A reinstall must rebuild the manifest, because the manifest describes what it replaced.
+
+    The manifest attests the interpreter and the installed package, so it is valid only for
+    the venv built above it. A stale or absent one fails the worker's
+    ``capture_bootstrap_manifest`` readiness check, and a not-ready worker skips ``dequeue``
+    rather than erroring -- the queue never drains and neither side logs anything.
+    """
+    source = _text(INSTALLER)
+    package = "uv pip install --python /opt/kdive-live-worker-lifecycle/.venv/bin/python /opt/kdive"
+    harden = "_harden_runtime_tree /opt/kdive-live-worker-lifecycle"
+    build = '"$manifest_python" "$manifest_builder" build'
+    install = '"$manifest_python" "$manifest_builder" install'
+    verify = '"$manifest_python" "$manifest_builder" verify'
+    assert source.index(package) < source.index(build)
+    # After hardening, because the manifest records the tree as it finds it.
+    assert source.index(harden) < source.index(build)
+    assert source.index(build) < source.index(install)
+    assert source.index(install) < source.index(verify)
+    assert "/usr/share/kdive/capture-bootstrap-manifest.json" in source
+    # The manifest must describe the installed package, never the checkout it was built from.
+    assert 'sysconfig.get_path("purelib")' in source
+    assert '[[ -z $manifest_temp || ! -e $manifest_temp ]] || unlink "$manifest_temp"' in source
+
+
 def test_installer_hardens_runtime_install_parent(tmp_path: Path) -> None:
     parent = tmp_path / "opt"
     parent.mkdir()
