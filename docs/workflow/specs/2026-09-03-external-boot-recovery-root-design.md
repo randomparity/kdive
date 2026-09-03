@@ -41,7 +41,20 @@ and they are complete.
 `KDIVE_LIBVIRT_RECOVERY_ROOT`, declared in
 `src/kdive/providers/local_libvirt/settings.py` beside the module's five existing settings
 and appended to its `SETTINGS` list, `group="local-libvirt"`,
-`processes=frozenset({"worker", "reconciler"})` like its five siblings.
+`processes=frozenset({"worker"})`.
+
+**Worker only, deliberately not the module's `_RT`.** The five siblings are host-uniform
+values — a libvirt URI, an allocation cap, two second-counts, a multiplier — so the same
+string is correct in every process that reads them. This one is uid-bound by construction:
+`parse` requires `st_uid == geteuid()`, and the roots are `0700` owned by `kdive-worker-N`.
+The reconciler runs as `User=kdive`
+(`deploy/systemd/system/kdive-reconciler.service:9`), and `src/kdive/__main__.py:442` calls
+`config.validate(args.command)` for every runnable, so declaring `reconciler` would make the
+reconciler fail to start with a `CONFIGURATION_ERROR` on exactly the hosts that configure
+this setting. It would also publish `reconciler` in the generated reference's `Processes`
+column, inviting an operator to put the value in the shared `/etc/kdive/kdive.env` that both
+services read. Copying the siblings' process set is the one thing that must not be done
+here.
 
 **It carries no default, and `required_when` stays at the registry default
 `never_required`.** Both halves are load-bearing:
@@ -121,12 +134,26 @@ listing sibling names") and for the authority paths (`:433-517`):
   `/var/lib/kdive/live-workers/external-boot-recovery`, created `root:root` mode `0711`.
   Traverse-only: a worker slot reaches its own child without being able to enumerate its
   siblings.
-- one child per account, `{{ root }}/{{ N }}`, owned `kdive-worker-N:kdive-worker-N`, mode
-  `0700` — exactly what the guard accepts.
+- one child per account, `{{ root }}/{{ account }}`, owned
+  `kdive-worker-N:kdive-worker-N`, mode `0700` — exactly what the guard accepts.
 
-Each creation is preceded by a `follow: false` stat and an assert that any existing entry is
-a real directory and not a symlink, matching `:445-455` and `:490-500`. `ansible.builtin.file`
-is idempotent by construction; the harness proves it by running the role twice and requiring
+**The child is named for its owning account, not for a stripped slot number**, so this tree
+does not mirror the existing `{{ state_root }}/slots/N` layout. That divergence is
+deliberate. Deriving `N` would mean a `regex_replace('^kdive-worker-', '')` applied
+identically in the create task and the verify task, and a transform duplicated across two
+tasks is a transform that can drift — the gate would then check a path provisioning never
+created. The recovery tree is new and owes the `slots/N` layout nothing, so the simplest
+correct name is the account itself. This is a maintainability choice with no security
+content: the slot names were already derivable from the role either way, and the confinement
+argument below rests on the parent's mode alone.
+
+Both the parent **and** every per-slot child are preceded by a `follow: false` stat and an
+assert that any existing entry is a real directory and not a symlink, matching `:445-455`
+and `:490-500`. The children's guard is not decoration: `ansible.builtin.file` with
+`state: directory` treats a symlink pointing at a directory as already satisfied, so without
+it a substituted slot root is reported converged, the health gate stays red, and the
+`fail_msg`'s advice to rerun provisioning can never clear it. `ansible.builtin.file` is
+idempotent by construction; the harness proves it by running the role twice and requiring
 the second run to report no change.
 
 The root is deliberately **not** placed under `{{ state_root }}/slots/N`. Those directories
@@ -181,14 +208,25 @@ filesystem. **Boundaries widened.** None; no existing path changes mode or owner
 not reach another slot's; a local operator running the play as root; the guest, which never
 sees these paths.
 
-**Controls.** Confinement is the `0711` parent: a slot can traverse to its own child by name
-but cannot list the parent, so slot N learns nothing about slot M. Each child at `0700`
-owned by its account is what stops cross-slot read or write, and it is enforced twice — by
-the mode, and by the application's own `_require_private_owned_directory` at open time,
-which refuses a root it does not own even if provisioning were wrong. Symlink substitution
-before creation is refused by the pre-create `follow: false` stat and its assert; symlink
-substitution afterwards is refused by the stores' `O_NOFOLLOW` open. The setting's `parse`
-adds a third, earlier refusal at configuration resolution.
+**Controls.** Cross-slot read and write is stopped by each child being `0700` and owned by
+its account, enforced twice: by the mode, and by the application's own
+`_require_private_owned_directory` at open time, which refuses a root it does not own even
+if provisioning were wrong. That is the whole of the confinement.
+
+The `0711` parent is **not** part of it, and the spec should not be read as claiming
+otherwise. Traverse-only prevents *enumeration*, not *guessing*: the slot names are
+`kdive-worker-1..8`, published in this role's own `defaults/main.yml` and in the systemd
+unit's `%i`, so an actor who can traverse the parent can name every child without listing
+it. What a non-listable parent buys is that a process which does not already know the naming
+scheme cannot discover it by reading the directory — a hardening detail, not a boundary. Any
+control that matters here is the child's mode and owner.
+
+Symlink substitution before creation is refused by the pre-create `follow: false` stat and
+its assert, on the parent **and** on every per-slot child — the children's guard is the one
+that matters operationally, since `ansible.builtin.file` would otherwise treat a symlinked
+slot root as already converged. Symlink substitution afterwards is refused by the stores'
+`O_NOFOLLOW` open. The setting's `parse` adds a third, earlier refusal at configuration
+resolution.
 
 **Out of scope.** A root-equivalent local actor can defeat any of this and is not modelled.
 Backup and retention of recovery payloads is ADR-0586's accounting, not this change's.

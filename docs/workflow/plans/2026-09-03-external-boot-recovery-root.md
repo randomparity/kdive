@@ -18,9 +18,15 @@ rejected by `Registry.validate` at process start. One traverse-only parent plus 
 **Tech stack.** Python 3.14 managed with `uv`; Ansible (`ansible-core==2.21.1`) for
 provisioning; pytest; `just` recipes are the single source of truth for all checks.
 
-Expected implementation size: 340–470 changed lines (M) — derived from the file map and task
-list below: ~50 lines of settings code, ~70 lines of role YAML, ~85 lines of harness, and
-~215 lines of tests.
+Expected implementation size: 500–560 changed lines (M) — derived from the file map and task
+list below: ~75 lines of settings code, ~110 lines of role YAML, ~120 lines of harness, and
+~240 lines of tests.
+
+That range is a correction. The first estimate said 340–470, which the design review found
+did not follow from the plan's own inlined content, and the built change measures 537
+insertions and 6 deletions across 11 files. The original was low mainly on the harness and
+on the per-slot pre-create guard the review added; it is restated here at the measured
+value rather than defended.
 
 ## Global Constraints
 
@@ -892,7 +898,56 @@ persisted data, and no change to any existing code path. The provisioned directo
 play has already created them, are inert once the role no longer references them and can be
 removed by hand.
 
-## Deferrals carried from review
+## Review dispositions
 
-None yet. Any deferral a `$trial-loop` run disposes of during review is recorded here with
-its owning record path or tracker issue.
+Design review, iteration 1: `$gauntlet`, verdict `needs-attention`, 9 findings, 2 blocking,
+2 suppressed. **No deferrals** — every finding was fixed or rejected with evidence, so
+nothing here needs an owning record or tracker issue.
+
+Blocking, both `accepted-fixed`:
+
+1. **Per-slot roots had no pre-create symlink guard, though the spec claimed one.** The
+   guard existed only for the traverse-only parent. `ansible.builtin.file` with
+   `state: directory` treats a symlink to a directory as already satisfied, so provisioning
+   reported success over a substituted slot root and rerunning could never repair it. Fixed:
+   a `follow: false` stat and assert pair now precedes the per-slot create loop, and harness
+   case 9 requires the **create** run to fail on a symlinked slot root.
+2. **`processes=_RT` declared a uid-bound path for a process that can never own it.** The
+   reconciler runs as `User=kdive` while the roots are `0700` owned by `kdive-worker-N`, and
+   `__main__.py:442` validates for every runnable — so the reconciler would have failed to
+   start on exactly the hosts that set this variable. Fixed: `frozenset({"worker"})`, pinned
+   by a test that also asserts `"reconciler" not in s.processes`.
+
+Notes, dispositioned without a further pass:
+
+- **Harness never exercised the `kdive-worker-N` strip** — `accepted-fixed`, by deleting the
+  strip. The child is now named for its owning account, so there is no transform to drift
+  between the create and verify tasks and nothing left to exercise.
+- **Ownership rejection arm had no test** — `accepted-fixed`. Harness case 7 constructs it
+  unprivileged by naming a slot the invoking account does not own, so only the
+  `pw_name`/`gr_name` arm can reject it.
+- **Threat model overstated the `0711` parent as the confinement** — `accepted-fixed` in the
+  spec: traverse-only prevents enumeration, not guessing, and the confinement is the child's
+  mode and owner.
+- **Harness identity substitution dropped the precedent's numeric-id hedge** —
+  `accepted-fixed` differently: the role names owner and group after the account, so a
+  numeric id would not match what `verify.yml` asserts. The harness instead fails loudly
+  when `id -gn` is not the invoking user, rather than skipping silently.
+- **Step 5.4 was not self-contained enough to implement** — `accepted-fixed`; the deploy
+  contract test is written and its assertions were fault-proven.
+- **Size estimate did not follow from the plan's content** — `accepted-fixed`; see the
+  corrected range above.
+- **Step 1.3 gave two bodies for the same `raise`** — `accepted-fixed`; one body ships, and
+  its message is asserted by the `match=` in the settings tests.
+
+Suppressions surfaced (an accepted ADR silenced each; recorded because a verdict alone
+hides them):
+
+- *Recovery payloads can fill the host filesystem, with no quota or retention* — suppressed
+  under **ADR-0586**, whose Consequences already own recovery capacity as a reservation
+  charged per activation and released on authenticated finalization. Reviewed and agreed:
+  not this change's to settle, and this change adds no payload writer.
+- *One shared service account for all eight slots would avoid per-slot roots entirely* —
+  suppressed under **ADR-0574**, which runs one `kdive-live-worker@N.service` per slot, each
+  as its own no-login account. Reviewed and agreed: that is an accepted contract, and
+  reopening it is out of scope here.
