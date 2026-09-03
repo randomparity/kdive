@@ -163,10 +163,19 @@ state machine validates would couple two owners for no gain.
 
 ### Health gate
 
-`tasks/verify.yml` gains a stat-and-assert pair over the parent and every child, following
+`tasks/verify.yml` gains stat-and-assert tasks over the parent and every child, following
 `verify.yml:327-365`. It asserts `stat.exists` first — so an absent root reports as absent
 rather than as an undefined-attribute error — then `isdir`, `not islnk`, `pw_name`,
-`gr_name`, and `mode == '0700'` for each child, and `0711` root-owned for the parent.
+`gr_name`, and `mode == '0700'` for each child, and `0711` for the parent.
+
+**The parent's owner arm compares against the literal `root`, never against a variable.**
+This is the reason there is no `..._recovery_root_owner` setting: an assertion that reads
+back the same value the create task consumed agrees by construction and can never fail, so
+it constrains nothing. The arm exists because a parent owned by a worker account could
+unlink and recreate any other slot's recovery root, which would defeat the confinement the
+`0700` children provide — so it must be able to reject a deployment, not merely describe
+one. The clean-host harness exercises it **negatively**, with a parent it owns itself,
+proving the arm rejects rather than merely that it passes.
 
 ## Requirement 3 — the gate stays closed
 
@@ -228,13 +237,21 @@ slot root as already converged. Symlink substitution afterwards is refused by th
 `O_NOFOLLOW` open. The setting's `parse` adds a third, earlier refusal at configuration
 resolution.
 
-**What the pre-create guard is, and is not.** It is a detector for a wrong state that
-already exists — a prior layout, an operator's hand-edit, a partially-run play — not a
-defence against a concurrent attacker. Ansible's `stat` and `file` are separate operations,
-so a race between them is possible in principle; but writing an entry into the `0711`
-root-owned parent requires root or that parent's owner, and such an actor can defeat the
-whole arrangement by other means. The guard's value is that it converts a silently
-"converged" wrong tree into a loud failure, which is the case that actually occurs.
+**Two separate mechanisms, and the spec should not conflate them.** The pre-create `stat` and
+`assert` are a **diagnostic**: they detect a wrong state that already exists — a prior
+layout, an operator's hand-edit, a partially-run play — and produce a message naming the
+path. They are not atomic, because `stat` and `file` are separate operations.
+
+The **atomic** refusal is `follow: false` on the `file` tasks themselves. This matters more
+than it looks: `ansible.builtin.file`'s `follow` defaults to **true**, and a directory create
+through a symlink with the default does not fail — it succeeds and applies the owner and
+mode to the link's *target*. Verified on this branch: creating `state: directory` over a
+symlink pointing at a mode-`0755` directory left that target at `0700`, reporting success.
+With `follow: false` the module fails with "already exists as a link" and writes nothing.
+
+Reaching that window requires write access to the root-owned parent, so no modelled actor
+can — this is defence in depth, not a closed exploit. It is set because it costs nothing and
+removes the window rather than arguing the window is unreachable.
 
 Likewise, validation at configuration resolution does not survive to use: the root could be
 changed between process start and the store's open. That is why the stores re-check on every

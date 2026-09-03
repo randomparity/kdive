@@ -32,10 +32,17 @@ if [ "$(id -gn)" != "$me" ]; then
   exit 1
 fi
 
+# The parent is created root-owned by the role and asserted against the literal root, so an
+# unprivileged harness cannot create it. It makes its own 0711 parent and drives only the
+# per-slot creation; the parent's own create task is pinned by the deploy contract test, and
+# the parent-owner gate is exercised NEGATIVELY below, which proves the arm bites rather
+# than merely that it passes.
+mkdir -p "$recovery_root"
+chmod 0711 "$recovery_root"
+
 cat >"$test_root/vars.json" <<JSON
 {
   "live_vm_host_worker_recovery_root": "$recovery_root",
-  "live_vm_host_worker_recovery_root_owner": "$me",
   "live_vm_host_worker_accounts": ["$me"]
 }
 JSON
@@ -44,7 +51,7 @@ ANSIBLE_CONFIG=deploy/ansible/ansible.cfg
 ANSIBLE_ROLES_PATH=deploy/ansible/roles
 export ANSIBLE_CONFIG ANSIBLE_ROLES_PATH
 playbook=deploy/ansible/tests/external_boot_recovery_root.yml
-create_tags=external_boot_recovery_root,external_boot_recovery_root_slots
+create_tags=external_boot_recovery_root_slots
 verify_tags=external_boot_recovery_root_verify
 
 run() {
@@ -114,7 +121,6 @@ chmod 0700 "$recovery_root/nobody"
 cat >"$test_root/foreign.json" <<JSON
 {
   "live_vm_host_worker_recovery_root": "$recovery_root",
-  "live_vm_host_worker_recovery_root_owner": "$me",
   "live_vm_host_worker_accounts": ["nobody"]
 }
 JSON
@@ -151,3 +157,14 @@ grep -q 'must be a real directory, not a symlink' "$test_root/create-symlink.log
     "$test_root/create-symlink.log"
 rm -f "$recovery_root/$me"
 echo "ok create: provisioning refuses a symlinked slot root instead of converging over it"
+
+# 10. The parent-owner arm is a real constraint, not a restatement of the variable that set
+#     the owner. This harness's parent is owned by the invoking account rather than root, so
+#     the arm must REJECT it. If that assertion were ever rewritten to compare against a
+#     configurable owner variable, this case would start passing and the arm would be dead.
+if run "external_boot_recovery_root_verify_parent_owner" "$test_root/parent-owner.log"; then
+  fail "parent-owner gate accepted a parent not owned by root" "$test_root/parent-owner.log"
+fi
+grep -q 'must be owned by root' "$test_root/parent-owner.log" ||
+  fail "parent-owner rejection did not name the invariant" "$test_root/parent-owner.log"
+echo "ok verify: parent-owner gate rejects a parent not owned by root"

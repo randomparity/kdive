@@ -431,9 +431,13 @@
   ansible.builtin.file:
     path: "{{ live_vm_host_worker_recovery_root }}"
     state: directory
-    owner: "{{ live_vm_host_worker_recovery_root_owner }}"
-    group: "{{ live_vm_host_worker_recovery_root_owner }}"
+    owner: root
+    group: root
     mode: "0711"
+    # follow defaults to true, which would dereference a symlink appearing between the stat
+    # above and this task and apply owner and mode to its target. The stat is the diagnostic
+    # that produces a clear operator message; this is the atomic refusal.
+    follow: false
   tags: [external_boot_recovery_root]
 
 # The per-slot roots need the same pre-create stat/assert as the parent, not just the parent:
@@ -470,6 +474,9 @@
     owner: "{{ item }}"
     group: "{{ item }}"
     mode: "0700"
+    # See the parent above: without follow: false this would chown and chmod whatever a
+    # symlink planted in the stat-to-create window points at.
+    follow: false
   loop: "{{ live_vm_host_worker_accounts }}"
   tags: [external_boot_recovery_root_slots]
 

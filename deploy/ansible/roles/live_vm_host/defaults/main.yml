@@ -82,10 +82,12 @@ live_vm_host_worker_fixture_files:
 # owned by the running euid, so there is one root per fixed worker account rather than one
 # shared root: a single directory cannot be uid-owned by eight slots. The parent is
 # traverse-only (0711) so a slot reaches its own child by name without being able to list
-# its siblings, matching the /etc/kdive/credentials idiom above. The owner is a variable
-# because the clean-host harness drives these same tasks unprivileged.
+# its siblings, matching the /etc/kdive/credentials idiom above. The parent's owner is the
+# literal root in both the create task and the health gate, deliberately not a variable: a
+# gate that compares an observed owner against the same variable that set it agrees by
+# construction and can never fail, and a parent owned by a worker account could unlink and
+# recreate any other slot's root, defeating the confinement the 0700 children provide.
 live_vm_host_worker_recovery_root: /var/lib/kdive/live-workers/external-boot-recovery
-live_vm_host_worker_recovery_root_owner: root
 
 # Dormant provider-host authority boundary (ADR-0584). This endpoint is separate from the
 # fixed-worker provider contract above; #2140 owns any later adapter binding or worker cutover.

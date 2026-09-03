@@ -1431,7 +1431,11 @@ def test_external_boot_recovery_root_defaults_are_declared() -> None:
     assert isinstance(root, str)
     assert root.startswith("/")
     assert root == "/var/lib/kdive/live-workers/external-boot-recovery"
-    assert defaults["live_vm_host_worker_recovery_root_owner"] == "root"
+    # The parent's owner is deliberately NOT a variable. A health gate that compares an
+    # observed owner against the same variable that set it agrees by construction and can
+    # never fail, and a parent owned by a worker account could unlink and recreate another
+    # slot's recovery root.
+    assert "live_vm_host_worker_recovery_root_owner" not in defaults
 
 
 def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
@@ -1440,16 +1444,18 @@ def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
     tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
     parent = (
         'path: "{{ live_vm_host_worker_recovery_root }}" state: directory '
-        'owner: "{{ live_vm_host_worker_recovery_root_owner }}" '
-        'group: "{{ live_vm_host_worker_recovery_root_owner }}" mode: "0711"'
+        'owner: root group: root mode: "0711"'
     )
     assert parent in tasks
     slots = (
         'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" state: directory '
-        'owner: "{{ item }}" group: "{{ item }}" mode: "0700" '
-        'loop: "{{ live_vm_host_worker_accounts }}"'
+        'owner: "{{ item }}" group: "{{ item }}" mode: "0700"'
     )
     assert slots in tasks
+    # follow defaults to true; without this both create tasks would dereference a symlink
+    # planted between the pre-create stat and the create, applying owner and mode to its
+    # target. Verified: with the default, the module succeeds and changes the target's mode.
+    assert tasks.count("follow: false") >= 2
 
 
 def test_external_boot_recovery_parent_is_checked_before_creation() -> None:
@@ -1474,6 +1480,12 @@ def test_external_boot_recovery_roots_are_health_gated() -> None:
     )
     assert "live_vm_host_recovery_root_check.stat.mode == '0711'" in verify
     assert "live_vm_host_recovery_root_check.stat.exists" in verify
+    # The parent-owner arm compares against the literal root, never against a variable the
+    # create task also consumed -- an assertion that reads back the value that produced it
+    # asserts nothing.
+    assert "live_vm_host_recovery_root_check.stat.pw_name == 'root'" in verify
+    assert "live_vm_host_recovery_root_check.stat.gr_name == 'root'" in verify
+    assert "live_vm_host_worker_recovery_root_owner" not in verify
 
 
 def test_external_boot_recovery_slot_roots_are_checked_before_creation() -> None:
