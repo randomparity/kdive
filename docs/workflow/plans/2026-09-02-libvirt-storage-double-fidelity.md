@@ -105,11 +105,16 @@ Facts this pins, all observed in that run:
     (`src/kdive/providers/remote_libvirt/lifecycle/xml.py:59`) emits exactly this, so the double
     must accept it. `unit=''` behaves the same.
   - Matching is **case-insensitive**: `k`, `kib`, `Kib`, `KIB` all give 1024; `b` and `Bytes` give 1.
-  - Table: `b`/`bytes` = 1, `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576, `MB` = 1000000,
-    `G`/`GiB` = 1073741824, `GB` = 1000000000, `T`/`TiB` = 2^40, `TB` = 10^12, `P`/`PiB` = 2^50,
-    `PB` = 10^15, `E`/`EiB` = 2^60, `EB` = 10^18. Suffixes from `T` up parse; a
-    `<capacity unit='T'>1</capacity>` then fails with `VIR_ERR_SYSTEM_ERROR` (code 38) for want of
-    disk space, which is a create failure after a successful parse.
+  - Table, **every multiplier read off a readback rather than inferred**: `b`/`byte`/`bytes` = 1,
+    `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576, `MB` = 1000000, `G`/`GiB` = 1073741824,
+    `GB` = 1000000000, `T`/`TiB` = 1099511627776, `TB` = 1000000000000,
+    `P`/`PiB` = 1125899906842624, `PB` = 1000000000000000, `E`/`EiB` = 1152921504606846976,
+    `EB` = 1000000000000000000.
+  - Seeing the suffixes from `T` up takes a pool on a real disk and an explicit
+    `<allocation unit='bytes'>0</allocation>`, which creates each volume sparsely. Over a pool on
+    `/tmp` — tmpfs on this host — a `<capacity unit='T'>1</capacity>` instead fails with
+    `VIR_ERR_SYSTEM_ERROR` (code 38): the suffix parsed and the 1 TiB file would not fit. Reading
+    that first result as "the larger suffixes are unparsed" is the misreading to avoid.
   - A present, non-empty suffix outside that set raises `VIR_ERR_INVALID_ARG` (code 8) — observed
     for `' K'` and `'bogusUnit'`. Code 8 versus code 38 is what separates a parse refusal from a
     create failure.
