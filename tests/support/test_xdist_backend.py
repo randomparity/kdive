@@ -521,12 +521,16 @@ class _FakeDockerClient:
         self._get_results = list(get_results)
         self.get_ids: list[str] = []
         self.filters: dict[str, str] | None = None
+        self.ignore_removed: bool = False
         self.containers = self
 
     # Named `list` to match docker-py's `client.containers.list`. The return annotation
     # spells `Sequence` because inside this class body `list` is now this method.
-    def list(self, all: bool, filters: dict[str, str]) -> Sequence[_FakeDockerContainer]:  # noqa: A002
+    def list(  # noqa: A002
+        self, all: bool, filters: dict[str, str], ignore_removed: bool = False
+    ) -> Sequence[_FakeDockerContainer]:
         self.filters = filters
+        self.ignore_removed = ignore_removed
         return [*self._containers]
 
     def get(self, container_id: str) -> Any:
@@ -752,6 +756,43 @@ def test_verification_lookup_failure_warns_and_keeps_sweeping(tmp_path: Path) ->
     with pytest.warns(UserWarning, match="cid-first"):
         assert xdist_backend.sweep_stale_backend_containers(client) == ["cid-second"]
     assert second.removed_with == {"force": True, "v": True}
+
+
+class _EnumerationRaceClient(_FakeDockerClient):
+    """A client whose enumeration trips over someone else's container disappearing.
+
+    Mirrors docker-py's `ContainerCollection.list`, which inspects every listed id and
+    re-raises `NotFound` from that per-id lookup unless `ignore_removed=True`.
+    """
+
+    def list(  # noqa: A002
+        self, all: bool, filters: dict[str, str], ignore_removed: bool = False
+    ) -> Sequence[_FakeDockerContainer]:
+        import docker.errors
+
+        if not ignore_removed:
+            raise docker.errors.NotFound("foreign container removed mid-enumeration")
+        return super().list(all=all, filters=filters, ignore_removed=ignore_removed)
+
+
+def test_sweep_survives_a_foreign_container_removed_during_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A container this run does not own vanishing mid-list must not zero the sweep.
+
+    The removal raises from docker-py's per-id inspect, which is above
+    `_reap_stale_candidates`' per-container handler, so without the tolerance flag the
+    outer catch swallows it and returns no ids -- abandoning this run's own stale
+    containers because an unrelated one disappeared. Any `just ci` sharing the host with
+    another run can hit it.
+    """
+    container = _FakeDockerContainer("cid-full", _labels(tmp_path))
+    client = _EnumerationRaceClient(container, get_results=[container])
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", tmp_path / "sweep.lock")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert xdist_backend.sweep_stale_backend_containers(client) == ["cid-full"]
+    assert client.ignore_removed is True
 
 
 @contextmanager

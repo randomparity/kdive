@@ -320,7 +320,15 @@ def sweep_stale_backend_containers(client: Any | None = None) -> list[str]:
                 from testcontainers.core.docker_client import DockerClient
 
                 client = DockerClient().client
-            candidates = client.containers.list(all=True, filters={"label": BACKEND_LABEL})
+            # docker-py inspects every listed id before returning, and re-raises `NotFound`
+            # when a container is removed in between unless told not to. That raise lands
+            # outside `_reap_stale_candidates`' per-container handler, so a *foreign*
+            # container vanishing mid-enumeration would take the whole sweep down to zero
+            # ids and leave this run's own leaks behind. The flag is docker-py's documented
+            # remedy for exactly this race.
+            candidates = client.containers.list(
+                all=True, filters={"label": BACKEND_LABEL}, ignore_removed=True
+            )
             return _reap_stale_candidates(client, candidates)
     except Exception as exc:  # noqa: BLE001 - any failure means "cannot sweep now"
         warnings.warn(f"shared_container: stale-backend sweep skipped: {exc}", stacklevel=2)
