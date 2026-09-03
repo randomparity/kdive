@@ -189,7 +189,10 @@ partial on the per-slot root with no reaper. `cleanup_payloads` runs only after
 Widening it to sweep partials is explicitly not done here: that would be a deletion of unknown
 extent under the privileged root, aimed at a gap in the recovery model rather than in this
 mechanism. The state is recorded so this design's enumeration is not mistaken for a complete
-account of archive reachability, and it is reported for routing.
+account of archive reachability. **Owner: #2212.** It cannot manifest before that issue merges —
+no production `.partial` is ever written while `ProviderRuntime.external_boot` is `None` — so the
+gap is fixed inside this queue rather than deferred out of it. The same state was found
+independently by the review on #2207, which meets it without creating it.
 
 ### `LocalOperationLane.pin(lease) -> PinnedOperationOwnership`
 
@@ -286,9 +289,9 @@ none bounds how many *good* ones may be created. Nor does anything remove them:
 `finalize_tombstone` rmdirs only `<system>.<activation>`, and no code in `lifecycle/boot/` removes
 an artifact `<system_id>` or `<run_id>` directory. Bounding creation would mean rate-limiting or
 authenticating the binding, which is ADR-0584's authority chain and #2140's work, not this
-mechanism's; reclaiming the directories has no owner today. Both are reported for routing rather
-than silently accepted, and neither is reachable in this change because
-`ProviderRuntime.external_boot` is `None`.
+mechanism's; reclaiming the directories is **owned by #2212**. Neither is reachable in this change
+because `ProviderRuntime.external_boot` is `None`: no production cleanup runs and no production
+directory is created until #2212 flips that, and #2212 is the only entry that can.
 
 **One root, resolved once.** Cleanup's second removal targets
 `<recovery_root>/<system_id>.<activation_id>`, while the directory that actually holds
@@ -301,7 +304,11 @@ the setting **once** and returns the value beside the factory as one
 `LocalExternalBootMechanisms(factory, recovery_root)`, and that is the value #2212 hands the store.
 The residual is stated plainly rather than claimed away: #2212 could still call `config.require`
 itself and discard what it was given. This seam cannot prevent that — it can only make the correct
-wiring the obvious one and leave a single resolution point for a reviewer to check.
+wiring the obvious one and leave a single resolution point for a reviewer to check. **The
+enforcement point is #2212's own contract, not a hope**: consuming
+`LocalExternalBootMechanisms.recovery_root` and never re-resolving the setting is a binding
+obligation recorded against that issue, so the remaining hole sits in a row whose dispatch is
+controlled rather than in prose nobody owns.
 
 **Explicitly out of scope.** A worker account compromised at the OS level: every check here is
 `euid`-relative, so an attacker who *is* that account defeats them by definition, and the control

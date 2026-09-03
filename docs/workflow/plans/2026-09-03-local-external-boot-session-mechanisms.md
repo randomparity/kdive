@@ -332,7 +332,7 @@ Steps:
     `initrd_filename` literals fix. Because cleanup treats a missing name as success, a projection
     that renames or adds an artifact would otherwise make cleanup silently skip it; this test is
     what turns that into a red.
-11. `just lint`; `just type`; commit
+12. `just lint`; `just type`; commit
     `feat(local-libvirt): remove the activation recovery archive on cleanup`.
 
 **Acceptance.** Both removals happen; both are by exact name; both treat absence as success;
@@ -512,15 +512,16 @@ all public, matching the spec, since #2212 is a named consumer of several of the
   resolved value so a mismatch requires discarding it rather than merely forgetting an invariant,
   but #2212 could still re-resolve the setting itself. This is the residual, and it is the reason
   the value is returned at all.
-- **Reclaim the `<system_id>` and `<run_id>` artifact directories — owner: routing pending.**
+- **Reclaim the `<system_id>` and `<run_id>` artifact directories — owner #2212.**
   `LocalArtifactRoot.open` creates them under the per-slot recovery root and nothing removes them;
-  `finalize_tombstone` rmdirs only `<system>.<activation>`. Reported to the orchestrator for
-  routing rather than solved here.
-- **The interrupted-prepare `.partial` archive residue — owner: routing pending; converges with
+  `finalize_tombstone` rmdirs only `<system>.<activation>`.
+- **The interrupted-prepare `.partial` archive residue — owner #2212; converges with
   #2207.** `RecoveryArchiveSink.publish` writes `modules.tar` into
   `.{system}.{activation}.partial`, and only `complete_preparation` renames it into place. A worker
   dying in between leaves a partial that `_publish_initial_intent` refuses on every same-activation
   retry, and that a fresh-activation retry orphans. `cleanup_payloads` cannot reach either state —
   it runs only after `record_phase(..., "recovered")` on a completed directory — so this is a gap
   in the recovery model, not in this mechanism, and widening cleanup to sweep partials is
-  explicitly refused.
+  explicitly refused. Neither this nor the directory residue can manifest before #2212 merges,
+  because `ProviderRuntime.external_boot` is `None` until then and no production cleanup or
+  `.partial` is ever produced; both are fixed inside this queue rather than deferred out of it.
