@@ -12,9 +12,13 @@ under [ADR-0587](../../adr/0587-local-external-boot-uses-an-operation-session.md
 
 Out of scope, with owners: the recovery-root setting and its provisioning (#2210, merged);
 `RealLocalExternalBootIO`, the materializer, `resolve_operation_lease` and the composition binding
-(#2212); the shared authority chain (ADR-0584 / #2140); and any change to
+(#2212); the shared authority chain (ADR-0584 / #2140); any change to
 `LibguestfsAuthenticatedGuestTree`, `_GuardedGuest`, `_GuestContext`, `RecoveryMetadataStore` or
-`TargetProjectionStore`.
+`TargetProjectionStore`; **redaction of the readiness probe's `probe_error`, which still carries
+raw libvirt text and host paths (#2220 — `readiness.py` and `install.py` are not modified here, and
+criterion 7's redaction half is not discharged by this change)**; and narrowing
+`_ConcreteSession.cleanup_payloads`'s `require_inactive` gate, which blocks cleanup for a System
+restored to running (`session.py` is not modified here; routing pending).
 
 `ProviderRuntime.external_boot` stays `None`. Binding these mechanisms supplies one half of
 ADR-0584's advertisement precondition; the authenticated authority boundary is the other half.

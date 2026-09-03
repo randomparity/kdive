@@ -567,7 +567,7 @@ requirements were unmapped; this table is checkable line by line instead.
 | 1 — `RunningObserver` not bound, keeps `_unconfigured_observation` | T4.7, T5.1 (`test_unconfigured_observation_raises`) |
 | 2 — three fail-closed defaults, independently, plus identity | T5.1, T5.2 |
 | 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
-| 4 — artifact root confined; symlink, wide mode, non-directory, traversal refused | T2.5 (symlink, both components), T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical). **"Cannot be pointed at another root" is NOT discharged by a test** — see below |
+| 4 — artifact root confined; symlink, wide mode, non-directory, traversal refused | T2.5 (symlink, both components), T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical). The **caller-level** "cannot be pointed at another root" half is discharged by the type signatures, not by a test, and **not** by T4.5c — see the note below |
 | 5 — cleanup removes payloads **and** the archive; bounded; idempotent | T3.1, T3.6, T3.7, T3.8, T3.9, T3.10 |
 | 6 — `open_guest` returns `_Guest`; guest access refused while active via the existing path | T4.2, T4.3 |
 | 7 — `readiness` returns `ReadinessResult` from a real read | reuse of `_real_readiness` unchanged; binding asserted at **T4.5b**. The "no libvirt text, no host path" half is **NOT discharged here** — `_real_readiness` leaks raw `virsh` stderr and this change does not wrap it. Owner **#2220** |
@@ -576,16 +576,33 @@ requirements were unmapped; this table is checkable line by line instead.
 | 10 — guardrails pass | Task 6 |
 | 11 — bite proof: `finalize_tombstone` fails descriptor-scoped, passes fixed | T3.4 (operands named), T3.5 (**record the failure**), T3.7 |
 
-**Criterion 4's "cannot be pointed elsewhere" half has no test, deliberately.** Two attempts were
-written and both were deleted for having no failing input: no implementation consistent with
-`LocalArtifactRoot(recovery_root)` can open a root the constructor was never given, so any assertion
-that it does not is true of every such implementation. Writing it would repeat, one level up, the
-tautological-gate error ADR-0591 rejects `recovery_directory_name` for. The property is
-**structural** — the constructed `Path` is the only root the mechanism can name, and T4.5c asserts
-the builder is its only construction site and that the value comes from
-`config.require(LIBVIRT_RECOVERY_ROOT)`. What the tests above discharge is that the root is
-*re-validated on every open*: symlink, wide mode, non-directory and non-canonical inputs each
-refuse. Saying the criterion is fully test-discharged would be the over-claim; it is not.
+**Criterion 4's "cannot be pointed elsewhere" half has no test, deliberately — and the claim
+standing in for it is narrower than an earlier revision said.**
+
+The true property is about **callers**, not implementations: *no caller can point `.open` at a root
+other than the one the instance was constructed with*, and that follows from the type signatures
+alone. `open(self, ownership: OperationOwnership) -> int` has no root-shaped parameter, and
+`OperationOwnership` carries only `system_id: UUID` and `binding: ExternalBootActivationBinding`.
+There is no channel through which a caller could name a second root, so no caller-supplied input
+can distinguish a correct implementation from an incorrect one — which is exactly why the two
+deleted tests had no failing input, and why writing a third would repeat, one level up, the
+tautological-gate error ADR-0591 rejects `recovery_directory_name` for.
+
+An earlier revision wrote this as "no *implementation* consistent with the constructor can open a
+root it was never given." That is **false** at that generality: an implementation could re-resolve
+the setting inside `.open`, read an environment variable, or fall back to a default path. Nothing
+in the signatures prevents it. Deleting a test that proved nothing and replacing it with a sentence
+that overreaches would be the worse trade, because prose reads as settled. The caller-level claim is
+what holds; the implementation-level claim is not asserted.
+
+What guards the implementation-level property instead is review plus T4.5c, and that is a
+**different** criterion: T4.5c discharges criterion 8 by asserting the builder is the only
+construction site in `src/` and that the value it passes came from
+`config.require(LIBVIRT_RECOVERY_ROOT)`. It is not a discharge of criterion 4, and the table row
+above must not be read as claiming it is.
+
+What the criterion-4 tests above *do* discharge is that the root is **re-validated on every open**:
+symlink, wide mode, non-directory and non-canonical inputs each refuse.
 
 Names are consistent across the Interfaces block and every task that uses them: `PAYLOAD_NAMES`,
 `LocalOperationLane.pin`, `LocalArtifactRoot.open`, `LocalPayloadCleanup.cleanup`,
