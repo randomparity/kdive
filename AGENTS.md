@@ -149,15 +149,26 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
   `-r` keeps it a no-op once the backlog is clear rather than an error.
 
   The real-daemon sweep tests in `tests/support/test_xdist_backend.py` start their
-  containers directly rather than through testcontainers, and under a label key unique to
-  each test invocation, so that concurrent suites cannot reap each other's fixtures
-  (#2219). Neither the command above nor the ADR-0551 sweep can see one that a killed run
-  orphaned. They all carry `kdive.test-scratch`, so clear those separately — again with no
-  test run in flight, since a running one owns its containers:
+  containers directly rather than through testcontainers, so the command above cannot see
+  them, and most of them carry a label key unique to the test invocation so that
+  concurrent suites cannot reap each other's fixtures (#2219) — which puts those out of
+  the ADR-0551 sweep's reach too. (One container in that module deliberately carries the
+  repo-wide `kdive.test-backend` key, because a sibling suite's enumeration has to be able
+  to see it for the test to mean anything; that one stays reapable by the ordinary sweep.)
+  All of them carry `kdive.test-scratch`, which is the only handle on one a killed run
+  orphaned:
 
   ```sh
-  docker ps -aq --filter "label=kdive.test-scratch" | xargs -r docker rm -fv
+  docker ps -aq --filter "label=kdive.test-scratch" --filter "status=exited" |
+    xargs -r docker rm -v
   ```
+
+  Unlike the command above, this one is safe to run with suites in flight, by construction
+  rather than by warning: it takes only *exited* containers, and a test that is still
+  running holds a running one. An orphan runs for five minutes before exiting, so a
+  cleanup that finds nothing may simply be early — run it again later. `-v` takes the
+  anonymous volume with the container, which is the part `docker volume prune` cannot
+  reclaim on its own.
 
 ## Architecture
 
