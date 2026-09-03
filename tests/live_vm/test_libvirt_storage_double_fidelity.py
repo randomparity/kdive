@@ -110,19 +110,23 @@ def assert_readbacks_agree(real_desc: str, fake_desc: str) -> None:
 
 
 def assert_no_unmodelled_content(desc: str) -> None:
-    """Walk the parsed tree rather than substring-matching the readback string.
+    """Walk the parsed tree; never substring-match the readback string.
 
-    Every readback carries the pool target path three times and ``tmp_path`` honours ``TMPDIR``
-    and ``--basetemp``, so a substring check for ``kdive`` false-reds on any runner whose temp
-    root contains that token — which this reviewer's own probe pool did. The submitted payload
-    *values* are safe to check by substring: they cannot occur in a path libvirt generates.
+    Every readback carries the pool target path three times, and ``tmp_path`` honours ``TMPDIR``
+    and ``--basetemp``, so any substring check over the whole document false-reds on a runner
+    whose temp root happens to contain the token — which this reviewer's own probe pool did for
+    ``kdive``. That applies to the payload values too: libvirt derives the volume path *from* the
+    pool target, so ``run-1`` or ``zzz`` inside ``TMPDIR`` would land in a readback where the
+    double and libvirt agree perfectly. Comparing each element's text for **equality** keeps the
+    check — no element carries the payload as its value — with no such failure mode, because a
+    path libvirt generates is never exactly one of these tokens.
     """
-    root = ET.fromstring(desc)
-    for element in root.iter():
+    payloads = {"run-1", "zzz"}
+    for element in ET.fromstring(desc).iter():
         assert element.tag not in ("metadata", "bogusElement")
         assert "kdive" not in element.attrib
-    assert "run-1" not in desc
-    assert "zzz" not in desc
+        assert (element.text or "").strip() not in payloads
+        assert payloads.isdisjoint(element.attrib.values())
 
 
 def test_double_and_libvirt_agree_on_the_dir_pool_volume_readback(tmp_path: Path) -> None:

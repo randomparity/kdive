@@ -369,8 +369,16 @@ any element carrying the submitted unknown attribute key — by walking the pars
 substring. A substring check over the readback strings would false-red: every readback carries the
 pool target path three times, and `tmp_path` honours `TMPDIR` and `--basetemp`, so a runner whose
 temp root happens to contain one of those tokens fails a test where the double and libvirt agree
-perfectly. The submitted payload *values* (`run-1`, `zzz`) are checked by substring, because those
-cannot appear in a path libvirt generates.
+perfectly.
+
+That reasoning covers the submitted payload *values* (`run-1`, `zzz`) as well, which an earlier
+draft of this design exempted on the grounds that they "cannot appear in a path libvirt generates."
+They can. libvirt derives the volume path *from* the pool target, and the pool target is the
+`tmp_path` that honours `TMPDIR`, so a runner whose temp root contains `zzz` would fail on a
+readback the double matched exactly — the same false-red, one step further along the same
+derivation. The proof instead compares each element's text and attribute values for **equality**
+against the payload set. That keeps the claim being made — no element carries the payload as its
+value — and a path libvirt generates is never exactly one of these tokens.
 
 It compares tag structure **plus the platform-determined values** — `capacity`'s text and its
 `unit`, `target/format@type`, and `target/permissions/mode`. Those are fixed by libvirt's own rules
