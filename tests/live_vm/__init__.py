@@ -11,6 +11,21 @@ skips; env **set but wrong** (missing rootfs file, non-writable parent dir, part
 → the gate fails loud, because a mis-provisioned runner must not masquerade as "no environment".
 ``KDIVE_LIBVIRT_URI`` is the operator escape hatch — the resolved ``contract.libvirt_uri`` is the
 single source of truth a test threads into ``boot_throwaway_domain(mode=...)``.
+
+The storage-double family (#2164) adds two requirements to that discipline. Its proof defines a
+``dir`` pool whose target is a ``tmp_path`` on the client machine, so it accepts only a **local
+session URI**: ``KDIVE_LIBVIRT_URI`` is the shared override for every local family and defaults to
+``qemu:///system`` for two of them, so an override set for another family would otherwise silently
+retarget this one at a mode where the comparison is meaningless. And its probe calls
+``listStoragePools()`` as well as ``libvirt.open``, because modern libvirt packages the storage
+driver separately from the qemu driver — a host can answer ``open`` and have no storage backend.
+
+That probe **latches once per process, per resolved URI (ADR-0580)**, and latches in both
+directions: what is cached is the probe outcome alone, never the resolution, because the
+ABSENT-versus-MISCONFIGURED split is decided by whether ``KDIVE_LIBVIRT_URI`` is *set* and that is
+not part of the key. On the CI live job there is no skip path by design:
+``.github/workflows/live.yml`` always exports ``KDIVE_LIBVIRT_URI``, so a failed probe there is a
+mis-provisioned runner and fails loud rather than skipping.
 """
 
 from __future__ import annotations
@@ -21,6 +36,7 @@ from enum import Enum
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
+import libvirt
 import pytest
 
 LIVE_VM_ROOTFS_ENV = "KDIVE_LIVE_VM_ROOTFS"
@@ -112,6 +128,13 @@ class RemoteContract:
     s3_endpoint_url: str
     s3_bucket: str
     reconciler: str
+
+
+@dataclass(frozen=True, slots=True)
+class StorageDoubleContract:
+    """The storage-double fidelity family's resolved environment: a local session URI."""
+
+    libvirt_uri: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +327,77 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
     )
 
 
+def _storage_driver_answers(uri: str) -> bool:
+    """Open the URI and list its storage pools, closing the probe connection on every path.
+
+    Only ``libvirt.libvirtError`` counts as a failed probe; anything else is a defect in the test
+    environment and propagates. ``listStoragePools()`` returns ``[]`` rather than raising when the
+    driver is present with no pools, so this catches a storage driver that *errors*, not one that
+    is merely silent — a host that lists pools but cannot define one still errors in the test body,
+    and no cheap probe short of running the proof would catch that.
+    """
+    conn = None
+    try:
+        conn = libvirt.open(uri)
+        conn.listStoragePools()
+    except libvirt.libvirtError:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+    return True
+
+
+# ADR-0580: a skip gate probing a live resource probes once per process and latches the verdict in
+# both directions. Keyed by resolved URI so the gate's own tests can vary KDIVE_LIBVIRT_URI, and
+# holding the probe outcome ONLY — see resolve_storage_double_contract for why the resolution
+# itself must not be cached.
+_STORAGE_DOUBLE_PROBE: dict[str, bool] = {}
+
+
+def resolve_storage_double_contract(default_uri: str) -> EnvResolution[StorageDoubleContract]:
+    """Resolve the storage-double family's env: a local session URI whose storage driver answers.
+
+    Three checks, in order. Check 1 (``_is_local_session_uri``) is pure and runs on every call,
+    before the latch is consulted. Checks 2 and 3 are the latched probe.
+
+    The ABSENT/MISCONFIGURED choice is made from ``LIBVIRT_URI_ENV`` on **every** call rather than
+    cached with the probe outcome. ``_resolved_uri`` returns the same string for an unset variable
+    defaulting to ``qemu:///session`` and for one explicitly set to it, so a skip latched under the
+    unset case would otherwise be served back under the set case — turning a mis-provisioned runner
+    into a silent skip instead of a loud failure.
+    """
+    uri = _resolved_uri(default_uri)
+    if not _is_local_session_uri(uri):
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=(
+                f"the storage-double fidelity family requires a local session URI; {uri!r} was "
+                f"resolved from {LIBVIRT_URI_ENV}. Its pool target is a client-side tmp_path, so "
+                "the comparison is meaningless in system mode"
+            ),
+        )
+    if uri not in _STORAGE_DOUBLE_PROBE:
+        _STORAGE_DOUBLE_PROBE[uri] = _storage_driver_answers(uri)
+    if not _STORAGE_DOUBLE_PROBE[uri]:
+        if os.environ.get(LIBVIRT_URI_ENV):
+            return EnvResolution(
+                LiveVmEnvState.MISCONFIGURED,
+                reason=(
+                    f"{LIBVIRT_URI_ENV}={uri!r} is set but its libvirt storage driver did not "
+                    "answer; that is a mis-provisioned runner, not an absent environment"
+                ),
+            )
+        return EnvResolution(
+            LiveVmEnvState.ABSENT,
+            reason=(
+                f"no libvirt session daemon with a storage driver answered at {uri!r}; "
+                f"set {LIBVIRT_URI_ENV} to point at one"
+            ),
+        )
+    return EnvResolution(LiveVmEnvState.AVAILABLE, StorageDoubleContract(libvirt_uri=uri))
+
+
 def require_live_vm_throwaway(
     default_uri: str = "qemu:///system", *, session_required: bool = False
 ) -> ThrowawayContract:
@@ -357,6 +451,25 @@ def require_live_vm_vmlinux() -> VmlinuxContract:
 def require_live_vm_provisioned(default_uri: str = "qemu:///system") -> ProvisionedContract:
     """Skip if the provisioned-System env is absent, fail loud if misconfigured, else return it."""
     resolution = resolve_provisioned_contract(default_uri)
+    if resolution.state is LiveVmEnvState.ABSENT:
+        pytest.skip(resolution.reason)
+    if resolution.state is LiveVmEnvState.MISCONFIGURED:
+        pytest.fail(resolution.reason)
+    assert resolution.contract is not None
+    return resolution.contract
+
+
+def require_live_vm_storage_double(
+    default_uri: str = "qemu:///session",
+) -> StorageDoubleContract:
+    """Skip if no session daemon answers, fail loud if a declared one does not, else return it.
+
+    Returns the URI rather than the open connection: handing back a live connection would put its
+    lifetime in the caller's hands across a ``pytest.skip`` boundary and would not fit the pure
+    ``EnvResolution[T]`` shape the other five families share. The second open costs nothing in a
+    live-tier test.
+    """
+    resolution = resolve_storage_double_contract(default_uri)
     if resolution.state is LiveVmEnvState.ABSENT:
         pytest.skip(resolution.reason)
     if resolution.state is LiveVmEnvState.MISCONFIGURED:
