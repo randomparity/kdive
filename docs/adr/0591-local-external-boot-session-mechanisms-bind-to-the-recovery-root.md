@@ -116,10 +116,28 @@ untouched and stay the fallback for an unsupplied mechanism.
 
 ## Consequences
 
-`finalize_tombstone` becomes reachable for an activation that captured a module archive, which it
-would not be under a descriptor-scoped cleanup. That reachability is proven by a test that fails
-with the real "unexpected payload" error when cleanup is bound descriptor-scoped and passes when
-it is bound as decided here.
+**`finalize_tombstone` becomes reachable for an activation whose `prior_power` is `inactive`, and
+only for that case.** The archive removal decided here is *necessary* for reachability — without
+it the recovery directory keeps `modules.tar` and finalization fails for every archived
+activation — but it is not *sufficient*, and the earlier unconditional wording overstated it.
+
+For `prior_power == "running"` a second, independent gate blocks the same path one layer above
+this decision. `restore_power` records phase `recovered` with the domain **still active**: it
+calls `start()`, requires readiness, and records. `cleanup` then opens a fresh session and calls
+`_ConcreteSession.cleanup_payloads`, whose first statement is `require_inactive()` — which raises
+`"domain must be inactive before overlay mutation"` while the domain is up. So cleanup raises
+before any deletion, `publish_tombstone` never runs, and no tombstone exists to finalize. No
+binding of `CleanupPayloads` can change that, because the gate sits above the callable.
+
+The gate also looks wider than its own justification: `cleanup_payloads` removes host-side payload
+files and the host-side recovery archive, and touches no guest overlay, yet it is fenced by a check
+whose message is about overlay mutation. Deciding whether that fence should narrow means editing
+`_ConcreteSession`, which this change declares unmodified, so it is reported for routing rather
+than taken here.
+
+The scope of this record's reachability claim is therefore: **necessary for all activations,
+sufficient for `prior_power == "inactive"`, and blocked above this seam for
+`prior_power == "running"` pending that separate decision.**
 
 **Cleanup and the recovery store must resolve one root, and the builder is what makes that so.**
 Cleanup opens `<recovery_root>/<system_id>.<activation_id>` using the root it was constructed
@@ -172,6 +190,14 @@ directory is refused rather than swept.
 One configured setting covers both trees. An operator provisions `KDIVE_LIBVIRT_RECOVERY_ROOT`
 per worker slot and gets the artifact subtree with it; there is no second setting to keep in step,
 and no second failure mode where one root is provisioned and the other is not.
+
+**The local external-boot path stays unexercised end to end.**
+`build_external_boot_session_mechanisms` becomes the factory's only caller in `src/`, and is itself
+called by nothing until #2212 wires it. So "the factory gains a production caller" is true and also
+terminates one level up in a function no production code invokes. That is the same dormancy this
+record relies on when it argues the null option is unacceptable, and when it routes the residuals
+to #2212 on the ground that neither can manifest while `ProviderRuntime.external_boot` is `None`.
+Stating it here keeps the record from claiming, by omission, more liveness than it delivers.
 
 Five of the six mechanisms gain production implementations and the sixth does not, so a factory
 built by this change still raises from `_unconfigured_observation` the first time anything asks

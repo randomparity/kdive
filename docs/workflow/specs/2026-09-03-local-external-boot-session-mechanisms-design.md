@@ -94,8 +94,12 @@ factory that looks built and raises only when an operation reaches that mechanis
 mid-activation with the domain already stopped. Today the builder fails at composition instead.
 Widening the type without adding a default keeps that property for every caller and makes the one
 deliberate omission explicit at the call site. Passing `_unconfigured_observation` directly would
-work too, but it imports a private name across modules for no gain; `None` routes through the
-factory's existing fallback.
+work too; `None` is preferred because it routes through the factory's own `or` fallback, keeping
+**one** definition of what "unconfigured" means rather than a second reference to it at the call
+site. The earlier justification — that it avoids importing a private name across modules — was
+wrong and is withdrawn: this design already imports the private `_Guest` protocol from `session.py`,
+and the fail-closed tests import all three `_unconfigured_*` functions to assert identity. Private
+names do cross these module boundaries; that is not the reason.
 
 That is the only edit to existing code outside the new module. The builder's laziness is unchanged
 and `test_external_boot_session_factory_builder_is_lazy_and_unadvertised` must keep passing, so the
@@ -137,8 +141,26 @@ loosening of the binding type cannot silently become a traversal.
 `lifecycle/boot/external_boot.py`, reused rather than restated. The reuse is deliberate: ADR-0586
 made those the definition of an acceptable directory, and a second definition would drift.
 
-**Errors.** A missing, non-directory, wrong-mode, wrong-owner or symlinked component raises
-`ValueError` with a message naming the failing component class and no host path.
+**Errors.** Every failure — missing, non-directory, wrong-mode, wrong-owner or symlinked, at the
+root or at either child — is re-raised as `ValueError` with a fixed message and **no** host path.
+
+This is not automatic and the first revision of this design got it wrong. `os.open` on the root
+raises `OSError` subclasses that carry `.strerror`, and — because the root is opened by path rather
+than descriptor-relative — `.filename` holding the recovery root itself. `_open_private_directory`
+raises the same for a child. A test asserting `NotADirectoryError` therefore *enforces* the leak
+the threat model forbids. So the mechanism catches `OSError` around the whole walk and re-raises
+`ValueError("artifact root is not an owner-only service-owned directory") from None`.
+
+**The `from None` is load-bearing.** `raise ... from exc` re-attaches the original exception, and
+its `filename`, through the chained traceback — which reaches a log or a CI transcript looking
+exactly like the fixed version. Suppressing the context is what actually removes the path.
+
+**One honest limitation.** Reusing `_open_or_create_private_child` means a *child* failure carries
+that helper's fixed `"recovery directory"` label, not a per-component one; only the root's own open
+is labelled `"artifact root"` here. Adding a label parameter would mean modifying
+`external_boot.py`, which this change declares unmodified, and the reuse is worth more than the
+label. So the spec promises a fixed, path-free message — not a message naming the exact failing
+component.
 
 **Ownership of the descriptor.** The caller (`LocalExternalBootSessionFactory.open`) takes
 ownership and closes it via `close_descriptor`. Intermediate descriptors are closed by this
@@ -237,12 +259,35 @@ mounts nothing: `_ConcreteSession._open_guest_context` does all of that, and doe
 checks — the session's `require_inactive` path is the single fence, and a second check in the
 opener would be a second place to get it wrong.
 
-### `_real_readiness`, reused
+### `redacted_readiness`, wrapping `_real_readiness`
 
-Already `Callable[[UUID], ReadinessResult]`, already the production probe wired at
-`LocalLibvirtInstall.from_env`. It resolves `KDIVE_LIBVIRT_URI` itself, tails the truncated console
-log, and returns bounded `probe_error` text capped at 200 characters by `_bounded_probe_error`. It
-is imported and passed, not reimplemented and not wrapped.
+`_real_readiness` is already `Callable[[UUID], ReadinessResult]` and already the production probe
+wired at `LocalLibvirtInstall.from_env`. It resolves `KDIVE_LIBVIRT_URI` itself and tails the
+truncated console log. It is **not** passed through unchanged, for one reason:
+
+`_bounded_probe_error` bounds *length* and nothing else — it is `message[:200]`. `_domain_exit_probe`
+forwards `proc.stderr` verbatim into `probe_error`, so an unreachable hypervisor yields text like
+`error: Failed to connect socket to '<host socket path>': No such file or directory` — raw libvirt
+text and a host filesystem path, well inside 200 characters. That is exactly the "unreachable
+domain" case criterion 7 names, and criterion 7 requires a bounded failure carrying no raw libvirt
+text and no host path.
+
+So this change wraps it: `redacted_readiness(system_id)` calls `_real_readiness` and returns the
+result with `probe_error` replaced by a fixed classification — one of a small closed set of
+strings naming *what* failed (probe timed out, probe tool absent, hypervisor unreachable, probe
+exited non-zero) and never the underlying text. `answered` and `ok` pass through untouched, so no
+readiness semantics change.
+
+**The existing consumer is unaffected, and that is why wrapping is free.** `probe_error`'s only
+production reader is `LocalLibvirtInstall`, which puts it into a boot-failure `details` payload —
+and `install.py` keeps calling `_real_readiness` directly. The wrapper is used only by the
+external-boot session factory, so operator-facing boot diagnostics keep their full text while this
+path stops carrying it. Nothing in `readiness.py` or `install.py` is modified.
+
+The residual is stated rather than hidden: `_real_readiness` itself still returns unredacted text
+to its other caller. That is pre-existing behaviour with a real consumer, outside this change's
+surface, and it is reported for routing rather than silently inherited or silently "fixed" for a
+caller that wants the detail.
 
 ## Threat model
 
@@ -388,8 +433,13 @@ no-op is the defect class this repository has shipped three times in this campai
 
 ## Failure behavior
 
-No mechanism raises a message carrying a host path, a libvirt or libguestfs string, a guest byte,
-or a secret. Directory failures raise `ValueError` naming the component class
-("artifact root", "recovery directory"). `_real_readiness` already bounds its own probe text.
-Descriptor cleanup runs on every failure path; a mechanism that fails partway closes what it
-opened before propagating.
+No mechanism this change introduces raises a message carrying a host path, a libvirt or libguestfs
+string, a guest byte, or a secret. Directory failures raise `ValueError` with a fixed message,
+re-raised `from None` so no chained `OSError` re-attaches `.filename` or `.strerror`.
+`redacted_readiness` replaces `probe_error` with a closed-set classification rather than trusting
+`_bounded_probe_error`, which bounds length only. Descriptor cleanup runs on every failure path; a
+mechanism that fails partway closes what it opened before propagating.
+
+The guarantee is scoped to the mechanisms defined here. It is **not** a claim about
+`_real_readiness` as called by `LocalLibvirtInstall`, which still returns raw libvirt stderr in
+`probe_error` by design and has a consumer that wants it.
