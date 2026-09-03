@@ -51,12 +51,15 @@ from kdive.store.assembly import (
     ObjectStoreAssembly,
     ObjectStoreFactory,
 )
-from kdive.store.objectstore import ObjectStore
+from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.live_vm import require_live_vm_provisioned
 
 _OVERLAY = "/var/lib/kdive/rootfs/sys-overlay.qcow2"
 _SYS = UUID("33333333-3333-3333-3333-333333333333")
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
+# The tenant `LocalLibvirtRetrieve.from_env` binds; spelled out rather than read back off the
+# retriever so a change to it fails the key assertions instead of travelling through them.
+_TENANT = "local"
 
 
 @dataclass
@@ -336,8 +339,10 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
          returns a ``CaptureOutput`` with a non-empty ``vmcore_build_id`` and a positive
          ``raw_size_bytes`` — confirming a real ``/var/crash/<ts>/vmcore`` was written
          by the in-guest kdump service without any staging step.
-      3. No staging artifact exists: the raw ref lives under ``systems/<uuid>/vmcore-kdump``
-         (not a per-run staging path).
+      3. No staging artifact exists: the core lands at its final Run-owned address in one
+         hop — ``<tenant>/runs/<run_id>/vmcore-kdump`` (ADR-0244 §2, which re-owned cores from
+         the System to the crashing Run) — with no intermediate staging object, unlike the
+         remote provider's two-phase stage-then-download (ADR-0084).
 
     Gated by ``require_live_vm_provisioned`` (the provisioned-System family gate): skips when
     ``KDIVE_LIVE_VM_SYSTEM_ID`` is absent, and fails loud when it is set but the ``KDIVE_S3_*``
@@ -370,20 +375,24 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
     # Step 3: harvest the core via the real seam — libguestfs reads the overlay read-only,
     # streams the core to a worker spool dir, then uploads it to the object store.
     retriever = _build_live_proof_retriever()
-    run_id = UUID("44444444-4444-4444-4444-444444444444")
+    run_id = _RUN
     out = retriever.capture(system_id, run_id, CaptureMethod.KDUMP)
 
     # The core was real: non-empty build-id and positive byte count.
     assert out.vmcore_build_id, "vmcore_build_id is empty — core may be corrupt or wrong method"
     assert out.raw_size_bytes > 0, "raw_size_bytes is zero — no core was actually captured"
 
-    # The raw artifact lives under the System's prefix, not a per-run staging path.
-    assert f"systems/{system_id}" in out.raw.key, (
-        f"unexpected raw artifact key {out.raw.key!r}: expected systems/<uuid>/vmcore-kdump"
+    # Both objects landed at the exact Run-owned keys ADR-0244 §2 specifies — the final
+    # address, reached in one hop with no staging object in between. Asserted as full-key
+    # equality rather than a substring so a wrong tenant, owner kind, owner id, or name each
+    # fail here; `artifact_key` is the same helper the production writers build keys with.
+    assert out.raw.key == artifact_key(_TENANT, "runs", str(run_id), "vmcore-kdump"), (
+        f"unexpected raw artifact key {out.raw.key!r}: expected "
+        f"{_TENANT}/runs/<run_id>/vmcore-kdump (ADR-0244 §2, cores are Run-owned)"
     )
-    assert out.raw.key.endswith("vmcore-kdump"), (
-        f"raw key {out.raw.key!r} does not end with vmcore-kdump"
-    )
-    assert out.redacted.key.endswith("vmcore-kdump-redacted"), (
-        f"redacted key {out.redacted.key!r} does not end with vmcore-kdump-redacted"
+    assert out.redacted.key == artifact_key(
+        _TENANT, "runs", str(run_id), "vmcore-kdump-redacted"
+    ), (
+        f"unexpected redacted artifact key {out.redacted.key!r}: expected "
+        f"{_TENANT}/runs/<run_id>/vmcore-kdump-redacted (ADR-0244 §2)"
     )
