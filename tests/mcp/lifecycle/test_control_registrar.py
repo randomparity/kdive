@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from typing import cast
+from uuid import UUID, uuid4
 
 import pytest
 from fastmcp import FastMCP
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import ExternalBootActivationState, RunState
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.lifecycle.records import Run
 from kdive.mcp.schema.schema_advertising import registered_tools
 from kdive.mcp.tools.lifecycle.control import registrar
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.rbac import Role
+from tests.mcp.lifecycle import runs_support
+from tests.services.external_boot.conftest import seed_activation
 
 
 def _register_tools() -> tuple[dict[str, FunctionTool], AsyncConnectionPool, ProviderResolver]:
@@ -282,3 +290,48 @@ def test_register_dispatches_to_focused_helpers(monkeypatch: pytest.MonkeyPatch)
         ("watch_for_crash", app, pool, resolver),
         ("capture_traffic", app, pool, resolver),
     ]
+
+
+def test_power_is_denied_while_an_external_boot_activation_restricts_the_system(
+    migrated_url: str,
+) -> None:
+    """ADR-0583: `control.power` is in no admitted row, so any restriction refuses it."""
+
+    async def scenario() -> None:
+        async with runs_support.pool(migrated_url) as pool:
+            sys_id = await runs_support.seed_system(pool)
+            inv_id = await runs_support.seed_investigation(pool)
+            async with pool.connection() as conn:
+                run = await RUNS.insert(
+                    conn,
+                    Run(
+                        id=uuid4(),
+                        created_at=runs_support.TEST_DT,
+                        updated_at=runs_support.TEST_DT,
+                        principal="user-1",
+                        project="proj",
+                        investigation_id=UUID(inv_id),
+                        system_id=UUID(sys_id),
+                        target_kind=ResourceKind.LOCAL_LIBVIRT,
+                        state=RunState.SUCCEEDED,
+                        build_profile={},
+                    ),
+                )
+                await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.ACTIVE,
+                    system_id=UUID(sys_id),
+                    run_id=run.id,
+                )
+            resp = await registrar.power_system(
+                pool, runs_support.ctx(Role.CONTRIBUTOR), system_id=sys_id, action="off"
+            )
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.object_id == sys_id
+            assert resp.suggested_next_actions == ["runs.get", "runs.release_external_boot"]
+            async with pool.connection() as conn:
+                cur = await conn.execute("SELECT count(*) FROM jobs WHERE kind = 'power'")
+                row = await cur.fetchone()
+                assert row is not None and row[0] == 0
+
+    asyncio.run(scenario())

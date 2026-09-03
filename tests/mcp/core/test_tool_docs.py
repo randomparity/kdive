@@ -9,7 +9,6 @@ documented, the destructive hint matches the reviewed set, and every
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import re
 import textwrap
@@ -18,17 +17,11 @@ from pathlib import Path
 from typing import Any, cast, get_type_hints
 
 import pytest
-from fastmcp.server.auth.providers.jwt import JWTVerifier
-from fastmcp.tools.function_tool import FunctionTool
-from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import SystemState
-from kdive.mcp.assembly.app import build_app
-from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from kdive.profiles.build import BuildProfile
-from kdive.security.secrets.secret_registry import SecretRegistry
 from scripts.generate.gen_tool_reference import (
     _BUILD_PROFILE_EXAMPLES,
     _MAX_SCHEMA_DEPTH,
@@ -36,7 +29,7 @@ from scripts.generate.gen_tool_reference import (
     render_param_detail,
     render_schema_type,
 )
-from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
+from tests.mcp.tool_registry_support import build_registered_tools
 
 _HERE = Path(__file__).resolve()
 _REPO_ROOT = next(parent for parent in _HERE.parents if (parent / "pyproject.toml").is_file())
@@ -175,22 +168,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
 }
 
 
-def _build_tools() -> list[FunctionTool]:
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    kp = make_keypair()
-    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(
-        pool,
-        verifier=verifier,
-        secret_registry=SecretRegistry(),
-        worker_death_verifier=CatalogWorkerDeathVerifier(),
-    )
-    # list_tools() is typed as Sequence[mcp.types.Tool] but the fastmcp runtime
-    # returns list[FunctionTool] — cast to the concrete type so the rest of the
-    # module can access .fn / .meta / .annotations without type errors.
-    return cast(list[FunctionTool], asyncio.run(app.list_tools()))
-
-
 def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     """Whether ``fn`` calls ``target`` directly or via a delegate it transitively calls.
 
@@ -281,7 +258,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     return _walk(fn)
 
 
-TOOLS = _build_tools()
+TOOLS = build_registered_tools()
 
 
 def test_every_tool_has_a_description() -> None:
@@ -759,10 +736,26 @@ def test_every_tool_has_a_valid_maturity() -> None:
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
 
 
-def test_tools_have_no_maturity_detail() -> None:
-    # A maturity_detail left behind after a tool is promoted would mislead.
-    offenders = [t.name for t in TOOLS if "maturity_detail" in (t.meta or {})]
-    assert not offenders, f"tools carrying a stale maturity_detail: {offenders}"
+# The reviewed `partial` set: the three external-boot recovery contracts, each of which
+# validates its request and then reports that the recovery executor is absent (#2117, #2118).
+# Pinned so a new partial tool is a deliberate entry, and so promoting one has to be recorded
+# here as well as at its registration.
+_PARTIAL_TOOLS = frozenset(
+    {
+        "ops.resolve_recovery_orphan",
+        "runs.release_external_boot",
+        "systems.resolve_external_boot_conflict",
+    }
+)
+
+
+def test_exactly_the_partial_tools_carry_a_maturity_detail() -> None:
+    # ADR-0175: a partial tool must carry a maturity_detail and every other tool must not — a
+    # maturity_detail left behind after a tool is promoted would mislead.
+    detailed = {t.name for t in TOOLS if "maturity_detail" in (t.meta or {})}
+    partial = {t.name for t in TOOLS if (t.meta or {}).get("maturity") == "partial"}
+    assert partial == _PARTIAL_TOOLS, f"unreviewed partial tools: {sorted(partial)}"
+    assert detailed == partial, f"maturity_detail set {sorted(detailed)} != partial set"
 
 
 # The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208

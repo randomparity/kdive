@@ -14,14 +14,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SNAPSHOTS, SYSTEMS, snapshot_by_name, snapshots_for_system
 from kdive.domain.capacity.state import JobState, RunState, SnapshotState, SystemState
 from kdive.domain.lifecycle.records import Snapshot
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import RestorePayload, SnapshotDeletePayload, SnapshotPayload
 from kdive.log import bind_context
@@ -30,13 +29,20 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle._recovery import iso
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.services.debug.sessions import active_session_ids_for_system
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 # libvirt snapshot names are agent-chosen; constrain to a shell/XML-safe charset so the name is
 # injection-safe in the snapshot XML the provider renders and safe as a dedup-key component.
@@ -81,16 +87,6 @@ def _admit_snapshot_op(system_id: str, runtime: ProviderRuntime) -> UUID | ToolR
     return uid
 
 
-async def _active_job_by_dedup(conn: AsyncConnection, dedup_key: str) -> Job | None:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT * FROM jobs WHERE dedup_key = %s AND state = ANY(%s)",
-            (dedup_key, list(_ACTIVE_JOB_STATES)),
-        )
-        row = await cur.fetchone()
-    return Job.model_validate(row) if row else None
-
-
 async def _has_live_run(conn: AsyncConnection, system_id: UUID) -> bool:
     async with conn.cursor() as cur:
         await cur.execute(
@@ -110,14 +106,38 @@ async def _active_snapshot_op(conn: AsyncConnection, system_id: UUID) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _snapshot_replay(
+    conn: AsyncConnection, system_id: UUID, name: str
+) -> ToolResponse | None:
+    """The genuinely in-flight ``creating`` case: a repeat call is a poll, not fresh work.
+
+    Split out of :func:`_resolve_snapshot_collision` so it can run *ahead* of the external-boot
+    guard, the rule ``runs/steps.py`` states and the ``keyed_mutation`` sites follow. Without
+    that, an activation appearing after the capture was enqueued turns an agent's poll into a
+    ``conflict`` — steering it at ``systems.teardown`` while its snapshot job is still queued
+    against the same System and will run. Both reads; the guard still precedes every write.
+    """
+    existing = await snapshot_by_name(conn, system_id, name)
+    if existing is None or existing.state is not SnapshotState.CREATING:
+        return None
+    active = await dedup_replay(
+        conn,
+        f"{system_id}:snapshot:{name}",
+        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+    )
+    return None if active is None else job_envelope(active, "system_id", system_id)
+
+
 async def _resolve_snapshot_collision(
     conn: AsyncConnection, system_id: UUID, name: str
 ) -> ToolResponse | None:
     """Apply the name-reuse rules; return a short-circuit envelope, or ``None`` to create fresh.
 
-    ``available`` → reject (durable name in use); genuinely in-flight ``creating`` → replay the
-    job; ``failed`` or a stale ``creating`` (its ``SNAPSHOT`` job already terminal/gone) → delete
-    the stranded ledger row and fall through to create a fresh row + job (auto-reclaim).
+    ``available`` → reject (durable name in use); ``failed`` or a stale ``creating`` (its
+    ``SNAPSHOT`` job already terminal/gone) → delete the stranded ledger row and fall through to
+    create a fresh row + job (auto-reclaim). The genuinely in-flight ``creating`` replay is
+    :func:`_snapshot_replay`'s and has already returned by the time this runs, because it must
+    precede the admission guard and the ``SNAPSHOTS.delete`` below must follow it.
     """
     existing = await snapshot_by_name(conn, system_id, name)
     if existing is None:
@@ -128,10 +148,6 @@ async def _resolve_snapshot_collision(
             detail="snapshot name in use; call systems.delete_snapshot first",
             data={"reason": "snapshot_name_in_use", "name": name},
         )
-    if existing.state is SnapshotState.CREATING:
-        active = await _active_job_by_dedup(conn, f"{system_id}:snapshot:{name}")
-        if active is not None:
-            return job_envelope(active, "system_id", system_id)
     await SNAPSHOTS.delete(conn, existing.id)
     return None
 
@@ -191,6 +207,15 @@ async def snapshot_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
+            replay = await _snapshot_replay(conn, uid, validated)
+            if replay is not None:
+                return replay
+            try:
+                await check_external_boot_admission(
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(system_id, exc, ctx)
             collision = await _resolve_snapshot_collision(conn, uid, validated)
             if isinstance(collision, ToolResponse):
                 return collision
@@ -265,6 +290,12 @@ async def restore_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
+            try:
+                await check_external_boot_admission(
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(system_id, exc, ctx)
             snapshot = await snapshot_by_name(conn, uid, name)
             if snapshot is None or snapshot.state is not SnapshotState.AVAILABLE:
                 return _config_error(
@@ -387,6 +418,22 @@ async def delete_snapshot(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
+            # `queue.enqueue` below is idempotent on this dedup key, so a repeat call while the
+            # deletion is queued or running returns that job unchanged — a poll, not fresh work.
+            # Probe it ahead of the guard for the same reason every other site does.
+            in_flight = await dedup_replay(
+                conn,
+                f"{uid}:delete_snapshot:{name}",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+            if in_flight is not None:
+                return job_envelope(in_flight, "system_id", uid)
+            try:
+                await check_external_boot_admission(
+                    conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(system_id, exc, ctx)
             snapshot = await snapshot_by_name(conn, uid, name)
             if snapshot is None:
                 return _config_error(

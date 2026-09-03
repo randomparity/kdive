@@ -19,6 +19,13 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    ADMISSION_STUB_DETAIL as _ADMISSION_STUB_DETAIL,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    degraded_stub_meta as _degraded_stub_meta,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import request_release as _request_release
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
@@ -92,6 +99,7 @@ def register(
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool, resolver)
     _register_runs_boot(app, pool)
+    _register_runs_release_external_boot(app, pool)
 
 
 def _complete_build_handlers() -> _CompleteBuildHandlers:
@@ -402,7 +410,9 @@ def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_cancel(
         run_id: Annotated[str, Field(description="The non-terminal Run to cancel.")],
     ) -> ToolResponse:
-        """Cancel a non-terminal run, freeing its system without a teardown."""
+        """Cancel a non-terminal run, freeing its system without a teardown. Refused with
+        `conflict` while an uncleaned external-boot activation restricts that system — the
+        denial names the activation and the action that clears it."""
         return await _cancel_run(pool, current_context(), run_id)
 
 
@@ -663,3 +673,30 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await _boot_run(
             pool, current_context(), run_id, force=force, idempotency_key=idempotency_key
         )
+
+
+def _register_runs_release_external_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.release_external_boot",
+        annotations=_docmeta.mutating(),
+        meta=_degraded_stub_meta(_ADMISSION_STUB_DETAIL),
+    )
+    async def runs_release_external_boot(
+        run_id: Annotated[
+            str, Field(description="The Run whose external-boot activation to release.")
+        ],
+    ) -> ToolResponse:
+        """Validate a release of this Run's external boot, then report the executor is missing.
+
+        Today this call checks your role and the System-wide external-boot admission matrix and
+        then fails with `configuration_error` and `data.reason` of
+        `recovery_executor_unavailable`: the external-boot recovery executor is not installed,
+        so no activation changed and the external boot is still in place. Once promoted
+        (#2118), the same call releases the activation and returns the System to ordinary use.
+
+        Requires contributor on the Run's project. Only an `active` activation owned by this
+        Run is admissible, and a release is refused while a job or a debug session still holds
+        the System. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
+        with `systems.teardown` instead; `runs.get` reports the current state either way.
+        """
+        return await _request_release(pool, current_context(), run_id=run_id)

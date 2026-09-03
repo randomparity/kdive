@@ -35,6 +35,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
+from kdive.services.external_boot import ExternalBootOperation, check_external_boot_admission
 from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.runs.build_catalog import parse_build_ref, resolve_build
 from kdive.services.runs.host_admission import (
@@ -330,6 +331,9 @@ async def _create_locked(
         assertion_block = check_reuse_assertion(system, alloc, requirement)
         if assertion_block is not None:
             raise assertion_block
+        await check_external_boot_admission(
+            conn, targets.system_id, ExternalBootOperation.RUN_CREATE, project=project
+        )
         inv = await _investigation_for_update(conn, targets.investigation_id)
         if inv is None:
             raise_config_error(str(targets.investigation_id))

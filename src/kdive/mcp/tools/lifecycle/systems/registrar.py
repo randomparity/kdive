@@ -18,6 +18,19 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    ADMISSION_STUB_DETAIL as _ADMISSION_STUB_DETAIL,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    MAX_OBSERVED_IDENTITY_LENGTH as _MAX_OBSERVED_IDENTITY_LENGTH,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    SUPPORTED_RESOLUTION_OPERATION as _SUPPORTED_RESOLUTION_OPERATION,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import (
+    degraded_stub_meta as _degraded_stub_meta,
+)
+from kdive.mcp.tools.external_boot.recovery_requests import resolve_conflict as _resolve_conflict
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import (
     with_runtime_for_allocation,
     with_runtime_for_system,
@@ -142,6 +155,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_restore(app, pool, resolver)
     _register_systems_list_snapshots(app, pool, resolver)
     _register_systems_delete_snapshot(app, pool, resolver)
+    _register_systems_resolve_external_boot_conflict(app, pool)
 
 
 def _rootfs_validator(runtime: ProviderRuntime):
@@ -616,4 +630,62 @@ def _register_systems_delete_snapshot(
             system_id,
             lambda runtime: _delete_snapshot(pool, ctx, runtime, system_id=system_id, name=name),
             required_role=Role.CONTRIBUTOR,
+        )
+
+
+def _register_systems_resolve_external_boot_conflict(
+    app: FastMCP, pool: AsyncConnectionPool
+) -> None:
+    @app.tool(
+        name="systems.resolve_external_boot_conflict",
+        annotations=_docmeta.mutating(),
+        meta=_degraded_stub_meta(_ADMISSION_STUB_DETAIL),
+    )
+    async def systems_resolve_external_boot_conflict(
+        system_id: Annotated[
+            str,
+            Field(description="The System whose external-boot recovery conflict to resolve."),
+        ],
+        operation: Annotated[
+            str,
+            Field(
+                description=(
+                    "The resolution to apply; the only accepted value is "
+                    f"'{_SUPPORTED_RESOLUTION_OPERATION}', which puts the recorded source "
+                    "state back."
+                )
+            ),
+        ],
+        observed_identity: Annotated[
+            str,
+            Field(
+                max_length=_MAX_OBSERVED_IDENTITY_LENGTH,
+                description=(
+                    "The composite state identity from your most recent systems.get, as "
+                    "'sha256:<64 lowercase hex>'; validated for shape only today, because the "
+                    "compare-and-set that consumes it lands with the recovery executor."
+                ),
+            ),
+        ],
+    ) -> ToolResponse:
+        """Validate a recovery-conflict resolution, then report the executor is missing.
+
+        Today this call checks your role, the `operation` and `observed_identity` you passed,
+        and the System-wide external-boot admission matrix, and then fails with
+        `configuration_error` and `data.reason` of `recovery_executor_unavailable`: the
+        external-boot recovery executor is not installed, so the conflict is untouched. Once
+        promoted (#2118), the same call puts the recorded source state back and clears the
+        conflict.
+
+        Requires admin on the System's project. Only an activation in `recovery_conflict` is
+        admissible. While the executor is absent, a System stuck in `recovery_conflict` or
+        `recovery_failed` is recovered with `systems.teardown`; `runs.get` reports the owning
+        Run's current state.
+        """
+        return await _resolve_conflict(
+            pool,
+            current_context(),
+            system_id=system_id,
+            operation=operation,
+            observed_identity=observed_identity,
         )

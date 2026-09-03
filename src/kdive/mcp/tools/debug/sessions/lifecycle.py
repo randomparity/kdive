@@ -46,6 +46,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.debug.introspection.gate import augment_with_runtime_probe
 from kdive.mcp.tools.debug.sessions.context import resolve_debug_session_context
@@ -73,6 +74,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import load_system_bootstrap_private_key
 from kdive.serialization import JsonValue
 from kdive.services.debug import lifecycle as debug_lifecycle
+from kdive.services.external_boot import ExternalBootDenied
 
 if TYPE_CHECKING:
     from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, DebugRuntimeResolver
@@ -520,6 +522,9 @@ async def _attach_debug_session(
         async with pool.connection() as conn:
             try:
                 return await insert_session_locked(conn, ctx, request, opened)
+            except ExternalBootDenied as exc:
+                await _close(request.connector, str(opened))
+                return _external_boot_denial(str(request.run.id), exc, ctx)
             except Exception:
                 await _close(request.connector, str(opened))
                 raise
@@ -644,7 +649,10 @@ async def _detach_locked(
     system_id: UUID,
     connector: Connector,
 ) -> ToolResponse:
-    result = await debug_lifecycle.detach_locked(conn, ctx, session_id, system_id, connector)
+    try:
+        result = await debug_lifecycle.detach_locked(conn, ctx, session_id, system_id, connector)
+    except ExternalBootDenied as exc:
+        return _external_boot_denial(str(session_id), exc, ctx)
     return _render_detach_result(result)
 
 

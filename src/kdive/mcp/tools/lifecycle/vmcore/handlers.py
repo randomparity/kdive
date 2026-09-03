@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
@@ -25,9 +26,10 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import kdump_capability_refusal as _kdump_capability_refusal
-from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.lifecycle.vmcore._vmcore_kdump_gate import refusing_kdump_capability
 from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
@@ -46,6 +48,11 @@ from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 from kdive.services.runs.steps import system_arch
 
 # The standard first-pass crash(8) batch `postmortem.crash` runs when the caller omits
@@ -274,24 +281,64 @@ async def _fetch_vmcore(
                 if capability is not None:
                     return _kdump_capability_refusal(run_id, capability=capability)
 
+            dedup_key = f"{run_id}:capture_vmcore:{capture_method.value}"
+
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                #
+                # That covers the keyed path only. `idempotency_key` is optional on this tool and
+                # `keyed_mutation` calls `do_work()` straight through when it is `None`, so the
+                # unkeyed — default — path has no envelope replay at all. Its replay is the fixed
+                # dedup key below, which `queue.enqueue` returns unchanged, so the same rule needs
+                # its own probe here. The enqueue passes no `recycle`, so `NEVER` applies and a
+                # *terminal* row replays too — `dedup_replay` derives that from the policy rather
+                # than leaving it to a hand-listed state set.
+                #
+                # Which control tools need this varies, and the difference is load-bearing:
+                # `control.power`, `control.diagnostic_sysrq` and `control.capture_traffic` mix a
+                # `uuid4()` into their unkeyed dedup suffix, so an unkeyed call there is always
+                # genuinely fresh work and needs no probe. `control.force_crash` and
+                # `control.watch_for_crash` use stable keys with no suffix and do need one.
+                #
+                # Unconditional, and against the exact key the enqueue uses. `dedup_key` here
+                # does not vary with `idempotency_key`, so a fresh key cannot mint fresh work --
+                # `queue.enqueue` returns the prior row either way -- and denying it would be the
+                # same divergence as denying an unkeyed repeat (#2117 review).
+                replay = await dedup_replay(conn, dedup_key)
+                if replay is not None:
+                    return job_envelope(replay, "run_id", uid)
+                try:
+                    await check_external_boot_admission(
+                        conn,
+                        system.id,
+                        ExternalBootOperation.CAPTURE_VMCORE,
+                        project=run.project,
+                        run_id=uid,
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(run_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.CAPTURE_VMCORE,
                     CaptureVmcorePayload(run_id=run_id, method=capture_method),
                     job_authorizing(ctx, run.project),
-                    f"{run_id}:capture_vmcore:{capture_method.value}",
+                    dedup_key,
                 )
                 return job_envelope(job, "run_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=run.project,
-                kind=_VMCORE_FETCH_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the Run and System
+            # above, so this block defers to the request's own commit and holds the SYSTEM lock
+            # until then. Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=run.project,
+                    kind=_VMCORE_FETCH_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def _postmortem_crash(

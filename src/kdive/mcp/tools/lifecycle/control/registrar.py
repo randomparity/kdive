@@ -26,6 +26,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
@@ -62,10 +63,13 @@ from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import (
+    external_boot_denial as _external_boot_denial,
+)
+from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -75,6 +79,11 @@ from kdive.security.artifacts.bpf_filter import hygiene_reason
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 _FORCE_CRASH = JobKind.FORCE_CRASH
 # Idempotency-store kinds (the registered tool names); ADR-0193.
@@ -83,6 +92,9 @@ _FORCE_CRASH_KIND = "control.force_crash"
 _DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
 _WATCH_FOR_CRASH_KIND = "control.watch_for_crash"
 _CAPTURE_TRAFFIC_KIND = "control.capture_traffic"
+# `watch_for_crash` recycles a terminal-or-canceled watch into a fresh one, so only a live
+# row is a replay. Named once: the probe and the enqueue must pass the same policy.
+_WATCH_RECYCLE = queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
 
 # capture_traffic bounds (ADR-0385, #1258). Single source of truth for the tool's `Field`
 # constraints and descriptions — interpolated into both so an agent never sees a hardcoded bound.
@@ -143,6 +155,14 @@ async def power_system(
             dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_POWER, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.POWER,
@@ -152,14 +172,18 @@ async def power_system(
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_POWER_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_POWER_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def _authorize_destructive(
@@ -236,28 +260,60 @@ async def force_crash_system(
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
 
+            # Canonical uid (not the raw agent string, which UUID() accepts in non-canonical
+            # forms): the reconciler's leak-recovery predicate matches this dedup_key against
+            # `s.id::text` (canonical), so a non-canonical key would hide a live force_crash job
+            # and trigger premature recovery (#1078). One expression, shared by the replay probe
+            # and the enqueue, so the two cannot ask about different keys.
+            dedup_key = f"{uid}:force_crash"
+
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                #
+                # ADR-0583's owning-Run modifier on force-crash is unenforced here — this handler
+                # carries no caller Run; the bound is the admin role plus the ADR-0130 gate. See
+                # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
+                #
+                # `f"{uid}:force_crash"` is stable across calls and recycles nothing, so an
+                # unkeyed repeat returns the prior job unchanged. That must stay a replay: the
+                # crash job is queued and will fire, and telling the agent it was refused
+                # diverges what it believes from what the System is about to do.
+                # Probed against the exact key the enqueue below uses, unconditionally. The
+                # question is not whether a key was supplied but whether the key *varies* with
+                # it: this one does not, so a fresh idempotency key cannot mint fresh work here
+                # -- `queue.enqueue` returns the prior row either way -- and denying it would be
+                # the same divergence as denying an unkeyed repeat (#2117 review).
+                replay = await dedup_replay(conn, dedup_key)
+                if replay is not None:
+                    return job_envelope(replay, "system_id", uid)
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.FORCE_CRASH,
                     SystemPayload(system_id=system_id),
                     job_authorizing(ctx, system.project),
-                    # Canonical uid (not the raw agent string, which UUID() accepts in
-                    # non-canonical forms): the reconciler's leak-recovery predicate matches this
-                    # dedup_key against `s.id::text` (canonical), so a non-canonical key would hide
-                    # a live force_crash job and trigger premature recovery (#1078).
-                    f"{uid}:force_crash",
+                    dedup_key,
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_FORCE_CRASH_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_FORCE_CRASH_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def diagnostic_sysrq_system(
@@ -303,6 +359,14 @@ async def diagnostic_sysrq_system(
             dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_SYSRQ, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.DIAGNOSTIC_SYSRQ,
@@ -312,14 +376,18 @@ async def diagnostic_sysrq_system(
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_DIAGNOSTIC_SYSRQ_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_DIAGNOSTIC_SYSRQ_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def watch_for_crash_system(
@@ -363,6 +431,9 @@ async def watch_for_crash_system(
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
 
+            # One expression for the probe and the enqueue below, so they cannot diverge.
+            dedup_key = f"{system_id}:watch_for_crash"
+
             async def _enqueue() -> ToolResponse:
                 # Stable per-System dedup key caps in-flight watches to one per System: a second
                 # call while a watch is queued/running returns that same job (there is no reason to
@@ -373,24 +444,49 @@ async def watch_for_crash_system(
                 # new reproducer batch) in place — without it a canceled watch would
                 # wedge the stable slot forever and brick re-issue (the watch is
                 # contributor-cancelable).
+                #
+                # The guard sits inside the closure, so `keyed_mutation`'s replay lookup runs
+                # first and only a fresh enqueue is guarded: an activation must not un-idempotent
+                # a retry. ADR-0583's owning-Run modifier is unenforced here — this handler
+                # carries no caller Run. The record below covers `SYSTEM_WATCH_CRASH` too. See
+                # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
+                #
+                # The stable key described above is exactly a replay, so it is probed ahead of
+                # the guard. Terminal-or-canceled rows are recycled into a fresh watch, so
+                # `dedup_replay` correctly reports those as fresh work the matrix must decide.
+                # Unconditional and against the exact key, for the reason given at
+                # `force_crash`: this key does not vary with `idempotency_key` either.
+                replay = await dedup_replay(conn, dedup_key, recycle=_WATCH_RECYCLE)
+                if replay is not None:
+                    return job_envelope(replay, "system_id", uid)
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.WATCH_FOR_CRASH,
                     WatchForCrashPayload(system_id=system_id, deadline_s=clamped),
                     job_authorizing(ctx, system.project),
-                    f"{system_id}:watch_for_crash",
-                    recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+                    dedup_key,
+                    recycle=_WATCH_RECYCLE,
                 )
                 return job_envelope(job, "system_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=system.project,
-                kind=_WATCH_FOR_CRASH_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=system.project,
+                    kind=_WATCH_FOR_CRASH_KIND,
+                    do_work=_enqueue,
+                )
 
 
 async def capture_traffic_system(
@@ -493,6 +589,18 @@ async def _capture_traffic(
             dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
+                # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                try:
+                    await check_external_boot_admission(
+                        conn,
+                        system.id,
+                        ExternalBootOperation.CAPTURE_TRAFFIC,
+                        project=run.project,
+                        run_id=uid,
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(run_id, exc, ctx)
                 job = await queue.enqueue(
                     conn,
                     JobKind.CAPTURE_TRAFFIC,
@@ -508,14 +616,18 @@ async def _capture_traffic(
                 )
                 return job_envelope(job, "run_id", uid)
 
-            return await keyed_mutation(
-                conn,
-                idempotency_key=idempotency_key,
-                principal=ctx.principal,
-                project=run.project,
-                kind=_CAPTURE_TRAFFIC_KIND,
-                do_work=_enqueue,
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing follows it in this handler, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=run.project,
+                    kind=_CAPTURE_TRAFFIC_KIND,
+                    do_work=_enqueue,
+                )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -24,13 +25,20 @@ from kdive.log import bind_context
 from kdive.mcp.exposure import visible_next_actions
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.ssh_authorized_key import validate_authorized_public_key
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
@@ -144,13 +152,33 @@ async def authorize_ssh_key(
             # idempotent, but a *distinct* key gets its own job — a System-only key would collapse
             # every key after the first into the first job (dedup_key is a permanent UNIQUE column).
             fingerprint = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-            job = await queue.enqueue(
-                conn,
-                JobKind.AUTHORIZE_SSH_KEY,
-                AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
-                job_authorizing(ctx, system.project),
-                f"{system_id}:authorize_ssh_key:{fingerprint}",
-            )
+            # SAVEPOINT, not a top-level transaction: `conn` already read the System above, so
+            # this block defers to the request's own commit and holds the SYSTEM lock until then.
+            # Nothing but the envelope render follows it, so the lock never spans later work.
+            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                # This tool takes no `idempotency_key`, so the fingerprinted dedup key above is
+                # its only replay path — a caller has no keyed escape hatch. Probed ahead of the
+                # guard: re-authorizing the same key while its job is live must keep returning
+                # that job rather than becoming a refusal.
+                replay = await dedup_replay(conn, f"{system_id}:authorize_ssh_key:{fingerprint}")
+                if replay is not None:
+                    return ToolResponse.from_job(replay)
+                try:
+                    await check_external_boot_admission(
+                        conn,
+                        uid,
+                        ExternalBootOperation.SYSTEM_AUTHORIZE_SSH_KEY,
+                        project=system.project,
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.AUTHORIZE_SSH_KEY,
+                    AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:authorize_ssh_key:{fingerprint}",
+                )
     return ToolResponse.from_job(job)
 
 

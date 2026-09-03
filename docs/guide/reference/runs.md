@@ -46,7 +46,9 @@ force-recycled boot. Absent `force`, a fresh boot of an already-booted Run needs
 
 `implemented`
 
-Cancel a non-terminal run, freeing its system without a teardown.
+Cancel a non-terminal run, freeing its system without a teardown. Refused with
+`conflict` while an uncleaned external-boot activation restricts that system — the
+denial names the activation and the action that clears it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -251,6 +253,31 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 - `state` (``created`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only Runs in this build-phase state.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
+
+## `runs.release_external_boot`
+
+`partial`
+
+**Maturity:** degraded_stub — Validates the caller's identity, role, and the System-wide external-boot admission matrix, then reports configuration_error with reason=recovery_executor_unavailable. No activation transition is committed and no recovery job is enqueued, because the external-boot recovery executor is not installed.
+
+**Promotion:** Promoted when the external-boot recovery job handler and worker claim path land (#2118).
+
+Validate a release of this Run's external boot, then report the executor is missing.
+
+Today this call checks your role and the System-wide external-boot admission matrix and
+then fails with `configuration_error` and `data.reason` of
+`recovery_executor_unavailable`: the external-boot recovery executor is not installed,
+so no activation changed and the external boot is still in place. Once promoted
+(#2118), the same call releases the activation and returns the System to ordinary use.
+
+Requires contributor on the Run's project. Only an `active` activation owned by this
+Run is admissible, and a release is refused while a job or a debug session still holds
+the System. A System stuck in `recovery_conflict` or `recovery_failed` is recovered
+with `systems.teardown` instead; `runs.get` reports the current state either way.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `run_id` | string | yes | The Run whose external-boot activation to release. |
 
 ## `runs.set`
 

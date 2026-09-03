@@ -27,9 +27,11 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.mcp.tools.lifecycle.support._idempotency import (
+    dedup_replay,
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
@@ -44,6 +46,11 @@ from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.validation import (
@@ -57,6 +64,12 @@ _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
+
+
+def _teardown_dedup_key(system_id: UUID) -> str:
+    """One expression for the replay probe and the enqueue; the key does not vary with
+    ``idempotency_key``, so the probe runs unconditionally."""
+    return f"{system_id}:teardown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +203,16 @@ async def _reprovision_in_lock(
         if existing is not None:
             return job_envelope(existing, "system_id", system_id)
         return _config_error(str(system_id), data={"current_status": system.state.value})
+    # Below the `REPROVISIONING` replay return above: a repeat call that finds the live dedup job
+    # enqueues nothing and returns it unchanged, so it is a poll rather than fresh work, and an
+    # activation that appeared since must not turn it into a `conflict` while that job stays
+    # queued and runs. Still ahead of every write — `_admit_reprovision` is the first.
+    try:
+        await check_external_boot_admission(
+            conn, system_id, ExternalBootOperation.SYSTEM_REPROVISION, project=system.project
+        )
+    except ExternalBootDenied as exc:
+        return _external_boot_denial(str(system_id), exc, ctx)
     if system.state is not SystemState.READY:
         return _config_error(str(system_id), data={"current_status": system.state.value})
     if await _has_live_run(conn, system_id):
@@ -381,12 +404,33 @@ async def _teardown_locked(
                 suggested_next_actions=["allocations.release", "systems.get"],
                 data={"project": system.project},
             )
+        # `{uid}:teardown` is stable and recycles nothing, so an unkeyed repeat while the teardown
+        # job is live replays it. Both replays sit above the guard, matching every other site.
+        replay = await dedup_replay(conn, _teardown_dedup_key(uid))
+        if replay is not None:
+            return job_envelope(replay, "system_id", uid)
+        # ADR-0583 admits teardown in every restricted state, so this cannot deny today. Ordered
+        # and handled as if it could, because teardown is the one operation admitted everywhere:
+        # `_ESCALATION_HINT` and the recovery rows of `_STATE_NEXT_ACTIONS` steer every denied
+        # caller here, so it is the single exit from a wedged activation. Two open records
+        # contemplate narrowing `_ALWAYS_ADMITTED` —
+        # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md and
+        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md. If that happens, a caller
+        # who already tore the System down, or whose teardown job is queued, must keep its
+        # idempotent answer rather than receive a `conflict` steering it at the tool it just
+        # called — and a denial must render the typed envelope every other site renders.
+        try:
+            await check_external_boot_admission(
+                conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(system_id, exc, ctx)
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
             SystemPayload(system_id=str(uid)),
             job_authorizing(ctx, system.project),
-            f"{uid}:teardown",
+            _teardown_dedup_key(uid),
         )
         envelope = job_envelope(job, "system_id", uid)
         if idempotency_key is not None:

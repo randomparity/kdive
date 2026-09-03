@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kdive.mcp.tools._common import (
     ConfigErrorReason,
     capability_unsupported,
     config_error,
     config_error_reason,
+    external_boot_denial,
     not_found,
 )
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
+from kdive.services.external_boot import ExternalBootDenied
 
 
 def test_not_found_builds_a_not_found_failure_envelope() -> None:
@@ -100,3 +106,44 @@ def test_capability_unsupported_sorts_the_supported_set() -> None:
     )
     assert resp.data["supported"] == ["live", "offline-vmcore"]
     assert resp.data["supported"] == resp2.data["supported"]
+
+
+def _denied(next_actions: list[str]) -> ExternalBootDenied:
+    return ExternalBootDenied(
+        "denied",
+        details={"activation_state": "recovery_conflict"},
+        next_actions=next_actions,
+        project="proj",
+    )
+
+
+def _ctx(role: Role) -> RequestContext:
+    return RequestContext(
+        principal="alice",
+        agent_session="s",
+        projects=("proj",),
+        roles={"proj": role},
+        platform_roles=frozenset(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        (Role.ADMIN, ["runs.get", "systems.teardown"]),
+        (Role.CONTRIBUTOR, ["runs.get"]),
+    ],
+)
+def test_external_boot_denial_filters_next_actions_by_project_role(
+    role: Role, expected: list[str]
+) -> None:
+    """A contributor must not be steered at `systems.teardown`, which is project ADMIN."""
+    resp = external_boot_denial("sys-1", _denied(["runs.get", "systems.teardown"]), _ctx(role))
+    assert resp.status == "error"
+    assert resp.error_category == "conflict"
+    assert resp.suggested_next_actions == expected
+
+
+def test_external_boot_denial_keeps_the_denial_details() -> None:
+    resp = external_boot_denial("sys-1", _denied(["runs.get"]), _ctx(Role.VIEWER))
+    assert resp.data["activation_state"] == "recovery_conflict"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -16,13 +17,20 @@ from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 _TERMINAL_JOB = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
+_TERMINAL_RUN = frozenset({RunState.SUCCEEDED, RunState.FAILED, RunState.CANCELED})
 _NEXT_ACTIONS = ["runs.create"]
 
 
@@ -32,9 +40,14 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
     Under the per-Run lock, transition a ``created``/``running`` Run to ``canceled`` and
     best-effort cancel its in-flight build job. A retried cancel on an already-``canceled``
     Run is an idempotent success no-op; a ``succeeded``/``failed`` Run returns ``conflict``
-    (it is never relabeled). A bound Run's cancel frees the System for a new ``runs.create``
-    with no ``systems.teardown``; an unbound Run (ADR-0169, ``system_id IS NULL``) has no System
-    to free and cancel touches none, so it works the same way.
+    (it is never relabeled). Both are decided before the external-boot check, so a retry keeps
+    its envelope. A bound Run's cancel frees the System for a new ``runs.create`` with no
+    ``systems.teardown``, except while an uncleaned external-boot activation restricts that
+    System (ADR-0583): the cancel is then denied with ``conflict``, because the System it would
+    free is not free. An unbound Run (ADR-0169, ``system_id IS NULL``) has no System to free,
+    cancel touches none, and no activation can restrict it. A Run bound by a concurrent
+    ``runs.bind`` while this call was taking its locks returns ``conflict`` with
+    ``data.reason`` of ``run_binding_changed``; retry it.
 
     Args:
         pool: The connection pool.
@@ -58,10 +71,50 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
 
 
 async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -> ToolResponse:
-    """Transition the Run + best-effort cancel its build job under the per-Run lock."""
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+    """Transition the Run + best-effort cancel its build job under the per-Run lock.
+
+    An unbound Run (ADR-0169) has no System to lock or to decide admission against, so the
+    SYSTEM lock is genuinely conditional here — unlike install and boot, which return
+    ``_not_bound`` before they reach their locks. SYSTEM leads RUN in the total co-hold order.
+
+    ``conn`` has already read the Run, so the stack's transaction is a SAVEPOINT: the locks
+    release at end-of-request, and only the envelope render follows the block.
+    """
+    async with AsyncExitStack() as locks:
+        await locks.enter_async_context(conn.transaction())
+        if run.system_id is not None:
+            await locks.enter_async_context(
+                advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id)
+            )
+        await locks.enter_async_context(advisory_xact_lock(conn, LockScope.RUN, run.id))
         locked = await RUNS.get(conn, run.id)
         prior = locked.state if locked is not None else run.state
+        if prior in _TERMINAL_RUN:
+            return await _terminal_response(conn, run)
+        # ``run`` was read before any lock, so its ``system_id`` can already be stale: a
+        # concurrent ``runs.bind`` commits between that read and the RUN lock. Both the
+        # conditional SYSTEM lock above and the guard below are decided from it, so a Run that
+        # was unbound then and is bound now would cancel against a restricted System while
+        # holding neither. Re-deciding here would mean dropping and retaking both locks to keep
+        # SYSTEM ahead of RUN, so the stale read is reported as retryable instead.
+        if locked is not None and locked.system_id != run.system_id:
+            return ToolResponse.failure(
+                str(run.id),
+                ErrorCategory.CONFLICT,
+                detail="this Run's System binding changed while the cancel was taking its locks",
+                suggested_next_actions=["runs.cancel"],
+                data={"reason": "run_binding_changed"},
+            )
+        # After the terminal-state return, so a retried cancel keeps its documented idempotent
+        # success (or its ``conflict``): a cancel with nothing left to transition frees no System
+        # either way, so denying it protects nothing. Only a cancel about to transition is guarded.
+        if run.system_id is not None:
+            try:
+                await check_external_boot_admission(
+                    conn, run.system_id, ExternalBootOperation.RUN_CANCEL, project=run.project
+                )
+            except ExternalBootDenied as exc:
+                return _external_boot_denial(str(run.id), exc, ctx)
         try:
             canceled = await RUNS.update_state(conn, run.id, RunState.CANCELED)
         except IllegalTransition:

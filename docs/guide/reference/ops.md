@@ -177,6 +177,32 @@ reference clock; an empty or oversized field is refused without deletion.
 | `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with a concise reason in ops.recover_build_use. |
 | `use_id` | string | yes | Exact stranded build-use UUID. |
 
+## `ops.resolve_recovery_orphan`
+
+`partial` · `destructive`
+
+**Maturity:** degraded_stub — Validates the caller's platform role and the bounded repair reference, then reports configuration_error with reason=recovery_executor_unavailable. No quarantined object is deleted or adopted and no recovery job is enqueued, because the external-boot recovery executor is not installed.
+
+**Promotion:** Promoted when the external-boot recovery job handler and worker claim path land (#2118).
+
+Validate a quarantined recovery-object repair, then report the executor is missing.
+
+Today this call checks that you hold platform_admin, resolves the System, and validates
+`object_identities` and `disposition`, and then fails with `configuration_error` and
+`data.reason` of `recovery_executor_unavailable`: the external-boot recovery executor is
+not installed, so nothing was deleted or adopted. Once promoted (#2118), the same call
+permanently deletes the named objects or adopts them back, with no undo.
+
+Requires platform_admin, and a denial is audited. The repair covers quarantined recovery
+objects rather than the activation itself, so it needs no admissible activation state
+and reads none.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `disposition` | string | yes | 'delete' to remove the named objects permanently, or 'adopt' to bring them back under the System's own external-boot activation. |
+| `object_identities` | array<string> | yes | The bounded list of quarantined recovery-object identities to repair; an out-of-bounds list is refused with reason invalid_object_identities, whose detail names the accepted range. |
+| `system_id` | string | yes | The System whose quarantined recovery objects to repair. |
+
 ## `ops.set_cost_class_coeff`
 
 `implemented`

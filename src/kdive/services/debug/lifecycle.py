@@ -22,6 +22,7 @@ from kdive.providers.ports.lifecycle import Connector, DebugTransportKind
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.serialization import JsonValue
+from kdive.services.external_boot import ExternalBootOperation, check_external_boot_admission
 
 _log = logging.getLogger("kdive.services.debug.lifecycle")
 
@@ -109,6 +110,13 @@ async def insert_session_locked(
             return DebugSessionRejected(
                 object_id=str(request.run.id), category=ErrorCategory.TRANSPORT_CONFLICT
             )
+        await check_external_boot_admission(
+            conn,
+            request.system.id,
+            ExternalBootOperation.DEBUG_ATTACH,
+            project=request.run.project,
+            run_id=request.run.id,
+        )
         now = datetime.now(UTC)
         session = await DEBUG_SESSIONS.insert(
             conn,
@@ -187,6 +195,14 @@ async def detach_locked(
             ) from exc
         if state is DebugSessionState.DETACHED:
             return DetachedSession(session_id=session_id, project=row["project"])
+        # Guards the detach itself, after the already-detached no-op returns: a terminal session
+        # has no attachment left to reverse, so an activation must not un-idempotent a retry.
+        # No `run_id`: `DEBUG_DETACH` carries no owning-Run fence, because the release refuses on
+        # any live session of the System whichever Run owns it. See
+        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md
+        await check_external_boot_admission(
+            conn, system_id, ExternalBootOperation.DEBUG_DETACH, project=row["project"]
+        )
         await close_transport(connector, row["transport_handle"])
         await DEBUG_SESSIONS.update_state(conn, session_id, DebugSessionState.DETACHED)
         await audit.record(

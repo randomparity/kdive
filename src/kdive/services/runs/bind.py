@@ -24,6 +24,7 @@ from kdive.log import bind_context
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.external_boot import ExternalBootOperation, check_external_boot_admission
 from kdive.services.runs.admission import RunReuseRequirementInput
 from kdive.services.runs.host_admission import (
     RunCreateError,
@@ -176,6 +177,13 @@ async def _bind_locked(
         assertion = check_reuse_assertion(system, alloc, requirement)
         if assertion is not None:
             raise assertion
+        await check_external_boot_admission(
+            conn,
+            targets.system_id,
+            ExternalBootOperation.RUN_BIND,
+            project=project,
+            run_id=run_id,
+        )
         if not await _bind_system(conn, run_id, targets.system_id):
             raise RunCreateError(
                 str(run_id),
