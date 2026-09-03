@@ -90,8 +90,12 @@ class _RemoteModuleDocument(_ClosedValue):
     protocol: str
 
     def _json(self, *, ensure_ascii: bool) -> bytes:
+        # This overrides _ClosedValue.to_canonical_json to add exclude_none and to parameterize
+        # ensure_ascii; every other dump argument must keep matching the base, because both
+        # serializers answer to the same canonical form. by_alias pairs with the base's
+        # validate_by_alias config and is a no-op only while no field here declares an alias.
         return json.dumps(
-            self.model_dump(mode="json", exclude_none=True),
+            self.model_dump(mode="json", by_alias=True, exclude_none=True),
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=ensure_ascii,
@@ -372,7 +376,18 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
 
 
 class RemoteModuleRecoveryRefV1(_RemoteModuleDocument):
-    """Opaque durable evidence sufficient to reopen one appliance attempt."""
+    """Opaque durable evidence sufficient to reopen one appliance attempt.
+
+    This is the provider-private half of the ADR-0585 recovery point: the ADR has Core store the
+    appliance result "and the exact scratch-volume reference" before activation, and this document
+    is that pairing. It never crosses the appliance boundary and has no appliance schema.
+
+    Three names sit close together, so read them precisely. The document the appliance writes is
+    ``remote-module-result-v1`` in ``deploy/remote_module_appliance/result-v1.schema.json`` and
+    ``RemoteModuleResultV1`` here, but ADR-0585 calls that same document
+    ``remote-module-recovery-v1``; the ADR and the shipped schema disagree, and the schema is what
+    the appliance enforces. This class is neither of those.
+    """
 
     protocol: Literal["remote-module-recovery-ref-v1"] = "remote-module-recovery-ref-v1"
     system_id: _CanonicalUuid

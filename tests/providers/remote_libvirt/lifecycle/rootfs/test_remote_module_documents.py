@@ -147,6 +147,33 @@ def test_documents_reject_extra_fields_unknown_versions_and_noncanonical_json() 
         )
 
 
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        (
+            "duplicate key",
+            lambda data: data.replace(b'"operation":', b'"operation":"restore","operation":', 1),
+        ),
+        ("gratuitous escape", lambda data: data.replace(b'"root-1"', b'"\\u0072oot-1"')),
+        ("trailing whitespace", lambda data: data + b" "),
+    ],
+)
+def test_canonical_comparison_rejects_parser_differential_encodings(name: str, mutate: Any) -> None:
+    """The byte comparison, not the parser, is what closes the differential.
+
+    A duplicate key is the classic differential: two JSON readers may disagree about which value
+    wins, so a document accepted by the appliance could mean something else to this reader. The
+    same applies to a `\\uXXXX` escape of a character that needs none. Nothing in pydantic rejects
+    either -- only re-serializing and comparing bytes does.
+    """
+    operation = RemoteModuleOperationV1.model_validate(_operation())
+    mutated = mutate(operation.to_canonical_json())
+    assert mutated != operation.to_canonical_json()
+
+    with pytest.raises(ValueError, match="not canonical JSON"):
+        RemoteModuleOperationV1.from_canonical_json(mutated)
+
+
 def test_operation_parser_enforces_16_kibibyte_cap_before_validation() -> None:
     with pytest.raises(ValueError, match="16384"):
         RemoteModuleOperationV1.from_canonical_json(b" " * 16_385)
