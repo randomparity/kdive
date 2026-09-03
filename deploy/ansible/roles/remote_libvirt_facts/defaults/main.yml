@@ -3,3 +3,24 @@
 remote_libvirt_facts_ca_cert_ref: cacert.pem
 remote_libvirt_facts_client_cert_ref: clientcert.pem
 remote_libvirt_facts_client_key_ref: clientkey.pem  # pragma: allowlist secret - filename ref
+
+# Stage-time verification of the external-boot guest userland (ADR-0590, #2160).
+#
+# The instrument is read-only by requirement, not by preference. The build-time check runs
+# virt-customize, which rewrites the image it inspects (random seed, SELinux relabel); that is
+# harmless against a build workdir but not against a staged volume other Systems clone from.
+# `guestfish --ro` opens the disk read-only and never writes.
+#
+# Unprivileged, like the stat above it: guestfish needs no root to read a root-owned 0644 volume
+# through a 0711 pool dir, and falls back to TCG where /dev/kvm is unavailable.
+remote_libvirt_facts_userland_verify: true
+
+# Where the per-volume verdict is cached, on the managed host, as the invoking user. An appliance
+# launch is ~2s per image; without this every site.yml run would pay it for every image forever.
+remote_libvirt_facts_userland_cache_dir: ~/.cache/kdive/external-boot-userland
+
+# The cache key must move whenever the answer could. It carries the volume's identity (size and
+# mtime — the copy that stages a volume sets both) and the contract's, so restaging an image or
+# changing the required program list invalidates the verdict rather than inheriting it.
+remote_libvirt_facts_userland_contract_id: >-
+  {{ kdive_external_boot_userland_programs | join(',') | hash('sha1') }}

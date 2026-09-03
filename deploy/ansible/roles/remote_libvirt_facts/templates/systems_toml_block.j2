@@ -7,13 +7,20 @@
 #
 # An [[image]] block is emitted only for a volume confirmed present in this host's
 # pool ({{ storage_pool_target }}) at render time — `kind = "staged"` is a claim
-# about the host, not about the inventory (ADR-0481, #1629).
+# about the host, not about the inventory (ADR-0481, #1629) — and confirmed to carry
+# the external-boot guest userland (ADR-0590, #2160).
 {% if remote_libvirt_facts_missing %}
 #
-# OMITTED — selected but not staged on this host; run playbooks/image.yml, then
-# re-run site.yml to regenerate this file:
+# OMITTED — each line gives the reason and the remedy:
 {% for img in remote_libvirt_facts_missing %}
-#   {{ img.name }} (no {{ storage_pool_target }}/{{ img.name }}.qcow2)
+{% if img.name in (remote_libvirt_facts_unverified | default([])) %}
+#   {{ img.name }} (staged, but the volume lacks {{ kdive_external_boot_userland_programs | join(' and/or ') }};
+#     the external-boot identity proof spawns those by absolute path — ADR-0590.
+#     Rebuild it: playbooks/image.yml with force_image_rebuild=true)
+{% else %}
+#   {{ img.name }} (no {{ storage_pool_target }}/{{ img.name }}.qcow2;
+#     run playbooks/image.yml, then re-run site.yml to regenerate this file)
+{% endif %}
 {% endfor %}
 {% if kdive_default_image not in (remote_libvirt_facts_staged | map(attribute='name') | list) %}
 # INCOMPLETE: base_image below names '{{ kdive_default_image }}', which is one of

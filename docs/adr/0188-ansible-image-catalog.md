@@ -86,6 +86,21 @@ satisfy that path.
    schema's required metadata, best-effort and confirmed on hardware, never a fabricated
    partition number that could mislead.
 
+### Amendment (2026-09-02): external boot adds a POSIX-userland requirement to the §4 contract (#2160)
+
+This is an amendment rather than a supersession: item 4's in-guest contract —
+`qemu-guest-agent`, the family helpers, and `curl`/`tar` under systemd — is unchanged and still
+holds. [ADR-0590](0590-external-boot-requires-a-posix-userland-in-every-catalog-image.md) adds one
+obligation beside it that item 4 does not state, and the claim it qualifies is item 4's
+enumeration of what the guest owes.
+
+Every image in `kdive_image_catalog` — not only the bare one — must additionally carry the
+programs the external-boot identity proof spawns, currently `/usr/bin/uname` and `/usr/bin/cat`,
+as executable files **at those absolute paths**: the `guest-exec` allowlist is path-keyed, so an
+image exposing the applets only at `/usr/sbin/busybox` fails the proof. Item 4's composition is
+untouched — busybox stays in the scratch installroot, and ADR-0481's reservation over §4's
+userland *composition* still governs any move to drop it.
+
 ## Consequences
 
 - A host bring-up + `playbooks/image.yml` stages each `host_images` entry idempotently; two

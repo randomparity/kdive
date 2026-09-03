@@ -26,6 +26,8 @@
       - install
       - systemd
       - busybox
+      # /usr/bin/uname and /usr/bin/cat for the external-boot identity proof (ADR-0590).
+      - coreutils
       - qemu-guest-agent
       - kexec-tools
       - makedumpfile
@@ -45,7 +47,7 @@
       - debootstrap
       - --variant=minbase
       - >-
-        --include=systemd-sysv,busybox,qemu-guest-agent,kexec-tools,makedumpfile,curl,tar,linux-image-generic,grub-efi-amd64
+        --include=systemd-sysv,busybox,coreutils,qemu-guest-agent,kexec-tools,makedumpfile,curl,tar,linux-image-generic,grub-efi-amd64
       - "{{ ansible_distribution_release }}"
       - "{{ guest_base_image_build_workdir }}/{{ image.name }}.root"
   when: ansible_os_family == 'Debian'
