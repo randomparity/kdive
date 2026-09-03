@@ -40,7 +40,13 @@ the README, 89 in the test module.
 | `deploy/ansible/roles/guest_base_image/tasks/build_one.yml` | modify | verifying the contract on the built qcow2 before staging |
 | `deploy/ansible/inventory/group_vars/all.yml` | modify | recording on the bare catalog entry why the contract binds it |
 | `deploy/ansible/README.md` | modify | operator-facing statement of the contract and the re-verify path |
-| `tests/deploy/test_guest_base_image_external_boot_userland.py` | create | structurally locking both edits |
+| `tests/deploy/test_external_boot_userland_contract.py` | create | structurally locking both edits |
+| `docs/adr/0188-ansible-image-catalog.md` | modify | the `### Amendment` block on §4 (branch review) |
+| `deploy/ansible/roles/remote_libvirt_facts/defaults/main.yml` | modify | the stage-time check's knobs (Task 2) |
+| `deploy/ansible/roles/remote_libvirt_facts/tasks/main.yml` | modify | verifying each staged volume before declaring it |
+| `deploy/ansible/roles/remote_libvirt_facts/templates/systems_toml_block.j2` | modify | per-volume omission reason and remedy |
+| `deploy/ansible/tests/fake-guestfish` | create | the guestfish double the render harness drives |
+| `deploy/ansible/tests/run-remote-libvirt-facts-render.sh` | modify | four new cases and a TOML-validity assertion |
 
 ## Task 1 — Declare and verify the contract in the build
 
@@ -57,7 +63,7 @@ required paths, and its position preceding the task named
 
 ### Step 1 — Write the test first
 
-Create `tests/deploy/test_guest_base_image_external_boot_userland.py`. Its contract, in full — the
+Create `tests/deploy/test_external_boot_userland_contract.py`. Its contract, in full — the
 module body is the durable artifact and is not transcribed here:
 
 - **Module docstring** — states that identity proof spawns the two paths (ADR-0590), that neither
@@ -87,7 +93,7 @@ module body is the durable artifact and is not transcribed here:
 ### Step 2 — Confirm it fails
 
 ```sh
-uv run python -m pytest tests/deploy/test_guest_base_image_external_boot_userland.py -q
+uv run python -m pytest tests/deploy/test_external_boot_userland_contract.py -q
 ```
 
 Expect **5 failed**: two `AssertionError` from the missing `coreutils` entries, two from `_named` on
@@ -205,6 +211,29 @@ reach.
 - Five tests pass, each failing when its own subject is broken (Step 8).
 - `just lint`, `just type`, `just lint-ansible`, `just test-ansible`, `just adr-status-check`, and
   `just ci` all exit 0, and `git diff --name-only main...HEAD` names no sibling-owned path.
+
+## Task 2 — Verify the contract at stage time (added after the branch review)
+
+Scope granted by the campaign orchestrator after Task 1's review, on the argument the review
+itself surfaced: Task 1's check carries the staging copy's guard, so on a host that skips the
+build it never fires, and #2160's fix is close to inert against the already-staged volume the
+issue is actually about. ADR-0590 Decision 4 records it. The surface is
+`deploy/ansible/roles/remote_libvirt_facts/` and its render harness.
+
+Binding constraints, all from the grant: the instrument must be read-only (`guestfish --ro`, never
+`virt-customize`, which writes to what it inspects); the role must stay unprivileged or the work
+stops and reports; an inspected-and-absent volume is omitted while an uninspectable one fails the
+play loudly; and the check must be gated so steady state pays no appliance launch per image.
+
+### Acceptance criteria
+
+- The probe opens the staged volume `--ro`, follows symlinks, and reads the program list declared
+  once in `all.yml` rather than its own copy.
+- A non-conformant volume is omitted with its own reason and remedy; the fragment stays valid TOML.
+- An uninspectable volume fails the play with a message naming the volume and the cause.
+- A second `site.yml` run over an unchanged pool launches no appliance; restaging one re-runs it.
+- Each of those is proven by a controlled fault: the render harness case fails when the property
+  is removed from the role.
 
 ### Step 11 — Commit
 

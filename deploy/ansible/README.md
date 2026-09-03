@@ -111,17 +111,41 @@ The scratch installroot names `coreutils` explicitly rather than relying on `sys
 in; the other three entries take their userland from a base image this repository downloads rather
 than composes, so they rest on the build check alone.
 
-`guest_base_image` verifies both paths in each qcow2 it builds **before** staging it, so a
-non-conformant image never reaches the pool and never appears in an `[[image]]` block. The check is
-guarded like the rest of the build, so it does not run when a staged volume is already present: an
-image staged earlier stays unverified until it is rebuilt with `force_image_rebuild=true`, the same
-refresh the in-guest helpers need. See
+The contract is enforced twice, because either point alone leaves a real gap.
+
+**At build time**, `guest_base_image` verifies both paths in each qcow2 it builds **before**
+staging it, so a non-conformant image never reaches the pool. That check is guarded like the rest
+of the build, so it does not run when a staged volume is already present.
+
+**At render time**, `remote_libvirt_facts` verifies each staged volume before declaring it an
+`[[image]]`. This is the half that covers a volume staged before this contract existed, or built
+outside `playbooks/image.yml` — the build check cannot see either. It reads the volume with
+`guestfish --ro`, which never writes to a pool volume other Systems clone from, and it runs
+unprivileged like the volume stat beside it.
+
+Three outcomes, and they are deliberately not the same:
+
+| Outcome | Result |
+| --- | --- |
+| Volume carries both programs | Declared as an `[[image]]` block |
+| Volume inspected, programs absent | **Omitted** with the reason and `force_image_rebuild=true` as the remedy |
+| Volume could not be inspected at all | **Play fails**, naming the volume and the cause |
+
+The third is not folded into the second on purpose: a host with no `libguestfs` would otherwise
+emit an empty but valid fragment and break provisioning with nothing naming why. So `site.yml`
+needs `libguestfs` on each managed host. Set `remote_libvirt_facts_userland_verify=false` to skip
+the render-time check and declare volumes unverified.
+
+Each verdict is cached under `~/.cache/kdive/external-boot-userland`, keyed on the volume's size
+and mtime and on the program list, so a normal `site.yml` run launches no appliance. Restaging a
+volume re-runs the check. See
 [ADR-0590](../../docs/adr/0590-external-boot-requires-a-posix-userland-in-every-catalog-image.md).
 
 ### What the emitted `[[image]]` blocks claim
 
-`remote_libvirt_facts` stats each selected image's volume in `storage_pool_target` and emits
-an `[[image]]` block **only** for volumes that are actually there — `kind = "staged"` is a
+`remote_libvirt_facts` stats each selected image's volume in `storage_pool_target`, checks that
+volume against the external-boot guest userland contract above, and emits an `[[image]]` block
+**only** for volumes that are actually there and actually conformant — `kind = "staged"` is a
 claim about the host, not about the inventory. Selected images with no volume are listed as
 `# OMITTED` in the artifact header.
 

@@ -1,10 +1,18 @@
-"""The external-boot guest userland contract is declared and verified in the image build.
+"""The external-boot guest userland contract is declared and enforced at both of its points.
 
 External-boot identity proof spawns ``/usr/bin/uname`` and ``/usr/bin/cat`` in the guest by
-absolute path (ADR-0590). Neither the scratch build nor the verification task can run in CI —
-there is no scratch-capable host — so this locks the *declaration*: the installroots name the
-package that supplies those paths, and the role checks for them on each qcow2 it builds before
-staging it. A real build host is what turns that check into evidence.
+absolute path (ADR-0590). Two roles hold images to that, and they cover different gaps:
+
+* ``guest_base_image`` verifies each qcow2 it builds, immediately before staging it. It carries
+  the staging copy's guard, so it fires only when a build ran.
+* ``remote_libvirt_facts`` verifies each staged volume before declaring it an ``[[image]]``.
+  That is the half covering a volume staged before ADR-0590, or built anywhere else.
+
+Neither the scratch build nor a real libguestfs appliance can run in CI, so what these lock is
+the *declaration* and the shape of each check. The render harness
+(``deploy/ansible/tests/run-remote-libvirt-facts-render.sh``) exercises the stage-time role's
+classification against a guestfish double; a real build host is what turns the build-time check
+into evidence.
 """
 
 from __future__ import annotations
@@ -16,20 +24,18 @@ from typing import Any
 import pytest
 import yaml
 
-_ROLE = (
-    Path(__file__).resolve().parents[2]
-    / "deploy"
-    / "ansible"
-    / "roles"
-    / "guest_base_image"
-    / "tasks"
-)
+_ANSIBLE = Path(__file__).resolve().parents[2] / "deploy" / "ansible"
+_ROLE = _ANSIBLE / "roles" / "guest_base_image" / "tasks"
 BUILD_SCRATCH = _ROLE / "build_scratch.yml"
 BUILD_ONE = _ROLE / "build_one.yml"
+FACTS_TASKS = _ANSIBLE / "roles" / "remote_libvirt_facts" / "tasks" / "main.yml"
+ALL_VARS = _ANSIBLE / "inventory" / "group_vars" / "all.yml"
 
 REQUIRED_PROGRAMS = ("/usr/bin/uname", "/usr/bin/cat")
 VERIFY_TASK = "external-boot guest userland"
 STAGE_TASK = "Stage the finished image into the (root-owned) pool for {{ image.name }}"
+PROBE_TASK = "Verify the external-boot guest userland in each unverified staged volume"
+INSPECT_FAIL_TASK = "Fail loudly when a staged volume could not be inspected at all"
 
 
 def _tasks(path: Path) -> list[dict[str, Any]]:
@@ -155,3 +161,91 @@ def test_verification_is_guarded_like_the_staging_copy() -> None:
     """No build path is exempt, and the guard matches the copy that consumes the same qcow2."""
     tasks = _tasks(BUILD_ONE)
     assert _named(tasks, VERIFY_TASK)["when"] == _named(tasks, STAGE_TASK)["when"]
+
+
+# --- The stage-time half: remote_libvirt_facts (ADR-0590 Decision 4). ---
+
+
+def _declared_programs() -> list[str]:
+    """The contract's program list, declared once and read by both roles."""
+    return yaml.safe_load(ALL_VARS.read_text(encoding="utf-8"))[
+        "kdive_external_boot_userland_programs"
+    ]
+
+
+def test_the_two_roles_enforce_one_declared_program_list() -> None:
+    """Both checks read the same declaration, so neither can drift from the other.
+
+    The contract is stated once in all.yml. The stage-time role consumes that variable
+    directly; the build-time check embeds the paths in a shell fragment, which is what could
+    silently disagree, so the fragment is held to the declaration here.
+    """
+    declared = _declared_programs()
+    assert declared == list(REQUIRED_PROGRAMS)
+
+    fragment = _run_command(_named(_tasks(BUILD_ONE), VERIFY_TASK))
+    for program in declared:
+        assert f"test -x {program}" in fragment, f"{program} is declared but not built-checked"
+
+    probe = _named(_tasks(FACTS_TASKS), PROBE_TASK)
+    assert "kdive_external_boot_userland_programs" in probe["ansible.builtin.command"]["stdin"], (
+        "the stage-time check must read the declared list, not its own copy of the paths"
+    )
+
+
+def test_stage_time_check_opens_the_staged_volume_read_only() -> None:
+    """The instrument must not write to what it inspects.
+
+    virt-customize — the build-time instrument — rewrites the image on every invocation (random
+    seed, SELinux relabel). Harmless against a build workdir; not against a staged volume other
+    Systems clone from. Different volume, different blast radius.
+    """
+    argv = _argv(_named(_tasks(FACTS_TASKS), PROBE_TASK))
+    assert argv[0] == "guestfish"
+    assert "--ro" in argv, "a staged volume must be opened read-only"
+    assert "virt-customize" not in argv, "the writing instrument must not reach a staged volume"
+    assert argv[argv.index("--add") + 1] == "{{ storage_pool_target }}/{{ volume_name }}.qcow2"
+
+
+def test_stage_time_check_follows_symlinks() -> None:
+    """A busybox image supplies the applets as symlinks, and that satisfies the identity proof.
+
+    guest-exec spawns ``/usr/bin/cat`` and the kernel follows the link, so a symlink to
+    /usr/sbin/busybox is conformant. guestfish's ``is-file`` lstats by default and reports false
+    for exactly that shape, which would omit a working image. The render harness cannot catch
+    this — its guestfish double has no filesystem — so the flag is locked here.
+    """
+    stdin = _named(_tasks(FACTS_TASKS), PROBE_TASK)["ansible.builtin.command"]["stdin"]
+    assert "followsymlinks:true" in stdin
+
+
+def test_uninspectable_volume_is_not_folded_into_the_missing_set() -> None:
+    """An absent program and an unreadable volume are different answers, with different remedies.
+
+    Folding the second into the first would let one host with a broken libguestfs emit an empty
+    but valid fragment, breaking provisioning everywhere with nothing naming the cause.
+    """
+    task = _named(_tasks(FACTS_TASKS), INSPECT_FAIL_TASK)
+    assert "ansible.builtin.assert" in task, "an uninspectable volume must stop the play"
+    fail_msg = task["ansible.builtin.assert"]["fail_msg"]
+    assert "could not inspect" in fail_msg
+    assert "ADR-0590" in fail_msg
+    assert "libguestfs" in fail_msg, "the message must name what to install"
+
+
+def test_stage_time_check_is_gated_by_a_cache_keyed_on_the_volume() -> None:
+    """Steady state must not pay an appliance launch per image per run.
+
+    The key has to move when the image does, or a restaged volume would inherit the old
+    verdict — so it carries the volume's size and mtime as well as the contract's identity.
+    """
+    lookup = _named(_tasks(FACTS_TASKS), "Look up the cached userland verdict")
+    key = lookup["ansible.builtin.stat"]["path"]
+    assert "item.stat.size" in key
+    assert "item.stat.mtime" in key
+    assert "remote_libvirt_facts_userland_contract_id" in key
+
+    probe = _named(_tasks(FACTS_TASKS), PROBE_TASK)
+    assert "rejectattr('stat.exists')" in probe["loop"], (
+        "the probe must run only for volumes with no cached verdict"
+    )

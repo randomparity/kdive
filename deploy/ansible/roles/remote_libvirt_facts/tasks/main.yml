@@ -44,14 +44,138 @@
     label: "{{ item.name }}"
   register: remote_libvirt_facts_volumes
 
+# --- Stage-time verification of the external-boot guest userland (ADR-0590, #2160). ---
+#
+# A stat proves the volume is there; it says nothing about what is inside it. The build-time
+# check that does say so carries the staging copy's guard, so it fires only when a build ran —
+# an image staged before ADR-0590, or built outside guest_base_image, reaches an `[[image]]`
+# block having never been checked. This is the stage-time half ADR-0590 Decision 4 adds: the
+# last point before a volume becomes a catalog row a System can select.
+#
+# The verdict is cached against the volume's size and mtime and the contract's own identity, so
+# the appliance runs once per image per restaging rather than once per site.yml run.
+- name: Look up the cached userland verdict for each confirmed volume
+  vars:
+    volume: "{{ item.item }}"
+  ansible.builtin.stat:
+    path: >-
+      {{ remote_libvirt_facts_userland_cache_dir }}/{{ volume.name }}.{{ item.stat.size
+      }}.{{ item.stat.mtime | int }}.{{ remote_libvirt_facts_userland_contract_id }}
+  loop: "{{ remote_libvirt_facts_volumes.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: remote_libvirt_facts_userland_cache
+  when: remote_libvirt_facts_userland_verify | bool
+
+# One appliance launch per unverified volume. `--ro` is the whole point: this opens a volume
+# other Systems clone from, so the instrument must not write to what it inspects.
+#
+# `followsymlinks:true` is required, not decorative. A busybox image supplies /usr/bin/cat as a
+# symlink to /usr/sbin/busybox, and that DOES satisfy the identity proof — the kernel follows the
+# link on exec. Without the flag `is-file` lstats and reports false, and the role would omit a
+# conformant image.
+#
+# `failed_when: false` here because the next task classifies rc rather than the shell doing it:
+# an absent program and an uninspectable volume are different answers and must not share a
+# failure. Note the split this relies on, which is a property of guestfish and is verified in
+# the render harness: inspection failure writes to stderr and leaves stdout EMPTY, while an
+# absent program is a normal `false` on stdout with rc 0.
+#
+# This verifies presence-as-a-file, not the execute bit the build-time check tests. Reading the
+# mode needs `stat`, which fails on an absent path and so collapses "not there" into "could not
+# look" — the one distinction this role must keep. ADR-0590 Decision 4 records the narrowing.
+- name: Verify the external-boot guest userland in each unverified staged volume
+  vars:
+    volume_name: "{{ item.item.item.name }}"
+  ansible.builtin.command:
+    argv:
+      - guestfish
+      - --ro
+      - --add
+      - "{{ storage_pool_target }}/{{ volume_name }}.qcow2"
+      - --inspector
+    # Double-quoted so YAML itself produces the newline: in a folded scalar `\n` reaches
+    # guestfish as a literal backslash-n and the whole script arrives as one unknown command.
+    stdin: "{{ kdive_external_boot_userland_programs | map('regex_replace', '^(.*)$', 'is-file \\1 followsymlinks:true') | join('\n') }}"
+  loop: >-
+    {{ remote_libvirt_facts_userland_cache.results | default([])
+       | rejectattr('stat.exists') | list }}
+  loop_control:
+    label: "{{ item.item.item.name }}"
+  register: remote_libvirt_facts_userland_probe
+  changed_when: false
+  failed_when: false
+  when: remote_libvirt_facts_userland_verify | bool
+
+# A volume that could not be inspected is NOT folded into the missing set. If it were, one host
+# without a working libguestfs would emit an empty fragment and break provisioning everywhere
+# with nothing naming the cause — the same false-absence the stat comment above refuses.
+- name: Fail loudly when a staged volume could not be inspected at all
+  vars:
+    volume_name: "{{ probe.item.item.item.name }}"
+  ansible.builtin.assert:
+    that:
+      - probe.rc | default(1) == 0
+      - (probe.stdout_lines | default([]) | length)
+        == (kdive_external_boot_userland_programs | length)
+    fail_msg: >-
+      {{ inventory_hostname }}: could not inspect
+      {{ storage_pool_target }}/{{ volume_name }}.qcow2 for the external-boot guest userland
+      (ADR-0590). guestfish exited {{ probe.rc | default('(not run)') }}:
+      {{ probe.stderr | default(probe.msg | default('no output')) | trim }}.
+      This is not a verdict about the image — the check could not run, so the volume is neither
+      confirmed nor denied. Install libguestfs-tools on this host, or set
+      remote_libvirt_facts_userland_verify=false to declare volumes unverified.
+  loop: "{{ remote_libvirt_facts_userland_probe.results | default([]) }}"
+  loop_control:
+    loop_var: probe
+    label: "{{ probe.item.item.item.name }}"
+
+# Record the pass so the next run skips the appliance. Only conformant volumes get a marker:
+# a failing one must be re-checked, since the fix is to restage it.
+- name: Cache the userland verdict for each volume that passed
+  vars:
+    volume: "{{ item.item.item }}"
+  ansible.builtin.file:
+    path: >-
+      {{ remote_libvirt_facts_userland_cache_dir }}/{{ volume.item.name }}.{{ volume.stat.size
+      }}.{{ volume.stat.mtime | int }}.{{ remote_libvirt_facts_userland_contract_id }}
+    state: touch
+    mode: "0644"
+  loop: >-
+    {{ remote_libvirt_facts_userland_probe.results | default([])
+       | rejectattr('stdout_lines', 'contains', 'false') | list }}
+  loop_control:
+    label: "{{ item.item.item.name }}"
+  changed_when: false
+
 - name: Split the selection into confirmed and unconfirmed volumes
+  vars:
+    # Verified this run, plus those a cached verdict already cleared.
+    userland_ok: >-
+      {{ (remote_libvirt_facts_userland_cache.results | default([])
+          | selectattr('stat.exists') | map(attribute='item.item.name') | list)
+         + (remote_libvirt_facts_userland_probe.results | default([])
+            | rejectattr('stdout_lines', 'contains', 'false')
+            | map(attribute='item.item.item.name') | list) }}
+    present: >-
+      {{ remote_libvirt_facts_volumes.results
+         | selectattr('stat.exists') | map(attribute='item.name') | list }}
   ansible.builtin.set_fact:
     remote_libvirt_facts_staged: >-
-      {{ remote_libvirt_facts_volumes.results
-         | selectattr('stat.exists') | map(attribute='item') | list }}
+      {{ kdive_selected_images
+         | selectattr('name', 'in', remote_libvirt_facts_userland_verify | bool
+                                    | ternary(userland_ok, present)) | list }}
     remote_libvirt_facts_missing: >-
-      {{ remote_libvirt_facts_volumes.results
-         | rejectattr('stat.exists') | map(attribute='item') | list }}
+      {{ kdive_selected_images
+         | rejectattr('name', 'in', remote_libvirt_facts_userland_verify | bool
+                                    | ternary(userland_ok, present)) | list }}
+    # Staged, inspected, and non-conformant — omitted for a different reason than absence, and
+    # with a different remedy, so the fragment must not report it as "no volume".
+    remote_libvirt_facts_unverified: >-
+      {{ remote_libvirt_facts_userland_probe.results | default([])
+         | selectattr('stdout_lines', 'contains', 'false')
+         | map(attribute='item.item.item.name') | list }}
 
 # An unconfirmed DEFAULT image is the one case the operator must not paste past: the emitted
 # base_image would name an image the fragment does not declare. That is rejected by
@@ -61,11 +185,18 @@
 # (deploy/ansible/README.md usage steps 2 and 3), and re-running site.yml afterwards
 # regenerates a complete fragment.
 - name: Warn when the emitted fragment is incomplete
+  vars:
+    absent: >-
+      {{ remote_libvirt_facts_missing | map(attribute='name')
+         | reject('in', remote_libvirt_facts_unverified | default([])) | list }}
+    unverified: "{{ remote_libvirt_facts_unverified | default([]) }}"
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }}: no staged volume for
-      {{ remote_libvirt_facts_missing | map(attribute='name') | join(', ') }} — those [[image]]
-      blocks are omitted. Run playbooks/image.yml, then re-run site.yml to regenerate.
+      {{ inventory_hostname }}: those [[image]] blocks are omitted.
+      {% if absent %}No staged volume for {{ absent | join(', ') }} — run playbooks/image.yml,
+      then re-run site.yml to regenerate.{% endif %}
+      {% if unverified %}Staged but lacking the external-boot guest userland (ADR-0590):
+      {{ unverified | join(', ') }} — rebuild those with force_image_rebuild=true.{% endif %}
   when: remote_libvirt_facts_missing | length > 0
 
 - name: Ensure the controller artifacts dir exists

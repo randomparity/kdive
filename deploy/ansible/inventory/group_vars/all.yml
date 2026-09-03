@@ -44,6 +44,17 @@ kdive_image_defaults:
     aarch64: arm64
     ppc64le: ppc64el
 
+# The external-boot guest userland contract (ADR-0590, #2160). Every catalog image owes these
+# programs as files at these ABSOLUTE paths: the external-boot identity proof spawns them over
+# guest-exec against a path-keyed allowlist, so an image exposing the applets only at
+# /usr/sbin/busybox does not satisfy it. Declared once here because two roles enforce it —
+# guest_base_image on each qcow2 it builds, remote_libvirt_facts on each volume it declares
+# staged. Changing this list changes what both check; it does not change ADR-0590, which states
+# the obligation generally and names these two as the instance #2110 chose.
+kdive_external_boot_userland_programs:
+  - /usr/bin/uname
+  - /usr/bin/cat
+
 # The catalog. Each entry: logical name, distro/version, source kind, optional
 # per-entry overrides (packages/helpers/arches/host_distros/root_device/cloud_image_url/force).
 # The in-guest helpers are Fedora/RHEL-family (grubby/dracut): the full kdive
