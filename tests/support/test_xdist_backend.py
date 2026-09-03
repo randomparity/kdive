@@ -6,6 +6,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import uuid
 import warnings
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -35,6 +36,46 @@ def _private_sweep_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     ``monkeypatch.setattr`` where they need a specific path; a later set wins.
     """
     monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", tmp_path / "sweep-lock")
+
+
+# Written out rather than imported from the module under test, so the assertions that pin
+# the real label still fail if someone changes it. `private_backend_label` derives this
+# run's key from it, so the two can never drift into different namespaces.
+_REPO_WIDE_BACKEND_LABEL = "kdive.test-backend"
+
+
+@pytest.fixture
+def private_backend_label(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Scope one test's *real* containers to a label key no other suite can enumerate.
+
+    Only for the tests that start containers on a real daemon. ``BACKEND_LABEL`` is
+    repo-wide on purpose — a sweep must be able to reap a container a *crashed* run left
+    behind, and it can only find one by a key every run agrees on (ADR-0551). The cost is
+    that a container carrying it and holding no liveness lock is reapable by every process
+    on the host, and every suite sweeps on its way to starting a backend
+    (``tests/db/conftest.py``, ``tests/store/conftest.py``).
+
+    A test that plants a deliberately stranded container is therefore racing every other
+    suite for the right to reap it, and loses often enough to matter under
+    worktree-per-agent parallelism: the sibling's ``remove`` wins, ours gets ``NotFound``,
+    the id never reaches our returned list, and ``assert stranded.id in reaped`` goes red
+    against unmodified code (#2219). The same applies once a live container's lock is
+    released to model a SIGKILL.
+
+    Scoping the key per test invocation removes the contention in both directions: no
+    sibling can enumerate what this test planted, and this test's sweeps stop reaping
+    strays that belong to other suites. ``backend_container_labels`` and the sweep's
+    filter both read ``BACKEND_LABEL`` at call time, so one patch moves the whole
+    round trip and producer and consumer cannot disagree.
+
+    Deliberately **not** a fix in ``xdist_backend`` itself. Making the enumeration key
+    per-run or per-checkout would contradict ADR-0551's decision and strand a crashed
+    run's container forever whenever its worktree is deleted — which, under
+    worktree-per-agent, is the normal case.
+    """
+    label = f"{_REPO_WIDE_BACKEND_LABEL}-{uuid.uuid4().hex}"
+    monkeypatch.setattr(xdist_backend, "BACKEND_LABEL", label)
+    return label
 
 
 class _CountingProbe:
@@ -898,7 +939,7 @@ def test_sweep_reaps_only_the_stale_labeled_container_and_its_volume(tmp_path: P
     assert dead.removed_with == {"force": True, "v": True}
     assert live.removed_with is None and foreign.removed_with is None
     # Enumeration is scoped to this repo's own containers, not every container on the host.
-    assert client.filters == {"label": "kdive.test-backend"}
+    assert client.filters == {"label": _REPO_WIDE_BACKEND_LABEL}
 
 
 def test_sweep_is_silent_when_another_run_reaped_the_same_container(tmp_path: Path) -> None:
@@ -942,27 +983,50 @@ def test_sweep_warns_rather_than_failing_the_run_when_docker_is_unusable() -> No
         assert xdist_backend.sweep_stale_backend_containers(_BrokenClient()) == []
 
 
-def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(tmp_path: Path) -> None:
+def _run_labelled_container(client: Any, labels: Mapping[str, str]) -> Any:
+    """Start one real container carrying ``labels``.
+
+    ``postgres:17`` is the image the db fixtures already use, so this pulls nothing extra;
+    the entrypoint is overridden so it starts instantly instead of running initdb.
+    """
+    return client.containers.run(
+        "postgres:17", entrypoint=["sleep", "300"], detach=True, labels=dict(labels)
+    )
+
+
+def _remove_quietly(client: Any, *container_ids: str) -> None:
+    """Best-effort teardown for containers a real-daemon test started."""
+    import docker.errors
+
+    for container_id in container_ids:
+        with suppress(docker.errors.NotFound):
+            client.containers.get(container_id).remove(force=True, v=True)
+
+
+def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(
+    tmp_path: Path, private_backend_label: str
+) -> None:
     """The whole fix, against a real daemon (#1910).
 
     The fakes above cannot catch a mismatch between the label the sweep filters on and
     the label a container actually carries, nor a `remove` call the daemon rejects — both
-    would leave every other test in this file green while the leak continued.
+    would leave every other test in this file green while the leak continued. Scoping the
+    key per invocation keeps that round trip intact: `backend_container_labels` stamps
+    whatever key the sweep then filters on, so producer and consumer still have to agree.
 
-    `postgres:17` is the image the db fixtures already use, so this pulls nothing extra;
-    the entrypoint is overridden so it starts instantly instead of running initdb.
-
-    The module-wide ``_private_sweep_lock`` fixture keeps this independent of whatever
-    else is running on the host; see its docstring.
+    Two fixtures keep this independent of whatever else is running on the host, and both
+    are needed: ``_private_sweep_lock`` so a sibling suite holding the host-global lock
+    cannot turn our sweeps into ``[]``, and ``private_backend_label`` so a sibling's sweep
+    cannot reap the stranded container we plant before our own sweep gets to it (#2219).
+    See their docstrings.
     """
     xdist_backend.skip_without_docker()
     import docker
     import docker.errors
 
     client = docker.from_env()
-    labels = xdist_backend.backend_container_labels(tmp_path, "pg")
-    container = client.containers.run(
-        "postgres:17", entrypoint=["sleep", "300"], detach=True, labels=labels
+    container = _run_labelled_container(
+        client, xdist_backend.backend_container_labels(tmp_path, "pg")
     )
     # A second container whose run is already gone: its liveness file is never locked, so
     # it is stale from the start. Sweeping both in ONE call is what keeps the spare
@@ -970,11 +1034,8 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(tmp_path: P
     # this one is the evidence that the sweep actually ran and still spared the live one.
     stranded_root = tmp_path / "stranded"
     stranded_root.mkdir()
-    stranded = client.containers.run(
-        "postgres:17",
-        entrypoint=["sleep", "300"],
-        detach=True,
-        labels=xdist_backend.backend_container_labels(stranded_root, "pg"),
+    stranded = _run_labelled_container(
+        client, xdist_backend.backend_container_labels(stranded_root, "pg")
     )
     try:
         with xdist_backend._liveness_held(tmp_path, "pg"):
@@ -992,6 +1053,81 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(tmp_path: P
         with pytest.raises(docker.errors.NotFound):
             client.containers.get(container.id)
     finally:
-        for leftover in (container.id, stranded.id):
-            with suppress(docker.errors.NotFound):
-                client.containers.get(leftover).remove(force=True, v=True)
+        _remove_quietly(client, container.id, stranded.id)
+
+
+def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
+    tmp_path: Path, private_backend_label: str
+) -> None:
+    """A sibling suite on the same host cannot enumerate this run's containers (#2219).
+
+    This is the property that makes the test above deterministic, asserted directly
+    against a real daemon rather than left to whatever else happens to be running.
+
+    ``control`` carries the repo-wide key a sibling suite really filters on and holds its
+    liveness lock for its whole life, so every sweep on the host spares it — the same
+    protection ``tests/db/test_postgres_url_fixture.py`` and
+    ``tests/store/test_minio_store_fixture.py`` already rely on. It is the anti-vacuity
+    control: without it, ``subject.id not in visible`` would pass just as happily against
+    an enumeration that returned nothing at all, which is the failure mode the
+    ``_private_sweep_lock`` docstring was written about.
+
+    ``subject`` is stranded on purpose — its liveness file is never locked, so it is stale
+    to any sweep that can see it. Under the repo-wide key that made it a free-for-all;
+    under this run's key nobody else can list it, and only our own sweep reaps it.
+
+    The enumeration below is read-only. Running a *real* unscoped sweep here would prove
+    the same point by destroying whatever other suites had stranded on the host, which is
+    the behaviour this test exists to keep out of the suite.
+    """
+    xdist_backend.skip_without_docker()
+    import docker
+    import docker.errors
+
+    client = docker.from_env()
+    control_root = tmp_path / "control"
+    subject_root = tmp_path / "subject"
+    control_root.mkdir()
+    subject_root.mkdir()
+    control_labels = {
+        _REPO_WIDE_BACKEND_LABEL: "pg",
+        xdist_backend.LIVENESS_LABEL: str(
+            xdist_backend._liveness_path(control_root, "pg").resolve()
+        ),
+    }
+
+    with xdist_backend._liveness_held(control_root, "pg"):
+        control = _run_labelled_container(client, control_labels)
+        subject = _run_labelled_container(
+            client, xdist_backend.backend_container_labels(subject_root, "pg")
+        )
+        try:
+            control.reload()
+            subject.reload()
+            # Read back off the running containers: `labels=` reaching the daemon is what
+            # everything below depends on, and a mock cannot show it.
+            assert control.labels[_REPO_WIDE_BACKEND_LABEL] == "pg"
+            assert subject.labels[private_backend_label] == "pg"
+            assert _REPO_WIDE_BACKEND_LABEL not in subject.labels
+
+            # Exactly the enumeration `sweep_stale_backend_containers` performs in a
+            # sibling suite that never patched anything.
+            visible = {
+                found.id
+                for found in client.containers.list(
+                    all=True, filters={"label": _REPO_WIDE_BACKEND_LABEL}
+                )
+            }
+            assert control.id in visible, "the sibling's enumeration returned nothing"
+            assert subject.id not in visible
+
+            # ...and this run's own sweep still reaps its own stranded container.
+            reaped = xdist_backend.sweep_stale_backend_containers()
+            assert subject.id in reaped
+            assert control.id not in reaped
+            with pytest.raises(docker.errors.NotFound):
+                client.containers.get(subject.id)
+            control.reload()
+            assert control.status == "running"
+        finally:
+            _remove_quietly(client, control.id, subject.id)
