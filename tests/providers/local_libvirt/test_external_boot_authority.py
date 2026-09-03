@@ -15,22 +15,32 @@ from typing import Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityTakeoverRequestV1,
+    JournalPhase,
+    JournalRecordV1,
     RecoveryObjectBindingV1,
     operation_is_permitted,
+    record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
     AuthorityMutationAdapter,
     AuthorityServiceError,
+    ExternalBootAuthorityService,
 )
 from kdive.providers.local_libvirt import external_boot_authority as adapter_module
 from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    FinalizeCleanupProof,
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
     LocalObservedState,
@@ -47,6 +57,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from tests.providers.external_boot_authority.service_support import _Repository
 
 pytestmark = pytest.mark.anyio
 
@@ -146,6 +157,11 @@ class _FakeIO:
         self.observe_fault = observe_fault
         self.actions: list[str] = []
         self.tombstone = False
+        self.finalized_proof: FinalizeCleanupProof | None = None
+        # Raised by `reopen_binding` in place of returning the record. `FileNotFoundError` is
+        # what the real store raises for every state in which the recovery record cannot be
+        # rebuilt; `OSError` stands for a read that merely failed.
+        self.reopen_error: BaseException | None = None
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
@@ -153,8 +169,9 @@ class _FakeIO:
         self.actions.append(f"open:{authority.ref}")
         return _FakeContext(self)
 
-    def finalize_tombstone(self, recovery: RecoveryPoint, proof: object) -> None:
-        del recovery, proof
+    def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
+        del recovery
+        self.finalized_proof = proof
         self.actions.append("finalize")
 
     # -- LocalExternalBootOperation ------------------------------------------------
@@ -169,6 +186,8 @@ class _FakeIO:
     def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1:
         del binding
         self.actions.append("reopen")
+        if self.reopen_error is not None:
+            raise self.reopen_error
         if self.reopen_fault:
             raise LookupError("libguestfs: /var/lib/kdive/secret.key unreadable")
         return self.metadata
@@ -278,6 +297,67 @@ def _request(
     )
 
 
+def _context(
+    operation: AuthorityOperation = AuthorityOperation.ACTIVATE,
+    *,
+    sequence: int = 4,
+    generation: int = 7,
+    operation_identity: str = "op-1",
+) -> AuthorityCommitContextV1:
+    """The context the service builds from the record it anchored for this request.
+
+    Built through ``for_record`` rather than by hand, so a test can never present the adapter
+    a context the service could not have produced.
+    """
+    record = JournalRecordV1(
+        authority_id=AUTHORITY_ID,
+        generation=generation,
+        system_id=SYSTEM_ID,
+        activation_id=ACTIVATION_ID,
+        run_id=RUN_ID,
+        plan_identity=PLAN_IDENTITY,
+        purpose=cast(Literal["activate"], _PURPOSE_FOR[operation]),
+        operation=operation,
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity=operation_identity,
+        operation_digest="sha256:" + "9" * 64,
+        sequence=sequence,
+        previous_digest="sha256:" + "0" * 64,
+        phase=JournalPhase.MUTATION_STARTED,
+        attempt_id=ATTEMPT_ID,
+        expected_source_identity=SOURCE_IDENTITY,
+        intended_target_identity=TARGET_IDENTITY,
+        recovery_objects=(),
+    )
+    return AuthorityCommitContextV1.for_record(record)
+
+
+_PURPOSE_FOR: dict[AuthorityOperation, str] = {
+    AuthorityOperation.ACTIVATE: "activate",
+    AuthorityOperation.DEADLINE: "activate",
+    AuthorityOperation.FAIL: "activate",
+    AuthorityOperation.RECOVER: "recover",
+    AuthorityOperation.RECOVERY_ATTEMPT: "recover",
+    AuthorityOperation.RESOLVE_CONFLICT: "resolve-conflict",
+    AuthorityOperation.RELEASE: "release",
+    AuthorityOperation.CLEANUP: "release",
+    AuthorityOperation.TEARDOWN: "teardown",
+}
+
+
+def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
+    """The recovery point the coordinator rebuilds from the durable record."""
+    return RecoveryPoint(
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        materialization_identity=metadata.materialization_identity,
+        recovery_ref=_RECOVERY_REF,
+        source_state=metadata.source_state,
+        target_state=metadata.target_state,
+    )
+
+
 def _owned_object() -> RecoveryObjectBindingV1:
     return RecoveryObjectBindingV1(
         system_id=SYSTEM_ID, activation_id=ACTIVATION_ID, reference=_RECOVERY_REF.ref
@@ -330,19 +410,26 @@ async def test_commit_refuses_every_illegal_purpose_operation_pair(
     request = _request(purpose=purpose, operation=legal)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(request, operation.value)
+        await _adapter(io).commit(request, _context(operation))
 
     assert caught.value.category == "provider_conflict"
     assert io.actions == []
 
 
-async def test_commit_refuses_a_commit_point_that_is_not_an_operation_at_all() -> None:
+async def test_a_commit_point_that_is_not_an_operation_cannot_reach_the_adapter() -> None:
+    """The ground this used to cover moved down a layer when the seam stopped taking a str.
+
+    It used to pass ``"rm -rf /"`` as the commit point and assert the adapter refused it.
+    ``AuthorityCommitContextV1.commit_point`` is an ``AuthorityOperation``, so a closed model
+    cannot carry a non-member and the adapter can no longer be handed one. The check is now
+    at construction, which is where it belongs, and it still fails closed.
+    """
     io = _FakeIO()
+    values = _context().model_dump(mode="json", by_alias=True)
 
-    with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(_request(), "rm -rf /")
+    with pytest.raises(ValidationError):
+        AuthorityCommitContextV1.model_validate(values | {"commit_point": "rm -rf /"})
 
-    assert caught.value.category == "provider_conflict"
     assert io.actions == []
 
 
@@ -380,7 +467,7 @@ def test_adapter_module_names_no_generic_power_operation_or_domain_xml() -> None
 async def test_accepted_commit_points_drive_named_local_primitives() -> None:
     io = _FakeIO(_metadata("pre-stop-intent"))
 
-    await _adapter(io).commit(_request(), AuthorityOperation.ACTIVATE.value)
+    await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
 
     assert "activate-modules" in io.actions
     assert "define-target" in io.actions
@@ -390,7 +477,7 @@ async def test_recover_drives_the_named_recovery_primitives() -> None:
     io = _FakeIO(_metadata("target-defined"))
     request = _request(purpose="recover", operation=AuthorityOperation.RECOVER)
 
-    await _adapter(io).commit(request, AuthorityOperation.RECOVER.value)
+    await _adapter(io).commit(request, _context(AuthorityOperation.RECOVER))
 
     assert "recover-modules" in io.actions
     assert "define-source" in io.actions
@@ -401,7 +488,7 @@ async def test_bookkeeping_operations_mutate_nothing() -> None:
     io = _FakeIO(_metadata("target-defined"))
     request = _request(purpose="recover", operation=AuthorityOperation.DEADLINE)
 
-    await _adapter(io).commit(request, AuthorityOperation.DEADLINE.value)
+    await _adapter(io).commit(request, _context(AuthorityOperation.DEADLINE))
 
     mutating = {"activate-modules", "define-target", "recover-modules", "cleanup"}
     assert mutating.isdisjoint(io.actions)
@@ -473,7 +560,7 @@ async def test_commit_refuses_a_mismatched_expected_source_identity() -> None:
     request = _request(expected_source="sha256:" + "f" * 64)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(request, AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(request, _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category == "provider_conflict"
     assert "activate-modules" not in io.actions
@@ -484,7 +571,7 @@ async def test_commit_refuses_a_mismatched_intended_target_identity() -> None:
     request = _request(intended_target="sha256:" + "f" * 64)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(request, AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(request, _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category == "provider_conflict"
     assert "activate-modules" not in io.actions
@@ -503,7 +590,7 @@ async def test_commit_refuses_a_mismatched_plan_identity() -> None:
 
     with pytest.raises(AuthorityServiceError):
         await _adapter(io).commit(
-            _request(plan_identity="sha256:" + "f" * 64), AuthorityOperation.ACTIVATE.value
+            _request(plan_identity="sha256:" + "f" * 64), _context(AuthorityOperation.ACTIVATE)
         )
 
     assert "activate-modules" not in io.actions
@@ -519,7 +606,7 @@ async def test_owned_recovery_objects_keep_ownership_across_observe_and_commit()
     request = _request(recovery_objects=(_owned_object(),))
 
     observed = await _adapter(io).observe(request)
-    committed = await _adapter(io).commit(request, AuthorityOperation.ACTIVATE.value)
+    committed = await _adapter(io).commit(request, _context(AuthorityOperation.ACTIVATE))
 
     assert observed.category == "source"
     assert committed.category in {"source", "target", "mixed"}
@@ -531,7 +618,7 @@ async def test_unproven_recovery_object_is_quarantined_not_reused_or_deleted() -
 
     observation = await _adapter(io).observe(request)
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(request, AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(request, _context(AuthorityOperation.ACTIVATE))
 
     assert observation.category == "conflict"
     assert caught.value.category == "provider_conflict"
@@ -572,7 +659,7 @@ async def test_hostile_identity_input_is_refused_without_touching_the_provider()
     hostile = _request(expected_source="/etc/shadow")
 
     with pytest.raises(AuthorityServiceError):
-        await _adapter(io).commit(hostile, AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(hostile, _context(AuthorityOperation.ACTIVATE))
 
     assert "activate-modules" not in io.actions
 
@@ -586,7 +673,7 @@ async def test_provider_failure_becomes_a_bounded_category_without_provider_outp
     io = _FakeIO(reopen_fault=True)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(_request(), AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category == "provider_conflict"
     rendered = f"{caught.value!r} {caught.value.args}"
@@ -609,7 +696,7 @@ async def test_every_error_category_is_one_of_the_four_bounded_values() -> None:
     bounded = {"unauthenticated", "superseded", "journal_conflict", "provider_conflict"}
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(_request(), AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category in bounded
 
@@ -622,11 +709,11 @@ async def test_every_error_category_is_one_of_the_four_bounded_values() -> None:
 async def test_a_generation_behind_the_admitted_watermark_is_superseded() -> None:
     io = _FakeIO()
     instance = _adapter(io)
-    await instance.commit(_request(generation=9), AuthorityOperation.ACTIVATE.value)
+    await instance.commit(_request(generation=9), _context(AuthorityOperation.ACTIVATE))
     io.actions.clear()
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await instance.commit(_request(generation=8), AuthorityOperation.ACTIVATE.value)
+        await instance.commit(_request(generation=8), _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category == "superseded"
     assert io.actions == []
@@ -643,10 +730,10 @@ async def test_a_commit_interrupted_after_the_mutation_does_not_double_apply() -
     instance = _adapter(io)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
+        await instance.commit(_request(), _context(AuthorityOperation.ACTIVATE))
     interrupted = list(io.actions)
     io.actions.clear()
-    await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
+    await instance.commit(_request(), _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category == "provider_conflict"
     assert interrupted.count("activate-modules") == 1
@@ -660,9 +747,9 @@ async def test_a_completed_commit_replayed_does_not_repeat_either_commit_point()
     io = _FakeIO(_metadata("pre-stop-intent"))
     instance = _adapter(io)
 
-    await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
+    await instance.commit(_request(), _context(AuthorityOperation.ACTIVATE))
     io.actions.clear()
-    await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
+    await instance.commit(_request(), _context(AuthorityOperation.ACTIVATE))
 
     assert "activate-modules" not in io.actions
     assert "define-target" not in io.actions
@@ -680,7 +767,7 @@ async def test_commit_refuses_a_commit_point_that_is_not_the_journalled_operatio
     request = _request(purpose="recover", operation=AuthorityOperation.DEADLINE)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(request, AuthorityOperation.RECOVER.value)
+        await _adapter(io).commit(request, _context(AuthorityOperation.RECOVER))
 
     assert caught.value.category == "provider_conflict"
     assert io.actions == []
@@ -700,7 +787,7 @@ async def test_a_deleting_commit_point_must_name_the_object_it_destroys(
     unnamed = _request(purpose=purpose, operation=operation)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(unnamed, operation.value)
+        await _adapter(io).commit(unnamed, _context(operation))
 
     assert caught.value.category == "provider_conflict"
     assert "cleanup" not in io.actions
@@ -714,7 +801,7 @@ async def test_a_deleting_commit_point_drives_cleanup_when_ownership_is_named(
     io = _FakeIO(_metadata("recovered"))
     named = _request(purpose=purpose, operation=operation, recovery_objects=(_owned_object(),))
 
-    await _adapter(io).commit(named, operation.value)
+    await _adapter(io).commit(named, _context(operation))
 
     assert "cleanup" in io.actions
     assert io.tombstone is True
@@ -724,7 +811,7 @@ async def test_release_without_cleanup_mutates_nothing() -> None:
     io = _FakeIO(_metadata("recovered"))
     request = _request(purpose="release", operation=AuthorityOperation.RELEASE)
 
-    await _adapter(io).commit(request, AuthorityOperation.RELEASE.value)
+    await _adapter(io).commit(request, _context(AuthorityOperation.RELEASE))
 
     assert "cleanup" not in io.actions
     assert io.tombstone is False
@@ -797,7 +884,188 @@ async def test_the_recovery_record_must_match_the_whole_requested_binding() -> N
     io = _FakeIO(foreign_run)
 
     with pytest.raises(AuthorityServiceError) as caught:
-        await _adapter(io).commit(_request(), AuthorityOperation.ACTIVATE.value)
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
 
     assert caught.value.category == "provider_conflict"
     assert "activate-modules" not in io.actions
+
+
+# --------------------------------------------------------------------------------------
+# #2207 - the cleanup commit point finalizes the tombstone against the anchored record
+# --------------------------------------------------------------------------------------
+
+
+def _cleanup_takeover() -> AuthorityTakeoverRequestV1:
+    return AuthorityTakeoverRequestV1(
+        authority_id=AUTHORITY_ID,
+        generation=7,
+        system_id=SYSTEM_ID,
+        activation_id=ACTIVATION_ID,
+        run_id=RUN_ID,
+        plan_identity=PLAN_IDENTITY,
+        purpose="release",
+        operation=AuthorityOperation.RELEASE,
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity="takeover-release",
+        operation_digest="sha256:" + "9" * 64,
+    )
+
+
+type _CleanupLane = tuple[
+    ExternalBootAuthorityService,
+    _Repository,
+    AuthenticatedPeer,
+    AuthorityTakeoverRequestV1,
+]
+
+
+def _cleanup_service(io: _FakeIO, tmp_path: Path) -> _CleanupLane:
+    """The real authority service over the real adapter, on a `release` lane.
+
+    Only the host IO beneath the coordinator is doubled, and only the repository and journal
+    beneath the service. The commit path under test is production code end to end.
+    """
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _cleanup_takeover()
+    repository = _Repository(peer, takeover)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_adapter(io),
+    )
+    return service, repository, peer, takeover
+
+
+def _cleanup_mutation(operation_identity: str = "cleanup-1") -> AuthorityMutationRequestV1:
+    return _request(
+        purpose="release",
+        operation=AuthorityOperation.CLEANUP,
+        recovery_objects=(_owned_object(),),
+    ).model_copy(update={"operation_identity": operation_identity, "attempt_id": uuid4()})
+
+
+async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_record(
+    tmp_path: Path,
+) -> None:
+    """`finalize_cleanup_tombstone` gets a production caller, driven through the service.
+
+    Calling `instance.commit` directly would bypass the service and prove nothing about the
+    wiring, so this drives `execute_mutation` and compares the proof against the record the
+    service actually wrote to the journal.
+    """
+    io = _FakeIO(_metadata("recovered"))
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    mutation = _cleanup_mutation()
+    await service.execute_mutation(peer, mutation)
+
+    assert io.actions.count("cleanup") == 1
+    assert io.actions.count("finalize") == 1
+    started = [
+        record
+        for record in repository.records
+        if record.phase is JournalPhase.MUTATION_STARTED
+        and record.operation_identity == mutation.operation_identity
+    ][-1]
+    proof = io.finalized_proof
+    assert proof is not None
+    assert proof.journal_sequence == started.sequence
+    assert proof.journal_digest == record_digest(started)
+    assert proof.operation_id == started.operation_identity
+    assert proof.attempt_id == str(started.attempt_id)
+    assert proof.phase == "mutation-started"
+    assert proof.binding == _BINDING
+    assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(_point(io.metadata))
+
+
+async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _cleanup_takeover().model_copy(
+        update={"purpose": "teardown", "operation": AuthorityOperation.TEARDOWN}
+    )
+    repository = _Repository(peer, takeover)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_adapter(io),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    await service.execute_mutation(
+        peer,
+        _request(
+            purpose="teardown",
+            operation=AuthorityOperation.TEARDOWN,
+            recovery_objects=(_owned_object(),),
+        ),
+    )
+
+    assert io.actions.count("cleanup") == 1
+    assert "finalize" not in io.actions
+
+
+@pytest.mark.parametrize(
+    "unresolvable",
+    [
+        # Every state in which the recovery record cannot be rebuilt raises the same error
+        # from the same place. The point of the parametrisation is that none is special:
+        # tombstone live, fully finalized, never prepared and prepare-interrupted are
+        # indistinguishable here, so none may be treated as a completed cleanup.
+        pytest.param(FileNotFoundError("intent.json"), id="record-absent"),
+        pytest.param(FileNotFoundError("recovery directory"), id="directory-absent"),
+        pytest.param(OSError("device busy"), id="unreadable"),
+    ],
+)
+async def test_a_cleanup_commit_refuses_every_unresolvable_recovery_point(
+    tmp_path: Path, unresolvable: BaseException
+) -> None:
+    """Absence never identifies its own cause, so it is never a success answer.
+
+    The fault this catches is adding back any absence-derived success branch: whichever state
+    it keyed on would return an observation here instead of raising, and the recovery-object
+    deletion gate would be skipped for a peer-chosen binding.
+    """
+    io = _FakeIO(_metadata("recovered"))
+    io.reopen_error = unresolvable
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, _cleanup_mutation())
+
+    assert caught.value.category == "provider_conflict"
+    assert "cleanup" not in io.actions
+    assert "finalize" not in io.actions
+
+
+async def test_a_cleanup_commit_short_circuits_on_the_tombstone_it_already_published(
+    tmp_path: Path,
+) -> None:
+    """Positive-evidence idempotency: the durable tombstone, not an absence.
+
+    `_FakeIO.reopen_binding` keeps the recovery point resolvable after a cleanup, where the
+    real store does not — `publish_tombstone` unlinks `intent.json` in the same operation that
+    writes the tombstone. So this pins the coordinator's `cleanup_complete` early-return
+    branch, whose production window is the crash between those two writes. It is not the
+    guarantee that ordinary commits do not double-mutate; that comes from `commit` having one
+    call site per `execute_mutation`.
+
+    The fault it catches is removing the `cleanup_complete` early return, which makes a second
+    `cleanup` action appear.
+    """
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True  # a cleanup that published its tombstone and did not finalize
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    await service.execute_mutation(peer, _cleanup_mutation())
+
+    assert "cleanup" not in io.actions
+    assert io.actions.count("finalize") == 1

@@ -17,6 +17,7 @@ import logging
 from uuid import UUID, uuid5
 
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -25,6 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     LocalObservedState,
 )
@@ -115,31 +117,27 @@ class LocalExternalBootAuthorityAdapter:
         return await asyncio.to_thread(self._observe, request)
 
     async def commit(
-        self, request: AuthorityMutationRequestV1, commit_point: str
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityObservationV1:
         """Apply one named commit point, then report the resulting observation."""
-        operation = self._require_permitted_commit_point(request, commit_point)
+        operation = self._require_permitted_commit_point(request, context)
         self._require_admissible_generation(request)
-        return await asyncio.to_thread(self._commit, request, operation)
+        return await asyncio.to_thread(self._commit, request, operation, context)
 
     @staticmethod
     def _require_permitted_commit_point(
-        request: AuthorityMutationRequestV1, commit_point: str
+        request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityOperation:
         """Refuse an illegal commit point before any provider call.
 
-        ``commit_point`` crosses the adapter seam as a bare ``str``, so
-        ``AuthorityMutationRequestV1``'s own purpose/operation validator does not cover it
-        and this check cannot lean on the model layer. Two things must hold: the operation
-        is legal for the request's purpose, and it is the same operation the request
+        ``context.commit_point`` is an ``AuthorityOperation``, so the model layer guarantees
+        the member itself. Two cross-model facts it does not guarantee must still hold: the
+        operation is legal for the request's purpose, and it is the same operation the request
         carries. Without the second, a request could journal one operation while driving
         the provider through another, and the journal record — the evidence ADR-0584 makes
         authoritative for what mutation may have happened — would name the wrong one.
         """
-        try:
-            operation = AuthorityOperation(commit_point)
-        except ValueError:
-            raise AuthorityServiceError("provider_conflict") from None
+        operation = context.commit_point
         if not operation_is_permitted(request.purpose, operation):
             raise AuthorityServiceError("provider_conflict")
         if operation is not request.operation:
@@ -157,7 +155,10 @@ class LocalExternalBootAuthorityAdapter:
         self._admitted[lane] = max(admitted or 0, request.generation)
 
     def _commit(
-        self, request: AuthorityMutationRequestV1, operation: AuthorityOperation
+        self,
+        request: AuthorityMutationRequestV1,
+        operation: AuthorityOperation,
+        context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1:
         binding = _activation_binding(request)
         authority = _authority_ref(request)
@@ -170,7 +171,7 @@ class LocalExternalBootAuthorityAdapter:
             # the state is reported as the conflict ADR-0584 calls an unowned observation.
             raise AuthorityServiceError("provider_conflict")
         if operation in _MUTATING_OPERATIONS:
-            self._apply(operation, matched, authority)
+            self._apply(operation, matched, authority, context)
         return self._observation(request, binding, authority, matched)
 
     def _apply(
@@ -178,6 +179,7 @@ class LocalExternalBootAuthorityAdapter:
         operation: AuthorityOperation,
         point: RecoveryPoint,
         authority: OpaqueProviderRef,
+        context: AuthorityCommitContextV1,
     ) -> None:
         """Drive the named local commit points for one mutating operation.
 
@@ -194,7 +196,18 @@ class LocalExternalBootAuthorityAdapter:
                 AuthorityOperation.RECOVERY_ATTEMPT,
             }:
                 self._ports.recover(point, authority)
-            elif operation in {AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN}:
+            elif operation is AuthorityOperation.CLEANUP:
+                self._ports.cleanup(point, authority)
+                # Built inside this try on purpose: FinalizeCleanupProof is a validating
+                # model, so a bad field raises ValidationError, which renders field values.
+                # The handler below bounds it to a category `from None`.
+                self._ports.finalize_cleanup_tombstone(
+                    point, _cleanup_proof(context, point), authority
+                )
+            elif operation is AuthorityOperation.TEARDOWN:
+                # Teardown publishes a tombstone through the same primitive and still has no
+                # finalizer. That gap is recorded in ADR-0592 and routed to #2212; it is not
+                # this seam's to close.
                 self._ports.cleanup(point, authority)
             else:
                 # An operation added to _MUTATING_OPERATIONS without a mapping here must
@@ -368,6 +381,24 @@ class LocalExternalBootAuthorityAdapter:
                 )
             ),
         )
+
+
+def _cleanup_proof(context: AuthorityCommitContextV1, point: RecoveryPoint) -> FinalizeCleanupProof:
+    """Tie this cleanup to the exact authority record the service anchored for it.
+
+    Every field is either the recovery point this adapter resolved or a value the authority
+    read out of its own journal. Nothing is defaulted or derived from protocol input —
+    ``phase`` included, which is why ``FinalizeCleanupProof`` no longer defaults it.
+    """
+    return FinalizeCleanupProof(
+        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        binding=point.binding,
+        operation_id=context.operation_identity,
+        attempt_id=str(context.attempt_id),
+        journal_sequence=context.journal_sequence,
+        journal_digest=context.journal_digest,
+        phase=context.phase.value,
+    )
 
 
 def _ownership_is_proven(

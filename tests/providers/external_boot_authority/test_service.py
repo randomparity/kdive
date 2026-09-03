@@ -965,3 +965,69 @@ async def test_unclassified_provider_failure_is_still_bounded_to_provider_confli
         await service.execute_mutation(peer, _mutation(request))
 
     assert caught.value.category == "provider_conflict"
+
+
+@pytest.mark.anyio
+async def test_commit_receives_the_anchored_mutation_started_sequence_and_digest(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    mutation = _mutation(request)
+
+    await service.execute_mutation(peer, mutation)
+
+    [context] = adapter.commit_contexts
+    started = [
+        record
+        for record in repository.records
+        if record.phase is JournalPhase.MUTATION_STARTED
+        and record.operation_identity == mutation.operation_identity
+    ][-1]
+    assert context.journal_sequence == started.sequence
+    assert context.journal_digest == record_digest(started)
+    assert context.attempt_id == started.attempt_id
+    assert context.operation_identity == started.operation_identity
+    assert context.commit_point is mutation.operation
+    assert context.phase is JournalPhase.MUTATION_STARTED
+
+
+@pytest.mark.anyio
+async def test_a_head_disagreeing_under_the_same_operation_identity_refuses_the_commit(
+    tmp_path: Path,
+) -> None:
+    """The head is re-read because ``advance`` reports what was accepted, not what is held."""
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    repository.head_override_after_phase = JournalPhase.MUTATION_STARTED
+    repository.corrupt_head = True
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, _mutation(request))
+
+    assert caught.value.category == "journal_conflict"
+    assert adapter.commit_contexts == []
+    assert not any(call.startswith("commit:") for call in adapter.calls)
+
+
+@pytest.mark.anyio
+async def test_a_head_moved_by_a_concurrent_takeover_still_lets_the_commit_finish(
+    tmp_path: Path,
+) -> None:
+    """The scoping is proved, not asserted.
+
+    ``acknowledge_takeover`` anchors its records under a different operation identity while an
+    admitted mutation is in flight. Widen the check to compare the bare head and this goes red
+    with ``journal_conflict``.
+    """
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    repository.head_override_after_phase = JournalPhase.MUTATION_STARTED
+    repository.head_operation_identity_override = "takeover-next"
+
+    await service.execute_mutation(peer, _mutation(request))
+
+    assert len(adapter.commit_contexts) == 1

@@ -18,6 +18,7 @@ from kdive.db.external_boot_authority_journal import (
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -104,6 +105,17 @@ class _Repository:
         self.current_candidate_resolutions = 0
         self.reject_resolution: int | None = None
         self.operation_override: AuthorityOperation | None = None
+        # Both head overrides below arm only once a record of this phase has been advanced,
+        # so `_recover`'s pre-admission head comparison still sees the real head. A real
+        # concurrent takeover likewise moves the head *after* the mutation was admitted.
+        self.head_override_after_phase: JournalPhase | None = None
+        self._head_override_armed = False
+        # Disagree by sequence and digest while keeping the same operation identity — the
+        # shape a second authority instance sharing that identity would produce.
+        self.corrupt_head = False
+        # Report a head belonging to a different operation identity — the shape a concurrent
+        # takeover produces, which the identity-scoped check must ignore.
+        self.head_operation_identity_override: str | None = None
 
     async def resolve_current_candidate(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
@@ -178,6 +190,12 @@ class _Repository:
         return _binding(peer, request, "current")
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None:
+        if self.head is None or not self._head_override_armed:
+            return self.head
+        if self.head_operation_identity_override is not None:
+            return replace(self.head, operation_identity=self.head_operation_identity_override)
+        if self.corrupt_head:
+            return replace(self.head, sequence=self.head.sequence + 1, digest="sha256:" + "f" * 64)
         return self.head
 
     async def advance(
@@ -247,6 +265,8 @@ class _Repository:
             suspended = None
         if record.phase is JournalPhase.TAKEOVER_ACKNOWLEDGED:
             pending = None
+        if record.phase is self.head_override_after_phase:
+            self._head_override_armed = True
         self.head = JournalHead(
             authority_instance=binding.authority_instance,
             system_id=binding.system_id,
@@ -274,11 +294,13 @@ class _Adapter:
         self.commit_error: AuthorityServiceError | None = None
         self.provider_output = "bounded observation failure"
         self.operations: list[str] = []
+        self.commit_contexts: list[AuthorityCommitContextV1] = []
 
     async def commit(
-        self, request: AuthorityMutationRequestV1, commit_point: str
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityObservationV1:
-        self.calls.append(f"commit:{commit_point}")
+        self.calls.append(f"commit:{context.commit_point.value}")
+        self.commit_contexts.append(context)
         self.entered.set()
         await self.release.wait()
         if self.commit_error is not None:

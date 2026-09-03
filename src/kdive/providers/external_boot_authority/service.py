@@ -17,6 +17,7 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
@@ -37,7 +38,7 @@ class AuthorityMutationAdapter(Protocol):
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
 
     async def commit(
-        self, request: AuthorityMutationRequestV1, commit_point: str
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityObservationV1: ...
 
 
@@ -382,6 +383,34 @@ class ExternalBootAuthorityService:
             },
         )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
+
+    async def _head_still_anchors(
+        self, binding: AuthorityBinding, context: AuthorityCommitContextV1
+    ) -> bool:
+        """Return whether the anchored record is still this operation's trusted head.
+
+        ``advance`` reports what the repository accepted, not what it still holds, and the
+        provider call happens outside the lane lock. What this catches is a trusted head that
+        stopped matching the record under *this* operation identity: a second authority
+        instance sharing the identity, or a head row that changed after ``advance`` returned.
+
+        Scoped to the operation identity on purpose, and it does **not** catch the
+        concurrent-takeover window. ``acknowledge_takeover`` anchors its supersession and
+        watermark records under a *different* operation identity before awaiting
+        ``active.done``, so the lane head legitimately moves past an in-flight mutation;
+        comparing against the bare head would reject the overlap ADR-0584 designs for and
+        defeat the ``completion_binding`` path that lets the in-flight commit finish.
+        """
+        head = await self._repository.read_head(binding)
+        if head is None:
+            return False
+        if head.operation_identity != context.operation_identity:
+            return True
+        return (
+            head.sequence == context.journal_sequence
+            and head.digest == context.journal_digest
+            and head.phase is JournalPhase.MUTATION_STARTED
+        )
 
     async def readiness(
         self, peer: AuthenticatedPeer | None, request: AuthorityTakeoverRequestV1
@@ -869,6 +898,7 @@ class ExternalBootAuthorityService:
                         self._record(request, records, JournalPhase.MUTATION_STARTED),
                     )
                     active.phase = JournalPhase.MUTATION_STARTED
+                    context = AuthorityCommitContextV1.for_record(records[-1])
                 rechecked = await self._repository.resolve_current(
                     authenticated,
                     request,
@@ -877,8 +907,16 @@ class ExternalBootAuthorityService:
                 )
                 if rechecked is None or not self._binding_matches(rechecked, request):
                     raise AuthorityServiceError("superseded")
+                # Both refusals here leave the operation unresolved at `mutation-started`, and
+                # that is the journal's design rather than a gap. `_NEXT_OPERATION_PHASES`
+                # allows `mutation-started` to be followed only by `provider-returned`, so a
+                # `terminal`/`never-began` record is not a legal successor: once the anchor is
+                # written, ADR-0584 treats the mutation as possibly-begun and requires the
+                # observation cycle `_finish_recovery` runs to settle what actually happened.
+                if not await self._head_still_anchors(binding, context):
+                    raise AuthorityServiceError("journal_conflict")
                 try:
-                    await self._adapter.commit(request, request.operation)
+                    await self._adapter.commit(request, context)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
