@@ -991,8 +991,11 @@ def test_sweep_warns_rather_than_failing_the_run_when_docker_is_unusable() -> No
 def _run_labelled_container(client: Any, labels: Mapping[str, str]) -> Any:
     """Start one real container carrying ``labels``, plus a fixed recovery handle.
 
-    ``postgres:17`` is the image the db fixtures already use, so this pulls nothing extra;
-    the entrypoint is overridden so it starts instantly instead of running initdb.
+    The image is the db fixtures' own digest-pinned reference, so this pulls nothing extra
+    and cannot drift if `postgres:17` is re-tagged upstream; the entrypoint is overridden
+    so it starts instantly instead of running initdb. Pulling by digest leaves no
+    `postgres:17` tag behind, so the bare tag this used to name was a second image and a
+    hidden network dependency on any host that had only ever run the db suite.
 
     ``_TEST_SCRATCH_LABEL`` is the price of ``private_backend_label``. A container these
     tests start under a per-invocation key is invisible to every sweep on the host —
@@ -1003,8 +1006,10 @@ def _run_labelled_container(client: Any, labels: Mapping[str, str]) -> Any:
     cleanup in AGENTS.md does not see them. One fixed key nothing filters on costs no
     isolation and keeps that residual recoverable; AGENTS.md carries the command.
     """
+    from tests.db import conftest as db_conftest
+
     return client.containers.run(
-        "postgres:17",
+        db_conftest._POSTGRES_IMAGE,
         entrypoint=["sleep", "300"],
         detach=True,
         labels={**labels, _TEST_SCRATCH_LABEL: "1"},
@@ -1151,12 +1156,15 @@ def test_a_concurrent_suites_sweep_cannot_reach_this_runs_containers(
             assert subject.id not in visible
 
             # ...and this run's own sweep still reaps its own stranded container.
+            #
+            # Only `subject` is asserted on. `control` is spared here for two independent
+            # reasons — it is outside the private key's enumeration *and* its liveness
+            # lock is held — so no assertion about it could tell the two apart or fail.
+            # That the sweep spares a live container it can genuinely see is proven in
+            # `test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one`.
             reaped = xdist_backend.sweep_stale_backend_containers()
             assert subject.id in reaped
-            assert control.id not in reaped
             with pytest.raises(docker.errors.NotFound):
                 client.containers.get(subject.id)
-            control.reload()
-            assert control.status == "running"
         finally:
             _remove_quietly(client, *started)
