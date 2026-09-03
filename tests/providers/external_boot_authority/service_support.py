@@ -28,6 +28,7 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
+    AuthorityServiceError,
     ExternalBootAuthorityService,
 )
 
@@ -269,6 +270,8 @@ class _Adapter:
         self.release.set()
         self.fail_commit = False
         self.fail_observe = False
+        # An already-bounded failure the adapter is entitled to reach on its own.
+        self.commit_error: AuthorityServiceError | None = None
         self.provider_output = "bounded observation failure"
         self.operations: list[str] = []
 
@@ -278,6 +281,8 @@ class _Adapter:
         self.calls.append(f"commit:{commit_point}")
         self.entered.set()
         await self.release.wait()
+        if self.commit_error is not None:
+            raise self.commit_error
         if self.fail_commit:
             raise RuntimeError("bounded commit failure")
         return self._observation("target")
