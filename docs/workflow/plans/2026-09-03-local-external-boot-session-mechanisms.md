@@ -55,6 +55,7 @@ Transcribed from `AGENTS.md` and the spec, values included:
 | `src/kdive/providers/local_libvirt/composition.py` | modify | resolving settings and assembling the mechanisms |
 | `tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py` | **new** | per-mechanism behaviour, confinement, bite proofs |
 | `tests/providers/local_libvirt/test_composition.py` | modify | the production caller, and `external_boot is None` |
+| `docs/adr/0591-local-external-boot-session-mechanisms-bind-to-the-recovery-root.md` | modify | the `Proposed` → `Accepted` flip, in Task 1's commit (step 0) |
 
 `session.py` is **not** modified. `external_boot.py` is **not** modified — its helpers are imported.
 
@@ -67,29 +68,37 @@ Produced by this change and relied on by later tasks and by #2212:
 class LocalOperationLease:
     system_id: UUID
     binding: ExternalBootActivationBinding
+
     def release(self) -> None: ...
+
 
 class LocalOperationLane:
     def pin(self, lease: LocalExternalBootOperationLease) -> PinnedOperationOwnership: ...
+
 
 class LocalArtifactRoot:
     def __init__(self, recovery_root: Path) -> None: ...
     def open(self, ownership: OperationOwnership) -> int: ...
 
+
 class LocalPayloadCleanup:
     def __init__(self, recovery_root: Path) -> None: ...
     def cleanup(self, root_fd: int, binding: ExternalBootActivationBinding) -> None: ...
 
+
 def open_libguestfs_guest() -> _Guest: ...
 
+
 PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
+
 
 # composition.py
 @dataclass(frozen=True, slots=True)
 class LocalExternalBootMechanisms:
     factory: LocalExternalBootSessionFactory
-    recovery_root: Path        # the SAME value LocalPayloadCleanup holds; #2212 passes this
-                               # to RecoveryMetadataStore rather than re-resolving the setting
+    recovery_root: Path  # the SAME value LocalPayloadCleanup holds; #2212 passes this
+    # to RecoveryMetadataStore rather than re-resolving the setting
+
 
 def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms: ...
 ```
@@ -104,7 +113,7 @@ def build_external_boot_session_factory(
     open_artifact_root: OpenArtifactRoot,
     open_guest: OpenGuest,
     readiness: ReadinessProbe,
-    observe_running: RunningObserver | None,   # was: RunningObserver
+    observe_running: RunningObserver | None,  # was: RunningObserver
     cleanup_payloads: CleanupPayloads,
 ) -> LocalExternalBootSessionFactory: ...
 ```
@@ -142,6 +151,13 @@ pin. **Tests** `test_session_mechanisms.py::TestOperationLane`.
 
 Steps, one action each:
 
+0. **Flip ADR-0591 from `Proposed` to `Accepted` in THIS task's commit** — the first one that cites
+   it from `src/`. It is `Proposed` while the work is design-only, per the README ratification rule,
+   but `check_adr_status.py`'s second invariant fails a `Proposed` ADR cited from `src/` or
+   `tests/`. So the flip must land in the same commit that adds the citing module docstring.
+   Flipping it in a later task leaves `just ci` red in between; flipping it before this task
+   reinstates the shipped-but-Proposed drift the guard exists to catch. This step is here, in the
+   first task, because that is where a reader executing the plan in order needs it.
 1. Write `test_pin_refuses_a_foreign_lease`: `LocalOperationLane().pin(object())` raises
    `TypeError` matching `"foreign operation lease"`. Also assert a *structural impostor* — a simple
    object carrying `system_id` and `binding` attributes — is refused, which is what makes the
@@ -182,7 +198,7 @@ A shared fixture builds a valid root:
 def recovery_root(tmp_path: Path) -> Path:
     root = tmp_path / "recovery"
     root.mkdir()
-    root.chmod(0o700)     # two-step, never mkdir(mode=...) — see the note below
+    root.chmod(0o700)  # two-step, never mkdir(mode=...) — see the note below
     return root
 ```
 
@@ -356,6 +372,19 @@ Steps:
 8. Write `test_cleanup_leaves_foreign_files_in_the_recovery_directory`: place `foreign.json` beside
    `modules.tar`; after cleanup `modules.tar` is gone and `foreign.json` remains. This is what
    bounds the deletion.
+8a. Write `test_cleanup_refuses_a_wide_mode_recovery_directory`: `chmod` the recovery directory
+   `<system_id>.<activation_id>` to `0o755` and assert cleanup raises `ValueError` matching
+   `"owner-only service-owned directory"`. Assert it **before any unlink of `modules.tar`** — the
+   archive is still present after the refusal — and assert the payloads under `root_fd` were
+   already removed, mirroring T3.9's scoping assertion so the refusal is provably scoped to the
+   second removal.
+
+   This is criterion 5's "foreign recovery directory refused" case, where *foreign* means wrong
+   mode or wrong owner — a real directory failing `_require_private_owned_directory`. The
+   alternative reading, "belonging to another activation", is unreachable: the directory name is
+   derived from the binding, so no other activation's directory can be named. The wide-mode case is
+   covered for the artifact root at T2.6 and was **not** covered for the recovery directory, which
+   is the deleting path.
 9. Write `test_cleanup_refuses_a_symlinked_recovery_directory` → `NotADirectoryError` with
    `errno.ENOTDIR`, for the reason measured in Task 2 step 5 — **not** `ELOOP`. Assert also that
    the payloads under `root_fd` were still removed first, so the refusal is scoped to the second
@@ -379,6 +408,7 @@ Steps:
 
     ```python
     from typing import get_args
+
     expected = set()
     for name, field in TargetProjectionV1.model_fields.items():
         if not name.endswith("_filename"):
@@ -455,7 +485,7 @@ Steps:
    ```python
    def _require(setting: object) -> object:
        if setting is composition.LIBVIRT_RECOVERY_ROOT:
-           return recovery_root          # a real mode-0700 tmp_path directory
+           return recovery_root  # a real mode-0700 tmp_path directory
        if setting is composition.LIBVIRT_URI:
            return "qemu:///session"
        raise AssertionError(f"unexpected setting: {setting}")
@@ -544,11 +574,6 @@ every new test has a recorded fault-injection pair.
 
 ## Task 6 — guardrails
 
-0. **Flip ADR-0591 to `Accepted` in the first commit that cites it from `src/`.** It is `Proposed`
-   while this is design-only, per the README ratification rule. But `check_adr_status.py`'s second
-   invariant fails a `Proposed` ADR cited from `src/` or `tests/`, so the status flip must land in
-   the same commit that adds the citing module docstring — Task 1's. Flipping it later leaves
-   `just ci` red in between; flipping it earlier reinstates the finding this fixed.
 1. `npm ci --prefix .github/scripts/mermaid-check` if this worktree has not run it.
 2. `just ci > /tmp/<scratch>/ci-final.log 2>&1 < /dev/null` — **bare**, no pipe, no
    `; echo $?`. Expect exit 0.
@@ -568,7 +593,7 @@ requirements were unmapped; this table is checkable line by line instead.
 | 2 — three fail-closed defaults, independently, plus identity | T5.1, T5.2 |
 | 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
 | 4 — artifact root confined; symlink, wide mode, non-directory, traversal refused | T2.5 (symlink, both components), T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical). The **caller-level** "cannot be pointed at another root" half is discharged by the type signatures, not by a test, and **not** by T4.5c — see the note below |
-| 5 — cleanup removes payloads **and** the archive; bounded; idempotent | T3.1, T3.6, T3.7, T3.8, T3.9, T3.10 |
+| 5 — cleanup removes payloads **and** the archive; bounded; idempotent; foreign recovery directory refused | T3.1, T3.6, T3.7, T3.8, **T3.8a (wide mode — the deleting path)**, T3.9 (symlink), T3.10 |
 | 6 — `open_guest` returns `_Guest`; guest access refused while active via the existing path | T4.2, T4.3 |
 | 7 — `readiness` returns `ReadinessResult` from a real read | reuse of `_real_readiness` unchanged; binding asserted at **T4.5b**. The "no libvirt text, no host path" half is **NOT discharged here** — `_real_readiness` leaks raw `virsh` stderr and this change does not wrap it. Owner **#2220** |
 | 8 — no mechanism takes configuration from protocol input | **T4.5c** |

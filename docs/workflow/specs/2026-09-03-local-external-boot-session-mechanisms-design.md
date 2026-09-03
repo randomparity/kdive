@@ -64,8 +64,11 @@ it does not retrofit already-provisioned domains.
 
 ## Architecture
 
-Two new small classes and three module-level functions, all in
-`local_libvirt/lifecycle/boot/session_mechanisms.py`, plus one new builder in `composition.py`.
+Four public classes — `LocalOperationLease`, `LocalOperationLane`, `LocalArtifactRoot`,
+`LocalPayloadCleanup` — plus one private pin and one module-level function
+(`open_libguestfs_guest`), all in `local_libvirt/lifecycle/boot/session_mechanisms.py`, and one new
+builder in `composition.py` returning a `LocalExternalBootMechanisms`. `_real_readiness` is
+imported and passed through, not redefined here.
 
 The mechanisms live in a **new module**, not in `session.py`. `session.py` is already 1301 lines and
 owns the session's own machinery; the mechanisms are its injected collaborators, resolve
@@ -302,7 +305,7 @@ untouched.
 This change is security-relevant: it opens directories under a privileged worker-owned root from
 identifiers that arrive inside an operation binding, and it deletes files.
 
-**Boundary inventory.** Two boundaries are added and one is widened.
+**Boundary inventory.** Three boundaries are added and one is widened.
 
 - *Added (read):* `LocalArtifactRoot.open` — the configured recovery root is walked using two names
   taken from `OperationOwnership`.
