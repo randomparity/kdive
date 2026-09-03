@@ -106,15 +106,23 @@ def _insert_worker(
     )
 
 
-def test_migration_0125_is_the_unique_bounded_inventory_tail() -> None:
+def test_migration_0125_is_the_unique_bounded_inventory() -> None:
+    """0125 is the one migration that defines the bounded inventory function.
+
+    Located by version rather than by tail position: what this asserts is that exactly one
+    migration carries the bounded listing, which stays true as later migrations land. Pinning it
+    to ``migrations[-1]`` made every unrelated migration edit this test and, worse, made the
+    uniqueness claim in its name rest on nothing.
+    """
     migrations = migrate.discover_migrations()
-    assert (migrations[-1].version, migrations[-1].filename) == (
-        "0125",
-        "0125_external_boot_authority_head_inventory.sql",
-    )
-    migration = migrations[-1]
+    defining = [
+        item for item in migrations if "list_external_boot_authority_journal_heads" in item.sql
+    ]
+    assert [(item.version, item.filename) for item in defining] == [
+        ("0125", "0125_external_boot_authority_head_inventory.sql")
+    ]
+    migration = defining[0]
     assert migration.sql.count("LIMIT 4097") == 1
-    assert "list_external_boot_authority_journal_heads" in migration.sql
     assert "p_authority_instance text" in migration.sql
 
 
