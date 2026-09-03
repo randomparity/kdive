@@ -1826,6 +1826,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report both halves of a recovery stop conflict
 - Hold every remote-module document to one byte form
 - Record the 256-byte refusal class as an amendment, not a rewrite
+- Make the hosted checkout traversable by worker accounts
 
 ### Security
 
