@@ -91,10 +91,11 @@ _PURPOSE_OPERATIONS: dict[str, frozenset[AuthorityOperation]] = {
 def operation_is_permitted(purpose: str, operation: AuthorityOperation) -> bool:
     """Return whether ``operation`` is a legal commit point for ``purpose``.
 
-    Provider adapters receive ``commit_point`` as a bare ``str`` across the
-    ``AuthorityMutationAdapter`` seam, so the model-layer guarantee below stops there and
-    each adapter has to revalidate. This exposes the one table rather than letting every
-    adapter copy it.
+    Provider adapters receive the commit point inside ``AuthorityCommitContextV1``, whose
+    ``commit_point`` is an ``AuthorityOperation``, so the model layer guarantees the member
+    itself. It does not guarantee the two cross-model facts each adapter must still check:
+    that the operation is legal for the request's purpose, and that it is the same operation
+    the request carries. This exposes the one table rather than letting every adapter copy it.
     """
     return operation in _PURPOSE_OPERATIONS.get(purpose, frozenset())
 
@@ -343,3 +344,47 @@ def canonical_record_bytes(record: JournalRecordV1) -> bytes:
 def record_digest(record: JournalRecordV1) -> str:
     """Return the SHA-256 identity of one canonical record."""
     return "sha256:" + hashlib.sha256(canonical_record_bytes(record)).hexdigest()
+
+
+class AuthorityCommitContextV1(_ClosedValue):
+    """Service-constructed proof of the anchored ``mutation-started`` record (ADR-0592).
+
+    Carried across the ``AuthorityMutationAdapter`` seam so a provider adapter can tie its own
+    commit to the exact authority journal record without reading the journal itself. Every
+    field comes from a record the authority anchored; none is reachable from
+    ``AuthorityMutationRequestV1``, which is peer-supplied and carries no journal field, so a
+    client cannot assert a journal sequence it did not cause.
+    """
+
+    schema_: Literal["external-boot-authority-v1"] = Field(
+        "external-boot-authority-v1", alias="schema"
+    )
+    commit_point: AuthorityOperation
+    operation_identity: str
+    attempt_id: UUID
+    journal_sequence: PositiveBigInt
+    journal_digest: Digest
+    phase: Literal[JournalPhase.MUTATION_STARTED] = JournalPhase.MUTATION_STARTED
+
+    @field_validator("operation_identity")
+    @classmethod
+    def _identity_is_bounded(cls, value: str) -> str:
+        return _bounded_text(value)
+
+    @classmethod
+    def for_record(cls, record: JournalRecordV1) -> AuthorityCommitContextV1:
+        """Build the context for one anchored record, refusing every other phase.
+
+        The phase gate is what makes a downstream proof's ``mutation-started`` claim proven
+        rather than assumed: a ``provider-returned`` or ``observed`` record describes a
+        mutation that already reached the provider, and cannot authorize one that has not.
+        """
+        if record.phase is not JournalPhase.MUTATION_STARTED:
+            raise ValueError("commit context requires an anchored mutation-started record")
+        return cls(
+            commit_point=record.operation,
+            operation_identity=record.operation_identity,
+            attempt_id=record.attempt_id,
+            journal_sequence=record.sequence,
+            journal_digest=record_digest(record),
+        )
