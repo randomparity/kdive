@@ -79,6 +79,21 @@ def test_generic_finalizers_still_exclude_authority_marked_payloads(
             assert f"AND NOT (payload ? '{_MARKER}')" in definition, signature
 
 
+def test_rewritten_claim_functions_keep_their_security_attributes(migrated_url: str) -> None:
+    """The rewrite must not drop SECURITY DEFINER or the empty search_path.
+
+    0127 rebuilds both bodies from ``pg_get_functiondef`` and re-executes them. Losing
+    ``SET search_path = ''`` on a SECURITY DEFINER function would be a search_path injection
+    hole, and it would be invisible to every behavioural test in this module.
+    """
+    with psycopg.connect(migrated_url) as conn:
+        for signature in _CLAIM_FUNCTIONS:
+            assert conn.execute(
+                "SELECT prosecdef, proconfig FROM pg_proc WHERE oid = %s::regprocedure",
+                (signature,),
+            ).fetchone() == (True, ['search_path=""']), signature
+
+
 def test_worker_claims_and_counts_an_authority_marked_job(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
