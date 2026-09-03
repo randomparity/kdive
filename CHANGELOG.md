@@ -1827,6 +1827,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hold every remote-module document to one byte form
 - Record the 256-byte refusal class as an amendment, not a rewrite
 - Make the hosted checkout traversable by worker accounts
+- Tolerate a foreign container removed during sweep enumeration
+- Install the capture manifest with the lifecycle venv
 
 ### Security
 
