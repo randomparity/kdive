@@ -1,12 +1,13 @@
-"""Remote-libvirt external Run-boot activation primitives (ADR-0583, #2110).
+"""Remote-libvirt external Run-boot activation primitives (ADR-0583, #2110, #2120).
 
 Three layers, each testable alone: the pure direct-kernel XML projection and the two ADR-0583
 definition identities; a closed ``RemoteExternalBootDefinition`` built by a pure
-``prepare_target_definition``; and two operations over injected libvirt and guest-agent seams.
+``prepare_target_definition``; and three operations over injected libvirt and guest-agent seams —
+activation, guest identity proof, and recovery to the recorded disk/GRUB baseline.
 
-Recovery to the disk/GRUB baseline (#2120), offline module capture and restoration (#2129),
-provider-host authority fencing and capability advertisement (#2140) are separately owned. This
-module implements no shared port and is not wired into ``ProviderRuntime``.
+Offline module capture and restoration (#2129) and provider-host authority fencing and capability
+advertisement (#2140) are separately owned. This module implements no shared port and is not wired
+into ``ProviderRuntime``.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import hashlib
 import json
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits a trusted tree after a defused parse
-from typing import Annotated, Protocol, Self
+from typing import Annotated, Literal, Protocol, Self
 from uuid import UUID
 
 import libvirt
@@ -273,8 +274,10 @@ class RemoteExternalBootDefinition(BaseModel):
     is outside this change's surface. Nothing needs it — this value's ADR-0583 identity is the
     preserved digest it records, never a digest over its own serialization.
 
-    It carries no ``ProviderStateIdentity`` and no prior power state: both pair the definition with
-    module-tree or recovery evidence that #2129 and #2120 own.
+    It carries no ``ProviderStateIdentity``: that pairs the definition with the module-tree
+    evidence #2129 owns. The prior power state recovery must restore is not here either — it is
+    observed at preparation, not derivable from these bytes, and lives on
+    ``RemoteExternalBootRecovery``, which is what recovery consumes.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -456,8 +459,8 @@ _XML_REJECTION_CODES = frozenset(
 )
 
 
-class ActivationDomain(Protocol):
-    """The libvirt domain surface activation uses."""
+class ExternalBootDomain(Protocol):
+    """The libvirt domain surface activation and recovery use. Only recovery calls ``destroy``."""
 
     def isActive(self) -> int: ...  # noqa: N802 - binding name
 
@@ -465,17 +468,22 @@ class ActivationDomain(Protocol):
 
     def create(self) -> int: ...
 
-
-class ActivationConn(Protocol):
-    """The libvirt connection surface activation uses."""
-
-    def lookupByName(self, name: str) -> ActivationDomain: ...  # noqa: N802 - binding name
-
-    def defineXML(self, xml: str) -> ActivationDomain: ...  # noqa: N802 - binding name
+    def destroy(self) -> int: ...
 
 
-def _activation_conflict(
-    reason: str, *, definition: RemoteExternalBootDefinition, **extra: object
+class ExternalBootConn(Protocol):
+    """The libvirt connection surface activation and recovery use."""
+
+    def lookupByName(self, name: str) -> ExternalBootDomain: ...  # noqa: N802 - binding name
+
+    def defineXML(self, xml: str) -> ExternalBootDomain: ...  # noqa: N802 - binding name
+
+
+type _Subject = Literal["activation", "recovery"]
+
+
+def _refused(
+    reason: str, *, subject: _Subject, definition: RemoteExternalBootDefinition, **extra: object
 ) -> CategorizedError:
     details: dict[str, object] = {
         "system_id": definition.binding.system_id,
@@ -484,21 +492,26 @@ def _activation_conflict(
     }
     details.update(extra)
     return CategorizedError(
-        f"remote-libvirt external-boot activation refused: {reason}",
+        f"remote-libvirt external-boot {subject} refused: {reason}",
         category=ErrorCategory.CONFLICT,
         details=details,
     )
 
 
 def _classify_libvirt(
-    exc: libvirt.libvirtError, *, definition: RemoteExternalBootDefinition, operation: str
+    exc: libvirt.libvirtError,
+    *,
+    definition: RemoteExternalBootDefinition,
+    operation: str,
+    subject: _Subject,
 ) -> CategorizedError:
     code = exc.get_error_code()
     if code in _XML_REJECTION_CODES:
         # libvirt refusing this definition shape is permanent; re-dispatching would burn the
         # readiness deadline on a write that can never land.
-        return _activation_conflict(
+        return _refused(
             f"libvirt rejected the definition during {operation}",
+            subject=subject,
             definition=definition,
             phase=operation,
         )
@@ -509,14 +522,47 @@ def _classify_libvirt(
     )
 
 
+def _lookup(
+    conn: ExternalBootConn, definition: RemoteExternalBootDefinition, *, subject: _Subject
+) -> ExternalBootDomain:
+    """Resolve the System's domain, separating "no such domain" from every other libvirt fault."""
+    domain_name = domain_name_for(UUID(definition.binding.system_id))
+    try:
+        return conn.lookupByName(domain_name)
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            raise CategorizedError(
+                "remote-libvirt external-boot domain does not exist",
+                category=ErrorCategory.NOT_FOUND,
+                details={"system_id": definition.binding.system_id, "domain": domain_name},
+            ) from exc
+        raise _classify_libvirt(
+            exc, definition=definition, operation="lookup", subject=subject
+        ) from exc
+
+
+def _is_active(
+    domain: ExternalBootDomain, definition: RemoteExternalBootDefinition, *, subject: _Subject
+) -> bool:
+    """Read power state. A stale handle or dropped connection must not escape uncategorized."""
+    try:
+        return bool(domain.isActive())
+    except libvirt.libvirtError as exc:
+        raise _classify_libvirt(
+            exc, definition=definition, operation="power-read", subject=subject
+        ) from exc
+
+
 def _observed_state(
-    domain: ActivationDomain, definition: RemoteExternalBootDefinition
+    domain: ExternalBootDomain, definition: RemoteExternalBootDefinition, *, subject: _Subject
 ) -> tuple[str, str, str]:
     """Classify the inactive definition by digest, never by bytes."""
     try:
         observed = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
     except libvirt.libvirtError as exc:
-        raise _classify_libvirt(exc, definition=definition, operation="read") from exc
+        raise _classify_libvirt(
+            exc, definition=definition, operation="read", subject=subject
+        ) from exc
     preserved = preserved_definition_identity(observed)
     boot = boot_projection_identity(observed)
     if preserved == definition.source_definition and boot == definition.source_boot:
@@ -526,7 +572,7 @@ def _observed_state(
     return "other", preserved, boot
 
 
-def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefinition) -> None:
+def activate_definition(conn: ExternalBootConn, definition: RemoteExternalBootDefinition) -> None:
     """Compare-and-set the System's persistent definition to the external-boot target.
 
     Requires the domain inactive with the recorded source definition, defines the target, verifies
@@ -541,23 +587,13 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
     immediately before this write. That proof is #2140's; this function takes the connection its
     caller already fenced and performs the state half of the gate.
     """
-    domain_name = domain_name_for(UUID(definition.binding.system_id))
-    try:
-        domain = conn.lookupByName(domain_name)
-    except libvirt.libvirtError as exc:
-        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-            raise CategorizedError(
-                "remote-libvirt external-boot domain does not exist",
-                category=ErrorCategory.NOT_FOUND,
-                details={"system_id": definition.binding.system_id, "domain": domain_name},
-            ) from exc
-        raise _classify_libvirt(exc, definition=definition, operation="lookup") from exc
-
-    active = bool(domain.isActive())
-    which, preserved, boot = _observed_state(domain, definition)
+    domain = _lookup(conn, definition, subject="activation")
+    active = _is_active(domain, definition, subject="activation")
+    which, preserved, boot = _observed_state(domain, definition, subject="activation")
     if which == "other" or (which == "source" and active):
-        raise _activation_conflict(
+        raise _refused(
             "the observed definition and power are not an admitted combination",
+            subject="activation",
             definition=definition,
             observed_definition=preserved,
             observed_boot=boot,
@@ -566,47 +602,208 @@ def activate_definition(conn: ActivationConn, definition: RemoteExternalBootDefi
     if which == "target":
         if active:
             return
-        _start(domain, definition, wrote=False)
+        _start(
+            domain,
+            definition,
+            subject="activation",
+            reason="the target definition was already present but the domain did not start",
+            phase="start",
+        )
         return
 
     try:
         conn.defineXML(definition.target_xml)
     except libvirt.libvirtError as exc:
-        raise _classify_libvirt(exc, definition=definition, operation="define") from exc
-    after, preserved, boot = _observed_state(domain, definition)
+        raise _classify_libvirt(
+            exc, definition=definition, operation="define", subject="activation"
+        ) from exc
+    after, preserved, boot = _observed_state(domain, definition, subject="activation")
     if after != "target":
-        raise _activation_conflict(
+        raise _refused(
             "the defined target did not read back as the target definition",
+            subject="activation",
             definition=definition,
             phase="readback",
             observed_definition=preserved,
             observed_boot=boot,
         )
-    _start(domain, definition, wrote=True)
+    _start(
+        domain,
+        definition,
+        subject="activation",
+        reason="the target definition was written but the domain did not start",
+        phase="start-after-define",
+    )
 
 
 def _start(
-    domain: ActivationDomain, definition: RemoteExternalBootDefinition, *, wrote: bool
+    domain: ExternalBootDomain,
+    definition: RemoteExternalBootDefinition,
+    *,
+    subject: _Subject,
+    reason: str,
+    phase: str,
 ) -> None:
-    """Start the domain, reporting truthfully whether this invocation wrote the definition."""
+    """Start the domain, reporting truthfully what this invocation had already done.
+
+    A failed start always leaves the persistent definition naming a kernel the guest is not
+    running, so the caller enters recovery rather than retrying. CONFLICT is already
+    non-retryable, so no terminal flag is needed. ``phase`` distinguishes an invocation that wrote
+    the definition from one that found it already written, because a caller deciding between
+    retry and recovery is misled by a write that did not happen.
+    """
     try:
         domain.create()
     except libvirt.libvirtError as exc:
-        # Either way the persistent definition names the external kernel while the guest is not
-        # running it, so the caller enters recovery rather than retrying. CONFLICT is already
-        # non-retryable, so no terminal flag is needed. The phase distinguishes the invocation
-        # that wrote the definition from one that found it already written, because a caller
-        # deciding between retry and recovery is misled by a write that did not happen.
-        raise _activation_conflict(
-            (
-                "the target definition was written but the domain did not start"
-                if wrote
-                else "the target definition was already present but the domain did not start"
-            ),
+        raise _refused(
+            reason,
+            subject=subject,
             definition=definition,
-            phase="start-after-define" if wrote else "start",
+            phase=phase,
             libvirt_error_code=exc.get_error_code(),
         ) from exc
+
+
+class RemoteExternalBootRecovery(BaseModel):
+    """One activation's definition pair plus the power state recovery must restore.
+
+    Closed and frozen. ``prior_power`` is the domain's power state as observed at preparation,
+    before any external-boot write; it is not derivable from either definition, so it is recorded
+    here rather than on ``RemoteExternalBootDefinition``. ADR-0583 makes it the condition recovery
+    has to reach: a System that was running before activation is recovered only once it is running
+    its disk/GRUB baseline again, and one that was stopped is recovered when the baseline
+    definition is verified inactive.
+
+    It carries no module-tree component: ADR-0583's provider state identity pairs the definition
+    with a release-qualified module identity, and that half is #2129's.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    definition: RemoteExternalBootDefinition
+    prior_power: Literal["running", "inactive"]
+
+
+def _stop(domain: ExternalBootDomain, definition: RemoteExternalBootDefinition) -> None:
+    """Stop a domain running the external kernel, tolerating a destroy that already landed.
+
+    ``destroy`` is used rather than a graceful shutdown: the guest is running a debug kernel that
+    may not answer ACPI, and ADR-0583 makes verified inactivity — not guest cooperation — the
+    precondition for the source write.
+    """
+    try:
+        domain.destroy()
+    except libvirt.libvirtError as exc:
+        # A lost response can leave the destroy applied, and a worker resuming after that must not
+        # fail a stop that already took effect. If the re-observation itself fails it is reported
+        # as itself, chained to the destroy error so both causes survive.
+        try:
+            still_active = _is_active(domain, definition, subject="recovery")
+        except CategorizedError as observation:
+            raise observation from exc
+        if still_active:
+            raise _classify_libvirt(
+                exc, definition=definition, operation="stop", subject="recovery"
+            ) from exc
+
+
+def _restore_source_definition(
+    conn: ExternalBootConn, domain: ExternalBootDomain, definition: RemoteExternalBootDefinition
+) -> None:
+    """Stop the target and compare-and-set the persistent definition back to the source."""
+    if _is_active(domain, definition, subject="recovery"):
+        _stop(domain, definition)
+        which, preserved, boot = _observed_state(domain, definition, subject="recovery")
+        still_active = _is_active(domain, definition, subject="recovery")
+        if which != "target" or still_active:
+            # Both halves are reported: a caller told only the digests cannot tell a competing
+            # redefine from a competing restart, and they take different operator resolutions.
+            raise _refused(
+                "the domain did not stop on its recorded target definition",
+                subject="recovery",
+                definition=definition,
+                phase="stop",
+                observed_definition=preserved,
+                observed_boot=boot,
+                active=still_active,
+            )
+    try:
+        conn.defineXML(definition.source_xml)
+    except libvirt.libvirtError as exc:
+        raise _classify_libvirt(
+            exc, definition=definition, operation="define", subject="recovery"
+        ) from exc
+    which, preserved, boot = _observed_state(domain, definition, subject="recovery")
+    if which != "source":
+        raise _refused(
+            "the restored baseline did not read back as the recorded source definition",
+            subject="recovery",
+            definition=definition,
+            phase="readback",
+            observed_definition=preserved,
+            observed_boot=boot,
+        )
+
+
+def recover_disk_grub_baseline(
+    conn: ExternalBootConn, recovery: RemoteExternalBootRecovery
+) -> None:
+    """Restore the System's persistent definition and power state to its disk/GRUB baseline.
+
+    Compare-and-set in the other direction from ``activate_definition``, over the same two-part
+    digest pair and never over raw bytes. From the recorded target it stops the domain, defines the
+    recorded source, verifies the readback, then restores ``prior_power``; from the recorded source
+    it only restores power.
+
+    Idempotent on the achieved post-state, which is what makes it resumable after worker loss: a
+    domain already on the baseline in its recorded prior power returns without a write, whichever
+    step the lost worker died in. Every step re-observes rather than trusting what a previous
+    observation or a previous worker saw.
+
+    Any other observed definition, and a baseline running when the recorded prior power was
+    stopped, are ADR-0583's unproven mixtures: they raise ``CONFLICT`` with the observed digests
+    retained, for the operator resolution path, rather than overwriting provider state.
+
+    Two halves of ADR-0583 recovery are deliberately not here. Restoring the prior module tree is
+    #2129's, and the fresh baseline readiness core requires before it may commit ``recovered`` for
+    a System that was running is the caller's (#2118) — this function returns once the baseline is
+    defined and started, not once the guest has answered.
+    """
+    definition = recovery.definition
+    domain = _lookup(conn, definition, subject="recovery")
+    which, preserved, boot = _observed_state(domain, definition, subject="recovery")
+    if which == "other":
+        raise _refused(
+            "the observed definition is neither the recorded source nor the recorded target",
+            subject="recovery",
+            definition=definition,
+            observed_definition=preserved,
+            observed_boot=boot,
+        )
+    if which == "target":
+        _restore_source_definition(conn, domain, definition)
+    active = _is_active(domain, definition, subject="recovery")
+    if recovery.prior_power == "inactive":
+        if active:
+            raise _refused(
+                "the baseline is running and the recorded prior power state was not",
+                subject="recovery",
+                definition=definition,
+                # Proven equal to what was just observed: this branch is reached only after the
+                # definition classified as the recorded source.
+                observed_definition=definition.source_definition,
+                observed_boot=definition.source_boot,
+                active=True,
+            )
+        return
+    if not active:
+        _start(
+            domain,
+            definition,
+            subject="recovery",
+            reason="the disk/GRUB baseline was restored but the domain did not start",
+            phase="start-after-recover",
+        )
 
 
 class RemoteGuestIdentity(BaseModel):
