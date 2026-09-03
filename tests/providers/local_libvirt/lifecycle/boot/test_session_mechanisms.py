@@ -26,6 +26,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootSession,
     LocalExternalBootSessionFactory,
     OperationOwnership,
+    _unconfigured_cleanup,
+    _unconfigured_observation,
+    _unconfigured_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     PAYLOAD_NAMES,
@@ -615,3 +618,82 @@ class TestOpenGuest:
                 pass
         finally:
             session.close()
+
+
+def _noop_readiness(_system_id: UUID) -> object:
+    raise AssertionError("readiness must not be reached in these tests")
+
+
+def _noop_observation(_system_id: UUID) -> object:
+    raise AssertionError("observation must not be reached in these tests")
+
+
+def _noop_cleanup(_root_fd: int, _binding: ExternalBootActivationBinding) -> None:
+    raise AssertionError("cleanup must not be reached in these tests")
+
+
+class TestFailClosedDefaults:
+    """Each default is proven reachable independently, by omitting exactly that one.
+
+    Deliberately not `test_session.py`'s `_factory` helper: it accepts only `events`, `domain`
+    and `pin_lease`, so it omits `readiness`, `observe_running` and `cleanup_payloads`
+    *together* and cannot express "omit exactly one". The three bound mechanisms below raise
+    `AssertionError` if reached, so a test that passes because the wrong default fired fails
+    instead of quietly agreeing.
+    """
+
+    def test_unconfigured_readiness_raises(self, tmp_path: Path) -> None:
+        session = _session(
+            _private_dir(tmp_path / "artifacts"),
+            observe_running=_noop_observation,
+            cleanup_payloads=_noop_cleanup,
+        )
+        try:
+            with pytest.raises(
+                RuntimeError, match="local external-boot readiness is not configured"
+            ):
+                session.readiness()
+        finally:
+            session.close()
+
+    def test_unconfigured_observation_raises(self, tmp_path: Path) -> None:
+        session = _session(
+            _private_dir(tmp_path / "artifacts"),
+            readiness=_noop_readiness,
+            cleanup_payloads=_noop_cleanup,
+        )
+        try:
+            with pytest.raises(
+                RuntimeError, match="local external-boot running observation is not configured"
+            ):
+                session.observe_running()
+        finally:
+            session.close()
+
+    def test_unconfigured_cleanup_raises(self, tmp_path: Path) -> None:
+        session = _session(
+            _private_dir(tmp_path / "artifacts"),
+            readiness=_noop_readiness,
+            observe_running=_noop_observation,
+        )
+        try:
+            with pytest.raises(
+                RuntimeError, match="local external-boot payload cleanup is not configured"
+            ):
+                session.cleanup_payloads()
+        finally:
+            session.close()
+
+    def test_factory_defaults_are_the_unconfigured_functions(self) -> None:
+        # Identity, not just "raises RuntimeError": a permissive replacement that happened to
+        # raise something would satisfy a message assertion while removing the guard.
+        factory = LocalExternalBootSessionFactory(
+            pin_lease=LocalOperationLane().pin,
+            connect=lambda: Conn([], Domain([])),
+            open_artifact_root=lambda _ownership: 41,
+            open_guest=lambda: Guest([]),
+        )
+
+        assert factory._readiness is _unconfigured_readiness
+        assert factory._observe_running is _unconfigured_observation
+        assert factory._cleanup_payloads is _unconfigured_cleanup
