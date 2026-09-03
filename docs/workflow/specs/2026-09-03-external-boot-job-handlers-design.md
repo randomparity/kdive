@@ -2,7 +2,7 @@
 
 Issue: [#2205](https://github.com/randomparity/kdive/issues/2205). Parent: #2118. Blocker:
 #2201, merged as `951fbaea0`. Decision record:
-[ADR-0591](../../adr/0591-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
+[ADR-0593](../../adr/0593-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
 
 ## Goal
 
@@ -231,7 +231,7 @@ Every operation handler is the same seven steps, in `operations/common.py`:
 2. **Read the activation.** `SELECT`-only, permitted. Refuse when the row is absent, when its
    `run_id`/`system_id`/`plan_identity` disagree with the marker, or when the evidence the
    operation consumes is missing — for `activate` that is `materialization` **and**
-   `recovery_point` (the `prepared-before-admission` disposition, ADR-0591 decision 4).
+   `recovery_point` (the `prepared-before-admission` disposition, ADR-0593 decision 4).
 3. **Allocate.** `allocate_external_boot_authority` as `kdive_worker`. `superseded` raises a
    non-terminal `CategorizedError(stale_handle)`; the SQLSTATE `42501` from a non-worker session
    propagates unchanged, which is what criterion 8 asserts.

@@ -1,4 +1,4 @@
-# 0591 — External-boot operations ride marked boot and teardown jobs
+# 0593 — External-boot operations ride marked boot and teardown jobs
 
 - **Status:** Proposed
 

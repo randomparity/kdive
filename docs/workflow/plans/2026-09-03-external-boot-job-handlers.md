@@ -2,7 +2,7 @@
 
 Issue [#2205](https://github.com/randomparity/kdive/issues/2205). Spec:
 [2026-09-03-external-boot-job-handlers-design.md](../specs/2026-09-03-external-boot-job-handlers-design.md).
-Decision: [ADR-0591](../../adr/0591-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
+Decision: [ADR-0593](../../adr/0593-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
 
 ## Goal
 
@@ -66,7 +66,7 @@ everything.
 
 | File | Answerable for |
 |---|---|
-| `__init__.py` | Package docstring citing ADR-0591; re-exports `register_handlers`, `ExternalBootHandlerPorts`, `ExternalBootOperations` |
+| `__init__.py` | Package docstring citing ADR-0593; re-exports `register_handlers`, `ExternalBootHandlerPorts`, `ExternalBootOperations` |
 | `ports.py` | `ExternalBootAuthorityAcknowledger` protocol, `ExternalBootHandlerPorts` dataclass, `EXTERNAL_BOOT_AUTHORITY_MARKER_KEY` |
 | `authority.py` | The two authority SQL calls this package owns: `allocate_authority` (wrapping `allocate_external_boot_authority`) and the `AllocatedAuthority` value |
 | `operations.py` | `ExternalBootOperations` registry, `ENQUEUEABLE_OPERATIONS`, `DuplicateExternalBootHandler` |
@@ -485,7 +485,7 @@ emits: unit, reference clock, scope, consequence of violation, recovery action.
      (criterion 6, not-applied half);
    - `test_superseded_commit_leaves_the_job_running` — records the #2203-owned leak, with the
      issue number in the test's docstring so it cannot be mistaken for intended coverage.
-2. **Write `test_prepared_before_admission.py`** — ADR-0591 decision 4's pin:
+2. **Write `test_prepared_before_admission.py`** — ADR-0593 decision 4's pin:
    - an activate job whose activation has `recovery_point` NULL is refused, and the port double
      recorded no call;
    - the same for `materialization` NULL;
@@ -501,7 +501,7 @@ emits: unit, reference clock, scope, consequence of violation, recovery action.
 ### Acceptance criteria
 
 - Charter criteria 4 (handler half), 5, 6, and 7 hold.
-- ADR-0591 decision 4 is pinned by a test that fails if a handler ever calls `materialize` or
+- ADR-0593 decision 4 is pinned by a test that fails if a handler ever calls `materialize` or
   `prepare`.
 
 ---
@@ -609,7 +609,7 @@ appended here with its owning record path or tracker issue before the branch shi
   it. Availability only. Owned by **#2203**; Task 4 records the behavior in a test rather than
   changing it.
 - `ExternalBootPorts.materialize` and `.prepare` stay uncalled by any worker handler
-  (ADR-0591 decision 4). The preparation path that records `materialization` and
+  (ADR-0593 decision 4). The preparation path that records `materialization` and
   `recovery_point` is owned by **#2204**.
 - The three MCP tools still return `recovery_executor_unavailable`
   (`docs/debt/0003-external-boot-contracts-await-their-executor.md`). Flipping them live is
