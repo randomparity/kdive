@@ -19,8 +19,16 @@ default:
     @just --list
 
 # One-command first-time setup: check host deps, sync the venv, install hooks.
-setup: check-deps sync build-capture-bootstrap-manifest install-hooks
+setup: check-deps sync build-capture-bootstrap-manifest install-hooks install-mermaid-deps
     @echo "Development environment is ready."
+
+# `check-mermaid` runs a Node script whose dependencies live in a gitignored `node_modules`, so a
+# fresh clone or `git worktree` has none and the recipe dies on ERR_MODULE_NOT_FOUND before it
+# checks a single diagram. `package.json` and `package-lock.json` are tracked; only the installed
+# tree is not. `check-setup-deps.sh` already requires node and npm, so this adds no host
+# prerequisite.
+install-mermaid-deps:
+    cd .github/scripts/mermaid-check && npm ci
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
