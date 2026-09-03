@@ -94,15 +94,29 @@ request has none.
   longer matches what `advance` reported as accepted under this identity: a second authority
   instance sharing the operation identity, or a repository row that changed underneath. That
   is the whole of its value.
-- **N4a.** A head-disagreement refusal anchors `terminal` with `outcome="never-began"` before
-  it raises, reusing the shape `execute_mutation`'s `stop_before_start` path already uses.
-  Without it the operation stays unresolved at `mutation-started`, and the next admission on
-  the lane runs `_finish_recovery`'s `MUTATION_STARTED` arm, which calls the adapter's
-  `observe` and journals `provider-returned`, `observed`, and a terminal outcome — a full
-  provider-observation cycle for a mutation that provably never reached the provider. ADR-0584
-  makes the journal the evidence of record for exactly that question. Source: necessary
-  consequence of criterion 5, which requires the refusal to be a bounded category and not a
-  new falsehood in the journal.
+- **N4a.** **Every** refusal between the `mutation-started` anchor and the provider call
+  anchors `terminal` with `outcome="never-began"` before it raises, through one shared helper
+  rather than a guard per caller. Without it the operation stays unresolved at
+  `mutation-started`, and the next admission on the lane runs `_finish_recovery`'s
+  `MUTATION_STARTED` arm, which calls the adapter's `observe` and journals
+  `provider-returned`, `observed` and a terminal outcome — a full provider-observation cycle
+  for a mutation that provably never reached the provider. ADR-0584 makes the journal the
+  evidence of record for exactly that question.
+
+  There are exactly **two** such refusals, and the second is pre-existing:
+
+  1. the new head-disagreement refusal (N4); and
+  2. the existing `superseded` raise after the post-anchor `resolve_current` recheck
+     (`service.py:878-879`), which today raises with no terminal record.
+
+  A third site, the `stop_before_start` raise at `service.py:852-864`, is **not** an instance:
+  it already anchors `terminal`/`never-began` before raising, and is the shape the helper
+  generalises. Fixing only the new arm would leave a two-arm defect half-closed in the same
+  function, so both route through the helper.
+
+  Source: necessary consequence of criterion 5 for arm 1; arm 2 is an in-scope repair on the
+  same seam, authorized by the campaign orchestrator on 2026-09-03 as a found-here-fixed-here
+  widening of the frozen surface.
 
   This does not touch the excluded journal surface. N4a introduces no phase, no field and no
   anchoring rule: it reuses `JournalPhase.TERMINAL` with `outcome="never-began"`, which
@@ -164,6 +178,26 @@ illegal or mismatched commit point, exactly as it does today. The two record val
 `ValueError` on a digest mismatch, exactly as the `source_xml` arm does, and that surfaces
 through the store's existing `model_validate_json` path. No new category, no new message
 shape, and no provider output crosses the boundary.
+
+**The no-leak property is checked against the exception types actually enforced, not just
+asserted.** `AuthorityServiceError.__init__` passes only its four-valued `category` literal to
+`RuntimeError`, so the exception carries no message, no path, no `filename` and no `strerror` —
+unlike the `OSError` subclasses (`FileNotFoundError`, `NotADirectoryError`) the store raises
+underneath it, which carry all three. The boundary holds because every raise inside an `except`
+block on this path uses `from None`, never `from exc`: chaining would re-attach the leaking path
+through `__cause__` and the traceback, which looks fixed and is not. That is already true of the
+existing sites, and the new code preserves it:
+
+- the head-disagreement refusal and the shared abandonment helper raise outside any `except`, so
+  nothing chains;
+- the `FinalizeCleanupProof` construction sits **inside** `_apply`'s existing `try`, so a
+  `ValidationError` — which would render field values — is converted by the existing
+  `except Exception:` arm into a bounded `provider_conflict` `from None`;
+- the full diagnostic still reaches `logger.exception` inside the authority, where ADR-0584 allows
+  it to exist, and only the category crosses the seam.
+
+Tests assert `raised.value.category`, never a rendered message, so they cannot pass on text that
+happens to contain a path.
 
 ## Threat model
 
@@ -228,8 +262,13 @@ Every criterion gets a test that drives a real entry point.
   the adapter recorded no `commit`; and by a companion asserting that a head reporting a
   *different* operation identity — the concurrent-takeover shape — still lets the commit run,
   so the scoping is proved rather than asserted.
-- N4a is proved by asserting the journal's last record after a refused commit is `terminal`
-  with `outcome="never-began"`, and that no `provider-returned` record was written.
+- N4a is proved twice, once per arm: after a head-disagreement refusal, and after a
+  `resolve_current` recheck refusal, the journal's last record is `terminal` with
+  `outcome="never-began"` and no `provider-returned` record exists for that operation
+  identity. A third test drives a second `execute_mutation` on the same lane afterwards and
+  asserts the adapter's `observe` was never called for the abandoned operation — which is what
+  the unresolved lane would otherwise cost. The fault each catches is removing the helper call
+  from its arm.
 - N6 is proved by driving a `cleanup` commit through the service for each of the four
   unresolvable states — tombstone live, fully finalized, never prepared, prepare interrupted —
   and asserting every one raises `provider_conflict` and that the coordinator recorded no

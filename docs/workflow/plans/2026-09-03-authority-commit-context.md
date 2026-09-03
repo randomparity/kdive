@@ -64,7 +64,7 @@ Decision: [ADR-0592](../../adr/0592-authority-commit-context-carries-the-anchore
 | Path | Answerable for | Change |
 |---|---|---|
 | `src/kdive/providers/external_boot_authority/protocol.py` | closed authority values | add `AuthorityCommitContextV1`; refresh the `operation_is_permitted` docstring |
-| `src/kdive/providers/external_boot_authority/service.py` | lane serialization and journaling | adapter `Protocol` signature; `_require_anchored_head`; anchor `never-began` on refusal; build and pass the context |
+| `src/kdive/providers/external_boot_authority/service.py` | lane serialization and journaling | adapter `Protocol` signature; `_require_anchored_head`; the shared pre-provider abandonment helper used by **both** refusal arms; build and pass the context |
 | `src/kdive/providers/local_libvirt/external_boot_authority.py` | local adapter | accept the context; finalize the tombstone on `CLEANUP`; no absence branch of any kind |
 | `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py` | local records and coordinator | widen `FinalizeCleanupProof.operation_id`; add `target_xml_sha256` to both records; extend `_metadata_extends_intent`; correct the stale comment |
 | `tests/providers/external_boot_authority/test_protocol.py` | context model behaviour | `for_record` phase gate, closure, and the wire-request field-set pin |
@@ -194,8 +194,13 @@ it. Build a mutation with `_mutation(takeover)` and set `repository.current = Tr
 4. Write the failing test for criterion 5: with `corrupt_head_after_phase = MUTATION_STARTED`,
    `execute_mutation` raises `AuthorityServiceError` with category `journal_conflict`,
    `adapter.commit_contexts == []`, and no `commit:` entry is in `adapter.calls`.
-5. Write the test for N4a: after that refusal, `repository.records[-1].phase is TERMINAL` with
-   `outcome == "never-began"`, and no `PROVIDER_RETURNED` record exists for that operation identity.
+5. Write the tests for N4a, one per arm. After a head-disagreement refusal, and separately after a
+   `resolve_current` recheck refusal (drive it with the double's existing `reject_resolution`
+   counter, which already makes a chosen `resolve_current` call return `None`),
+   `repository.records[-1].phase is TERMINAL` with `outcome == "never-began"` and no
+   `PROVIDER_RETURNED` record exists for that operation identity. Add a third test that runs a
+   second `execute_mutation` on the lane afterwards and asserts `adapter.calls` contains no
+   `observe` for the abandoned operation — the cost the unresolved lane would otherwise impose.
 6. Write the scoping regression: with `head_operation_identity_override = "takeover-next"`,
    `execute_mutation` completes and exactly one context was recorded. This one guards against the
    *over-strict* implementation, so it passes trivially with no implementation — Task 5 bite-proves
@@ -214,17 +219,28 @@ it. Build a mutation with `_mutation(takeover)` and set `repository.current = Tr
 9. In `execute_mutation`, inside the lock that anchors `MUTATION_STARTED` (`service.py:865-871`)
    and right after `active.phase = JournalPhase.MUTATION_STARTED`, build
    `context = AuthorityCommitContextV1.for_record(records[-1])`.
-10. Replace the commit call (`service.py:880-887`) so the head check runs first. On its
-    `journal_conflict`, anchor `TERMINAL` with `outcome="never-began"` under `lane.lock` before
-    re-raising — the same shape as the `stop_before_start` path at `service.py:852-864` — so the
-    lane is left resolved. Keep #2199's `except AuthorityServiceError: raise` arm ahead of the bare
-    `except Exception` exactly as it is.
-11. `uv run python -m pytest tests/providers/external_boot_authority -q` — every test green,
+10. Add the shared abandonment helper and route **both** pre-provider refusals through it. It
+    anchors `TERMINAL` with `outcome="never-began"` under `lane.lock`, using
+    `active.completion_binding or binding` like the other post-anchor writes, then raises the given
+    bounded category. The two callers are the new head check and the **pre-existing** `superseded`
+    raise at `service.py:878-879`, which today leaves the lane unresolved at `mutation-started`.
+
+    Verified before writing: `service.py:852-864`'s `stop_before_start` raise is **not** a third
+    caller — it already anchors `TERMINAL`/`never-began` at `:853-863` before raising, and is the
+    shape this helper generalises. Do not add a third call there.
+
+    One fix in the shared helper, not a guard per caller: fixing only the new arm would leave a
+    two-arm defect half-closed inside one function.
+11. Replace the commit call (`service.py:880-887`) so the head check runs first. Keep #2199's
+    `except AuthorityServiceError: raise` arm ahead of the bare `except Exception` exactly as it is.
+12. `uv run python -m pytest tests/providers/external_boot_authority -q` — every test green,
     including the pre-existing ones. `just lint && just type`, commit.
 
 **Acceptance.** The adapter receives a context matching the journal; a same-identity head
 disagreement raises `journal_conflict` before the adapter is called and leaves the lane terminal
-with `never-began`; a different-identity head does not refuse.
+with `never-began`; a different-identity head does not refuse; and **both** pre-provider
+refusals — the head check and the `resolve_current` recheck — leave the lane terminal rather than
+unresolved.
 
 ## Task 3 — the local adapter finalizes the tombstone
 
@@ -319,7 +335,13 @@ with `never-began`; a different-identity head does not refuse.
     ADR-0592 and not this seam's to close. Leave the surrounding
     `except AuthorityServiceError: raise` / `except Exception:` wrapper alone, so a finalization
     `ValueError` becomes a bounded `provider_conflict`.
-12. Add the module-level proof builder. Every field comes from the context or the resolved point,
+12. Add the module-level proof builder, and **call it inside `_apply`'s existing `try`**, never
+    before it. `FinalizeCleanupProof` is a validating model, so a bad field raises
+    `ValidationError`, which renders field values; inside the `try` the existing
+    `except Exception:` arm converts it to a bounded `provider_conflict` `from None`. Use
+    `from None` for every new raise inside an `except` on this path — `from exc` would re-attach a
+    leaking host path through `__cause__` and the traceback, which looks fixed and is not.
+    Every field comes from the context or the resolved point,
     and `phase` is passed as `context.phase` rather than left to the model default — otherwise the
     proof's phase assertion observes the default and would pass even if the context had no `phase`
     field at all.
@@ -410,7 +432,7 @@ is dormant, which is the same window the ordering constraint names.
 2. Inject one controlled fault per new test and run that test alone. At minimum:
    drop the `phase` guard in `for_record`; drop the `head.digest` arm in `_require_anchored_head`;
    widen `_require_anchored_head` to compare the bare head (must turn the takeover-overlap test
-   red); drop the `never-began` anchor; drop the `finalize_cleanup_tombstone` call in `_apply`;
+   red); drop the `never-began` anchor from the shared helper (must turn **both** N4a arm tests red, which is what proves the helper is actually shared); drop the `finalize_cleanup_tombstone` call in `_apply`;
    add an absence-derived success branch keyed on the recovery directory (must turn the
    never-prepared and prepare-interrupted arms of the four-state test red); omit `phase` in the
    proof builder (must turn it red with a `ValidationError`, which is only possible because the
