@@ -317,12 +317,12 @@ def _allocate_successor(
     return successor_case, successor
 
 
-def test_migration_0125_is_the_unique_inventory_tail() -> None:
+def test_migration_0125_is_the_unique_inventory_migration() -> None:
+    """Exactly one migration introduces the head inventory, located by version not by position."""
     migrations = migrate.discover_migrations()
-    assert (migrations[-1].version, migrations[-1].filename) == (
-        "0125",
-        "0125_external_boot_authority_head_inventory.sql",
-    )
+    assert [(item.version, item.filename) for item in migrations if item.version == "0125"] == [
+        ("0125", "0125_external_boot_authority_head_inventory.sql")
+    ]
 
 
 def test_journal_head_has_bounded_continuations(pg_conn: psycopg.Connection) -> None:

@@ -284,6 +284,49 @@ def test_terminal_evidence_round_trips_and_is_write_once(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_kdive_server_can_drive_the_row_without_execute_on_the_trigger_function(
+    migrated_url: str,
+) -> None:
+    """The write-once trigger still fires for the role that owns none of it.
+
+    The migration revokes the trigger function's default EXECUTE-to-PUBLIC, because the authority
+    host's readiness check counts an unlisted PUBLIC grant as excess privilege. That is only safe
+    if PostgreSQL checks EXECUTE when the trigger is *created* rather than when it runs, so this
+    exercises the whole row under ``SET ROLE kdive_server`` — which has SELECT/INSERT/UPDATE on the
+    table and no privilege at all on the function.
+    """
+
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            row = await (
+                await conn.execute(
+                    "SELECT has_function_privilege('kdive_server', "
+                    "'public.reject_remote_module_attempt_rewrite()', 'EXECUTE')"
+                )
+            ).fetchone()
+            assert row is not None and row[0] is False
+
+            await conn.execute("SET ROLE kdive_server")
+            evidence = _evidence(attempt)
+            await repo.open_mutation_obligation(conn, attempt)
+            await repo.record_terminal_evidence(conn, attempt, evidence)
+            assert await repo.read_terminal_evidence(conn, attempt) == evidence
+
+            with pytest.raises(psycopg.errors.RaiseException, match="terminal evidence"):
+                async with conn.transaction():
+                    await conn.execute(
+                        "UPDATE remote_module_attempt_obligations SET terminal_operation = %s "
+                        "WHERE system_id = %s AND run_id = %s AND operation_nonce = %s",
+                        (Jsonb(_operation(attempt) | {"release": "6.13.0"}), *attempt.key),
+                    )
+            await conn.execute("RESET ROLE")
+
+    asyncio.run(_run())
+
+
 def test_reap_obligation_requires_terminal_evidence(migrated_url: str) -> None:
     """A reap obligation cannot open before the source its readers depend on exists."""
 

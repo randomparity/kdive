@@ -184,6 +184,12 @@ CREATE TRIGGER remote_module_attempt_obligations_write_once
     BEFORE UPDATE ON remote_module_attempt_obligations
     FOR EACH ROW EXECUTE FUNCTION reject_remote_module_attempt_rewrite();
 
+-- A new function is EXECUTE-to-PUBLIC by default, and the authority host's readiness check counts
+-- any such grant outside its allowlist as excess privilege. A trigger function needs no EXECUTE
+-- grant to fire — the privilege is checked when the trigger is created, not when it runs — so the
+-- grant is removed rather than the allowlist widened.
+REVOKE ALL ON FUNCTION reject_remote_module_attempt_rewrite() FROM PUBLIC;
+
 GRANT SELECT, INSERT, UPDATE ON TABLE remote_module_attempt_obligations TO kdive_server;
 REVOKE ALL ON TABLE remote_module_attempt_obligations FROM kdive_worker, kdive_reconciler;
 GRANT SELECT ON TABLE remote_module_attempt_obligations TO kdive_worker, kdive_reconciler;
