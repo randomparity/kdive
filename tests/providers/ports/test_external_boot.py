@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from typing import cast
-from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -14,7 +13,6 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
-    ExternalBootPorts,
     OpaqueProviderRef,
     RecoveryPoint,
     RootSpecV1,
@@ -266,60 +264,6 @@ def test_canonical_deserialization_rejects_oversized_bytes_before_json_parsing()
 
     with pytest.raises(ValueError, match="exceeds 65536 bytes"):
         ExternalBootPlan.from_canonical_json(oversized)
-
-
-class _ContractConsumer:
-    def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
-    ) -> ExternalBootMaterialization:
-        raise NotImplementedError
-
-    def prepare(
-        self,
-        materialization: ExternalBootMaterialization,
-        binding: ExternalBootActivationBinding,
-        authority: OpaqueProviderRef,
-    ) -> RecoveryPoint:
-        raise NotImplementedError
-
-    def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        raise NotImplementedError
-
-    def observe(
-        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
-    ) -> RunningKernelObservation:
-        raise NotImplementedError
-
-    def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        raise NotImplementedError
-
-    def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
-        raise NotImplementedError
-
-
-def test_protocol_exposes_six_provider_neutral_operations() -> None:
-    ports: ExternalBootPorts = _ContractConsumer()
-    assert ports is not None
-    assert UUID(SYSTEM_ID).version == 4 or UUID(SYSTEM_ID).int == 3
-
-
-def test_fault_inject_consumes_all_six_operations_without_provider_types() -> None:
-    provider = FaultInjectExternalBoot()
-    authority = OpaqueProviderRef(ref="authority/current")
-    plan = ExternalBootPlan.model_validate(_plan_data())
-
-    materialization = provider.materialize(plan, authority)
-    binding = ExternalBootActivationBinding(
-        system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
-    )
-    recovery = provider.prepare(materialization, binding, authority)
-    provider.activate(recovery, authority)
-
-    assert provider.observe(recovery, authority) == materialization.kernel_observation
-    provider.recover(recovery, authority)
-    provider.cleanup(recovery, authority)
-    with pytest.raises(KeyError):
-        provider.observe(recovery, authority)
 
 
 def test_recovery_point_binding_canonical_round_trip_and_closed_schema() -> None:

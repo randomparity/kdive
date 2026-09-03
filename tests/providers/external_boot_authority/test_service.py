@@ -927,3 +927,41 @@ async def test_restart_rejects_divergent_trusted_continuation_before_recovery_ac
         await restarted.acknowledge_takeover(peer, successor)
     assert fresh_adapter.calls == []
     assert path.read_bytes() == before
+
+
+@pytest.mark.anyio
+async def test_bounded_adapter_error_keeps_its_category_across_the_provider_seam(
+    tmp_path: Path,
+) -> None:
+    """An adapter that already reached a bounded category must not be re-classified.
+
+    The provider seam converts an unclassified exception into ``provider_conflict``. An
+    ``AuthorityServiceError`` is not unclassified: downgrading a ``superseded`` verdict to
+    ``provider_conflict`` would lose the fencing outcome ADR-0584 makes load-bearing, and
+    would mislabel the rejection metric.
+    """
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    mutation = _mutation(request)
+    adapter.commit_error = AuthorityServiceError("superseded")
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, mutation)
+
+    assert caught.value.category == "superseded"
+
+
+@pytest.mark.anyio
+async def test_unclassified_provider_failure_is_still_bounded_to_provider_conflict(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.fail_commit = True
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, _mutation(request))
+
+    assert caught.value.category == "provider_conflict"

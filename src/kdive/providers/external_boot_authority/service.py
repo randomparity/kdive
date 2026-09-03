@@ -518,6 +518,10 @@ class ExternalBootAuthorityService:
         if prior.phase is JournalPhase.MUTATION_STARTED:
             try:
                 observation = await self._adapter.observe(request)
+            except AuthorityServiceError:
+                # Already a bounded category; re-classifying it as provider_conflict would
+                # lose a superseded verdict the adapter is entitled to reach.
+                raise
             except Exception:
                 raise self._provider_error(request) from None
             records = await self._anchor(
@@ -529,6 +533,10 @@ class ExternalBootAuthorityService:
         elif prior.phase is JournalPhase.PROVIDER_RETURNED:
             try:
                 observation = await self._adapter.observe(request)
+            except AuthorityServiceError:
+                # Already a bounded category; re-classifying it as provider_conflict would
+                # lose a superseded verdict the adapter is entitled to reach.
+                raise
             except Exception:
                 raise self._provider_error(request) from None
         elif prior.phase is JournalPhase.OBSERVED:
@@ -871,6 +879,10 @@ class ExternalBootAuthorityService:
                     raise AuthorityServiceError("superseded")
                 try:
                     await self._adapter.commit(request, request.operation)
+                except AuthorityServiceError:
+                    # Already a bounded category; re-classifying it as provider_conflict would
+                    # lose a superseded verdict the adapter is entitled to reach.
+                    raise
                 except Exception:
                     raise self._provider_error(request) from None
                 async with lane.lock:
@@ -883,6 +895,10 @@ class ExternalBootAuthorityService:
                     )
                 try:
                     observation = await self._adapter.observe(request)
+                except AuthorityServiceError:
+                    # Already a bounded category; re-classifying it as provider_conflict would
+                    # lose a superseded verdict the adapter is entitled to reach.
+                    raise
                 except Exception:
                     raise self._provider_error(request) from None
                 async with lane.lock:

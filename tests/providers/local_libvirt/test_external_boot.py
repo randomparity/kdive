@@ -25,6 +25,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
     LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
+    LocalObservedState,
     LocalPreStopIntentV1,
     LocalRecoveryMetadataV1,
     ModuleLayout,
@@ -1442,6 +1443,23 @@ class _ExternalIO:
         if self.operation_fault:
             raise LookupError("operation primary")
         return self.metadata
+
+    def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1:
+        del binding
+        self.actions.append("reopen")
+        if self.operation_fault:
+            raise LookupError("operation primary")
+        return self.metadata
+
+    def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
+        self.actions.append("observe-state")
+        if self.operation_fault:
+            raise LookupError("operation primary")
+        return LocalObservedState(
+            definition=metadata.source_state.definition,
+            modules=metadata.source_state.modules,
+            active=False,
+        )
 
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("activate-modules")
