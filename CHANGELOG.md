@@ -197,6 +197,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provision dormant authority endpoint
 - Supervise external boot authority
 - Add provider-private remote module documents
+- Add the external-boot direct-kernel XML projection
+- Admit only the owned disk/GRUB external-boot source
+- Derive the external-boot target definition
+- Activate the external-boot target definition
+- Prove external-boot kernel and command-line identity
 
 ### Changed
 
@@ -1090,6 +1095,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Key module volume retention on obligation, not attempt liveness
 - Separate the reap obligation from the mutation obligation
 - Make the second-channel removal ordering a hard gate
+- Design remote external-boot activation
+- Fix external-boot activation design defects
+- Correct guest read shape and ADR-0583 seam
+- Tighten the busybox image citations
+- Drop the phantom exit-127 mitigation
+- Align the testing section with the contract
+- Reconcile the two documents' rule inventories
+- Stop claiming core enforces the command line
+- Ruff-format the plan's python blocks
 
 ### Fixed
 
@@ -1783,6 +1797,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the four review notes on the module documents
 - Keep appliance-controlled bytes out of parser errors
 - Close the parser differential and the recovery-ref name collision
+- Close the external-boot review findings
+- Refuse a command line XML cannot represent
 
 ### Security
 
