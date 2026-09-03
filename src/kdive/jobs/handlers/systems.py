@@ -32,6 +32,8 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
 from kdive.jobs.handlers.connectivity.ssh_reachable import check_ssh_reachable_handler
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
+from kdive.jobs.handlers.external_boot.router import route_marked
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     ReprovisionPayload,
@@ -823,8 +825,15 @@ def register_handlers(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     artifact_store: RetiredKeyBatchDeleter,
+    external_boot: ExternalBootOperations,
 ) -> None:
-    """Bind the provision/teardown/reprovision/authorize_ssh_key/check_ssh_reachable handlers."""
+    """Bind the provision/teardown/reprovision/authorize_ssh_key/check_ssh_reachable handlers.
+
+    ``external_boot`` is required rather than defaulted: a call site that omitted it would send an
+    authority-marked job to ``teardown_handler``, which tears a System down. Making it required
+    means that mistake is a ``TypeError`` at registration instead of a wrong operation against a
+    live System.
+    """
     registry.register(
         JobKind.PROVISION,
         lambda conn, job: provision_handler(
@@ -836,8 +845,11 @@ def register_handlers(
     )
     registry.register(
         JobKind.TEARDOWN,
-        lambda conn, job: teardown_handler(
-            conn, job, resolver=resolver, artifact_store=artifact_store
+        route_marked(
+            external_boot,
+            lambda conn, job: teardown_handler(
+                conn, job, resolver=resolver, artifact_store=artifact_store
+            ),
         ),
     )
     registry.register(

@@ -14,7 +14,7 @@ from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
-from kdive.jobs.handlers import diagnostics, image_build, systems
+from kdive.jobs.handlers import diagnostics, external_boot, image_build, systems
 from kdive.jobs.handlers.artifacts import rootfs_reclaim, vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
@@ -109,11 +109,21 @@ def build_production_handler_registry(
 
 def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAssembly) -> None:
     """Register every active worker handler using the process assembly ports."""
+    # One operations registry, passed to both registrars. Building two would let a marked boot and
+    # a marked teardown resolve to different handler sets; passing it as a required keyword means
+    # a registrar that forgot it fails at registration rather than running the wrong operation.
+    operations = external_boot.build_operations(
+        external_boot.ExternalBootHandlerPorts(
+            resolver=assembly.resolver,
+            incarnation_credential=assembly.incarnation_credential,
+        )
+    )
     systems.register_handlers(
         registry,
         resolver=assembly.resolver,
         secret_registry=assembly.secret_registry,
         artifact_store=assembly.object_stores.store,
+        external_boot=operations,
     )
     runs.register_handlers(
         registry,
@@ -123,6 +133,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             secret_registry=assembly.secret_registry,
             artifact_store=assembly.object_stores.store,
         ),
+        external_boot=operations,
     )
     console_rotate.register_handlers(
         registry,

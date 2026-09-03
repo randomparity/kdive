@@ -32,6 +32,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import BootOutcome
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.runs import common as run_handler_common
 from kdive.jobs.handlers.runs import registrar as runs_handlers
 from kdive.jobs.service_operations import JobOperations
@@ -5160,6 +5161,7 @@ def test_register_handlers_binds_install_and_boot() -> None:
             secret_registry=SecretRegistry(),
             artifact_store=cast(Any, object()),
         ),
+        external_boot=ExternalBootOperations(),
     )
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
