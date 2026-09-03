@@ -398,11 +398,19 @@ or adoption, and live-provider behavior are owned elsewhere and are not represen
 behavior here. Authority-host deployment hardening is ADR-0584's and #2150's. Denial-of-service
 through repeated denied calls is bounded by the existing per-tool authorization path and writes
 nothing. Two of the three perform at most one indexed single-row read under the per-System lock.
-`request_release` also runs the blocking-job query, which is `LIMIT`-bounded to one error page: its
-`payload->>'system_id'` arm rides `jobs_payload_system_id_idx`, its `run_id` arm has no covering
-index and reaches `jobs` through a `runs` subquery served index-only by `runs_id_system_id_key`. So
-it is bounded work under the lock rather than a single-row read, and still a weaker amplifier than
-the lifecycle tools already exposed beside it.
+`request_release` also runs the blocking-job query, and that query is **not** fully bounded. It is
+two separately-planned arms rather than one `OR`, because an `OR` across an indexed and an
+unindexed expression is planned as neither: measured on 200k `jobs` rows with both indexes present
+and nothing matching, the single-statement form walked `jobs_pkey` end to end (201041 buffers,
+`Rows Removed by Filter: 200000`) and never touched the expression index. Split, the
+`payload->>'system_id'` arm plans as `Index Scan using jobs_payload_system_id_idx` and reads 3
+buffers. The `run_id` arm has no covering index — none exists for `payload->>'run_id'` — so it
+scans every job, and its `LIMIT` can end the scan early only when rows match, which the ordinary
+no-blocker case is not. That residual scan runs under the per-System advisory lock and is the
+weakest claim in this section: it is a real amplifier, not bounded work, and it is deferred to
+#2118 with the index that would close it in
+`docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md`. Until the executor lands
+the tool refuses before any of this can be reached in anger.
 
 ## Verification
 

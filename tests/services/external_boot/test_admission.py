@@ -190,7 +190,13 @@ def test_no_restricting_activation_admits_every_operation(
 @pytest.mark.parametrize(
     ("state", "operation", "next_actions"),
     [
-        (_STATE.ACTIVE, _OP.RUN_INSTALL, ["runs.get", "runs.release_external_boot"]),
+        # `systems.teardown` rides with the release: until #2118 installs the executor the
+        # release refuses every call, so alone it is a breadcrumb to a tool that changes nothing.
+        (
+            _STATE.ACTIVE,
+            _OP.RUN_INSTALL,
+            ["runs.get", "runs.release_external_boot", "systems.teardown"],
+        ),
         (_STATE.RECOVERY_CONFLICT, _OP.SYSTEM_POWER, ["runs.get", "systems.teardown"]),
         (_STATE.RECOVERY_FAILED, _OP.RUN_CREATE, ["runs.get", "systems.teardown"]),
         (_STATE.PREPARING, _OP.RUN_BOOT, ["runs.get"]),

@@ -82,17 +82,32 @@ _ACTIVE_JOB_STATES = [JobState.QUEUED.value, JobState.RUNNING.value]
 # System-scoped kinds carry the System in their payload; run-scoped kinds carry only a
 # `run_id`, so the Run lookup is what makes the refusal cover another Run's in-flight work.
 #
-# The `system_id` arm rides `jobs_payload_system_id_idx` (migration 0082), an unpartitioned
-# expression index on exactly `payload->>'system_id'`. The `run_id` arm has no index that covers
-# it — `jobs_live_install_run_id_idx` (migration 0101) is partial on `kind = 'install'` — so it
-# is a subquery rather than a join: the `runs` read is served index-only by
-# `runs_id_system_id_key (id, system_id)` (migration 0121) instead of hashing every Run, and the
-# `LIMIT` bounds what the scan materialises while this holds the System-wide advisory lock.
+# Two arms rather than one `OR`, because an `OR` across an indexed and an unindexed expression
+# is planned as neither: measured on 200k jobs, the single-statement form walked `jobs_pkey`
+# end to end (`Rows Removed by Filter: 200000`) and never touched the expression index, and a
+# global `ORDER BY j.id` is what stopped the `LIMIT` from ending it early. Split, the
+# `system_id` arm plans as `Index Scan using jobs_payload_system_id_idx` (migration 0082, an
+# expression index on exactly `payload->>'system_id'`) and reads 3 buffers.
+#
+# The `run_id` arm still scans every row: no index covers `payload->>'run_id'`
+# (`jobs_live_install_run_id_idx`, migration 0101, is partial on `kind = 'install'`), so its
+# per-arm `LIMIT` can only stop early when rows actually match — and the ordinary case, where
+# nothing blocks the release, is the one that scans the whole table while this holds the
+# System-wide advisory lock. Closing that needs an index this issue's surface does not cover;
+# the deferral is docs/debt/0008-external-boot-release-job-scan-under-the-system-lock.md.
+#
+# `UNION` rather than `UNION ALL`: nothing enforces that a payload carries only one of the two
+# keys, and a row matching both arms would otherwise be counted twice against
+# `_MAX_ERROR_ENTRIES` and raise `truncated` on a list that is not truncated. No global
+# `ORDER BY`: the refusal needs existence, one page of ids, and whether the cap bit — never a
+# particular page (`test_release_caps_the_blocking_job_ids_it_returns` asserts a subset).
 _ACTIVE_JOBS_SQL: LiteralString = (
-    "SELECT j.id FROM jobs j "
-    "WHERE j.state = ANY(%s) AND (j.payload->>'system_id' = %s "
-    "OR j.payload->>'run_id' IN (SELECT id::text FROM runs WHERE system_id = %s)) "
-    "ORDER BY j.id LIMIT %s"
+    "(SELECT j.id FROM jobs j "
+    "WHERE j.state = ANY(%s) AND j.payload->>'system_id' = %s LIMIT %s) "
+    "UNION "
+    "(SELECT j.id FROM jobs j "
+    "WHERE j.state = ANY(%s) AND j.payload->>'run_id' IN "
+    "(SELECT id::text FROM runs WHERE system_id = %s) LIMIT %s)"
 )
 
 _REPOSITORY = ExternalBootActivationRepository()
@@ -182,9 +197,29 @@ def _conflict(
     )
 
 
+def _unresolved(object_id: str, *, reason: str, detail: str, next_action: str) -> ToolResponse:
+    """A syntactically valid id that resolves to no visible row: ``not_found`` per errors.py.
+
+    ``domain/errors.py`` states the rule normatively (a malformed id stays
+    ``configuration_error``; one that resolves to nothing is ``not_found``), and ``runs.cancel``
+    already follows it for the same object kind. The seam is mixed elsewhere in the repo, but
+    this is new surface with no compatibility contract to preserve, and the category is what
+    tells an agent whether retrying can help: ``configuration_error`` reads as fix-and-retry for
+    a condition no retry changes. The disclosure property is unaffected — the missing and the
+    foreign case stay byte-identical either way, which is the whole point of one envelope.
+    """
+    return ToolResponse.failure(
+        object_id,
+        ErrorCategory.NOT_FOUND,
+        detail=detail,
+        suggested_next_actions=[next_action],
+        data={"reason": reason},
+    )
+
+
 def _unresolved_run(run_id: str) -> ToolResponse:
     """One envelope for a missing Run and for a Run in a project the caller does not hold."""
-    return _config_error(
+    return _unresolved(
         run_id,
         reason="unresolved_run",
         detail="run_id does not resolve to a Run available to this caller",
@@ -194,7 +229,7 @@ def _unresolved_run(run_id: str) -> ToolResponse:
 
 def _unresolved_system(system_id: str) -> ToolResponse:
     """One envelope for a missing System and for one the caller may not see."""
-    return _config_error(
+    return _unresolved(
         system_id,
         reason="unresolved_system",
         detail="system_id does not resolve to a System available to this caller",
@@ -219,10 +254,13 @@ def _bounded_ids(key: str, values: list[str]) -> dict[str, JsonValue]:
 async def _active_job_ids_for_system(conn: AsyncConnection, system_id: UUID) -> list[str]:
     """Every queued or running job for the System, whichever Run owns it, bounded to one page.
 
-    One row past ``_MAX_ERROR_ENTRIES`` is fetched so :func:`_bounded_ids` still sees that the
-    cap bit and marks the list ``truncated``; the refusal itself needs no exact count.
+    One row past ``_MAX_ERROR_ENTRIES`` is fetched *per arm* so :func:`_bounded_ids` still sees
+    that the cap bit and marks the list ``truncated``; the refusal itself needs no exact count.
+    Taking that many from each arm cannot under-report the cap: a page's worth of matches in
+    either arm alone already exceeds it.
     """
-    params = (_ACTIVE_JOB_STATES, str(system_id), system_id, _MAX_ERROR_ENTRIES + 1)
+    page = _MAX_ERROR_ENTRIES + 1
+    params = (_ACTIVE_JOB_STATES, str(system_id), page, _ACTIVE_JOB_STATES, system_id, page)
     async with conn.cursor() as cur:
         await cur.execute(_ACTIVE_JOBS_SQL, params)
         rows = await cur.fetchall()
@@ -248,6 +286,11 @@ async def request_release(
             run = await RUNS.get(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _unresolved_run(run_id)
+            require_role(ctx, run.project, Role.CONTRIBUTOR)
+            # Below `require_role`, so the module docstring's "resolve, authorize, admit" is
+            # literally true of every branch rather than only of the activation read. Nothing
+            # leaked while it sat above — bindedness is already viewer-readable through
+            # `runs.get` — but an ordering claim that holds for one branch is worse than none.
             if run.system_id is None:
                 return _config_error(
                     run_id,
@@ -255,7 +298,6 @@ async def request_release(
                     detail="this Run is bound to no System, so it holds no external boot",
                     next_action="runs.get",
                 )
-            require_role(ctx, run.project, Role.CONTRIBUTOR)
             return await _release_locked(conn, ctx, run, run.system_id)
 
 

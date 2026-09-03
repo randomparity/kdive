@@ -45,7 +45,9 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
     ``systems.teardown``, except while an uncleaned external-boot activation restricts that
     System (ADR-0583): the cancel is then denied with ``conflict``, because the System it would
     free is not free. An unbound Run (ADR-0169, ``system_id IS NULL``) has no System to free,
-    cancel touches none, and no activation can restrict it.
+    cancel touches none, and no activation can restrict it. A Run bound by a concurrent
+    ``runs.bind`` while this call was taking its locks returns ``conflict`` with
+    ``data.reason`` of ``run_binding_changed``; retry it.
 
     Args:
         pool: The connection pool.
@@ -89,6 +91,20 @@ async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -
         prior = locked.state if locked is not None else run.state
         if prior in _TERMINAL_RUN:
             return await _terminal_response(conn, run)
+        # ``run`` was read before any lock, so its ``system_id`` can already be stale: a
+        # concurrent ``runs.bind`` commits between that read and the RUN lock. Both the
+        # conditional SYSTEM lock above and the guard below are decided from it, so a Run that
+        # was unbound then and is bound now would cancel against a restricted System while
+        # holding neither. Re-deciding here would mean dropping and retaking both locks to keep
+        # SYSTEM ahead of RUN, so the stale read is reported as retryable instead.
+        if locked is not None and locked.system_id != run.system_id:
+            return ToolResponse.failure(
+                str(run.id),
+                ErrorCategory.CONFLICT,
+                detail="this Run's System binding changed while the cancel was taking its locks",
+                suggested_next_actions=["runs.cancel"],
+                data={"reason": "run_binding_changed"},
+            )
         # After the terminal-state return, so a retried cancel keeps its documented idempotent
         # success (or its ``conflict``): a cancel with nothing left to transition frees no System
         # either way, so denying it protects nothing. Only a cancel about to transition is guarded.

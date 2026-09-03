@@ -42,7 +42,7 @@ _STATE = ExternalBootActivationState
 _DIGEST = "sha256:" + "b" * 64
 _RESOLUTION = "restore-recorded-source"
 _UNAVAILABLE = "recovery_executor_unavailable"
-_ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot"]
+_ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot", "systems.teardown"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _AUTHORIZING = {"principal": "alice", "agent_session": None, "project": "proj"}
 _CAP = _MAX_ERROR_ENTRIES
@@ -286,8 +286,10 @@ def test_release_reports_a_missing_and_a_foreign_run_identically(migrated_url: s
         return missing, foreign
 
     missing, foreign = _drive(migrated_url, _body)
-    _assert_reason(missing, "configuration_error", "unresolved_run")
-    _assert_reason(foreign, "configuration_error", "unresolved_run")
+    # `not_found`, not `configuration_error`: domain/errors.py reserves the latter for a
+    # malformed id. Both cases stay byte-identical, which is what the envelope is for.
+    _assert_reason(missing, "not_found", "unresolved_run")
+    _assert_reason(foreign, "not_found", "unresolved_run")
     assert missing.detail == foreign.detail
     assert missing.data == foreign.data
 
@@ -321,8 +323,10 @@ def test_conflict_resolution_rejects_a_malformed_and_a_missing_system(migrated_u
         return malformed, missing
 
     malformed, missing = _drive(migrated_url, _body)
+    # The two halves of the errors.py rule, in one test: a malformed id is a caller mistake to
+    # fix, an id that resolves to nothing is `not_found` and no retry changes it.
     _assert_reason(malformed, "configuration_error", "invalid_uuid")
-    _assert_reason(missing, "configuration_error", "unresolved_system")
+    _assert_reason(missing, "not_found", "unresolved_system")
 
 
 def test_orphan_repair_rejects_a_missing_system(migrated_url: str) -> None:
@@ -335,7 +339,7 @@ def test_orphan_repair_rejects_a_missing_system(migrated_url: str) -> None:
             disposition="delete",
         )
 
-    _assert_reason(_drive(migrated_url, _body), "configuration_error", "unresolved_system")
+    _assert_reason(_drive(migrated_url, _body), "not_found", "unresolved_system")
 
 
 # --- admission ------------------------------------------------------------------------------

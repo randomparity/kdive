@@ -17,6 +17,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, _lock_key
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import ExternalBootActivationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
@@ -34,7 +35,7 @@ from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
-from kdive.mcp.tools.lifecycle.systems.snapshot import snapshot_system
+from kdive.mcp.tools.lifecycle.systems.snapshot import delete_snapshot, snapshot_system
 from kdive.mcp.tools.lifecycle.systems.ssh_access import authorize_ssh_key
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VmcoreHandlers
 from kdive.providers.ports.handles import SystemHandle, TransportHandle
@@ -54,7 +55,7 @@ from tests.services.external_boot.conftest import SeedActivation
 
 _STATE = ExternalBootActivationState
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot"]
+_ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot", "systems.teardown"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@kdive"
 
@@ -201,6 +202,29 @@ async def _snapshot(restricted: _Restricted) -> ToolResponse:
     )
 
 
+async def _delete_snapshot(restricted: _Restricted) -> ToolResponse:
+    """Its own case because three tools share `SYSTEM_SNAPSHOT`.
+
+    The forward gate is satisfied by any one of them, so without this the guard at
+    `snapshot.py` could be deleted and every closure gate in this change would stay green.
+    """
+    resolver = _resolver()
+    return await with_runtime_for_system(
+        restricted.pool,
+        resolver,
+        _ctx(),
+        restricted.system_id,
+        lambda runtime: delete_snapshot(
+            restricted.pool,
+            _ctx(),
+            runtime,
+            system_id=restricted.system_id,
+            name="snap-1",
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
 async def _create_other_run(restricted: _Restricted) -> ToolResponse:
     investigation_id = await runs_support.seed_investigation(restricted.pool)
     return await runs_support.create(
@@ -324,6 +348,7 @@ _READY_DENIED: dict[str, Callable[[_Restricted], Awaitable[ToolResponse]]] = {
     "control.power": _power,
     "control.diagnostic_sysrq": _sysrq,
     "systems.snapshot": _snapshot,
+    "systems.delete_snapshot": _delete_snapshot,
     "systems.reprovision": _reprovision,
     "systems.authorize_ssh_key": _authorize_ssh_key,
     "control.capture_traffic": _capture_traffic_other_run,
@@ -793,6 +818,61 @@ def test_a_boot_does_not_cross_a_restriction_committed_mid_flight(
     response, enqueued = asyncio.run(_run())
     _assert_denied(response, _ACTIVE_ACTIONS)
     assert enqueued == 0
+
+
+def test_a_cancel_refuses_a_run_bound_after_its_pre_lock_read(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    """`runs.cancel` decides its SYSTEM lock and its guard from a read taken before any lock.
+
+    A Run that was unbound at that read and is bound by the time the RUN lock is acquired would
+    otherwise take neither the lock nor the guard, and cancel against a restricted System. The
+    barrier is a test-only ``pg_advisory_xact_lock`` on the RUN key, not a sleep: the writer
+    holds the key, commits the binding, and releases it at commit, so the cancel is guaranteed
+    to have read the Run unbound and to see it bound once it gets the lock.
+    """
+
+    async def _run() -> tuple[ToolResponse, str | None]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            restricted = await _restricted_ready_system(conn_pool, seeded_activation)
+            investigation_id = await runs_support.seed_investigation(conn_pool)
+            run_id = await _insert_run(
+                conn_pool,
+                investigation_id=UUID(investigation_id),
+                system_id=None,
+                state=RunState.CREATED,
+            )
+            run_key = _lock_key(LockScope.RUN, UUID(run_id))
+            barrier_taken = asyncio.Event()
+
+            async def _bind_under_the_barrier() -> None:
+                writer = await psycopg.AsyncConnection.connect(migrated_url)
+                async with writer, writer.transaction():
+                    await writer.execute("SELECT pg_advisory_xact_lock(%s)", (run_key,))
+                    barrier_taken.set()
+                    # Let the cancel take its pre-lock read of the still-unbound Run, then
+                    # commit exactly what `runs.bind` commits.
+                    await asyncio.sleep(0)
+                    await writer.execute(
+                        "UPDATE runs SET system_id = %s WHERE id = %s",
+                        (UUID(restricted.system_id), UUID(run_id)),
+                    )
+
+            async def _cancel() -> ToolResponse:
+                await barrier_taken.wait()
+                return await cancel_run(conn_pool, _ctx(), run_id)
+
+            _, response = await asyncio.gather(_bind_under_the_barrier(), _cancel())
+            async with conn_pool.connection() as conn:
+                cur = await conn.execute("SELECT state FROM runs WHERE id = %s", (UUID(run_id),))
+                row = await cur.fetchone()
+            return response, None if row is None else str(row[0])
+
+    response, state = asyncio.run(_run())
+    assert response.error_category == "conflict", response.model_dump()
+    assert response.data["reason"] == "run_binding_changed"
+    # The whole point: the Run is not canceled behind the guard's back.
+    assert state == RunState.CREATED.value
 
 
 def test_an_install_admitted_before_the_activation_still_replays(

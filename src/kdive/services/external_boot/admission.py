@@ -115,11 +115,20 @@ _OWNING_RUN_SCOPED = frozenset(
     }
 )
 
-_STATE_NEXT_ACTION: Mapping[ExternalBootActivationState, str] = {
-    ExternalBootActivationState.ACTIVE: "runs.release_external_boot",
-    ExternalBootActivationState.RECOVERY_CONFLICT: "systems.teardown",
-    ExternalBootActivationState.RECOVERY_FAILED: "systems.teardown",
+# `systems.teardown` rides alongside the release in `active` because, until #2118 installs the
+# recovery executor, `runs.release_external_boot` refuses every call — steering a denied caller
+# at it alone is a breadcrumb to a tool that changes nothing. Teardown is in `_ALWAYS_ADMITTED`,
+# so it is the one exit that works in every restricting state.
+_STATE_NEXT_ACTIONS: Mapping[ExternalBootActivationState, tuple[str, ...]] = {
+    ExternalBootActivationState.ACTIVE: ("runs.release_external_boot", "systems.teardown"),
+    ExternalBootActivationState.RECOVERY_CONFLICT: ("systems.teardown",),
+    ExternalBootActivationState.RECOVERY_FAILED: ("systems.teardown",),
 }
+
+# `systems.teardown` is project ADMIN, so ADR-0261 filtering strips it from a CONTRIBUTOR's
+# breadcrumbs and leaves a bare `runs.get` — a denial with no reachable next action and no hint
+# that escalation is what is missing. The detail says so in words, which no filter removes.
+_ESCALATION_HINT = "systems.teardown is admitted in every restricting state and needs project ADMIN"
 
 # The `data.reason` every matrix denial carries, matching the convention the recovery contracts
 # set (`no_active_activation`, `system_job_active`, `debug_session_active`, ...). A bounded
@@ -153,17 +162,17 @@ async def check_external_boot_admission(
         operation not in _OWNING_RUN_SCOPED or run_id == activation.run_id
     ):
         return
-    next_action = _STATE_NEXT_ACTION.get(activation.state)
+    next_actions = _STATE_NEXT_ACTIONS.get(activation.state, ())
     raise ExternalBootDenied(
         f"{operation.value} is denied while external-boot activation {activation.id} "
-        f"holds System {system_id} in {activation.state.value}",
+        f"holds System {system_id} in {activation.state.value}; {_ESCALATION_HINT}",
         details={
             "reason": DENIAL_REASON,
             "activation_id": str(activation.id),
             "activation_state": activation.state.value,
             "owning_run_id": str(activation.run_id),
         },
-        next_actions=["runs.get"] if next_action is None else ["runs.get", next_action],
+        next_actions=["runs.get", *next_actions],
         project=project,
     )
 
