@@ -10,8 +10,10 @@ The change is tests only. No `src/` file changes, no schema, no dependency, no m
 ADR. The libvirt-discards fact this design rests on is recorded by #2157; this design records only
 how the double models it and how the modelling is proved.
 
-Migrating the nine existing test modules that carry their own local `createXML` double belongs to
-the children of #2129 that own those modules, not here.
+Migrating the six existing modules under `tests/providers/remote_libvirt/` that carry their own
+local storage `createXML` double belongs to the children of #2129 that own those modules, not here.
+A seventh storage double outside this provider (`tests/diagnostics/test_base_image_staging.py`) has
+no such owner and is reported rather than adopted; see *Considered and rejected*.
 
 The implementation targets x86_64 and ppc64le. x86_64 work and verification complete first; the
 native ppc64le proof is deferred to a separate later run on native POWER hardware.
@@ -172,6 +174,20 @@ are rendered, which is what the live-tier comparison checks. `info()` returns
 | a present, non-empty `capacity/@unit` outside the suffix table | `VIR_ERR_INVALID_ARG` | 8 |
 
 An *absent* or empty `unit` is accepted, not refused, and the double must not confuse the two.
+
+**Volume name length is deliberately not a sixth refusal.** ADR-0588 makes the volume name the
+durable ownership channel and records that a dir-pool name round-trips to 255 bytes and is refused
+at 256, so the question of whether this double should model that refusal is live rather than
+academic. It should not. Observed on this host: a 255-byte name is created and reads back
+byte-identically, and a 256-byte name fails with `VIR_ERR_SYSTEM_ERROR` (code 38) and the message
+`Failed to create file ...: File name too long`. That is the filesystem's `NAME_MAX` refusing
+`open()` after libvirt parsed the document — the same code-38 shape as a capacity that will not fit
+the disk, and the same class as `allocation` or `timestamps`. `NAME_MAX` is a property of whatever
+filesystem the pool target sits on, so a double asserting a 255-byte boundary would be asserting a
+host fact it cannot know. The five modelled refusals are the ones libvirt decides itself: four
+parse refusals (codes 27 and 8) and the duplicate-name refusal (code 90), which is libvirt's own
+object-identity rule. ADR-0588's grammar renders at most 135 bytes, leaving 120 bytes of headroom,
+so nothing in the ownership channel approaches the boundary.
 
 The duplicate-name refusal is the one with a production consumer:
 `src/kdive/providers/remote_libvirt/lifecycle/storage.py` guards `ensure_named_overlay` with an
@@ -463,6 +479,17 @@ to fail that way is not modelling the discard.
 - **Write an ADR.** verified: the decision record for the libvirt-discards fact is ADR-0588, owned
   by #2157, and the campaign assigned no ADR number to #2164. The decisions here are test-fixture
   interface choices recorded above, not architecture.
-- **Do nothing.** verified: nine test modules under `tests/` define their own `createXML` double
-  and `tests/providers/remote_libvirt/fakes.py` models no storage at all, so the class of defect
-  that shipped green on #2129's branch is reintroducible today with no red test.
+- **Do nothing.** verified: `rg -ln 'def createXML' tests/` returns nine modules, but they are not
+  one population and the count is worth stating precisely. **Six** are storage-volume doubles inside
+  this provider — `lifecycle/test_provisioning.py:654`, `lifecycle/test_storage.py:81`,
+  `reaping/test_domains.py:325`, `test_boot_artifact_volumes.py:82`, `test_staged_volumes.py:51`,
+  `test_volume_upload.py:77` — and those are the ones the children of #2129 migrate. A **seventh**
+  storage-volume double sits outside the provider at `tests/diagnostics/test_base_image_staging.py:160`;
+  it discards the document entirely (`del xml, flags`), so it does not echo, but it models nothing
+  either, and no child of #2129 owns it. The remaining **two** —
+  `tests/providers/local_libvirt/lifecycle/rootfs/test_customization_boot.py:86` and
+  `tests/testing/test_live_vm.py:227` — are `virConnect.createXML` domain doubles, a different API
+  that this issue's defect class does not touch; the `local_libvirt` one is barred from adopting
+  this double by ADR-0076 regardless. Against the six, plus a
+  `tests/providers/remote_libvirt/fakes.py` that models no storage at all, the class of defect that
+  shipped green on #2129's branch is reintroducible today with no red test.
