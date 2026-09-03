@@ -1817,6 +1817,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Create the verdict cache dir before writing to it
 - Name the cause when guestfish never runs
 - Refuse an empty userland contract and sharpen the cache key
+- Stop the gate invocation masking a failed exit code
 
 ### Security
 
