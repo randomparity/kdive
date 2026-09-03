@@ -359,7 +359,12 @@ def seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     def require(setting: object) -> object:
         if setting is composition.LIBVIRT_RECOVERY_ROOT:
-            return recovery_root
+            # A *fresh, equal* Path per call, deliberately. Returning the one object would
+            # make `is` identity hold whether the builder resolved the setting once or
+            # twice, so the single-resolution test could not fail -- fault injection caught
+            # exactly that. A distinct object per resolution is also what the real
+            # `config.require` produces, since it re-parses the setting.
+            return Path(str(recovery_root))
         if setting is composition.LIBVIRT_URI:
             return "qemu:///session"
         raise AssertionError(f"unexpected setting: {setting}")
@@ -452,4 +457,6 @@ def test_configuration_comes_only_from_the_composition_seam(
     # The builder takes no parameters, so no caller can inject configuration into it.
     assert inspect.signature(composition.build_external_boot_session_mechanisms).parameters == {}
     # And the value it constructs them with is the one config.require returned.
-    assert composition.build_external_boot_session_mechanisms().recovery_root is seam
+    # Equality, not identity: the seam hands out a fresh Path per resolution (see the
+    # fixture), and what this asserts is provenance -- the value came from require.
+    assert composition.build_external_boot_session_mechanisms().recovery_root == seam
