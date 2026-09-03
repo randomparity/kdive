@@ -16,14 +16,14 @@ dependency.
 Design: [spec](../specs/2026-09-03-local-external-boot-session-mechanisms-design.md),
 [ADR-0591](../../adr/0591-local-external-boot-session-mechanisms-bind-to-the-recovery-root.md).
 
-Expected implementation size: 800–1050 changed lines (L) — derived from the file map and task list
-below: ~290 lines of new production module (five mechanisms, the canonical-UUID guard, the
-`ValueError`-wrapping walk, and the readiness redactor), ~45 lines in `composition.py` (the builder
-plus the `LocalExternalBootMechanisms` result), ~570 lines of new tests across Tasks 1–5, and ~65
-lines added to `test_composition.py`. Revised twice: 600–850 in the first revision, 700–950 after
-round 1 added five tests, and 800–1050 after round 2 added Task 2a's readiness redactor with its
-three tests, Task 3's blocked-while-active companion, and the provenance-based rewrite of the
-criterion-8 test.
+Expected implementation size: 700–950 changed lines (L) — derived from the file map and task list
+below: ~260 lines of new production module (five mechanisms, the canonical-UUID guard, and the
+`ValueError`-wrapping walks for both the artifact root and cleanup's own root open), ~45 lines in
+`composition.py` (the builder plus the `LocalExternalBootMechanisms` result), ~520 lines of new
+tests across Tasks 1–5, and ~65 lines added to `test_composition.py`. Revised three times: 600–850
+initially, 700–950 after round 1 added five tests, 800–1050 after round 2 added a readiness
+redactor, and back to 700–950 after round 3 deleted that redactor (routed to #2220) and the
+foreign-root test (no failing input).
 
 ## Global Constraints
 
@@ -81,10 +81,8 @@ class LocalPayloadCleanup:
     def cleanup(self, root_fd: int, binding: ExternalBootActivationBinding) -> None: ...
 
 def open_libguestfs_guest() -> _Guest: ...
-def redacted_readiness(system_id: UUID) -> ReadinessResult: ...
 
 PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
-READINESS_PROBE_FAILURES: frozenset[str]   # the closed set redacted_readiness may report
 
 # composition.py
 @dataclass(frozen=True, slots=True)
@@ -239,20 +237,6 @@ Steps:
    therefore **not claimed as covered** — the spec says so explicitly, and no test may imply
    otherwise by skipping. A `pytest.mark.skipif(os.geteuid() != 0)` test is worse than none here:
    it never runs in CI while reading, in the file, as though the case were covered.
-6a. Write `test_open_is_confined_to_its_constructed_root`. The obvious version of this test **cannot
-   fail** and must not be written: asserting that a `LocalArtifactRoot` constructed on root A opens
-   under A rather than under an unrelated root B is true of every implementation consistent with the
-   constructor, because nothing in the call path can name B. Asserting it would repeat, one level
-   up, the tautological-gate error ADR-0591 rejects `recovery_directory_name` for.
-
-   Write the version with a failing input instead: construct on A, create A's `<system_id>/<run_id>`
-   tree **and** an identical tree under B, then `chmod` A's root to `0o755`. Assert (i) the
-   resolution raises `ValueError`, and (ii) B's tree is untouched — no descriptor opened under it,
-   verified by comparing B's subtree `st_atime`/contents before and after, or by asserting the
-   raised error rather than a successful open. An implementation that fell back to a second root,
-   or that resolved the setting a second time at call time instead of using the constructed value,
-   goes red here; the current design goes green. That is charter criterion 4's confinement case with
-   an input that can actually distinguish the two.
 7. Write `test_open_refuses_a_root_that_is_not_a_directory` and
    `test_open_refuses_a_missing_root` → `NotADirectoryError` / `FileNotFoundError`.
 8. Write `test_open_leaks_no_descriptor_on_failure`: capture `len(os.listdir("/proc/self/fd"))`
@@ -271,40 +255,6 @@ Steps:
 
 **Acceptance.** Every component is re-validated; symlink, mode, owner, missing and non-canonical
 cases each refuse; no descriptor leaks; the message names no host path.
-
-## Task 2a — the redacting readiness wrapper
-
-**Modifies** `session_mechanisms.py` (adds `redacted_readiness` and `READINESS_PROBE_FAILURES`).
-**Tests** `test_session_mechanisms.py::TestRedactedReadiness`. Nothing in `readiness.py` or
-`install.py` changes.
-
-1. Write `test_redacted_readiness_drops_libvirt_text_and_host_paths`: stub the wrapped probe to
-   return `ReadinessResult(answered=False, ok=False, probe_error="error: Failed to connect socket "
-   "to '/run/libvirt/libvirt-sock': No such file or directory")`, and assert the wrapper's result
-   has the same `answered` and `ok` but a `probe_error` that (i) is one of the closed set, (ii)
-   contains no `/`, and (iii) contains neither `libvirt` nor `socket`. Assert on the *absence* of
-   the substrings, not merely that the value changed — a wrapper that returned a different leaky
-   string would otherwise pass.
-2. Run the file; expect FAIL on the missing name, then on the assertion once the stub exists.
-3. Implement `redacted_readiness(system_id)`: call `_real_readiness(system_id)`, return it unchanged
-   when `probe_error is None`, otherwise `result._replace(probe_error=<classification>)`.
-   `ReadinessResult` is a `NamedTuple`, so `_replace` is its documented API. The classification is
-   drawn from a module-level closed set — probe timed out, probe tool absent, hypervisor
-   unreachable, probe exited non-zero — chosen by matching the *shape* the probe already
-   distinguishes, never by substring-matching guest or hypervisor text into the message.
-4. Re-run; expect `1 passed`.
-5. Write `test_redacted_readiness_passes_through_answered_and_ok`: for
-   `ReadinessResult(True, True, None)` the wrapper returns an equal value, so no readiness semantics
-   change. Re-run.
-6. Write `test_redacted_readiness_classification_is_closed`: every value the wrapper can produce for
-   `probe_error` is in `READINESS_PROBE_FAILURES`, asserted by driving each branch. This is what
-   stops a later edit reintroducing interpolated text.
-7. `just lint`; `just type`; commit
-   `feat(local-libvirt): redact the external-boot readiness probe error`.
-
-**Acceptance.** `answered`/`ok` are untouched; `probe_error` is always a closed-set value;
-`readiness.py` and `install.py` are unmodified, so the existing boot-failure diagnostics keep their
-full text.
 
 ## Task 3 — payload cleanup, and the archive it must remove
 
@@ -335,11 +285,22 @@ Steps:
    doubles, bind `cleanup_payloads=LocalPayloadCleanup(root).cleanup`, and call
    `session.cleanup_payloads()`.
 
-   **Use `prior_power="inactive"` for this proof.** The helper's default is `"running"`, and for
-   that value `restore_power` leaves the domain active, so `require_inactive()` raises before any
-   deletion and finalization is unreachable for a reason above this change (Task 3 step 4a records
-   that case separately). A proof built on the default would fail for the wrong reason and invite
-   "fixing" it by bypassing the gate.
+   **The domain double must be inactive.** What gates cleanup is
+   `require_inactive()` reading the *domain's* live state, not `prior_power` — that field is
+   recovery metadata and reaches none of this code path. So set the `Domain` double inactive; keep
+   `prior_power="inactive"` only for `_metadata_extends_intent` consistency, and do not claim the
+   field is what makes the test pass.
+
+   **Use ONE binding on both sides.** This is the trap that would make the proof silently vacuous.
+   `test_session.py` defines `BINDING` as `1111…`/`2222…`/`3333…`; `test_external_boot.py` defines
+   `_BINDING` as `0000…-0001`/`-0002`/`-0003`. `_ConcreteSession.cleanup_payloads` passes
+   `self._binding` — which comes from the pinned lease, i.e. the *session* file's binding — while
+   the store was driven by the *external_boot* file's helpers, so the archive removal would target a
+   directory that never existed, hit the idempotence rule, and report success. Reconcile toward
+   `_BINDING`: `_point(metadata)` builds `recovery_ref` from `_BINDING` regardless of
+   `metadata.binding`, so overriding the metadata's binding does not help. Build a local lease and
+   `ExpectedOperationOwnership` carrying `_BINDING` rather than reusing `FakeLease`/`LANE`/
+   `_expected()`, all of which hard-code `test_session.BINDING`.
 
    - `reference = store.publish_pre_stop(intent)` where `intent` is a `LocalPreStopIntentV1`.
      Reuse the helpers in `tests/providers/local_libvirt/test_external_boot.py` — note the path:
@@ -370,13 +331,19 @@ Steps:
 
    Assert `finalize_tombstone` returns without raising and that the recovery directory no longer
    exists.
-4a. Write `test_cleanup_is_blocked_while_the_domain_is_active`, the companion that makes the
-   limitation visible in the suite instead of only in the ADR. Same setup with
-   `prior_power="running"` and an **active** domain double; assert `session.cleanup_payloads()`
-   raises `RuntimeError` matching `"domain must be inactive"`, that the payloads are still present,
-   and that no tombstone was written. This documents that `finalize_tombstone` stays unreachable for
-   a restored-to-running System for a reason one layer above this change, and it goes red if anyone
-   later narrows that gate without revisiting the ADR's reachability claim.
+4a. Write `test_cleanup_is_blocked_while_the_domain_is_active`, the companion that makes the gate
+   visible in the suite. Same setup with an **active** domain double; assert
+   `session.cleanup_payloads()` raises `RuntimeError` matching `"domain must be inactive"`, that the
+   payloads are still present, and that no tombstone was written. It goes red if anyone narrows that
+   gate without revisiting the ADR's reachability claim.
+
+   **State what it does and does not prove.** It proves the gate fires on an active domain. It does
+   **not** exercise `restore_power`, so it does not demonstrate the link from
+   `prior_power == "running"` to an active domain at cleanup time — that link is established by
+   reading `restore_power`, whose `"running"` arm reaches `record_phase(..., "recovered")` only from
+   the branch requiring `active`. Do not describe this test as proving the `prior_power`
+   consequence. Closing that gap needs an integration-level test over the whole
+   recover → cleanup path, which is recorded as a residual rather than written here.
 5. Run it against the **current** descriptor-scoped implementation. Expect it to FAIL with
    `ValueError: cleanup tombstone directory contains unexpected payload`. Record that exact output
    — it is the demonstrated defect, and this step is the one that must not be skipped.
@@ -404,23 +371,29 @@ Steps:
 
     Read `TargetProjectionV1`'s annotations instead, which are genuinely introspectable:
 
+    **Discover the fields, do not list them.** A hard-coded list of `kernel_filename` /
+    `modules_filename` / `initrd_filename` catches a *rename* of those three and misses an *added*
+    fourth artifact entirely — a new `dtb_filename: Literal["dtb"]` would never enter `expected`,
+    the equality would still hold, and cleanup would silently stop removing it. Iterate every field
+    whose name ends `_filename`:
+
     ```python
     from typing import get_args
-    fields = TargetProjectionV1.model_fields
-    expected = {
-        get_args(fields["kernel_filename"].annotation)[0],
-        get_args(fields["modules_filename"].annotation)[0],
-        # initrd_filename is `Literal["initrd"] | None`
-        get_args(get_args(fields["initrd_filename"].annotation)[0])[0],
-    }
+    expected = set()
+    for name, field in TargetProjectionV1.model_fields.items():
+        if not name.endswith("_filename"):
+            continue
+        args = get_args(field.annotation)
+        # Literal["x"] -> ("x",);  Literal["x"] | None -> (Literal["x"], NoneType)
+        expected.add(args[0] if isinstance(args[0], str) else get_args(args[0])[0])
+    assert expected, "no _filename fields discovered — the unwrapping is wrong"
     assert set(PAYLOAD_NAMES) == expected
     ```
 
-    Confirm the exact unwrapping against the branch before relying on it — the `| None` arm makes
-    the nesting easy to get wrong, and a `get_args` expression that silently yields an empty set
-    would make this pass vacuously. Because cleanup treats a missing name as success, a projection
-    that renames or adds an artifact would otherwise make cleanup skip it silently; this is what
-    turns that into a red.
+    The non-empty assertion is not decoration: a `get_args` expression that silently yields an empty
+    set would make the equality vacuous, which is the failure mode this whole test exists to
+    prevent. Confirm the unwrapping against the branch before relying on it — the `| None` arm makes
+    the nesting easy to get wrong.
 12. `just lint`; `just type`; commit
     `feat(local-libvirt): remove the activation recovery archive on cleanup`.
 
@@ -500,7 +473,7 @@ Steps:
    described. This is the only in-change control on the #2212 divergence, and it must be a real
    assertion on the built object, not a comment.
 5b. Add `test_production_builder_binds_readiness_and_open_guest`: assert by identity that the built
-   factory's `_readiness is redacted_readiness` and `_open_guest is open_libguestfs_guest`. Without
+   factory's `_readiness is _real_readiness` and `_open_guest is open_libguestfs_guest`. Without
    this, dropping either argument leaves the class falling back to `_unconfigured_readiness` and
    nothing goes red.
 5c. Add `test_configuration_comes_only_from_the_composition_seam` (charter criterion 8).
@@ -571,6 +544,11 @@ every new test has a recorded fault-injection pair.
 
 ## Task 6 — guardrails
 
+0. **Flip ADR-0591 to `Accepted` in the first commit that cites it from `src/`.** It is `Proposed`
+   while this is design-only, per the README ratification rule. But `check_adr_status.py`'s second
+   invariant fails a `Proposed` ADR cited from `src/` or `tests/`, so the status flip must land in
+   the same commit that adds the citing module docstring — Task 1's. Flipping it later leaves
+   `just ci` red in between; flipping it earlier reinstates the finding this fixed.
 1. `npm ci --prefix .github/scripts/mermaid-check` if this worktree has not run it.
 2. `just ci > /tmp/<scratch>/ci-final.log 2>&1 < /dev/null` — **bare**, no pipe, no
    `; echo $?`. Expect exit 0.
@@ -589,18 +567,25 @@ requirements were unmapped; this table is checkable line by line instead.
 | 1 — `RunningObserver` not bound, keeps `_unconfigured_observation` | T4.7, T5.1 (`test_unconfigured_observation_raises`) |
 | 2 — three fail-closed defaults, independently, plus identity | T5.1, T5.2 |
 | 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
-| 4 — artifact root confined; foreign root, symlink, traversal refused | T2.5 (symlink, both components), **T2.6a (foreign root)**, T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical) |
+| 4 — artifact root confined; symlink, wide mode, non-directory, traversal refused | T2.5 (symlink, both components), T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical). **"Cannot be pointed at another root" is NOT discharged by a test** — see below |
 | 5 — cleanup removes payloads **and** the archive; bounded; idempotent | T3.1, T3.6, T3.7, T3.8, T3.9, T3.10 |
 | 6 — `open_guest` returns `_Guest`; guest access refused while active via the existing path | T4.2, T4.3 |
-| 7 — `readiness` returns `ReadinessResult` from a real read; failure carries no libvirt text or host path | **T2a** (`redacted_readiness` replaces `probe_error` with a closed-set classification); binding asserted at **T4.5b** |
+| 7 — `readiness` returns `ReadinessResult` from a real read | reuse of `_real_readiness` unchanged; binding asserted at **T4.5b**. The "no libvirt text, no host path" half is **NOT discharged here** — `_real_readiness` leaks raw `virsh` stderr and this change does not wrap it. Owner **#2220** |
 | 8 — no mechanism takes configuration from protocol input | **T4.5c** |
 | 9 — `ProviderRuntime.external_boot` still `None` | T4.6 |
 | 10 — guardrails pass | Task 6 |
 | 11 — bite proof: `finalize_tombstone` fails descriptor-scoped, passes fixed | T3.4 (operands named), T3.5 (**record the failure**), T3.7 |
 
-Three steps are bold because they did not exist in the first revision of this plan: the readiness
-binding assertion, the foreign-root test, and the constructor-shape test for criterion 8. The
-single-root control (T4.5a) and the payload-name coupling (T3.11) are likewise new.
+**Criterion 4's "cannot be pointed elsewhere" half has no test, deliberately.** Two attempts were
+written and both were deleted for having no failing input: no implementation consistent with
+`LocalArtifactRoot(recovery_root)` can open a root the constructor was never given, so any assertion
+that it does not is true of every such implementation. Writing it would repeat, one level up, the
+tautological-gate error ADR-0591 rejects `recovery_directory_name` for. The property is
+**structural** — the constructed `Path` is the only root the mechanism can name, and T4.5c asserts
+the builder is its only construction site and that the value comes from
+`config.require(LIBVIRT_RECOVERY_ROOT)`. What the tests above discharge is that the root is
+*re-validated on every open*: symlink, wide mode, non-directory and non-canonical inputs each
+refuse. Saying the criterion is fully test-discharged would be the over-claim; it is not.
 
 Names are consistent across the Interfaces block and every task that uses them: `PAYLOAD_NAMES`,
 `LocalOperationLane.pin`, `LocalArtifactRoot.open`, `LocalPayloadCleanup.cleanup`,
@@ -622,14 +607,14 @@ all public, matching the spec, since #2212 is a named consumer of several of the
   resolved value so a mismatch requires discarding it rather than merely forgetting an invariant,
   but #2212 could still re-resolve the setting itself. This is the residual, and it is the reason
   the value is returned at all.
-- **`_real_readiness` leaks raw libvirt stderr, including host paths, to its other caller — owner:
-  routing pending.** `_bounded_probe_error` truncates to 200 characters and redacts nothing, so an
-  unreachable hypervisor puts `error: Failed to connect socket to '<host path>': ...` into
-  `probe_error`, which `LocalLibvirtInstall` places in a boot-failure `details` payload. This change
-  wraps the probe for the external-boot path only (Task 2a) and modifies neither `readiness.py` nor
-  `install.py`, so the pre-existing exposure on the install path is untouched and is reported rather
-  than inherited silently. Deciding it means choosing between operator diagnostics and redaction for
-  a consumer outside this surface.
+- **`_real_readiness` leaks raw libvirt stderr, including host paths — owner #2220.**
+  `_bounded_probe_error` truncates to 200 characters and redacts nothing, so an unreachable
+  hypervisor puts `error: Failed to connect socket to '<host path>': ...` into `probe_error`, which
+  `LocalLibvirtInstall` places in a boot-failure `details` payload. This change passes
+  `_real_readiness` through **unchanged** and modifies neither `readiness.py` nor `install.py`, so
+  criterion 7's redaction half is not discharged here and this plan does not claim it is. #2220 owns
+  it with the whole call path in view. Nothing on the external-boot path can leak before #2220 lands
+  anyway: the factory has no `src/` caller until #2212.
 - **Narrow or justify `_ConcreteSession.cleanup_payloads`'s `require_inactive()` gate — owner:
   routing pending.** The gate blocks cleanup for any System restored to running, so
   `finalize_tombstone` stays unreachable for `prior_power == "running"` regardless of how

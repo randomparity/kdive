@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-09-03)
+Proposed (2026-09-03)
 
 ## Context
 
@@ -240,6 +240,15 @@ advertisement still requires both.
   "tombstone.json"]` after cleanup, so `finalize_tombstone` raises "cleanup tombstone directory
   contains unexpected payload" for every activation with a module archive. Since this change is
   what first binds the mechanism, shipping that is creating the defect, not inheriting it.
+- **Remove `modules.tar` inside `RecoveryMetadataStore.finalize_tombstone` instead.** verified:
+  that method already holds a validated descriptor on the exact recovery directory and already
+  unlinks `tombstone.json` and `rmdir`s the directory there, so the removal would happen inside the
+  component that owns the directory, under the guard it already applies — with no deletion outside a
+  handed-in descriptor, no second root to keep in step, and no `recovery_root` plumbing obligation
+  for #2212. It is arguably the natural home, and it is unavailable here for a scope reason rather
+  than a technical one: this change's frozen scope declares `RecoveryMetadataStore` complete and out
+  of scope. Recorded so this list is not read as an exhaustive account of where the removal could
+  live; it is an account of where it could live **within this change's surface**.
 - **Have `cleanup_payloads` sweep the recovery directory of everything but `intent.json`.**
   judgment: a deletion outside the handed descriptor whose extent is defined by exclusion is
   unbounded by construction; an exact name is checkable and a sweep is not.

@@ -27,7 +27,7 @@ Five of the six mechanism aliases gain implementations. The sixth does not, deli
 | --- | --- | --- |
 | `PinOperationLease` | new `LocalOperationLane.pin` | none — the lane's own invariants |
 | `OpenArtifactRoot` | new `LocalArtifactRoot.open` | `KDIVE_LIBVIRT_RECOVERY_ROOT` at construction |
-| `OpenGuest` | new `_open_libguestfs_guest` | none — constructs a libguestfs handle |
+| `OpenGuest` | new `open_libguestfs_guest` | none — constructs a libguestfs handle |
 | `ReadinessProbe` | existing `_real_readiness`, reused unchanged | `KDIVE_LIBVIRT_URI` inside the probe |
 | `CleanupPayloads` | new `LocalPayloadCleanup.cleanup` | `KDIVE_LIBVIRT_RECOVERY_ROOT` at construction |
 | `RunningObserver` | **not bound** — keeps `_unconfigured_observation` | n/a; owner #2212 |
@@ -181,10 +181,19 @@ Two bounded removals, in order:
    name is treated as success, a future projection that renames or adds an artifact would make
    cleanup silently remove nothing for it. A test therefore couples the tuple to that admitted set
    rather than restating it, so drift goes red instead of going quiet.
-2. Open `<recovery_root>/<binding.system_id>.<binding.activation_id>` through
-   `_open_private_directory`, then unlink `modules.tar` by exact name. `FileNotFoundError` on the
-   unlink is success. `FileNotFoundError` on the *directory* is also success: an activation whose
-   recovery directory never existed has no archive.
+2. Open the **recovery root itself** — `os.open(self._root, O_RDONLY|O_DIRECTORY|O_NOFOLLOW)`
+   followed by `_require_private_owned_directory(root_fd, "recovery root")` — then resolve
+   `<system_id>.<activation_id>` relative to it with `_open_private_directory(root_fd, name)`, then
+   unlink `modules.tar` by exact name. Both descriptors are closed in `finally`.
+   `FileNotFoundError` on the unlink is success. `FileNotFoundError` on the *directory* is also
+   success: an activation whose recovery directory never existed has no archive.
+
+   The root's own open is stated here because it is on the **deleting** path and an earlier
+   revision left it unspecified, mentioning only the child open. Without `O_NOFOLLOW` an `os.open`
+   of the root path follows a symlink, so an attacker-substituted root would be opened and then
+   deleted from; without the re-validation the mechanism would trust that the root is still what
+   startup checked, which the read path explicitly refuses to do. Both controls apply identically
+   here, and the same `ValueError ... from None` wrapping keeps the path out of the message.
 
 No recursion, no glob, no `listdir`-driven removal, no name the mechanism did not write literally.
 The recovery-directory name is built from the binding's own `system_id` and `activation_id`, both
@@ -259,35 +268,30 @@ mounts nothing: `_ConcreteSession._open_guest_context` does all of that, and doe
 checks — the session's `require_inactive` path is the single fence, and a second check in the
 opener would be a second place to get it wrong.
 
-### `redacted_readiness`, wrapping `_real_readiness`
+### `_real_readiness`, reused unchanged
 
 `_real_readiness` is already `Callable[[UUID], ReadinessResult]` and already the production probe
 wired at `LocalLibvirtInstall.from_env`. It resolves `KDIVE_LIBVIRT_URI` itself and tails the
-truncated console log. It is **not** passed through unchanged, for one reason:
+truncated console log. It is imported and passed through **unchanged** — not reimplemented, not
+wrapped.
 
-`_bounded_probe_error` bounds *length* and nothing else — it is `message[:200]`. `_domain_exit_probe`
-forwards `proc.stderr` verbatim into `probe_error`, so an unreachable hypervisor yields text like
-`error: Failed to connect socket to '<host socket path>': No such file or directory` — raw libvirt
-text and a host filesystem path, well inside 200 characters. That is exactly the "unreachable
-domain" case criterion 7 names, and criterion 7 requires a bounded failure carrying no raw libvirt
-text and no host path.
+**Criterion 7's redaction half is not discharged here, and this design does not claim it is.**
+`_bounded_probe_error` bounds *length* and nothing else — it is `message[:200]`.
+`_domain_exit_probe` forwards `proc.stderr` verbatim into `probe_error`, so an unreachable
+hypervisor yields raw libvirt text and a host filesystem path, well inside 200 characters. That is
+a real exposure and it is **owned by #2220**, which holds the whole call path in view and has an
+explicit brief to weigh redaction against operator diagnosability.
 
-So this change wraps it: `redacted_readiness(system_id)` calls `_real_readiness` and returns the
-result with `probe_error` replaced by a fixed classification — one of a small closed set of
-strings naming *what* failed (probe timed out, probe tool absent, hypervisor unreachable, probe
-exited non-zero) and never the underlying text. `answered` and `ok` pass through untouched, so no
-readiness semantics change.
+An earlier revision of this design added a redacting wrapper for the external-boot path only. It is
+withdrawn. It was a second, narrower answer to a question #2220 owns, it could not derive its
+classification from what `_real_readiness` actually returns, and the wrapper itself raised a host
+path — producing the defect it existed to remove. Removing it deletes that class of problem at the
+root instead of fixing it repeatedly.
 
-**The existing consumer is unaffected, and that is why wrapping is free.** `probe_error`'s only
-production reader is `LocalLibvirtInstall`, which puts it into a boot-failure `details` payload —
-and `install.py` keeps calling `_real_readiness` directly. The wrapper is used only by the
-external-boot session factory, so operator-facing boot diagnostics keep their full text while this
-path stops carrying it. Nothing in `readiness.py` or `install.py` is modified.
-
-The residual is stated rather than hidden: `_real_readiness` itself still returns unredacted text
-to its other caller. That is pre-existing behaviour with a real consumer, outside this change's
-surface, and it is reported for routing rather than silently inherited or silently "fixed" for a
-caller that wants the detail.
+Nothing on this path can leak in production before #2220 lands: the session factory has no `src/`
+caller until #2212 wires it, so no readiness probe on the external-boot path runs at all.
+`readiness.py` and `install.py` are unmodified either way, so existing boot diagnostics are
+untouched.
 
 ## Threat model
 
@@ -301,6 +305,10 @@ identifiers that arrive inside an operation binding, and it deletes files.
 - *Added (write):* `LocalArtifactRoot.open` again — the same walk **creates** the `<system_id>` and
   `<run_id>` directories, mode 0700, when absent. This mechanism writes to the privileged
   per-worker-slot recovery root, and the controls below cover creation as well as opening.
+- *Added (read):* `LocalPayloadCleanup.cleanup`'s **own open of the recovery root** — the mechanism
+  holds a `Path`, not a descriptor, so it must open the root itself before resolving anything
+  relative to it. This is a distinct boundary from `LocalArtifactRoot`'s walk, on the deleting path,
+  and it was absent from an earlier revision of this inventory.
 - *Widened:* `LocalPayloadCleanup.cleanup` — deletion, previously confined to a descriptor the
   caller supplied, now also names a directory derived from the binding.
 
@@ -319,8 +327,9 @@ trust that the recovery root is still what startup validated.
 | --- | --- | --- | --- | --- |
 | artifact-root walk (read) | `CanonicalUuid` on both names, re-asserted; `O_NOFOLLOW` per component | `_require_private_owned_directory` per component: directory, mode 0700, euid owner | exactly two components, both from the ownership | `ValueError`, no host path, no `strerror` |
 | artifact-root walk (create) | same `CanonicalUuid` re-assertion before any `mkdir` | `mkdir(0o700, dir_fd=)` then the same per-component check via `_open_private_directory` | at most two directories per distinct `(system_id, run_id)`; **count is not otherwise bounded** — see below | as above |
-| recovery-dir open | `CanonicalUuid` on both name halves, re-asserted; `O_NOFOLLOW` | `_open_private_directory`, same three checks | one component | as above |
-| payload deletion | fixed `_PAYLOAD_NAMES` tuple | descriptor-relative, `dir_fd=root_fd` | three literal names | absence is success |
+| cleanup's recovery-**root** open | none needed — the path is the constructed value, never a call argument | `O_DIRECTORY\|O_NOFOLLOW` then `_require_private_owned_directory(fd, "recovery root")` | one open, closed in `finally` | `ValueError` re-raised `from None` |
+| recovery-**dir** open (child) | `CanonicalUuid` on both name halves, re-asserted; `O_NOFOLLOW` | `_open_private_directory`, same three checks | one component | as above |
+| payload deletion | fixed `PAYLOAD_NAMES` tuple, coupled by test to `TargetProjectionV1`'s `*_filename` fields | descriptor-relative, `dir_fd=root_fd` | three literal names | absence is success |
 | archive deletion | one literal name, `modules.tar` | descriptor-relative under the validated recovery dir | one literal name | absence is success |
 
 TOCTOU between the setting's startup validation and an operation's open is handled by
@@ -402,11 +411,14 @@ The load-bearing tests:
   factory. Without it, a future edit that drops either argument leaves the class quietly falling
   back to `_unconfigured_readiness`, and nothing goes red — the same fail-open shape the
   fail-closed tests exist to prevent, arriving through the builder instead of the class.
-- **No mechanism takes configuration from protocol input.** One test per mechanism constructor
-  (`LocalOperationLane`, `LocalArtifactRoot`, `LocalPayloadCleanup`, `open_libguestfs_guest`)
-  inspects its signature and asserts no parameter accepts a URI, filesystem path, command, XML
-  document or credential from a call argument — only the composition seam supplies configuration.
-  This is charter criterion 8 and it had no test until this revision.
+- **No mechanism takes configuration from protocol input.** This is charter criterion 8, and it is
+  tested by **provenance, not by signature shape**. `LocalArtifactRoot` and `LocalPayloadCleanup`
+  each take a `Path`, so "no parameter accepts a path" would have to fail on the very constructors
+  it inspects; and `inspect.signature` reports arity, never where an argument came from. The tests
+  instead assert that `build_external_boot_session_mechanisms` is the only construction site of
+  those two classes in `src/`, that the value it constructs them with is the one
+  `config.require(LIBVIRT_RECOVERY_ROOT)` returned (via a sentinel), and that the builder itself
+  takes no parameters, so no caller can inject configuration into it.
 - **The payload names are coupled to their source.** A test asserts `set(PAYLOAD_NAMES)` equals the
   set `_artifact_ref_parts` admits as a reference's fifth component, so a projection that renames
   or adds an artifact fails here instead of making cleanup a silent no-op.
@@ -433,13 +445,13 @@ no-op is the defect class this repository has shipped three times in this campai
 
 ## Failure behavior
 
-No mechanism this change introduces raises a message carrying a host path, a libvirt or libguestfs
-string, a guest byte, or a secret. Directory failures raise `ValueError` with a fixed message,
-re-raised `from None` so no chained `OSError` re-attaches `.filename` or `.strerror`.
-`redacted_readiness` replaces `probe_error` with a closed-set classification rather than trusting
-`_bounded_probe_error`, which bounds length only. Descriptor cleanup runs on every failure path; a
-mechanism that fails partway closes what it opened before propagating.
+**The no-leak guarantee is scoped to the two directory mechanisms**, `LocalArtifactRoot` and
+`LocalPayloadCleanup`. Neither raises a message carrying a host path, a libvirt or libguestfs
+string, a guest byte, or a secret: every directory failure becomes a `ValueError` with a fixed
+message, re-raised `from None` so no chained `OSError` re-attaches `.filename` or `.strerror`.
+Descriptor cleanup runs on every failure path; a mechanism that fails partway closes what it opened
+before propagating.
 
-The guarantee is scoped to the mechanisms defined here. It is **not** a claim about
-`_real_readiness` as called by `LocalLibvirtInstall`, which still returns raw libvirt stderr in
-`probe_error` by design and has a consumer that wants it.
+It is explicitly **not** a claim about readiness. `_real_readiness` is passed through unchanged and
+still returns raw libvirt stderr, including host paths, in `probe_error` — for both its callers.
+That exposure is #2220's, and this design neither fixes it nor pretends to.
