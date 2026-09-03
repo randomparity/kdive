@@ -50,7 +50,7 @@
   register: live_vm_host_xdg
   failed_when: not live_vm_host_xdg.stat.exists
 
-# Part 3: the fixed live-worker authority contract (ADR-0555). These proofs cover the identity,
+# Part 3: the fixed live-worker authority contract (ADR-0574). These proofs cover the identity,
 # file, unit, session-libvirt daemon/provider, socket, and slot-isolation surface.
 - name: Inspect the protected runtime parent
   ansible.builtin.stat:
@@ -363,6 +363,61 @@
         )
   loop: "{{ live_vm_host_authority_protected_path_results.results }}"
   when: live_vm_host_authority_enabled | bool
+
+# Local external-boot recovery roots (ADR-0586, #2210). This gate is the host-side proof
+# that the shape the recovery stores demand actually exists: a wrong mode or owner here is
+# a recovery that fails at open time, deep inside a lifecycle operation, instead of at
+# provisioning.
+- name: Inspect the external-boot recovery parent
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_recovery_root }}"
+    follow: false
+  register: live_vm_host_recovery_root_check
+  tags: [external_boot_recovery_root_verify]
+
+- name: Assert the external-boot recovery parent is traverse-only
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_recovery_root_check.stat.exists
+      - live_vm_host_recovery_root_check.stat.isdir
+      - not live_vm_host_recovery_root_check.stat.islnk
+      - >-
+        live_vm_host_recovery_root_check.stat.pw_name
+        == live_vm_host_worker_recovery_root_owner
+      - live_vm_host_recovery_root_check.stat.mode == '0711'
+    fail_msg: >-
+      {{ live_vm_host_worker_recovery_root }} must be a real mode-0711 directory owned by
+      {{ live_vm_host_worker_recovery_root_owner }}, so a worker slot reaches its own
+      recovery root without being able to list its siblings.
+  tags: [external_boot_recovery_root_verify]
+
+- name: Inspect the per-slot external-boot recovery roots
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}"
+    follow: false
+  loop: "{{ live_vm_host_worker_accounts }}"
+  register: live_vm_host_recovery_slot_checks
+  tags: [external_boot_recovery_root_verify]
+
+# stat.exists is asserted first on purpose: without it an absent root fails on an undefined
+# isdir attribute rather than reporting what is actually wrong.
+- name: Assert each per-slot external-boot recovery root is owner-only
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isdir
+      - not item.stat.islnk
+      - item.stat.pw_name == item.item
+      - item.stat.gr_name == item.item
+      - item.stat.mode == '0700'
+    fail_msg: >-
+      The external-boot recovery root for {{ item.item }} under
+      {{ live_vm_host_worker_recovery_root }} must be a mode-0700 directory owned by
+      {{ item.item }}; the local recovery stores refuse any other shape at open time.
+  loop: "{{ live_vm_host_recovery_slot_checks.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  tags: [external_boot_recovery_root_verify]
 
 - name: Inspect the authority libvirt configuration
   ansible.builtin.stat:
