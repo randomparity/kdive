@@ -35,6 +35,10 @@ scorecard.png
 # Agents and orchestration
 .claude-flow/
 .swarm/
+# Per-agent git worktrees. Each holds a `.git` file pointing back at this repo, so an
+# unqualified `git add` stages it as a broken gitlink; they also mask real untracked
+# files in `git status`. `.claude/` itself stays tracked — it carries committed skills.
+.claude/worktrees/
 
 # Helm subchart tarballs — regenerated from Chart.lock by `helm dependency build`
 # (the demo-only bundledBackends path); Chart.lock pins the exact versions/digests.
