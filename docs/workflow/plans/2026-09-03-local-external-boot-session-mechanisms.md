@@ -159,9 +159,10 @@ Steps, one action each:
    reinstates the shipped-but-Proposed drift the guard exists to catch. This step is here, in the
    first task, because that is where a reader executing the plan in order needs it.
 1. Write `test_pin_refuses_a_foreign_lease`: `LocalOperationLane().pin(object())` raises
-   `TypeError` matching `"foreign operation lease"`. Also assert a *structural impostor* — a simple
-   object carrying `system_id` and `binding` attributes — is refused, which is what makes the
-   typing nominal rather than structural.
+   `TypeError` matching `"foreign operation lease"`. Then `test_pin_refuses_a_structural_impostor`
+   — a simple object carrying `system_id` and `binding` attributes is refused — which is what makes
+   the typing nominal rather than structural. Shipped as two tests rather than one assertion, since
+   the impostor needs its own class definition.
 2. Run `uv run python -m pytest tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py -q`.
    Expect collection to succeed and the test to FAIL with `ImportError`/`AttributeError` — then
    write the minimum and expect it to fail on the assertion, not the import.
@@ -177,9 +178,10 @@ Steps, one action each:
 7. Write `test_pin_returns_the_exact_lease_identity`: the returned
    `PinnedOperationOwnership.ownership` equals `OperationOwnership(lease.system_id, lease.binding)`
    **by value**, and `ownership.binding is lease.binding`. Implement; re-run.
-8. Write `test_lane_exposes_no_issue_method`: `not hasattr(LocalOperationLane, "issue")` and
-   `"issue" not in dir(LocalOperationLane)`. This guards ADR-0591's refusal to let a mechanism mint
-   its own lease. Re-run.
+8. Write `test_lane_cannot_mint_its_own_lease`: `not hasattr(LocalOperationLane, "issue")`.
+   This guards ADR-0591's refusal to let a mechanism mint its own lease. Re-run.
+8a. Write `test_a_second_pin_keeps_the_lease_held`: closing one pin must not release a lease a
+   second pin still holds, so the counter — not the first close — decides.
 9. `just lint` then `just type`, both bare. Expect `All checks passed!` and a clean `ty` run.
 10. Commit: `feat(local-libvirt): add the external-boot operation lane`.
 
@@ -406,6 +408,15 @@ Steps:
    derived from the binding, so no other activation's directory can be named. The wide-mode case is
    covered for the artifact root at T2.6 and was **not** covered for the recovery directory, which
    is the deleting path.
+8b. Write `test_cleanup_refuses_a_wide_mode_recovery_root`: `chmod` the recovery **root**
+   itself to `0o755` and assert `ValueError` matching `"owner-only service-owned directory"`, with
+   the payloads under `root_fd` already removed and `modules.tar` untouched.
+
+   This is a different control from T3.8a. T3.8a's wide-mode *recovery directory* is refused by
+   the per-component check inside `_open_private_directory`; the root's **own** re-validation fires
+   before any component is resolved, and is what stops cleanup trusting that the root is still what
+   startup validated. Added after fault injection showed that removing the root's re-validation
+   left every other cleanup test green.
 9. Write `test_cleanup_refuses_a_symlinked_recovery_directory` → the mechanism's fixed `ValueError`
    with the redaction triple, per Task 2 step 5; cleanup's own root open is by path, so it leaks
    the same way if unwrapped. Assert also that the payloads under `root_fd` were still removed
@@ -550,10 +561,19 @@ Steps:
    resolved at one site the test names.
 6. Add `test_mechanisms_builder_does_not_advertise_external_boot`: after building the mechanisms,
    `composition.build_runtime(secret_registry=SecretRegistry()).external_boot is None`.
-7. Add `test_observe_running_is_left_unconfigured`: build the factory through the production
-   builder with a stub recovery root, open a session with the existing doubles, and assert
-   `session.observe_running()` raises `RuntimeError` matching
-   `"local external-boot running observation is not configured"`. This is the deferral's guard.
+7. Add `test_production_builder_leaves_observe_running_unconfigured`: build the factory through
+   the production builder and assert `factory._observe_running is _unconfigured_observation`.
+   This is the deferral's guard — it fails the moment someone binds an observer without doing the
+   domain-XML work.
+
+   **Narrowed from "open a session and call it", and the reason is a fact about the builder.**
+   The production builder deliberately leaves `open_overlay` on its real default, which opens
+   `/var/lib/kdive/rootfs/<system>-overlay.qcow2`. No unprivileged test can create that, so a
+   session cannot be opened through the production factory at all. The two halves are discharged
+   separately instead: this step proves the builder *selects* the unconfigured default, and T5.1's
+   `test_unconfigured_observation_raises` proves that default raises the specific message when a
+   session calls it. Chained, they give the property; neither alone does, and this plan does not
+   claim otherwise.
 8. `just lint`; `just type`; `just test-changed`. Commit
    `feat(local-libvirt): build the external-boot session mechanisms`.
 
@@ -612,9 +632,9 @@ requirements were unmapped; this table is checkable line by line instead.
 | 1 — five aliases implemented, passed to the builder, each with a test | Tasks 1–4; per-alias tests: lane T1.1–T1.8, artifact root T2.1–T2.9, cleanup T3.1–T3.11, guest opener T4.2–T4.3, **readiness T4.5b** |
 | 1 — `RunningObserver` not bound, keeps `_unconfigured_observation` | T4.7, T5.1 (`test_unconfigured_observation_raises`) |
 | 2 — three fail-closed defaults, independently, plus identity | T5.1, T5.2 |
-| 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
+| 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7, T1.8a; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
 | 4 — artifact root confined; symlink, wide mode, non-directory, traversal refused | T2.5 (symlink, both components), T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical). The **caller-level** "cannot be pointed at another root" half is discharged by the type signatures, not by a test, and **not** by T4.5c — see the note below |
-| 5 — cleanup removes payloads **and** the archive; bounded; idempotent; foreign recovery directory refused | T3.1, T3.6, T3.7, T3.8, **T3.8a (wide mode — the deleting path)**, T3.9 (symlink), T3.10 |
+| 5 — cleanup removes payloads **and** the archive; bounded; idempotent; foreign recovery directory refused | T3.1, T3.6, T3.7, T3.8, **T3.8a (wide-mode recovery directory)**, **T3.8b (wide-mode recovery root — the root's own re-validation)**, T3.9 (symlink), T3.10 |
 | 6 — `open_guest` returns `_Guest`; guest access refused while active via the existing path | T4.2, T4.3 |
 | 7 — `readiness` returns `ReadinessResult` from a real read | reuse of `_real_readiness` unchanged; binding asserted at **T4.5b**. The "no libvirt text, no host path" half is **NOT discharged here** — `_real_readiness` leaks raw `virsh` stderr and this change does not wrap it. Owner **#2220** |
 | 8 — no mechanism takes configuration from protocol input | **T4.5c** |

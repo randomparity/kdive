@@ -40,17 +40,17 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 from kdive.providers.shared.runtime_paths import overlay_path
-from tests.providers.local_libvirt.lifecycle.boot.test_session import (
-    Conn,
-    Domain,
-    Guest,
-    _xml,
-)
-from tests.providers.local_libvirt.test_external_boot import (
+from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,
     _metadata,
     _point,
     _pre_stop,
+)
+from tests.providers.local_libvirt.lifecycle.boot.session_support import (
+    Conn,
+    Domain,
+    Guest,
+    _xml,
 )
 
 SYSTEM_ID = UUID("11111111-1111-1111-1111-111111111111")
