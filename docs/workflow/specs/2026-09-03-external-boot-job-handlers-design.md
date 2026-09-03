@@ -81,10 +81,15 @@ marker is rejected at `dump_payload` rather than at `allocate_external_boot_auth
 - `BootPayload`: `marker.run_id == UUID(self.run_id)`; `marker.purpose != "teardown"`.
 - `TeardownPayload`: `marker.system_id == UUID(self.system_id)`; `marker.purpose == "teardown"`.
 - Both: `marker.operation` is admitted for `marker.purpose`, checked with the existing
-  `operation_is_permitted(purpose, operation)`
+  `operation_is_permitted(marker.purpose, AuthorityOperation(marker.operation))`
   (`src/kdive/providers/external_boot_authority/protocol.py:91`), which is the same
   `_PURPOSE_OPERATIONS` table `_AuthorityBinding` and the SQL both enforce. Nothing new is
-  defined and `jobs/models.py` is not modified.
+  defined and `jobs/models.py` is not modified. The `AuthorityOperation(...)` coercion is
+  required rather than cosmetic: the function is annotated
+  `(purpose: str, operation: AuthorityOperation)` and `ExternalBootAuthorityMarkerV1.operation`
+  is a bare `Literal[str]`, so passing it through unconverted is a `ty` error even though the
+  `StrEnum` membership test would succeed at runtime. The coercion doubles as the closed-set
+  check, raising `ValueError` on anything outside the nine names.
 - Both: `marker.operation` is one of the six enqueueable operations (below).
 
 The marker's `activation_id`/`plan_identity` cannot be checked against the activation row inside
@@ -256,14 +261,39 @@ mapping is #2202's; this change ships the honest default and one test pinning it
 
 ### 7. Per-operation detail
 
-| Operation | Kind / purpose | Port call | Result variant | Activation after an applied commit |
-|---|---|---|---|---|
-| `activate` | boot / activate | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
-| `recover` | boot / recover | `recover` then `observe` | `_RecoverResult` | `recovered` |
-| `resolve-conflict` | boot / resolve-conflict | `recover` then `observe` | `_RecoverResult` | `recovered` |
-| `release` | boot / release | `observe` | `_ReleaseResult` | reservation released |
-| `cleanup` | boot / release | `cleanup` | `_CleanupResult` | `cleanup_complete = true` |
-| `teardown` | teardown / teardown | `cleanup` | `_TeardownResult` | `cleanup_complete`, System `torn_down` |
+| Operation | Kind / purpose | Required activation state | Port call | Result variant | Activation after an applied commit |
+|---|---|---|---|---|---|
+| `activate` | boot / activate | `activating` | `activate` then `observe` | `_ActivateResult` | `active`, `terminal_evidence` set |
+| `recover` | boot / recover | `recovering` † | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `resolve-conflict` | boot / resolve-conflict | `recovery_conflict` † | `recover` then `observe` | `_RecoverResult` | `recovered` |
+| `release` | boot / release | `active`, `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `observe` | `_ReleaseResult` | reservation released |
+| `cleanup` | boot / release | `recovered`, `abandoned`, `recovery_conflict`, `recovery_failed` ‡ | `cleanup` | `_CleanupResult` | `cleanup_complete = true` |
+| `teardown` | teardown / teardown | `recovery_conflict`, `recovery_failed` ‡ § | `cleanup` | `_TeardownResult` | `cleanup_complete`, System `torn_down` |
+
+The **required activation state** column is the set `run_operation` passes as
+`require_activation_state`, and it is taken from the **commit** preconditions
+(`0122…sql:1302-1335`), not from `allocate`'s (`:482-500`). The two differ, and the commit's is
+the tighter one: `allocate` admits `activate` from `prepared` *or* `activating` and `recover`
+from `active` *or* `recovering`, while the commit admits only the second of each pair. Passing
+`allocate`'s looser set would let a handler allocate, acknowledge, and call the provider, and only
+then be refused at commit — landing in the re-execution window §8 describes with the System
+already mutated. Failing before allocation is the cheaper and safer end.
+
+Three preconditions in that table are **not** activation state, and each has to be checked
+separately:
+
+- **†** `recover` additionally requires the current recovery-attempt row to be in state
+  `recovering`, and `resolve-conflict` requires it in state `conflict` (`0122…sql:1307-1318`).
+  **Nothing in this change creates or advances that row.** It is written by the
+  `recovery-attempt` operation, which this design excludes as #2202's (ADR-0593 decision 4). So
+  in production the `recover` and `resolve-conflict` handlers are registered and reachable but
+  cannot reach an applied commit until #2202 supplies the attempt row; their tests seed it
+  directly, exactly as `tests/db/external_boot_authority_support.py:214-229` already does for the
+  teardown case. This is stated rather than worked around, and a test pins it.
+- **‡** `cleanup` and `teardown` additionally require `NOT cleanup_complete`, and `release`
+  requires that no `external_boot_reservation_releases` row exists yet
+  (`0122…sql:1319-1335`).
+- **§** `teardown` additionally requires `systems.state = 'failed'` (`0122…sql:1331-1335`).
 
 - **activate** requires activation state `activating` at commit (`0122…sql:1302-1306`), so the
   handler refuses a `prepared` activation that the server has not moved to `activating`;
@@ -277,29 +307,36 @@ mapping is #2202's; this change ships the honest default and one test pinning it
   all three against the same row (`0122…sql:1535-1541`), so any value the handler invented
   would be rejected there. `release_identity` is `sha256` over the canonical release evidence.
 
-  **Settled reading of `objects`.** ADR-0583's prose orders the sequence "deletes and verifies
-  the owned objects, releases the reservation exactly once, commits cleanup complete"
-  ([ADR-0583](../../adr/0583-external-run-boot-uses-prepared-recovery-points.md), lines
-  373-376), which would put the deletion before the release. The merged
-  ADR-0584 adapter says otherwise and is what shipped: `LocalExternalBootAuthorityAdapter`
-  lists `RELEASE` in neither `_MUTATING_OPERATIONS`
-  (`src/kdive/providers/local_libvirt/external_boot_authority.py:53-60`) nor
-  `_DELETING_OPERATIONS` (`:65`), and its comment states that release's "provider effect is
-  exactly one observation" because "ADR-0584 makes conflict resolution, release, and teardown
-  each allocate their own later generation before mutating" (`:49-52`). Deletion therefore
-  belongs to `cleanup`, under a later generation, and `release` observes.
+  **`objects` is always empty under every adapter that exists today, and that is the truthful
+  value.** Release performs no deletion: ADR-0584's merged adapter lists `RELEASE` in neither
+  `_MUTATING_OPERATIONS` (`src/kdive/providers/local_libvirt/external_boot_authority.py:53-61`)
+  nor `_DELETING_OPERATIONS` (`:65`), because deletion belongs to `cleanup` under a later
+  generation. So at release time no owned object is absent, and `_ReleaseObject` can represent
+  only an absent object (`absent: Literal[True]`, `src/kdive/jobs/models.py:65-67`).
 
-  So at release time no owned object is yet absent. `_ReleaseObject` can only represent an
-  absent object (`absent: Literal[True]`, `src/kdive/jobs/models.py:65-67`), so the truthful
-  enumeration is empty. The handler enumerates over exactly the activation's recorded object
-  references — the `materialization.artifacts` refs and the `recovery_point.recovery_ref`,
-  which are also the only refs the commit's `known_refs` recursion accepts
-  (`0122…sql:1229-1263`) — includes only those `port.observe` shows gone, and sets
-  `enumeration_complete` because that domain is the complete one. For every adapter that exists
-  today the result is `objects: []` on a healthy activation, and a non-empty list on one whose
-  objects a prior partial cleanup already removed. The handler never asserts `absent` for an
-  object it did not check. A store-side enumeration richer than the activation's own recorded
-  refs would need a port `ExternalBootPorts` does not have; adding one is #2199/#2200's.
+  `ExternalBootPorts` has no method that reports per-object absence — `observe` returns a
+  `RunningKernelObservation` of `architecture`, `release`, and `gnu_build_id`
+  (`src/kdive/providers/ports/external_boot.py:242-245`, `:324-326`), one call per recovery
+  point, carrying no object identity. So the handler emits `objects: []` unconditionally, and
+  `enumeration_complete` is truthful because the domain it can check is empty rather than because
+  it checked and found nothing. The handler never asserts `absent` for an object it did not
+  check, and this design deliberately does not give it a way to. A store-side enumeration needs a
+  port that does not exist; adding one is #2199/#2200's.
+
+  That ordering departs from ADR-0583's stated invariant, and the departure has a capacity
+  consequence this specification does not have the authority to settle: the release commit
+  `DELETE`s the reservation row and credits `reserved_bytes` back while the objects still exist.
+  It is recorded as
+  [deferral record 0010](../../debt/0010-external-boot-release-credits-capacity-before-cleanup.md).
+- **What the `observe` calls are for.** `observe` returns a `RunningKernelObservation` and
+  nothing in `ExternalBootTerminalEvidenceV1` consumes it — `composite_state` is the
+  acknowledgement's `positive_quiescence_digest`, not a digest derived from the observation. The
+  call is a **post-mutation liveness precondition**: `activate`, `recover`, and
+  `resolve-conflict` require that the observed running kernel equals the one the activation's
+  persisted `materialization.kernel_observation` records, and refuse to emit terminal evidence
+  when it does not. That is the whole of its contribution, and the handler discards the value
+  after the comparison. `release` calls it for the same reason — to establish the recovery point
+  is still the one being released — and likewise reads nothing out of it.
 - **cleanup** requires a recorded release (`0122…sql:1398`), reads its `release_identity`, and
   sets `mode` from the activation state — `ordinary` for `recovered`/`abandoned`,
   `system_teardown` for `recovery_conflict`/`recovery_failed`, matching `0122…sql:1400-1413`.
@@ -307,25 +344,57 @@ mapping is #2202's; this change ships the honest default and one test pinning it
   `teardown` kind.
 
 Every evidence `objects` entry must be a reference the commit's `known_refs` recursion already
-knows (`0122…sql:1229-1263`): the handler draws them from the activation's persisted
-`materialization` and `recovery_point` and the reservation row, never from a value it composed.
+knows: the handler draws them from the activation's persisted `materialization` and
+`recovery_point` and the reservation row, never from a value it composed. That is a **subset** of
+what `known_refs` accepts — the recursion seeds from four activation columns
+(`materialization`, `recovery_point`, `pre_recovery_evidence`, `terminal_evidence`) and unions
+`external_boot_reservations` and `external_boot_reservation_releases`
+`store_identity`/`owner_key` (`0122…sql:1204-1249`). Restricting to the narrower set is
+deliberate: it is the set whose provenance the handler can establish from rows it read.
 
 ### 8. Failure and terminality
 
 `commit_external_boot_authority_result` finalizes the `jobs` row itself. A success operation
 sets `succeeded` (`0122…sql:1681-1684`); the `fail` operation sets `failed` when the result is
-terminal or the attempt is the last, and `queued` otherwise (`:1660-1669`). The handler reads
-the returned `(status, job_state)` through `queue.commit_external_boot_authority_result`, which
-returns the post-commit `Job` on `applied` and `None` on `superseded`. Criterion 6's "an applied
-and a not-applied commit each leave the `jobs` row in a terminal state, never `running`" is
-asserted against those two: a success commit leaves `succeeded`, a terminal failure commit
-leaves `failed`.
+terminal or the attempt is the last, and `queued` otherwise (`:1660-1669`).
 
-A commit that returns `superseded` writes no `jobs` row at all, so the job stays `running` until
-its lease lapses, and both generic finalizers and `repair_abandoned_jobs` are fenced against it.
-That window is not closed here: it is the availability-only leak #2203 owns, and closing it from
-the worker would require a second terminalizer competing with the `SECURITY DEFINER` commit. A
-test records the behavior so it cannot change silently.
+**The handler does not call the commit; the worker does.** `_finalize_handler`
+(`src/kdive/jobs/worker.py:534-542`) checks `_authority_binding_matches` and then calls
+`queue.complete_external_boot` or `queue.fail_external_boot`, and that check is the one thing
+standing between a mismatched result and the authority tables — which is why ADR-0593 rejects a
+self-committing handler. The Python wrapper collapses the SQL's `(status, job_state)` to
+`Job | None`: `queue.commit_external_boot_authority_result`
+(`src/kdive/jobs/queue.py:267-306`) selects both columns, branches on
+`status != "applied"`, and discards `job_state`.
+
+So charter criterion 6's "the handler reads the `(status, job_state)` … and finalizes the job on
+it" is met by a different component than the criterion names, and deliberately: the
+`SECURITY DEFINER` commit is the sole terminalizer of an authority-marked job, the worker reads
+`status` through the wrapper, and no code reads `job_state`. Recording the divergence here makes
+it a stated decision rather than an apparent miss. The criterion's assertion still holds and is
+tested: a success commit leaves the `jobs` row `succeeded`, and a terminal failure commit leaves
+it `failed` — never `running`.
+
+**The window in which a marked job is left `running` is a re-execution window, not an
+availability window.** A commit that returns `superseded` writes no `jobs` row at all, and neither
+does a handler exception that is not a binding-matching `ExternalBootAuthorityFailure` — the
+worker logs and returns (`worker.py:505-517`). Either way the job keeps its lease until it lapses,
+and then `claim_worker_job` re-claims it and increments `attempt`, on the lane #2201's `0127`
+migration reopened. The handler restarts at step 1, **including the provider call at step 5**, on
+a System the first attempt may already have mutated — and the allocate preconditions still hold
+precisely because the commit that would have moved the activation state never applied. For
+`cleanup` and `teardown` the re-run is a re-run deletion. Once `attempt >= max_attempts` the row
+is permanently `running`, because `repair_abandoned_jobs` is fenced against marked payloads
+(`src/kdive/reconciler/repairs/jobs.py:42-49`) and both generic finalizers are fenced
+(`0122…sql:304-315`).
+
+Nothing here makes the port calls idempotent or gates re-entry on an observation. Idempotency
+under a later authority generation is the adapter's obligation under ADR-0584 — the merged local
+adapter keeps per-activation admission watermarks for exactly that
+(`src/kdive/providers/local_libvirt/external_boot_authority.py:111`, `:151-154`) — and this change
+neither verifies nor relies on it. Observe-driven re-entry is #2202's; the reaping half is
+#2203's. This design closes neither, and a test records the behavior so it cannot change
+silently.
 
 ### 9. Import closure
 
@@ -374,6 +443,45 @@ Behavioral, against a real Postgres where the assertion is about SQL behavior. E
 bite-proved: fix committed first, controlled fault injected, clean assertion failure observed,
 fault reverted, file verified byte-identical.
 
+### The execution vehicle, stated before the tests that rest on it
+
+"Against the fault-inject port" is not constructible by simply handing a handler a fresh
+`FaultInjectExternalBoot`, and two independent mechanisms make it so. Both are the fixture's job
+to solve, and neither weakens ADR-0593 decision 4.
+
+1. **`observe` answers only for a recovery point `prepare` produced.**
+   `FaultInjectExternalBoot.observe` is `return self._observations[recovery.recovery_ref.ref]`
+   (`src/kdive/providers/fault_inject/lifecycle/external_boot.py:90-94`), and `_observations` is
+   written in exactly one place — `prepare` (`:84`). Four of the six operations route through
+   `observe`, so a port whose `_observations` is empty raises `KeyError` on all four. Seeding an
+   activation row straight into Postgres does not populate it, and neither does a recovery-point
+   JSONB shaped like `tests/db/external_boot_authority_support.py:122-131`, whose
+   `{schema, binding, plan_identity}` has no `recovery_ref` at all and does not validate as a
+   `RecoveryPoint`.
+2. **No composed runtime binds that port under an admissible `provider_kind`.** The only runtime
+   carrying `FaultInjectExternalBoot` is the fault-inject composition
+   (`src/kdive/providers/fault_inject/composition.py:124`), whose kind is
+   `ResourceKind.FAULT_INJECT = "fault-inject"` — a value
+   `ExternalBootAuthorityMarkerV1.provider_kind` cannot hold and `allocate_external_boot_authority`
+   rejects (`0122…sql:369`).
+
+**The fixture therefore does this, and the tests assert against it:**
+
+- Build one `FaultInjectExternalBoot` and drive it through `materialize` then `prepare`
+  **out of band**, in the fixture, from a synthetic `ExternalBootPlan`. That is what populates
+  `_observations` and yields a real `RecoveryPoint`.
+- Write that `RecoveryPoint`'s canonical JSON verbatim into the seeded
+  `external_boot_activations.recovery_point`, and the `ExternalBootMaterialization`'s into
+  `materialization`, so the row the handler reads back is the object the port already knows.
+- Hand the handler that **same instance**, wrapped in a delegating double that raises
+  `AssertionError` from `materialize` and `prepare` and forwards the other four. The pin
+  ADR-0593 decision 4 asks for is about the **handler**, so the fixture performing those two
+  calls before the handler exists is exactly the disposition, not a hole in it.
+- Register that wrapped port on a `ProviderRuntime` bound under `ResourceKind.LOCAL_LIBVIRT` in
+  a test resolver, and seed the resource and Run with `kind`/`target_kind` `local-libvirt`. This
+  is the fault-inject **port** without the fault-inject **kind**, which is what every criterion
+  asking for the fault-inject port actually needs.
+
 1. **Payload contracts** (`tests/jobs/test_external_boot_payloads.py`) — round-trip through
    `dump_payload`/`load_payload`; `extra="forbid"`; unmarked `{run_id}` still decodes and
    re-dumps identically; `run_id_from_payload` returns the Run for `boot` and `None` for
@@ -405,13 +513,21 @@ fault reverted, file verified byte-identical.
    activation with `recovery_point` NULL fails without calling the port; the handler calls
    neither `materialize` nor `prepare` on any path.
 9. **End to end** (`tests/integration/test_external_boot_job_lifecycle.py`, Postgres) — enqueue
-   a marked job, claim it with a real `Worker` (which needs #2201's migration), run the
-   registered handler against the fault-inject port, assert the activation reaches its terminal
-   state and the job is terminal.
+   a marked job, assert `count_claimable_worker_jobs` counts it (which is what #2201's migration
+   bought, so it is asserted rather than assumed), claim it with a real `Worker`, run the
+   registered handler on the vehicle above, assert the activation reaches its terminal state and
+   the job is terminal.
 10. **Import closure** (`test_import_closure.py`) — no module under
     `kdive.providers.local_libvirt`, `kdive.providers.remote_libvirt`, or `libvirt`.
-11. **Superseded-commit behavior** (in `test_lifecycle.py`) — records that a superseded
-    commit leaves the `jobs` row `running`, naming #2203 as owner.
+11. **Re-execution window** (in `test_lifecycle.py`) — records that a superseded commit leaves
+    the `jobs` row `running`, and that a pre-allocation refusal (absent acknowledger) writes no
+    `jobs` row at all and leaves it `running` with its lease. Both name #2203 as the owner of the
+    reaping half and #2202 as the owner of re-entry, in the test docstrings, so neither reads as
+    intended coverage.
+12. **Recovery-attempt prerequisite** (in `test_lifecycle.py`) — pins that `recover` and
+    `resolve-conflict` reach an applied commit only when the current recovery-attempt row is in
+    state `recovering`/`conflict`, which the tests seed directly because nothing in this change
+    writes it (#2202 owns the `recovery-attempt` operation).
 
 ## Out of scope
 

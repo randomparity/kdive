@@ -1,6 +1,8 @@
 # 0593 — External-boot operations ride marked boot and teardown jobs
 
-- **Status:** Proposed
+## Status
+
+Accepted (2026-09-03)
 
 ## Context
 
@@ -19,9 +21,10 @@ Three facts in the installed schema constrain any answer.
 
 `allocate_external_boot_authority` refuses unless
 `v_job.kind = (CASE WHEN p_purpose = 'teardown' THEN 'teardown' ELSE 'boot' END)`
-(`src/kdive/db/schema/0122_external_boot_authority.sql:465`), mirrored by CHECK constraints at
-`:111-112` and `:210-211`. A new `JobKind` member is therefore inadmissible, not merely
-undesirable.
+(`src/kdive/db/schema/0122_external_boot_authority.sql:465`). A new `JobKind` member is therefore
+inadmissible, not merely undesirable. That one guard carries it alone: the CHECK constraints at
+`:111-112` and `:210-211` constrain the authority row's *purpose*, not the job's *kind*, and would
+not by themselves exclude a new kind.
 
 The worker's only authorized write path is the `SECURITY DEFINER` function.
 `0121_external_boot_activations.sql:280-285` revokes every privilege on the four external-boot
@@ -124,13 +127,38 @@ the server half only.
   site must pass the operations registry; that is the point, since a call site that omitted it
   would silently reopen the wrong-operation path.
 - The production handler registry registers all six operations, and every one of them fails
-  closed on the absent acknowledger until an adapter issue supplies it. That is visible and
-  categorized, not silent.
-- A commit that returns `superseded` writes no `jobs` row, so the job stays `running` until its
-  lease lapses — and both generic finalizers (`0122…sql:304-315`) and `repair_abandoned_jobs`
-  are fenced against it. This record does not close that window. It is the availability-only
-  leak #2203 owns, and the accepted trade for keeping
-  `commit_external_boot_authority_result` the single terminalizer of an authority-marked job.
+  closed on the absent acknowledger until an adapter issue supplies it. **That failure is not
+  visible in the `jobs` table, and `terminal=True` is inert on this path.** When a marked job's
+  handler raises anything that is not an `ExternalBootAuthorityFailure` whose binding matches the
+  marker, `src/kdive/jobs/worker.py:505-517` logs `marked external boot job %s failed without
+  authority result` and returns without reaching `_fail_job_and_run`. No `jobs` row is written and
+  no `error_category` is set. The job's lease then lapses, `claim_worker_job` re-claims it and
+  increments `attempt` — the lane #2201's `0127` migration reopened — and the same failure repeats
+  once per lease lapse until `attempt >= max_attempts`, at which point the row is permanently
+  `running`, because `repair_abandoned_jobs` is fenced against marked payloads
+  (`src/kdive/reconciler/repairs/jobs.py:42-49`) and both generic finalizers are fenced
+  (`0122…sql:304-315`). This is the shipped default configuration until #2199/#2200 wire an
+  acknowledger, and it is reached by every pre-allocation refusal — absent acknowledger, absent
+  port, provider-kind mismatch, activation identity mismatch, wrong activation state. The only
+  observable is the log line.
+- **The window in which a marked job is left `running` is a re-execution window, not an
+  availability window.** A lapsed-lease `running` job with `attempt < max_attempts` is re-claimed
+  and the handler restarts at step 1, which includes the provider call at step 5. So a worker that
+  dies between the port call and the commit, a commit that returns `superseded`, or a result the
+  worker's `_authority_binding_matches` rejects, all leave a System the first attempt already
+  mutated and an activation whose state never moved — so the allocate preconditions still hold and
+  the second attempt re-runs the same mutation. For `cleanup` and `teardown` that is a re-run
+  deletion. Nothing here makes the port calls idempotent or gates re-entry on an observation:
+  idempotency under a later authority generation is the adapter's obligation under ADR-0584, and
+  observe-driven re-entry is #2202's. This decision does not close that window; it names it
+  correctly. #2203 owns the reaping half.
+- The `release` operation credits the recovery-store reservation back while the objects it covers
+  still exist, because ADR-0584's adapter makes deletion belong to `cleanup` under a later
+  generation. That departs from ADR-0583's stated ordering and under-charges
+  `recovery_max_bytes` between the two commits — permanently if the `cleanup` job never commits,
+  which the bullet above makes the expected case. Recorded as
+  [deferral record 0010](../debt/0010-external-boot-release-credits-capacity-before-cleanup.md); this
+  decision neither introduces nor resolves it.
 - `ExternalBootPorts.materialize` and `.prepare` stay uncalled by any worker handler. They are
   the preparation path's, and that path is #2204's. This change does not make the six-method
   port fully exercised in production; it makes the four operations a worker owns executable.
@@ -142,9 +170,8 @@ the server half only.
 ## Considered & rejected
 
 - **Add `JobKind` members for the lifecycle operations.** verified: `allocate_external_boot_authority`
-  raises `superseded` unless `v_job.kind` is exactly `boot` or `teardown`
-  (`src/kdive/db/schema/0122_external_boot_authority.sql:465` at commit `54f346f5`), with the
-  same pin duplicated as CHECK constraints at `:111-112` and `:210-211`. A new kind is
+  returns `superseded` unless `v_job.kind` is exactly `boot` or `teardown`
+  (`src/kdive/db/schema/0122_external_boot_authority.sql:465` at commit `54f346f5`). A new kind is
   unclaimable authority, not a design preference.
 - **Register the operations directly on `JobKind.BOOT` and `JobKind.TEARDOWN`.** verified:
   `HandlerRegistry.register` raises `DuplicateHandler` when a kind already has a handler

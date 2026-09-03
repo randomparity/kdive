@@ -55,10 +55,11 @@ everything.
   creates per-role LOGIN principals and returns a callable mapping a role name to a DSN; pass
   its DSN to `psycopg.AsyncConnection.connect` yourself.
 - **Expected implementation size: 1900–2800 changed lines (L)** — derived from the file map
-  below: roughly 1000 lines of `src/` across eleven new modules plus six edited files, and
-  roughly 1300 lines of tests across eleven new test files, plus the five mechanical enqueue
-  call-site updates in Task 1. This agrees with the issue's `effort:L` label and with the
-  charter's `complexity: high`.
+  below and reconciled against it: roughly 1000 lines of `src/` across **ten** new modules and
+  **ten** edited files (of which five are one-identifier enqueue swaps), roughly 1300 lines of
+  tests across **eleven** new test files plus one package `__init__.py`, and roughly 20 lines
+  across the **six** existing test files Task 1 breaks. This agrees with the issue's `effort:L`
+  label and with the charter's `complexity: high`.
 
 ## File map
 
@@ -91,15 +92,37 @@ everything.
 | `src/kdive/mcp/tools/ops/security/breakglass.py` | `TeardownPayload(...)` at the enqueue |
 | `src/kdive/reconciler/repairs/systems.py` | `TeardownPayload(...)` at the enqueue |
 | `src/kdive/mcp/tools/lifecycle/runs/steps.py` | `BootPayload(...)` at the enqueue |
+| `tests/mcp/systems_support.py` | its `provider_resolver` builder gains an `external_boot` parameter, so a test can bind a port under `ResourceKind.LOCAL_LIBVIRT` |
 
-**Why the last five files are in scope.** They are the only sites that pass a *model instance*
-rather than a dict to `queue.enqueue` for `boot`/`teardown` (`dump_payload` is called from
-exactly one place, `src/kdive/jobs/queue.py:90`). Once `_ACTIVE_PAYLOAD_MODELS` names the
-subclass, `dump_payload`'s `isinstance(payload, model_class)` is False for a `RunPayload`
-instance and pydantic v2 refuses to validate one model instance as a different model class. The
-edit is one identifier per site and is an unavoidable consequence of the sourced criterion that
-the boot and teardown payloads round-trip; it is not new scope. The charter's `surface` field
-did not list them, so say so in the PR body.
+### Edited — existing tests Task 1 breaks
+
+`_ACTIVE_PAYLOAD_MODELS` naming the subclass breaks every site that passes a *base-class model
+instance* to `queue.enqueue` for these kinds, in tests as well as in `src/`. These six are the
+complete set, each one identifier:
+
+| File | Site |
+|---|---|
+| `tests/mcp/lifecycle/test_systems_tools.py` | `_enqueue_teardown`, `JobKind.TEARDOWN` + `SystemPayload` (≈:200-205) |
+| `tests/mcp/jobs/test_jobs_tools.py` | `JobKind.TEARDOWN` + `SystemPayload` (≈:1153-1157) |
+| `tests/jobs/handlers/test_systems_bootstrap_key.py` | three `JobKind.TEARDOWN` + `SystemPayload` enqueues (≈:474, :511, :541) |
+| `tests/mcp/lifecycle/test_runs_tools.py` | parametrized `(JobKind.BOOT, "boot", RunPayload(run_id=run_id))` (≈:3691-3702) |
+| `tests/jobs/test_worker.py` | `RunPayload(run_id=run_id) if kind is JobKind.BOOT else …` (≈:519-527) |
+
+(Five files, six sites — `test_systems_bootstrap_key.py` carries three.) Re-derive each line
+number with `rg -n "JobKind.(BOOT|TEARDOWN)" tests/` before editing; the ranges above are
+approximate and are a search aid, not a citation.
+
+**Why the five `src/` enqueue files and the five test files are in scope.** They are the
+complete set of sites that pass a *model instance* rather than a dict to `queue.enqueue` for
+`boot`/`teardown` (`dump_payload` is called from exactly one place,
+`src/kdive/jobs/queue.py:90`). Once `_ACTIVE_PAYLOAD_MODELS` names the subclass,
+`dump_payload`'s `isinstance(payload, model_class)` is False for a `RunPayload` instance, and
+pydantic v2 refuses to validate one model instance as a different model class — confirmed here
+with pydantic 2.13.4: `Sub.model_validate(base_instance)` raises `ValidationError … model_type`.
+The edit is one identifier per site and is an unavoidable consequence of the sourced criterion
+that the boot and teardown payloads round-trip; it is not new scope. The charter's `surface`
+field listed none of them, so the PR body must name **both** groups — the five `src/` enqueue
+files and the five test files carrying six sites — not the `src/` half alone.
 
 ### New tests
 
@@ -182,13 +205,19 @@ Later tasks rely on `BootPayload`, `TeardownPayload`,
    would make the worker's `_compensation_run_id` transition a Run to `failed` on every ordinary
    System-teardown failure.
 4. **Run it and confirm it passes.**
-5. **Update the four `load_payload` / five enqueue call sites** listed in the file map. Find
-   them with `rg -n "load_payload\(job, (RunPayload|SystemPayload)\)" src/` and
+5. **Update the two `load_payload` sites and the five `src/` enqueue sites** listed in the file
+   map. Find them with `rg -n "load_payload\(job, (RunPayload|SystemPayload)\)" src/` and
    `rg -n "JobKind.(BOOT|TEARDOWN)," -A 2 src/`. Do not touch `provision_handler`
    (`systems.py:393`) or the force-crash handler (`control/control.py:221`) — those are
    `PROVISION` and `FORCE_CRASH`, whose model is unchanged.
-6. **Run the affected suites**: `just test-changed`, then
-   `uv run python -m pytest tests/jobs tests/mcp/lifecycle tests/reconciler -q`. Expect green.
+6. **Run the affected suites and expect a specific red first**:
+   `uv run python -m pytest tests/jobs tests/mcp/lifecycle tests/mcp/jobs tests/reconciler -q`.
+   **Expect the six enqueue sites in the five existing test files above to fail** with
+   `PayloadValidationError: invalid teardown payload` / `invalid boot payload`, because they still
+   construct the base model. That red is the change working, not a regression. Swap each to
+   `TeardownPayload` / `BootPayload`, re-run the same command, and expect green. Do not skip
+   straight to the swap: seeing the six fail first is what proves the model registry actually
+   changed, and it is the cheapest bite proof available for this task.
 7. `just lint && just type`. Commit:
    `feat(jobs): carry an external-boot authority marker on boot and teardown payloads`.
 
@@ -298,7 +327,12 @@ def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
    `registry.register(JobKind.BOOT, route_marked(operations, lambda conn, job: boot_handler(...)))`.
 5. **Run and confirm they pass**; then `uv run python -m pytest tests/jobs -q` to catch every
    existing caller of the two registrars that now needs the keyword.
-6. `just lint && just type`. Commit:
+6. `just lint && just type && just adr-status-check`. The third is not decoration:
+   `scripts/guards/check_adr_status.py` fails any ADR whose status keyword is `Proposed` and that
+   is cited from `src/` or `tests/`, and this task is where the first `ADR-0593` citation lands
+   (the package docstring). ADR-0593 is already `Accepted`, which is the repo's rule for the PR
+   implementing a decision, so this should pass — run it here so a regression surfaces where it
+   is introduced rather than at Task 7. Commit:
    `feat(jobs): route authority-marked boot and teardown jobs to an operations registry`.
 
 ### Acceptance criteria
@@ -352,8 +386,10 @@ async def run_operation(
     *,
     ports: ExternalBootHandlerPorts,
     require_activation_state: frozenset[ExternalBootActivationState],
-    build_result: Callable[[OperationContext], ExternalBootAuthorityResultV1],
-    call_port: Callable[[OperationContext], None],
+    build_result: Callable[
+        [OperationContext, RunningKernelObservation | None], ExternalBootAuthorityResultV1
+    ],
+    call_port: Callable[[OperationContext], RunningKernelObservation | None],
 ) -> ExternalBootAuthorityResultV1: ...
 
 # evidence.py
@@ -393,10 +429,34 @@ introduces). `failure_context.phase` is `admission` for steps 1–3, `preparatio
 ### Steps
 
 1. **Write `conftest.py`** providing, for the whole package's Postgres tests:
+   - **`external_boot_vehicle`** — the fixture the spec's "execution vehicle" subsection
+     specifies, and the prerequisite for every other Postgres test in this package. It builds one
+     `FaultInjectExternalBoot`, drives it through `materialize` then `prepare` **out of band**
+     from a synthetic `ExternalBootPlan` (this is what populates `_observations`, which
+     `observe` reads and which nothing else writes), keeps the resulting
+     `ExternalBootMaterialization` and `RecoveryPoint`, and returns the port wrapped in a
+     delegating double that forwards `activate`/`observe`/`recover`/`cleanup` and raises
+     `AssertionError` from `materialize`/`prepare`. Build the plan with the smallest values
+     `ExternalBootPlan`'s validators accept — its `_validate_composed_plan` requires `cmdline`
+     to compose `platform_arguments` exactly and the root arguments to occur exactly once, so
+     copy the shape from `docs/adr/0583-external-run-boot-uses-prepared-recovery-points.md`'s
+     golden vector rather than inventing one.
    - a `seeded_activation` helper that inserts resource/allocation/system/investigation/run/
      activation/worker_incarnation/job rows in a given activation state and purpose, modelled on
      `tests/db/external_boot_authority_support.py:135` (`_seed_case`) but async and returning
-     typed ids;
+     typed ids. It seeds the resource `kind` and the run `target_kind` as **`local-libvirt`**,
+     and writes the vehicle's `RecoveryPoint` and `ExternalBootMaterialization` canonical JSON
+     verbatim into `external_boot_activations.recovery_point` and `.materialization` — not the
+     `{schema, binding, plan_identity}` stub `_seed_case` uses, which carries no `recovery_ref`
+     and does not validate as a `RecoveryPoint`. Where an operation needs one, it also seeds the
+     `external_boot_recovery_attempts` row in the state §7's † footnote requires, because nothing
+     in this change writes that row.
+   - a `provider_resolver` builder binding the vehicle's wrapped port on a `ProviderRuntime`
+     under `ResourceKind.LOCAL_LIBVIRT`. The fault-inject composition registers its runtime under
+     `ResourceKind.FAULT_INJECT`, a value the marker's `provider_kind` cannot hold, so binding
+     the port under the local-libvirt kind is what makes the fault-inject **port** usable without
+     the fault-inject **kind**. Extend `tests/mcp/systems_support.py`'s existing builder with an
+     `external_boot` parameter rather than writing a second one.
    - a `role_connection` async helper taking `authority_role_dsns` and a role name and yielding
      an `AsyncConnection` for that LOGIN role;
    - a `RecordingAcknowledger` that performs the **real**
@@ -459,8 +519,14 @@ ACTIVATION_READINESS_WINDOW: Final[timedelta] = timedelta(minutes=15)
 ```
 
 Per-operation behavior, required activation state, port call, and result variant are the spec's
-§7 table. Each handler's docstring states the five-part limit contract for any deadline it
-emits: unit, reference clock, scope, consequence of violation, recovery action.
+§7 table, which now carries a **required activation state** column plus its three footnotes —
+the recovery-attempt row state for `recover`/`resolve-conflict` (†), the `NOT cleanup_complete`
+and no-existing-release guards (‡), and `systems.state = 'failed'` for `teardown` (§). Take
+`require_activation_state` from that column, which is sourced from the **commit** preconditions
+(`0122…sql:1302-1335`) rather than the looser `allocate` ones; the footnoted prerequisites are
+separate checks, not activation states. Each handler's docstring states the five-part limit
+contract for any deadline it emits: unit, reference clock, scope, consequence of violation,
+recovery action.
 
 ### Steps
 
@@ -489,10 +555,13 @@ emits: unit, reference clock, scope, consequence of violation, recovery action.
    - an activate job whose activation has `recovery_point` NULL is refused, and the port double
      recorded no call;
    - the same for `materialization` NULL;
-   - across every one of the six handlers, the port double records no call to `materialize` or
-     `prepare` on any path. Implement the double as a subclass of the fault-inject port that
-     raises `AssertionError` from `materialize` and `prepare`, so the assertion cannot be
-     satisfied by the test forgetting to check.
+   - across every one of the six handlers, the port records no call to `materialize` or
+     `prepare` on any path. This is the `external_boot_vehicle` fixture's wrapper, which raises
+     `AssertionError` from those two, so the assertion cannot be satisfied by the test forgetting
+     to check. The fixture itself calls both **before** it installs the wrapper, which is the
+     disposition rather than a hole in it: ADR-0593 decision 4 pins that the *handler* never
+     performs them, and the activation row the handler reads is `prepared` precisely because
+     something else already did.
 3. **Run and confirm they fail.**
 4. **Implement** `lifecycle.py` and finish `registrar.build_operations`.
 5. **Run and confirm they pass.** `just lint && just type`. Commit:
@@ -598,7 +667,17 @@ for `purpose == "teardown"` and `BOOT` otherwise, matching
 
 ## Deferrals carried into this plan
 
-None yet. Any deferral a `$trial-loop` run on this branch disposes of as `deferred-tracked` is
+- **The release commit credits recovery-store capacity before cleanup deletes the objects.**
+  ADR-0584's adapter makes `release` non-mutating and non-deleting, so the reservation `DELETE`
+  in the release branch of `commit_external_boot_authority_result` credits `reserved_bytes` back
+  while the owned objects still exist — under-charging `recovery_max_bytes` between the release
+  and cleanup commits, and permanently if the cleanup job never commits. That departs from
+  ADR-0583's stated ordering. Owner:
+  [deferral record 0010](../../debt/0010-external-boot-release-credits-capacity-before-cleanup.md),
+  tracker #2118. This plan must not make the interval longer or the leak likelier; see that
+  record's non-regression boundary.
+
+Any further deferral a `$trial-loop` run on this branch disposes of as `deferred-tracked` is
 appended here with its owning record path or tracker issue before the branch ships.
 
 ## Known adjacent state this plan does not change
