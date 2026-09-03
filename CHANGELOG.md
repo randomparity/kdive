@@ -378,6 +378,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify authority core
 - Bind external boot to activation
 - Name the lock-queue report once
+- Trim the docstring AGENTS.md already carries
 
 ### Documentation
 
@@ -1146,6 +1147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound what the pre-create guard actually claims
 - Record the branch review and threat scan
 - Scope the golden-vector claim and record the NFC gap
+- Make the scratch-container cleanup safe under concurrency
 
 ### Fixed
 
