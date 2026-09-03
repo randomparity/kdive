@@ -244,6 +244,32 @@ jobs:
             fi
           done
 
+      # worker-lifecycle.sh's require_worker_path_access walks every ancestor of the checkout and
+      # requires each kdive-worker-N to traverse it. Those accounts are neither the owner nor a
+      # group member of the runner home, so they reach the checkout only through the "other"
+      # execute bit, and the hosted image leaves /home/runner without it. The self-hosted box does
+      # not need this: its workspace is /opt/actions-runner/_work with an 0755 chain throughout.
+      # Traversal only — o+x adds no read bit, nothing below the workspace is touched, and on an
+      # ephemeral single-tenant runner it exposes nothing that outlives the job. Without it the
+      # gate fails at "checkout worker launcher is not accessible to kdive-worker-1", which does
+      # not name the offending component; the explicit probe below fails here instead, on the
+      # exact path, while the chain is still on screen.
+      - name: Make the checkout traversable by the fixed worker accounts
+        run: |
+          set -euo pipefail
+          ancestor="$GITHUB_WORKSPACE"
+          while [[ "$ancestor" != / ]]; do
+            sudo chmod o+x "$ancestor"
+            ancestor="$(dirname -- "$ancestor")"
+          done
+          launcher="$GITHUB_WORKSPACE/scripts/live-stack/worker-from-checkout"
+          if ! sudo --user=kdive-worker-1 test -x "$launcher"; then
+            echo "fixed worker still cannot execute the checkout launcher: ${launcher}" >&2
+            namei -l "$launcher" >&2
+            exit 1
+          fi
+          namei -l "$launcher"
+
       - name: Build and install fixed-worker capture manifest
         run: |
           set -euo pipefail
