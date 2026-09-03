@@ -226,10 +226,14 @@ euid; it trusts nothing the peer sends.
   residual, because this change makes the path production-reachable for the first time:** the
   delete carries no operation-lease pin, unlike every sibling coordinator call, which reaches
   durable state through `self._io.open(authority, _expected_binding(...))` and is refused
-  unless the pinned ownership facts match. That is deliberate and pre-existing —
-  `test_real_adapter_finalization_replays_exact_proof_without_session` asserts finalization
-  resolves no lease and opens no session, because it is a durable-store delete needing no
-  libvirt or guest access. Adding the pin would change the finalization seam's shape, which
+  unless the pinned ownership facts match. That is deliberate and pre-existing, and a **negative control
+  enforces it**: `test_real_adapter_finalization_replays_exact_proof_without_session` in
+  `tests/providers/local_libvirt/test_external_boot.py` supplies a lease resolver that raises
+  `AssertionError("finalization must not resolve or open an operation session")`, under the
+  authority ref `authority/authenticated-by-2140`. It is a written prohibition against the
+  pin, not an absence of one, because this is a durable-store delete needing no libvirt or
+  guest access. The citation belongs beside the residual: without it, "no lease pin here"
+  reads as an oversight and the next reader reasonably tries to close it. Adding the pin would change the finalization seam's shape, which
   belongs to ADR-0586, so it is recorded here rather than taken. `authority` is accepted by
   the coordinator and knowingly unused; the code says so where a reader will meet it.
 - Unresolvable recovery point: refused as `provider_conflict` with no branch of any kind, so
