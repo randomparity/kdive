@@ -103,6 +103,13 @@ def test_configuring_a_recovery_root_does_not_advertise_external_boot(
     root.chmod(0o700)
     monkeypatch.setenv("KDIVE_LIBVIRT_RECOVERY_ROOT", str(root))
     composition.config.reset()
+    # Force the OTHER half of ADR-0584's precondition open. build_external_boot returns None
+    # when `io is None` OR the authority is unconfigured, and the authority is unconfigured
+    # in tests — so without this the assertion below would hold for a reason that has
+    # nothing to do with #2210, and would keep holding even if someone did wire the recovery
+    # root into external_boot_io. Pinning the authority half True isolates the half this
+    # issue owns: the primitives must still be absent.
+    monkeypatch.setattr(composition, "external_boot_authority_is_configured", lambda: True)
 
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
 
