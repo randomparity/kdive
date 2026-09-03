@@ -1420,3 +1420,79 @@ def test_root_only_configuration_and_revision_are_verified() -> None:
     assert 'mode == "0600"' in verify
     assert 'mode == "0644"' in verify
     assert 'mode == "0444"' in verify
+
+
+def test_external_boot_recovery_root_defaults_are_declared() -> None:
+    # ADR-0586 / #2210: the configured recovery root is durable provider state and must be
+    # provisioned with the worker's permissions. The path is absolute so it matches what
+    # KDIVE_LIBVIRT_RECOVERY_ROOT accepts.
+    defaults = _yaml(DEFAULTS)
+    root = defaults["live_vm_host_worker_recovery_root"]
+    assert isinstance(root, str)
+    assert root.startswith("/")
+    assert root == "/var/lib/kdive/live-workers/external-boot-recovery"
+    assert defaults["live_vm_host_worker_recovery_root_owner"] == "root"
+
+
+def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
+    # One root per fixed slot, not one shared root: RecoveryMetadataStore requires
+    # st_uid == geteuid(), which a single directory cannot satisfy for eight accounts.
+    tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
+    parent = (
+        'path: "{{ live_vm_host_worker_recovery_root }}" state: directory '
+        'owner: "{{ live_vm_host_worker_recovery_root_owner }}" '
+        'group: "{{ live_vm_host_worker_recovery_root_owner }}" mode: "0711"'
+    )
+    assert parent in tasks
+    slots = (
+        'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" state: directory '
+        'owner: "{{ item }}" group: "{{ item }}" mode: "0700" '
+        'loop: "{{ live_vm_host_worker_accounts }}"'
+    )
+    assert slots in tasks
+
+
+def test_external_boot_recovery_parent_is_checked_before_creation() -> None:
+    # A pre-create stat with follow: false plus an assert is what stops provisioning
+    # writing through a symlink planted at the recovery parent.
+    tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
+    assert (
+        'path: "{{ live_vm_host_worker_recovery_root }}" follow: false '
+        "register: live_vm_host_recovery_root_before" in tasks
+    )
+    assert "live_vm_host_recovery_root_before.stat.islnk" in tasks
+
+
+def test_external_boot_recovery_roots_are_health_gated() -> None:
+    verify = re.sub(r"\s+", " ", _text(VERIFY_TASKS))
+    # stat.exists precedes stat.isdir so an absent root reports what is wrong instead of
+    # failing on an undefined attribute.
+    assert (
+        "item.stat.exists - item.stat.isdir - not item.stat.islnk "
+        "- item.stat.pw_name == item.item - item.stat.gr_name == item.item "
+        "- item.stat.mode == '0700'" in verify
+    )
+    assert "live_vm_host_recovery_root_check.stat.mode == '0711'" in verify
+    assert "live_vm_host_recovery_root_check.stat.exists" in verify
+
+
+def test_external_boot_recovery_slot_roots_are_checked_before_creation() -> None:
+    # ansible.builtin.file with state=directory treats a symlink to a directory as already
+    # satisfied, so without a per-slot pre-create guard a substituted slot root is reported
+    # converged and rerunning provisioning can never repair it. The parent guard alone is
+    # not enough: the per-slot roots are the directories a worker actually opens.
+    tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
+    assert (
+        'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" follow: false '
+        'loop: "{{ live_vm_host_worker_accounts }}" '
+        "register: live_vm_host_recovery_slots_before" in tasks
+    )
+    assert "not item.stat.exists or (item.stat.isdir and not item.stat.islnk)" in tasks
+
+
+def test_external_boot_recovery_root_harness_runs_in_ci() -> None:
+    # A run-*.sh that is not named in the test-ansible recipe never runs in CI.
+    harness = ROOT / "deploy" / "ansible" / "tests" / "run-external-boot-recovery-root.sh"
+    assert harness.is_file()
+    assert harness.stat().st_mode & stat.S_IXUSR
+    assert "run-external-boot-recovery-root.sh" in _text(ROOT / "justfile")

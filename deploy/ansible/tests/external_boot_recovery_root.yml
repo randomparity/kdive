@@ -1,0 +1,8 @@
+---
+- name: Exercise the live_vm_host external-boot recovery roots in isolation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - role: live_vm_host
