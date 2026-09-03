@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-09-02)
 
 ## Context
 
@@ -68,7 +68,11 @@ renders; the grammar covers them because a kind it omits is a volume the sweep c
 foreign and leaks forever. The longest name the grammar can render is 135 bytes —
 `13 + 36 + 1 + 36 + 1 + 32 + 1 + 15`, the last term being `reaping.journal`. Measured on the same
 host, a dir-pool volume name round-trips byte-identically up to 255 bytes and is refused at 256 —
-the filesystem `NAME_MAX` a dir pool inherits — so the grammar holds 120 bytes of headroom.
+the filesystem `NAME_MAX` a dir pool inherits, surfacing *after* a clean parse as libvirt error
+code 38, `File name too long`, from the `open()` the pool performs, and not as a parse refusal
+from libvirt's own name grammar (which would be code 8) — so the grammar holds 120 bytes of
+headroom. A test for the 256-byte case asserts the host failure class, not an invalid-argument
+one.
 
 Recognition is a single anchored parse of the whole name. A name that does not match is a foreign
 volume: never read further, never deleted, never counted. There is no prefix match, no partial
