@@ -52,8 +52,23 @@
 # block having never been checked. This is the stage-time half ADR-0590 Decision 4 adds: the
 # last point before a volume becomes a catalog row a System can select.
 #
+# An empty program list would make the whole check vacuous rather than absent: guestfish would
+# run with no commands, exit 0 with no output, and every volume would read as conformant. Refuse
+# to enforce an empty contract instead of appearing to enforce one.
+- name: Assert the external-boot userland contract names at least one program
+  ansible.builtin.assert:
+    that: (kdive_external_boot_userland_programs | default([]) | length) > 0
+    fail_msg: >-
+      kdive_external_boot_userland_programs is empty, so the staged-volume check would declare
+      every image conformant without inspecting anything. Declare the programs the external-boot
+      identity proof spawns (ADR-0590) in inventory/group_vars/all.yml, or set
+      remote_libvirt_facts_userland_verify=false to skip the check deliberately.
+  when: remote_libvirt_facts_userland_verify | bool
+
 # The verdict is cached against the volume's size and mtime and the contract's own identity, so
-# the appliance runs once per image per restaging rather than once per site.yml run.
+# the appliance runs once per image per restaging rather than once per site.yml run. This works
+# only because the instrument is read-only: a check that touched the volume would move the mtime
+# its own key is built from and invalidate itself on every run.
 - name: Ensure the userland verdict cache dir exists
   ansible.builtin.file:
     path: "{{ remote_libvirt_facts_userland_cache_dir }}"
@@ -67,7 +82,7 @@
   ansible.builtin.stat:
     path: >-
       {{ remote_libvirt_facts_userland_cache_dir }}/{{ volume.name }}.{{ item.stat.size
-      }}.{{ item.stat.mtime | int }}.{{ remote_libvirt_facts_userland_contract_id }}
+      }}.{{ item.stat.mtime }}.{{ remote_libvirt_facts_userland_contract_id }}
   loop: "{{ remote_libvirt_facts_volumes.results | selectattr('stat.exists') | list }}"
   loop_control:
     label: "{{ item.item.name }}"
@@ -147,7 +162,7 @@
   ansible.builtin.file:
     path: >-
       {{ remote_libvirt_facts_userland_cache_dir }}/{{ volume.item.name }}.{{ volume.stat.size
-      }}.{{ volume.stat.mtime | int }}.{{ remote_libvirt_facts_userland_contract_id }}
+      }}.{{ volume.stat.mtime }}.{{ remote_libvirt_facts_userland_contract_id }}
     state: touch
     mode: "0644"
   loop: >-

@@ -86,9 +86,16 @@ volume's size and mtime.
 
 `deploy/ansible/tests/run-remote-libvirt-facts-render.sh` drives the real role end to end against a
 guestfish double, asserting the rendered fragment is valid TOML in every case. Its four pre-#2160
-cases are unchanged; four more cover a non-conformant volume, a non-conformant *default* volume, an
-uninspectable volume failing the play, and the cache gate — inspecting twice, then not at all, then
-once more after the volume is restaged.
+cases are unchanged; five more cover a non-conformant volume, a non-conformant *default* volume, an
+uninspectable volume failing the play, an empty program list failing the play, and the cache gate —
+inspecting twice, then not at all, then once more after the volume is restaged. No case pre-creates
+the verdict cache directory, so every one of them also covers the fresh-host path.
+
+Beyond the double, the following were measured against real guestfish 1.60.1 on the development
+host: three `guestfish --ro` runs leave a volume's sha256 and mtime byte-identical while one
+`virt-customize` changes its sha256; an uninspectable volume fails the play through the role's own
+message; a conformant volume renders and then, on a second run, launches no appliance; and the
+default `~/.cache/kdive/external-boot-userland` path expands and is created correctly.
 
 ## What this cannot verify
 

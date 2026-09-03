@@ -77,7 +77,7 @@ setup_case() {
   "pki_artifacts_dir": "$artifacts",
   "remote_libvirt_facts_userland_cache_dir": "$dir/cache",
   "remote_host_fqdn": "host-a.example.test",
-  "gdb_addr": "192.168.12.4"
+  "gdb_addr": "192.168.12.4"${EXTRA_VARS_JSON:+,$EXTRA_VARS_JSON}
 }
 JSON
 }
@@ -202,13 +202,21 @@ run_failing_case() {
     fail=1
     return 0
   fi
-  echo "ok   [$name]: play failed naming the uninspectable volume"
+  echo "ok   [$name]: play failed, output names the cause, no fragment written"
   return 0
 }
 
 run_failing_case userland_uninspectable \
   "rocky-10-kdive-remote-base,bare-kdive-remote-base:broken" \
   "could not inspect"
+
+# An empty contract is the one way this check fails OPEN: guestfish would run with no commands,
+# exit 0 with no output, and every volume would read as conformant. Refusing to enforce an empty
+# contract is the difference between a check that is absent and one that is merely vacuous.
+EXTRA_VARS_JSON='"kdive_external_boot_userland_programs": []' \
+  run_failing_case userland_contract_empty \
+  "rocky-10-kdive-remote-base,bare-kdive-remote-base" \
+  "would declare every image conformant without inspecting anything"
 
 # The gate. An appliance launch per image per site.yml run is not free, so a verdict is cached
 # against the volume's size and mtime. Run twice over the same pool and assert the second run

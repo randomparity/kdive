@@ -101,7 +101,15 @@ qcow2 a build produces, and the pool volume a render is about to declare.
    The verdict is cached against the volume's size and mtime and the program list's own identity,
    because an appliance launch is roughly two seconds per image and steady state must not pay it
    per image per run. Restaging a volume or changing the required programs moves the key, so a
-   stale verdict is never inherited.
+   stale verdict is never inherited. The read-only property is what makes this work at all: three
+   consecutive `guestfish --ro` runs left a test volume's sha256 *and* mtime byte-identical, while
+   a single `virt-customize` changed its sha256 — an instrument that wrote would move the mtime
+   its own cache key is built from and re-inspect every image on every run.
+
+   The check refuses an **empty** program list rather than enforcing one. guestfish given no
+   commands exits 0 with no output, which would read as "every volume conformant" — the one way
+   this control could fail open, and the difference between a check that is absent and one that
+   only appears to be there.
 
    **This half checks presence, not the execute bit.** `is-file` answers without failing on an
    absent path; reading the mode needs `stat`, which *fails* on one, collapsing "not there" into
