@@ -940,8 +940,51 @@ Notes, dispositioned without a further pass:
 - **Step 1.3 gave two bodies for the same `raise`** — `accepted-fixed`; one body ships, and
   its message is asserted by the `match=` in the settings tests.
 
+Branch review, iteration 1: `$gauntlet` over the whole diff, verdict `needs-attention`,
+6 findings, 1 blocking, 2 suppressed. **No deferrals.**
+
+- **Blocking — the harness's user-private-group precondition would have hard-failed
+  `just test-ansible` on the CI image**, reddening that required step on every PR in the
+  repo rather than only this one: GitHub-hosted Ubuntu runners give their account a primary
+  group of `docker`, so `id -gn` never equals `id -un`. `accepted-fixed` **in the role, not
+  the harness** — the per-slot roots are `0700`, where the group has no access, so naming
+  one constrained nothing while imposing an environment requirement the one environment that
+  must run it cannot satisfy. The precondition is gone and no group is set.
+- **`processes={"worker"}` does not avoid the failure it was chosen to avoid** —
+  `accepted-fixed` as guidance rather than declaration. `kdive-worker.service` is also
+  `User=kdive` off the shared `kdive.env`, and the registry keys on the command name, which
+  the shared unit and the live-worker gate both spell `worker`. No process set can separate
+  them, so the loud startup `CONFIGURATION_ERROR` is correct behaviour; `frozenset()` would
+  only buy silence by discarding the preflight. The `help` and `suggest` strings now say the
+  value is per-slot and must never go in the shared environment file.
+- **The live-worker gate's env allowlist omits the variable** — `deferred-tracked`, owner
+  **#2212**, which owns the wiring. Recorded in the spec's *Prerequisite this hands to #2212*
+  so that change inherits it rather than rediscovering it at first recovery.
+- **The health gate errors on an undefined attribute when an owner no longer resolves** —
+  `accepted-fixed`. `stat` fills `pw_name` inside a try/except around `pwd.getpwuid`, so an
+  orphaned uid leaves the key absent; both owner arms now assert `is defined` first.
+- **Three spec citations stale by ~85 lines** — `accepted-fixed`; all five re-verified
+  against current source.
+- **Criterion 2's "message names the setting" half is asserted for two of seven conditions**
+  — `rejected-with-evidence`. `Registry.get` wraps every `ValueError` as
+  `f"{setting.name}: cannot parse {raw!r} ({exc})"`, so the setting name is present
+  structurally for all seven; asserting it per-condition would test the registry, not this
+  setting. The spec states this.
+
+Threat scan (`$detect-evil`): verdict **`approve`**, 2 findings, 0 blocking, 0 suppressed.
+Both `accepted-fixed`:
+
+- **The pre-create symlink refusal was a check-then-act pair, not atomic.**
+  `ansible.builtin.file` defaults `follow: true`; verified that creating `state: directory`
+  over a symlink to a mode-`0755` directory *succeeded* and left that target at `0700`. Both
+  create tasks now set `follow: false`, which fails and writes nothing.
+- **The parent-owner arm compared against the variable that set it**, so it agreed by
+  construction and could never fail. The variable is deleted; the parent is created
+  root-owned and the gate asserts the literal `root`. The harness exercises that arm
+  negatively, proving it rejects.
+
 Suppressions surfaced (an accepted ADR silenced each; recorded because a verdict alone
-hides them):
+hides them; the branch review raised the same two independently):
 
 - *Recovery payloads can fill the host filesystem, with no quota or retention* — suppressed
   under **ADR-0586**, whose Consequences already own recovery capacity as a reservation
