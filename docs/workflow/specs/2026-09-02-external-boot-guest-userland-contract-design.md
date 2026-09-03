@@ -24,9 +24,12 @@ that admissibility is **undeclared**.
 5. `deploy/ansible/README.md` gains an operator subsection stating the contract, the check, and the
    `force_image_rebuild` re-verify path, and amends the scratch caveat bullet.
 
-Items 4 and 5 are load-bearing: ADR-0590 declines to add a forward amendment note to ADR-0188 §4 on
-the ground that a reader reaches it through the recipe comments, the catalog entry, and the README.
-Omitting either makes that argument false.
+6. ADR-0188 §4 gains the `### Amendment (2026-09-02)` block `docs/adr/README.md` prescribes, naming
+   the added obligation and linking ADR-0590.
+
+Items 4, 5 and 6 are the discoverability set. Item 6 is the one a reader of §4 reaches without
+already knowing ADR-0590 exists; items 4 and 5 are the pointers from the code and the operator
+docs. The record is reachable from all three.
 
 ## Failure behaviour
 

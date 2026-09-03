@@ -13,7 +13,7 @@ Neither does any other accepted decision: ADR-0188 §4 describes the in-guest co
 
 **How that observation is taken is #2110's design, not merged code.** Its activation design spawns
 `/usr/bin/uname` and `/usr/bin/cat` through a `guest-exec` allowlist keyed on absolute paths; `rg`
-over this repository outside `docs/` finds neither path, so nothing merged reads them yet. #2110
+over `src/` finds neither path, so nothing merged reads them yet. #2110
 considered and **rejected** the obvious alternative — an `observe` subcommand on the in-guest
 `kdive-install-kernel` helper — because that helper ships in the base image, so it would reach only
 re-imaged guests and an existing System would fail identity proof for a deployment reason. What
@@ -109,11 +109,14 @@ as executable files, and hold the build to it rather than assume it.
   scratch-capable host exists in CI or on available hardware, and the dependency reasoning above is
   read off packaging metadata and Debian policy. The first real `playbooks/image.yml` run turns the
   new task from an assertion into evidence, and is the first thing that could falsify the reasoning.
-- ADR-0188 is **not** edited to carry a forward amendment note, though ADR-0481 set that precedent
-  in the same §4. A merged record takes only a supersession banner, and this supersedes nothing.
-  This record is reachable from the code that implements it — the recipe comments, the catalog
-  entry, and `deploy/ansible/README.md` all name it — but §4 read on its own still describes the
-  older, shorter contract, and nothing there points here.
+- ADR-0188 **is** edited to carry a forward amendment note, as ADR-0481 did in the same §4. A
+  merged record is append-only outside `## Status`, and `docs/adr/README.md` prescribes the append
+  for exactly this case: a `### Amendment (YYYY-MM-DD)` block on the level-2 section a later
+  decision qualifies. §4 enumerates what the guest owes and this record adds to that enumeration,
+  so §4 read on its own would otherwise describe a contract that is no longer complete. The
+  amendment states the obligation and points here; it does not restate the decision. This record is
+  additionally reachable from the code that implements it — the recipe comments, the catalog entry,
+  and `deploy/ansible/README.md` all name it.
 
 ## Considered & rejected
 

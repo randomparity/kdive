@@ -9,9 +9,11 @@ staging it. A real build host is what turns that check into evidence.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 _ROLE = (
@@ -75,6 +77,67 @@ def test_build_verifies_both_identity_proof_programs() -> None:
     for program in REQUIRED_PROGRAMS:
         assert f"test -x {program}" in command, f"{program} is named but not tested"
     assert verify["changed_when"] is False, "the task asserts; it does not customize"
+
+
+def _run_command(task: dict[str, Any]) -> str:
+    """The shell fragment a ``--run-command`` task hands its instrument."""
+    argv = _argv(task)
+    return argv[argv.index("--run-command") + 1]
+
+
+def test_build_verification_inspects_the_qcow2_it_is_about_to_stage() -> None:
+    """The instrument is virt-customize and the disk it opens is the built image.
+
+    Asserting the ``test -x`` text alone leaves the task free to invoke ``true``, or to point
+    ``-a`` at some other disk, while still reading as a check.
+    """
+    argv = _argv(_named(_tasks(BUILD_ONE), VERIFY_TASK))
+    assert argv[0] == "virt-customize", "the check must run an instrument that opens the image"
+    assert argv[argv.index("-a") + 1] == "{{ guest_base_image_qcow2 }}", (
+        "the disk inspected must be the qcow2 this task is about to stage"
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "mode", "expected_ok"),
+    [
+        (("uname", "cat"), 0o755, True),
+        ((), 0o755, False),
+        (("uname",), 0o755, False),
+        (("uname", "cat"), 0o644, False),
+    ],
+    ids=["both-executable", "both-absent", "cat-absent", "cat-not-executable"],
+)
+def test_build_verification_command_accepts_and_refuses(
+    tmp_path: Path,
+    present: tuple[str, ...],
+    mode: int,
+    expected_ok: bool,
+) -> None:
+    """The check's own shell fragment passes a conformant tree and fails every other shape.
+
+    The string-shape tests above cannot tell an enforcing check from an inert one: appending
+    ``|| true``, or swapping the instrument for ``true``, leaves both ``test -x`` substrings in
+    place. So run the fragment the task actually ships. ``/usr/bin`` is rewritten to a tmp_path
+    so no image or libguestfs is needed — what is under test is the condition, not the appliance.
+    """
+    bin_dir = tmp_path / "usr" / "bin"
+    bin_dir.mkdir(parents=True)
+    for program in present:
+        target = bin_dir / program
+        target.write_text("#!/bin/sh\n", encoding="utf-8")
+        target.chmod(mode)
+
+    fragment = _run_command(_named(_tasks(BUILD_ONE), VERIFY_TASK))
+    assert "/usr/bin/" in fragment, "the fragment must name the paths it checks absolutely"
+    rehomed = fragment.replace("/usr/bin/", f"{bin_dir}/")
+
+    completed = subprocess.run(["sh", "-c", rehomed], capture_output=True, text=True, check=False)
+    assert (completed.returncode == 0) is expected_ok, (
+        f"rc={completed.returncode} for present={present} mode={mode:o}; stderr={completed.stderr}"
+    )
+    if not expected_ok:
+        assert "ADR-0590" in completed.stderr, "a refusal must name the record that explains it"
 
 
 def test_verification_precedes_staging() -> None:

@@ -200,8 +200,8 @@ reach.
 - `build_scratch.yml` names `coreutils` on both bootstrap paths and still names `busybox` on both.
 - `build_one.yml` carries exactly one task naming both required paths, before the staging copy,
   with a `when` byte-identical to that copy's and `changed_when: false`.
-- The diff touches `all.yml` and `deploy/ansible/README.md`, and both name ADR-0590 — the
-  discoverability pointers ADR-0590 substitutes for a forward amendment note in ADR-0188 §4.
+- The diff touches `all.yml` and `deploy/ansible/README.md`, and both name ADR-0590. ADR-0188 §4
+  carries the `### Amendment` block the ADR README prescribes, pointing at ADR-0590.
 - Five tests pass, each failing when its own subject is broken (Step 8).
 - `just lint`, `just type`, `just lint-ansible`, `just test-ansible`, `just adr-status-check`, and
   `just ci` all exit 0, and `git diff --name-only main...HEAD` names no sibling-owned path.
