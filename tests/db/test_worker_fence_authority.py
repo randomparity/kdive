@@ -2170,6 +2170,14 @@ def _role_lock_state(observer: psycopg.Connection) -> list[tuple[Any, ...]]:
         return [("unavailable", repr(exc))]
 
 
+def _lock_state_report(observer: psycopg.Connection) -> str:
+    """The lock queue, labelled, for any failure report in this module."""
+    return (
+        "Cluster-global role lock (pid, granted, state, wait_event_type, wait_event, query): "
+        f"{_role_lock_state(observer)}"
+    )
+
+
 def _result_or_race_report(
     future: Future[Any],
     *,
@@ -2226,19 +2234,13 @@ def _raise_participant_failure(
         return
     raise AssertionError(
         f"{expectation}; the participant raised before reaching that state: {error!r}. "
-        "Cluster-global role lock (pid, granted, state, wait_event_type, wait_event, "
-        f"query): {_role_lock_state(observer)}"
+        f"{_lock_state_report(observer)}"
     ) from error
 
 
 def _race_state(observer: psycopg.Connection | None, participants: dict[str, Future[Any]]) -> str:
     """Who was where, for any backstop's expiry report."""
-    lock_state = (
-        ""
-        if observer is None
-        else " Cluster-global role lock (pid, granted, state, "
-        f"wait_event_type, wait_event, query): {_role_lock_state(observer)}"
-    )
+    lock_state = "" if observer is None else f" {_lock_state_report(observer)}"
     return f"Participants: {_future_states(participants)}.{lock_state}"
 
 
@@ -2500,9 +2502,7 @@ def _lock_backend_pid(
         if time.monotonic() >= deadline:
             raise AssertionError(
                 f"role {role} never connected to take the cluster-global fixture lock within "
-                f"{_LOCK_HELD_STEP_TIMEOUT_S}s. Participants: {_future_states(participants)}. "
-                "Cluster-global role lock (pid, granted, state, wait_event_type, wait_event, "
-                f"query): {_role_lock_state(observer)}"
+                f"{_LOCK_HELD_STEP_TIMEOUT_S}s. {_race_state(observer, participants)}"
             )
 
 
@@ -2540,8 +2540,7 @@ def _wait_for_cluster_role_lock(
             raise AssertionError(
                 f"{expectation}; pid {backend_pid} did not "
                 f"{'hold' if granted else 'queue for'} the cluster-global fixture lock within "
-                f"{timeout_s}s. Cluster-global role lock (pid, granted, state, wait_event_type, "
-                f"wait_event, query): {_role_lock_state(observer)}"
+                f"{timeout_s}s. {_lock_state_report(observer)}"
             )
         time.sleep(0.02)
 
