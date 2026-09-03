@@ -403,6 +403,88 @@
     mode: "0750"
   loop: "{{ live_vm_host_worker_accounts }}"
 
+# Local external-boot recovery roots (ADR-0586, #2210). The recovery stores re-check the
+# root on every open and accept only a directory that is mode 0700 and owned by the running
+# euid, so each fixed worker slot gets its own root beneath a traverse-only parent.
+- name: Inspect the external-boot recovery parent without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_recovery_root }}"
+    follow: false
+  register: live_vm_host_recovery_root_before
+  tags: [external_boot_recovery_root]
+
+- name: Require a real external-boot recovery parent
+  ansible.builtin.assert:
+    that:
+      - >-
+        not live_vm_host_recovery_root_before.stat.exists
+        or (
+        live_vm_host_recovery_root_before.stat.isdir
+        and not live_vm_host_recovery_root_before.stat.islnk
+        )
+    fail_msg: >-
+      {{ live_vm_host_worker_recovery_root }} must be a real directory; the existing entry
+      was left untouched. Correct it and rerun provisioning.
+  tags: [external_boot_recovery_root]
+
+- name: Create the traverse-only external-boot recovery parent
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_recovery_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0711"
+    # follow defaults to true, which would dereference a symlink appearing between the stat
+    # above and this task and apply owner and mode to its target. The stat is the diagnostic
+    # that produces a clear operator message; this is the atomic refusal.
+    follow: false
+  tags: [external_boot_recovery_root]
+
+# The per-slot roots need the same pre-create stat/assert as the parent, not just the parent:
+# ansible.builtin.file with state=directory treats a symlink pointing at a directory as
+# already satisfied, so without this a substituted slot root is reported as converged and a
+# rerun cannot repair it. The child is named for its owning account rather than a stripped
+# slot number so the create and verify tasks cannot drift on a shared transform.
+- name: Inspect the per-slot external-boot recovery roots without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}"
+    follow: false
+  loop: "{{ live_vm_host_worker_accounts }}"
+  register: live_vm_host_recovery_slots_before
+  tags: [external_boot_recovery_root_slots]
+
+- name: Require real per-slot external-boot recovery roots
+  ansible.builtin.assert:
+    that:
+      - >-
+        not item.stat.exists
+        or (item.stat.isdir and not item.stat.islnk)
+    fail_msg: >-
+      {{ live_vm_host_worker_recovery_root }}/{{ item.item }} must be a real directory, not a
+      symlink; the existing entry was left untouched. Remove it and rerun provisioning.
+  loop: "{{ live_vm_host_recovery_slots_before.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  tags: [external_boot_recovery_root_slots]
+
+- name: Create the owner-only external-boot recovery root for each worker slot
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}"
+    state: directory
+    owner: "{{ item }}"
+    # No group is set, deliberately. At mode 0700 the group has no access at all, so naming
+    # one constrains nothing about confinement while requiring a group named after each
+    # account to exist. That requirement is not universally satisfiable: GitHub-hosted
+    # Ubuntu runners give their account a primary group of `docker`, so a harness
+    # substituting the invoking account could not create these directories at all. The
+    # sibling slot directories do set a group because they are 0750, where it matters.
+    mode: "0700"
+    # See the parent above: without follow: false this would chown and chmod whatever a
+    # symlink planted in the stat-to-create window points at.
+    follow: false
+  loop: "{{ live_vm_host_worker_accounts }}"
+  tags: [external_boot_recovery_root_slots]
+
 - name: Inspect the protected runtime parent without following links
   ansible.builtin.stat:
     path: /run/kdive

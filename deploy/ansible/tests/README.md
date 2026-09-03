@@ -10,6 +10,7 @@ Regression harnesses for role logic that no unit test in `tests/` can reach, all
 | `run-guest-base-image-admission.sh` | the `guest_base_image` build-host admission gate (#1629) |
 | `run-remote-libvirt-facts-render.sh` | `remote_libvirt_facts` staged-volume confirmation (#1629) |
 | `run-remote-module-appliance.sh` | clean-host digest verification and idempotent extraction (#2128) |
+| `run-external-boot-recovery-root.sh` | the `live_vm_host` external-boot recovery-root shape, idempotence, and health gate (#2210) |
 
 Each drives the **real** tasks — never a copy of the logic — in isolation.
 

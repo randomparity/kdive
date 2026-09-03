@@ -43,7 +43,7 @@ live_vm_host_docker_packages:
 # if pip is configured to install console scripts elsewhere.
 live_vm_host_uv_bin: /usr/local/bin/uv
 
-# Fixed host-worker authority contract (ADR-0555). Keep the slot count literal: unit names,
+# Fixed host-worker authority contract (ADR-0574). Keep the slot count literal: unit names,
 # account isolation, and lifecycle bounds all use exactly 1..8.
 live_vm_host_worker_accounts:
   - kdive-worker-1
@@ -76,6 +76,18 @@ live_vm_host_worker_fixture_files:
   - rootfs_catalog.toml
   - profiles/console-ready_ppc64le.yaml
   - profiles/console-ready_x86_64.yaml
+
+# Local external-boot recovery roots (ADR-0586, #2210). RecoveryMetadataStore and
+# TargetProjectionStore open the configured root O_NOFOLLOW and require mode exactly 0700
+# owned by the running euid, so there is one root per fixed worker account rather than one
+# shared root: a single directory cannot be uid-owned by eight slots. The parent is
+# traverse-only (0711) so a slot reaches its own child by name without being able to list
+# its siblings, matching the /etc/kdive/credentials idiom above. The parent's owner is the
+# literal root in both the create task and the health gate, deliberately not a variable: a
+# gate that compares an observed owner against the same variable that set it agrees by
+# construction and can never fail, and a parent owned by a worker account could unlink and
+# recreate any other slot's root, defeating the confinement the 0700 children provide.
+live_vm_host_worker_recovery_root: /var/lib/kdive/live-workers/external-boot-recovery
 
 # Dormant provider-host authority boundary (ADR-0584). This endpoint is separate from the
 # fixed-worker provider contract above; #2140 owns any later adapter binding or worker cutover.

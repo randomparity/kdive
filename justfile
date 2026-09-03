@@ -454,6 +454,7 @@ test-ansible:
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-module-appliance.sh
+    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-external-boot-recovery-root.sh
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its

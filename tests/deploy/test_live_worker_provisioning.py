@@ -1420,3 +1420,108 @@ def test_root_only_configuration_and_revision_are_verified() -> None:
     assert 'mode == "0600"' in verify
     assert 'mode == "0644"' in verify
     assert 'mode == "0444"' in verify
+
+
+def test_external_boot_recovery_root_defaults_are_declared() -> None:
+    # ADR-0586 / #2210: the configured recovery root is durable provider state and must be
+    # provisioned with the worker's permissions. The path is absolute so it matches what
+    # KDIVE_LIBVIRT_RECOVERY_ROOT accepts.
+    defaults = _yaml(DEFAULTS)
+    root = defaults["live_vm_host_worker_recovery_root"]
+    assert isinstance(root, str)
+    assert root.startswith("/")
+    assert root == "/var/lib/kdive/live-workers/external-boot-recovery"
+    # The parent's owner is deliberately NOT a variable. A health gate that compares an
+    # observed owner against the same variable that set it agrees by construction and can
+    # never fail, and a parent owned by a worker account could unlink and recreate another
+    # slot's recovery root.
+    assert "live_vm_host_worker_recovery_root_owner" not in defaults
+
+
+def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
+    # One root per fixed slot, not one shared root: RecoveryMetadataStore requires
+    # st_uid == geteuid(), which a single directory cannot satisfy for eight accounts.
+    tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
+    parent = (
+        'path: "{{ live_vm_host_worker_recovery_root }}" state: directory '
+        'owner: root group: root mode: "0711"'
+    )
+    assert parent in tasks
+    # Asserted as pieces, not one contiguous run: explanatory comments sit between these
+    # keys in the role and would break a single-substring match without any behaviour
+    # changing.
+    assert 'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" state: directory' in tasks
+    assert 'owner: "{{ item }}"' in tasks
+    # No group on the per-slot roots: at 0700 the group has no access, and requiring a group
+    # named after each account is not universally satisfiable.
+    assert 'owner: "{{ item }}" group: "{{ item }}" mode: "0700"' not in tasks
+    # follow defaults to true; without this both create tasks would dereference a symlink
+    # planted between the pre-create stat and the create, applying owner and mode to its
+    # target. Verified: with the default, the module succeeds and changes the target's mode.
+    assert tasks.count("follow: false") >= 2
+
+
+def test_external_boot_recovery_parent_is_checked_before_creation() -> None:
+    # A pre-create stat with follow: false plus an assert is what stops provisioning
+    # writing through a symlink planted at the recovery parent.
+    tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
+    assert (
+        'path: "{{ live_vm_host_worker_recovery_root }}" follow: false '
+        "register: live_vm_host_recovery_root_before" in tasks
+    )
+    assert "live_vm_host_recovery_root_before.stat.islnk" in tasks
+
+
+def test_external_boot_recovery_roots_are_health_gated() -> None:
+    verify = re.sub(r"\s+", " ", _text(VERIFY_TASKS))
+    # stat.exists precedes stat.isdir so an absent root reports what is wrong instead of
+    # failing on an undefined attribute.
+    # Pieces, not one contiguous run: explanatory comments and the `is defined` guards sit
+    # between these arms in the role.
+    for arm in (
+        "item.stat.exists",
+        "item.stat.isdir",
+        "not item.stat.islnk",
+        "item.stat.pw_name == item.item",
+        "item.stat.mode == '0700'",
+    ):
+        assert arm in verify
+    # `is defined` precedes each owner equality: the stat module fills pw_name inside a
+    # try/except around pwd.getpwuid, so an orphaned uid leaves the key absent and the
+    # equality would raise an undefined-attribute error instead of the fail_msg.
+    assert "item.stat.pw_name is defined" in verify
+    assert "live_vm_host_recovery_root_check.stat.pw_name is defined" in verify
+    assert "live_vm_host_recovery_root_check.stat.mode == '0711'" in verify
+    assert "live_vm_host_recovery_root_check.stat.exists" in verify
+    # The parent-owner arm compares against the literal root, never against a variable the
+    # create task also consumed -- an assertion that reads back the value that produced it
+    # asserts nothing.
+    assert "live_vm_host_recovery_root_check.stat.pw_name == 'root'" in verify
+    assert "live_vm_host_recovery_root_check.stat.gr_name == 'root'" in verify
+    assert "live_vm_host_worker_recovery_root_owner" not in verify
+    # No group arm on the per-slot roots: at 0700 the group has no access, and requiring a
+    # group named after each account is not universally satisfiable (GitHub-hosted Ubuntu
+    # runners give their account a primary group of `docker`).
+    assert "item.stat.gr_name == item.item" not in verify
+
+
+def test_external_boot_recovery_slot_roots_are_checked_before_creation() -> None:
+    # ansible.builtin.file with state=directory treats a symlink to a directory as already
+    # satisfied, so without a per-slot pre-create guard a substituted slot root is reported
+    # converged and rerunning provisioning can never repair it. The parent guard alone is
+    # not enough: the per-slot roots are the directories a worker actually opens.
+    tasks = re.sub(r"\s+", " ", _text(MAIN_TASKS))
+    assert (
+        'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" follow: false '
+        'loop: "{{ live_vm_host_worker_accounts }}" '
+        "register: live_vm_host_recovery_slots_before" in tasks
+    )
+    assert "not item.stat.exists or (item.stat.isdir and not item.stat.islnk)" in tasks
+
+
+def test_external_boot_recovery_root_harness_runs_in_ci() -> None:
+    # A run-*.sh that is not named in the test-ansible recipe never runs in CI.
+    harness = ROOT / "deploy" / "ansible" / "tests" / "run-external-boot-recovery-root.sh"
+    assert harness.is_file()
+    assert harness.stat().st_mode & stat.S_IXUSR
+    assert "run-external-boot-recovery-root.sh" in _text(ROOT / "justfile")

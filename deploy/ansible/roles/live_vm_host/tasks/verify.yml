@@ -50,7 +50,7 @@
   register: live_vm_host_xdg
   failed_when: not live_vm_host_xdg.stat.exists
 
-# Part 3: the fixed live-worker authority contract (ADR-0555). These proofs cover the identity,
+# Part 3: the fixed live-worker authority contract (ADR-0574). These proofs cover the identity,
 # file, unit, session-libvirt daemon/provider, socket, and slot-isolation surface.
 - name: Inspect the protected runtime parent
   ansible.builtin.stat:
@@ -363,6 +363,92 @@
         )
   loop: "{{ live_vm_host_authority_protected_path_results.results }}"
   when: live_vm_host_authority_enabled | bool
+
+# Local external-boot recovery roots (ADR-0586, #2210). This gate is the host-side proof
+# that the shape the recovery stores demand actually exists: a wrong mode or owner here is
+# a recovery that fails at open time, deep inside a lifecycle operation, instead of at
+# provisioning.
+- name: Inspect the external-boot recovery parent
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_recovery_root }}"
+    follow: false
+  register: live_vm_host_recovery_root_check
+  # Both tags: the shape arm and the owner arm are separately selectable, and each needs
+  # this register, so tagging the stat for only one leaves the other undefined.
+  tags:
+    - external_boot_recovery_root_verify
+    - external_boot_recovery_root_verify_parent_owner
+
+- name: Assert the external-boot recovery parent is traverse-only
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_recovery_root_check.stat.exists
+      - live_vm_host_recovery_root_check.stat.isdir
+      - not live_vm_host_recovery_root_check.stat.islnk
+      - live_vm_host_recovery_root_check.stat.mode == '0711'
+    fail_msg: >-
+      {{ live_vm_host_worker_recovery_root }} must be a real mode-0711 directory, so a worker
+      slot reaches its own recovery root without being able to list its siblings.
+  tags: [external_boot_recovery_root_verify]
+
+# Compared against the literal root, never against the variable the create task used: an
+# assertion that reads back the value that produced it agrees by construction and asserts
+# nothing. A parent owned by a worker account could unlink and recreate any other slot's
+# recovery root, which is why this arm exists at all.
+- name: Assert the external-boot recovery parent is root-owned
+  ansible.builtin.assert:
+    that:
+      # exists first: this arm is separately selectable, so it can run without the shape
+      # arm above. Without this guard an absent parent fails on an undefined pw_name
+      # attribute instead of reporting what is actually wrong -- in exactly the diagnostic
+      # an operator reaches for when the gate is red.
+      - live_vm_host_recovery_root_check.stat.exists
+      # Same reason as the per-slot arm: an unresolvable owner leaves these keys absent, and
+      # an undefined-attribute error would replace the message an operator needs.
+      - live_vm_host_recovery_root_check.stat.pw_name is defined
+      - live_vm_host_recovery_root_check.stat.gr_name is defined
+      - live_vm_host_recovery_root_check.stat.pw_name == 'root'
+      - live_vm_host_recovery_root_check.stat.gr_name == 'root'
+    fail_msg: >-
+      {{ live_vm_host_worker_recovery_root }} must be owned by root, and that account must
+      resolve. A parent owned by any worker account can unlink and recreate another slot's
+      recovery root, defeating the per-slot confinement the 0700 children otherwise provide.
+  tags: [external_boot_recovery_root_verify_parent_owner]
+
+- name: Inspect the per-slot external-boot recovery roots
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}"
+    follow: false
+  loop: "{{ live_vm_host_worker_accounts }}"
+  register: live_vm_host_recovery_slot_checks
+  tags: [external_boot_recovery_root_verify]
+
+# stat.exists is asserted first on purpose: without it an absent root fails on an undefined
+# isdir attribute rather than reporting what is actually wrong.
+- name: Assert each per-slot external-boot recovery root is owner-only
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isdir
+      - not item.stat.islnk
+      # `is defined` before the equality, for the same reason exists precedes isdir. The
+      # stat module fills pw_name inside a try/except around pwd.getpwuid, so an orphaned
+      # uid with no passwd entry -- a worker account removed or renumbered, which is exactly
+      # what an operator runs this gate to diagnose -- leaves the key absent and would fail
+      # with a Jinja undefined-attribute error instead of the message below.
+      - item.stat.pw_name is defined
+      - item.stat.pw_name == item.item
+      # No group arm: at 0700 the group has no access, so the create task sets none.
+      - item.stat.mode == '0700'
+    fail_msg: >-
+      The external-boot recovery root for {{ item.item }} under
+      {{ live_vm_host_worker_recovery_root }} must be a mode-0700 directory owned by
+      {{ item.item }}, and that account must still resolve; the local recovery stores refuse
+      any other shape at open time.
+  loop: "{{ live_vm_host_recovery_slot_checks.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  tags: [external_boot_recovery_root_verify]
 
 - name: Inspect the authority libvirt configuration
   ansible.builtin.stat:
