@@ -1,4 +1,8 @@
-"""Contract tests for the remote-libvirt external-boot activation primitives (#2110)."""
+"""Contract tests for the remote-libvirt external-boot primitives (#2110, #2120).
+
+The recovery block at the end is #2120's: it drives every point a worker can be lost at back to
+the recorded disk/GRUB baseline and proves the writes that must not happen.
+"""
 
 from __future__ import annotations
 
@@ -34,11 +38,13 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     MAX_DEFINITION_BYTES,
     MAX_GUEST_READ_BYTES,
     RemoteExternalBootDefinition,
+    RemoteExternalBootRecovery,
     activate_definition,
     boot_projection_identity,
     observe_guest_identity,
     prepare_target_definition,
     preserved_definition_identity,
+    recover_disk_grub_baseline,
     render_target_xml,
     require_disk_grub_source,
 )
@@ -464,9 +470,16 @@ class _FakeDomain:
         self.defined: list[str] = []
         self.create_error: BaseException | None = None
         self.xmldesc_error: BaseException | None = None
+        self.isactive_error: BaseException | None = None
+        self.destroy_error: BaseException | None = None
+        # What a competing actor did during the stop window, applied after the destroy took
+        # effect: it models a lost response, a racing redefine, or a racing restart.
+        self.on_destroy: Callable[[_FakeDomain], None] | None = None
 
     def isActive(self) -> int:  # noqa: N802 - libvirt binding name
         self.calls.append("isActive")
+        if self.isactive_error is not None:
+            raise self.isactive_error
         return 1 if self._active else 0
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt binding name
@@ -482,6 +495,15 @@ class _FakeDomain:
         if self.create_error is not None:
             raise self.create_error
         self._active = True
+        return 0
+
+    def destroy(self) -> int:
+        self.calls.append("destroy")
+        self._active = False
+        if self.on_destroy is not None:
+            self.on_destroy(self)
+        if self.destroy_error is not None:
+            raise self.destroy_error
         return 0
 
     def _replace(self, xml: str) -> None:
@@ -903,3 +925,251 @@ def test_activation_start_failure_on_an_already_written_target_says_no_write_hap
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details["phase"] == "start"
     assert domain.defined == []
+
+
+def test_activation_reports_an_unreadable_power_state_as_infrastructure_failure() -> None:
+    definition = _prepare()
+    domain = _FakeDomain(definition.source_xml, active=False)
+    domain.isactive_error = _libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        activate_definition(_FakeConn(domain), definition)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert domain.defined == []
+
+
+# ---------------------------------------------------------------------------
+# Recovery to the recorded disk/GRUB baseline (#2120).
+# ---------------------------------------------------------------------------
+
+
+def _recovery(prior_power: Any = "running", **overrides: Any) -> RemoteExternalBootRecovery:
+    return RemoteExternalBootRecovery(definition=_prepare(**overrides), prior_power=prior_power)
+
+
+def _domain_for(which: str, recovery: RemoteExternalBootRecovery, *, active: bool) -> _FakeDomain:
+    observed = {
+        "source": recovery.definition.source_xml,
+        "target": recovery.definition.target_xml,
+        "other": _OTHER_XML,
+    }[which]
+    return _FakeDomain(observed, active=active)
+
+
+def _observed_side(domain: _FakeDomain, definition: RemoteExternalBootDefinition) -> str:
+    """Classify what the domain now reads back as, by the same digest pair recovery compares."""
+    observed = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+    preserved = preserved_definition_identity(observed)
+    boot = boot_projection_identity(observed)
+    if (preserved, boot) == (definition.source_definition, definition.source_boot):
+        return "source"
+    if (preserved, boot) == (definition.target_definition, definition.target_boot):
+        return "target"
+    return "other"
+
+
+@pytest.mark.parametrize(
+    ("which", "active", "prior", "destroys", "defines", "creates"),
+    [
+        ("source", False, "inactive", 0, 0, 0),
+        ("source", False, "running", 0, 0, 1),
+        ("source", True, "running", 0, 0, 0),
+        ("target", False, "inactive", 0, 1, 0),
+        ("target", False, "running", 0, 1, 1),
+        ("target", True, "inactive", 1, 1, 0),
+        ("target", True, "running", 1, 1, 1),
+    ],
+    ids=[
+        "already-recovered-stopped-is-a-noop",
+        "baseline-defined-but-not-yet-started",
+        "already-recovered-running-is-a-noop",
+        "target-written-never-started-and-was-stopped",
+        "target-written-never-started-and-was-running",
+        "activated-and-running-and-was-stopped",
+        "activated-and-running-and-was-running",
+    ],
+)
+def test_recovery_matrix(
+    which: str, active: bool, prior: str, destroys: int, defines: int, creates: int
+) -> None:
+    """Every point a worker can die at converges on the recorded baseline in one call."""
+    recovery = _recovery(prior)
+    definition = recovery.definition
+    domain = _domain_for(which, recovery, active=active)
+    conn = _FakeConn(domain)
+
+    recover_disk_grub_baseline(conn, recovery)
+
+    assert domain.calls.count("destroy") == destroys
+    assert len(domain.defined) == defines
+    assert domain.calls.count("create") == creates
+    if defines:
+        assert domain.defined == [definition.source_xml]
+    assert _observed_side(domain, definition) == "source"
+    assert bool(domain.isActive()) is (prior == "running")
+
+
+def test_recovery_is_a_compare_and_set_over_digests_not_over_bytes() -> None:
+    """The domain reformats on read, so a byte comparison would misclassify the baseline."""
+    recovery = _recovery("inactive")
+    domain = _domain_for("target", recovery, active=True)
+    recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE) != recovery.definition.source_xml
+    assert _observed_side(domain, recovery.definition) == "source"
+
+
+@pytest.mark.parametrize(
+    ("which", "active", "prior"),
+    [
+        ("other", False, "running"),
+        ("other", True, "running"),
+        ("other", False, "inactive"),
+        ("source", True, "inactive"),
+    ],
+    ids=[
+        "third-definition-stopped",
+        "third-definition-running",
+        "third-definition-when-the-system-was-stopped",
+        "baseline-running-that-nothing-in-this-activation-started",
+    ],
+)
+def test_recovery_refuses_an_unproven_state_without_writing(
+    which: str, active: bool, prior: str
+) -> None:
+    recovery = _recovery(prior)
+    domain = _domain_for(which, recovery, active=active)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["system_id"] == str(_SYSTEM_ID)
+    assert caught.value.details["activation_id"] == _ACTIVATION_ID
+    assert "<domain" not in str(caught.value.details)
+    assert domain.defined == []
+    assert domain.calls.count("destroy") == 0
+    assert domain.calls.count("create") == 0
+
+
+def test_recovery_resumes_after_a_lost_response_without_writing_again() -> None:
+    recovery = _recovery("running")
+    domain = _domain_for("target", recovery, active=True)
+    conn = _FakeConn(domain)
+
+    recover_disk_grub_baseline(conn, recovery)
+    first = (domain.calls.count("destroy"), len(domain.defined), domain.calls.count("create"))
+    recover_disk_grub_baseline(conn, recovery)
+
+    assert first == (1, 1, 1)
+    assert (
+        domain.calls.count("destroy"),
+        len(domain.defined),
+        domain.calls.count("create"),
+    ) == first
+    assert _observed_side(domain, recovery.definition) == "source"
+
+
+def test_recovery_tolerates_a_destroy_that_landed_before_its_response_was_lost() -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("target", recovery, active=True)
+    domain.destroy_error = _libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    recover_disk_grub_baseline(_FakeConn(domain), recovery)
+
+    assert domain.defined == [recovery.definition.source_xml]
+    assert _observed_side(domain, recovery.definition) == "source"
+
+
+def test_recovery_reports_a_destroy_that_left_the_domain_running() -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("target", recovery, active=True)
+    domain.destroy_error = _libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    domain.on_destroy = lambda fake: setattr(fake, "_active", True)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert domain.defined == []
+
+
+def test_recovery_refuses_to_define_when_another_actor_redefined_during_the_stop() -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("target", recovery, active=True)
+    domain.on_destroy = lambda fake: fake._replace(_OTHER_XML)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "stop"
+    assert domain.defined == []
+
+
+def test_recovery_refuses_to_define_when_another_actor_restarted_during_the_stop() -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("target", recovery, active=True)
+    domain.on_destroy = lambda fake: setattr(fake, "_active", True)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "stop"
+    assert domain.defined == []
+
+
+def test_recovery_conflicts_when_the_baseline_does_not_read_back_as_the_source() -> None:
+    recovery = _recovery("running")
+    domain = _domain_for("target", recovery, active=False)
+    conn = _FakeConn(domain)
+    conn.readback_xml = _OTHER_XML
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(conn, recovery)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "readback"
+    assert domain.calls.count("create") == 0
+
+
+def test_recovery_reports_an_xml_rejection_of_the_baseline_as_conflict() -> None:
+    recovery = _recovery("running")
+    domain = _domain_for("target", recovery, active=False)
+    conn = _FakeConn(domain)
+    conn.define_error = _libvirt_error(libvirt.VIR_ERR_XML_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(conn, recovery)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert "recovery refused" in str(caught.value)
+    assert domain.calls.count("create") == 0
+
+
+def test_recovery_start_failure_names_the_restored_baseline() -> None:
+    recovery = _recovery("running")
+    domain = _domain_for("source", recovery, active=False)
+    domain.create_error = _libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details["phase"] == "start-after-recover"
+
+
+def test_recovery_reports_a_missing_domain_as_not_found() -> None:
+    conn = _FakeConn(None, lookup_error=_libvirt_error(libvirt.VIR_ERR_NO_DOMAIN))
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(conn, _recovery())
+    assert caught.value.category is ErrorCategory.NOT_FOUND
+
+
+def test_recovery_reports_an_unreadable_power_state_as_infrastructure_failure() -> None:
+    recovery = _recovery("inactive")
+    domain = _domain_for("source", recovery, active=False)
+    domain.isactive_error = _libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        recover_disk_grub_baseline(_FakeConn(domain), recovery)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert domain.defined == []
+
+
+def test_recovery_value_rejects_a_power_state_outside_the_two_recorded_ones() -> None:
+    payload = _recovery().model_dump()
+    payload["prior_power"] = "paused"
+    with pytest.raises(ValidationError):
+        RemoteExternalBootRecovery.model_validate(payload)
+
+
+def test_recovery_value_revalidates_the_definition_it_carries() -> None:
+    payload = _recovery().model_dump()
+    payload["definition"]["source_definition"] = _GOLDEN_PRESERVED
+    with pytest.raises(ValidationError):
+        RemoteExternalBootRecovery.model_validate(payload)
