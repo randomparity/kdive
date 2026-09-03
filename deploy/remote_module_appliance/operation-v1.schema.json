@@ -34,7 +34,12 @@
       "additionalProperties": false,
       "required": ["key", "identity"],
       "properties": {
-        "key": {"type": "string", "minLength": 1, "maxLength": 255},
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Pool-scoped libvirt volume name. The normative bound is 255 UTF-8 BYTES (the dir-pool NAME_MAX; ADR-0585 amendment 2026-09-03, ADR-0588). JSON Schema maxLength counts characters, so this keyword is a necessary and not a sufficient bound; the appliance and the provider reader refuse the key by byte length."
+        },
         "identity": {"$ref": "#/$defs/sha256"}
       }
     },

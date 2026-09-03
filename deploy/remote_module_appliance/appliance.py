@@ -22,6 +22,7 @@ DEPMOD = "/sbin/depmod"
 ENTRY_LIMIT = 200_000
 BYTE_LIMIT = 8 * 1024**3
 DOCUMENT_LIMIT = 16 * 1024
+VOLUME_KEY_BYTE_LIMIT = 255
 XATTR_BYTE_LIMIT = 32 * 1024**2
 DEPMOD_TIMEOUT_SECONDS = 300
 ROOT = Path("/mnt/root")
@@ -54,6 +55,25 @@ class ApplianceError(Exception):
         self.code = code
 
 
+def _canonical_bytes(document: dict[str, object]) -> bytes:
+    """Return the ADR-0585 canonical form of a document: unframed, unescaped, sorted UTF-8.
+
+    Every reader and writer of a `remote-module-*-v1` document goes through here, so the bytes
+    the appliance hashes, writes, and accepts cannot drift apart the way they did before #2176.
+    """
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _is_framed_canonical(document: dict[str, object], data: bytes) -> bool:
+    """Whether `data` is exactly the canonical form of `document` plus one framing newline.
+
+    Comparing bytes rather than trusting the parse is what refuses a duplicate member, a
+    gratuitous `\\uXXXX` escape, unsorted members, and stray whitespace -- forms two JSON readers
+    may resolve differently, and none of which `json.loads` alone rejects.
+    """
+    return _canonical_bytes(document) + b"\n" == data
+
+
 def _matches(pattern: Pattern[str], value: object) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
@@ -79,13 +99,13 @@ def _read_operation(path: Path) -> dict[str, object]:
         raise ApplianceError("INVALID_DOCUMENT") from error
     finally:
         os.close(descriptor)
-    if len(data) > DOCUMENT_LIMIT or b"\x00" in data or not data.endswith(b"\n"):
+    if len(data) > DOCUMENT_LIMIT or b"\x00" in data:
         raise ApplianceError("INVALID_DOCUMENT")
     try:
         parsed = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ApplianceError("INVALID_DOCUMENT") from error
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, dict) or not _is_framed_canonical(parsed, data):
         raise ApplianceError("INVALID_DOCUMENT")
     return _validate_operation(parsed)
 
@@ -131,7 +151,10 @@ def _validate_operation(document: dict[str, object]) -> dict[str, object]:
         isinstance(root_volume, dict)
         and set(root_volume) == {"key", "identity"}
         and isinstance(root_key, str)
-        and 0 < len(root_key) <= 255
+        # Bytes, not characters: a dir-pool volume name is bounded by the filesystem NAME_MAX
+        # (ADR-0585 amendment 2026-09-03, ADR-0588), and a 255-character non-ASCII key runs to
+        # 1020 bytes.
+        and 0 < len(root_key.encode()) <= VOLUME_KEY_BYTE_LIMIT
         and _matches(DIGEST_RE, root_mapping.get("identity"))
     )
     if not all(values) or not root_valid:
@@ -300,12 +323,7 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
         "recovery": "recovery-module-tree-v1",
     }[kind]
     prefix = f"kdive-{schema}".encode()
-    encoded = json.dumps(
-        {"entries": entries_document, "schema": schema},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
+    encoded = _canonical_bytes({"entries": entries_document, "schema": schema})
     return f"sha256:{hashlib.sha256(prefix + b'\0' + encoded).hexdigest()}", entries, content_bytes
 
 
@@ -426,7 +444,7 @@ def _sync_path(path: Path) -> None:
 
 
 def _write_json(path: Path, document: dict[str, object]) -> None:
-    data = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    data = _canonical_bytes(document) + b"\n"
     temporary = path.with_name(f".{path.name}.tmp")
     try:
         try:
@@ -530,7 +548,7 @@ def _existing_checkpoint(document: dict[str, object]) -> dict[str, object] | Non
         checkpoint = json.loads(data)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise ApplianceError("RECOVERY_CONFLICT") from error
-    if not isinstance(checkpoint, dict):
+    if not isinstance(checkpoint, dict) or not _is_framed_canonical(checkpoint, data):
         raise ApplianceError("RECOVERY_CONFLICT")
     allowed = {
         "protocol",

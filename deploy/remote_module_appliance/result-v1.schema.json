@@ -35,7 +35,12 @@
       "maxLength": 64,
       "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9][A-Za-z0-9._+-]*$"
     },
-    "root_volume_key": {"type": "string", "minLength": 1, "maxLength": 255},
+    "root_volume_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Pool-scoped libvirt volume name. The normative bound is 255 UTF-8 BYTES (the dir-pool NAME_MAX; ADR-0585 amendment 2026-09-03, ADR-0588). JSON Schema maxLength counts characters, so this keyword is a necessary and not a sufficient bound; the appliance and the provider reader refuse the key by byte length."
+    },
     "root_volume_identity": {"$ref": "#/$defs/sha256"},
     "source_manifest": {"$ref": "#/$defs/sha256"},
     "installed_manifest": {"$ref": "#/$defs/sha256"},
