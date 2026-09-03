@@ -285,6 +285,15 @@ with `never-began`; a different-identity head does not refuse.
    a cleanup commit whose tombstone is already published for this point, and assert
    `cleanup_complete` short-circuits it — `io.actions` gains no second `"cleanup"` — and that the
    commit still finalizes. Also assert a `TEARDOWN` commit never appends `"finalize"`.
+
+   **Say in the test's docstring what it does and does not pin.** `_FakeIO.reopen_binding` returns
+   `self.metadata` unconditionally, so the double keeps the recovery point resolvable after a
+   cleanup where the real store does not — `publish_tombstone` unlinks `intent.json` in the same
+   operation that writes the tombstone. The test therefore pins the coordinator's `cleanup_complete`
+   early-return branch, which is production-reachable only through the crash window between those
+   two writes. It is not the guarantee that ordinary commits do not double-mutate; that comes from
+   `commit` having exactly one call site per `execute_mutation`, which step 4's parametrisation and
+   the service tests cover.
 6. Run the module — expect the new tests to fail.
 7. Change `commit` to take `context: AuthorityCommitContextV1`, and pass it through to `_commit`
    and `_apply`.

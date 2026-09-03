@@ -103,6 +103,11 @@ request has none.
   makes the journal the evidence of record for exactly that question. Source: necessary
   consequence of criterion 5, which requires the refusal to be a bounded category and not a
   new falsehood in the journal.
+
+  This does not touch the excluded journal surface. N4a introduces no phase, no field and no
+  anchoring rule: it reuses `JournalPhase.TERMINAL` with `outcome="never-began"`, which
+  `execute_mutation`'s existing `stop_before_start` path already writes, through the existing
+  `_record`/`_anchor` pair. What changes is only which condition reaches that write.
 - **N5.** The local adapter's `cleanup` commit point calls `finalize_cleanup_tombstone` with a
   proof whose every field comes from the context or the resolved recovery point; none is
   defaulted or synthesized. To make that literally true of `phase`,
@@ -249,6 +254,15 @@ Every criterion gets a test that drives a real entry point.
 Each new test is bite-proved: with the implementation committed, a controlled fault is
 injected, the test must fail on its own assertion rather than on collection, and the fault is
 reverted and the file verified byte-identical.
+
+## Criterion 13 and the fault-inject port
+
+Criterion 13 requires the fault-inject port to keep working. It is met by non-modification, and
+that is worth stating rather than leaving as an absent component: the fault-inject provider
+implements no `AuthorityMutationAdapter`, so the widened `commit` signature does not reach it.
+`tests/providers/contract/bindings/fault_inject.py` binds the external-boot *contract*, not the
+authority seam. Nothing in the permitted surface touches `providers/fault_inject/`, and the
+guardrail suite is what proves it stayed working.
 
 ## Out of scope
 

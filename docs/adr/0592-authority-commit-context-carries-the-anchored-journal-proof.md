@@ -86,6 +86,14 @@ produce the same value and no assertion at any layer can tell them apart — a c
 field would compare a compile-time constant against itself. Required, omitting it is a
 `ValidationError`, which is a fault a test can actually observe.
 
+Neither edit contests ADR-0586's ownership of this shape. That record fixes the proof's *contents* —
+the point digest, the activation binding, the finalize operation and attempt identities, the
+authority-journal sequence and digest, and the literal `phase="mutation-started"` — and specifies
+neither a pattern for `operation_id` nor a default for `phase`. Both edits change constraints
+ADR-0586 left unspecified, and both move the field toward what it already requires: `operation_id`
+becomes able to carry the *real* operation identity, and `phase` stays the same literal while
+ceasing to be silently suppliable.
+
 ### The adapter never infers from absence, and that is the whole of the retry story
 
 Cleanup destroys the durable recovery record it commits against, so after a cleanup the
@@ -113,11 +121,17 @@ destroys recovery evidence — is ever bypassed on a peer-chosen binding.
 exists.** `self._adapter.commit` is called at exactly one site in `service.py`, once per
 `execute_mutation`; `_finish_recovery` re-drives only `observe`. The authority therefore never
 re-drives a cleanup commit for the same operation, and a "retried cleanup" is a new operation
-with a new operation identity. Within the one commit that does run, the path is idempotent
-against a durable positive record rather than an absence: `LocalLibvirtExternalBoot.cleanup`
+with a new operation identity. **That one-call-site property is what carries the
+no-double-mutation guarantee in the ordinary case**, and it is architectural rather than
+defensive.
+
+The coordinator's own short-circuit is the second, narrower half: `LocalLibvirtExternalBoot.cleanup`
 early-returns on `cleanup_complete`, which matches the on-disk tombstone against this point's
-digest, and `finalize_tombstone` returns cleanly when the tombstone is already gone — both
-evaluated with the recovery point in hand.
+digest, and `finalize_tombstone` returns cleanly when the tombstone is already gone — both with the
+recovery point in hand. Weight that honestly: reaching the short-circuit needs a resolvable
+`RecoveryPoint` *and* a live tombstone at once, and `publish_tombstone` writes the tombstone and
+unlinks `intent.json` in the same operation, so the only production state holding both is the crash
+window between those two writes. It is a real branch guarding a real window, not the common path.
 
 **This makes one of issue #2207's acceptance criteria unsatisfiable as written, and the record
 says so rather than quietly meeting a weaker version.** The criterion asks for a test that
