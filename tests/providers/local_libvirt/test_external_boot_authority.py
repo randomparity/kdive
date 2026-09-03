@@ -12,7 +12,7 @@ import hashlib
 import inspect
 from pathlib import Path
 from typing import Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -129,7 +129,9 @@ class _FakeIO:
         observed: LocalObservedState | None = None,
         reopen_fault: bool = False,
         observe_fault: bool = False,
+        define_target_faults: int = 0,
     ) -> None:
+        self.define_target_faults = define_target_faults
         self.metadata = metadata if metadata is not None else _metadata()
         self.observed = (
             observed
@@ -182,6 +184,11 @@ class _FakeIO:
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("define-target")
+        if self.define_target_faults > 0:
+            # Interrupt the operation after activate_modules committed the module tree but
+            # before the target definition is acknowledged.
+            self.define_target_faults -= 1
+            raise LookupError("libvirt: define interrupted")
         self.record_phase(metadata, "target-defined")
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
@@ -305,7 +312,9 @@ def test_adapter_satisfies_the_authority_mutation_adapter_protocol() -> None:
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("purpose", ["activate", "recover", "resolve-conflict", "release"])
+@pytest.mark.parametrize(
+    "purpose", ["activate", "recover", "resolve-conflict", "release", "teardown"]
+)
 @pytest.mark.parametrize("operation", list(AuthorityOperation))
 async def test_commit_refuses_every_illegal_purpose_operation_pair(
     purpose: str, operation: AuthorityOperation
@@ -621,23 +630,114 @@ async def test_a_generation_behind_the_admitted_watermark_is_superseded() -> Non
     assert io.actions == []
 
 
-async def test_an_interrupted_commit_stays_observable_and_does_not_double_apply() -> None:
+async def test_a_commit_interrupted_after_the_mutation_does_not_double_apply() -> None:
+    """Interrupt between the two commit points of one activation, then retry.
+
+    ``activate_modules`` has published the module tree and advanced the durable phase, but
+    ``define_target`` fails before the operation is acknowledged. The retry must complete
+    the activation without republishing the module tree.
+    """
+    io = _FakeIO(_metadata("pre-stop-intent"), define_target_faults=1)
+    instance = _adapter(io)
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
+    interrupted = list(io.actions)
+    io.actions.clear()
+    await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
+
+    assert caught.value.category == "provider_conflict"
+    assert interrupted.count("activate-modules") == 1
+    assert io.metadata.phase == "target-defined"
+    # The module tree is published once across both attempts, not once per attempt.
+    assert "activate-modules" not in io.actions
+    assert io.actions.count("define-target") == 1
+
+
+async def test_a_completed_commit_replayed_does_not_repeat_either_commit_point() -> None:
     io = _FakeIO(_metadata("pre-stop-intent"))
     instance = _adapter(io)
 
     await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
-    first = list(io.actions)
     io.actions.clear()
     await instance.commit(_request(), AuthorityOperation.ACTIVATE.value)
 
-    assert first.count("activate-modules") == 1
-    # The durable phase advanced to target-defined, so the retry re-reads and returns
-    # without republishing the module tree or redefining the domain.
     assert "activate-modules" not in io.actions
     assert "define-target" not in io.actions
-    assert (await instance.observe(_request())).category in {
-        "source",
-        "target",
-        "mixed",
-        "conflict",
-    }
+    assert (await instance.observe(_request())).category == "source"
+
+
+async def test_commit_refuses_a_commit_point_that_is_not_the_journalled_operation() -> None:
+    """A legal-for-purpose commit point that disagrees with the request is refused.
+
+    Otherwise the journal record — ADR-0584's evidence of what mutation may have
+    happened — would name an operation the adapter classifies as non-mutating while a
+    full provider recovery ran.
+    """
+    io = _FakeIO(_metadata("target-defined"))
+    request = _request(purpose="recover", operation=AuthorityOperation.DEADLINE)
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(request, AuthorityOperation.RECOVER.value)
+
+    assert caught.value.category == "provider_conflict"
+    assert io.actions == []
+
+
+@pytest.mark.parametrize("operation", [AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN])
+async def test_a_deleting_commit_point_must_name_the_object_it_destroys(
+    operation: AuthorityOperation,
+) -> None:
+    """An empty recovery-object set is not a proof of ownership.
+
+    ADR-0584 permits deleting a recovery object only when the stable binding is proven, so
+    an operation that destroys recovery evidence has to name what it destroys.
+    """
+    purpose = "release" if operation is AuthorityOperation.CLEANUP else "teardown"
+    io = _FakeIO(_metadata("recovered"))
+    unnamed = _request(purpose=purpose, operation=operation)
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(unnamed, operation.value)
+
+    assert caught.value.category == "provider_conflict"
+    assert "cleanup" not in io.actions
+
+
+@pytest.mark.parametrize("operation", [AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN])
+async def test_a_deleting_commit_point_drives_cleanup_when_ownership_is_named(
+    operation: AuthorityOperation,
+) -> None:
+    purpose = "release" if operation is AuthorityOperation.CLEANUP else "teardown"
+    io = _FakeIO(_metadata("recovered"))
+    named = _request(purpose=purpose, operation=operation, recovery_objects=(_owned_object(),))
+
+    await _adapter(io).commit(named, operation.value)
+
+    assert "cleanup" in io.actions
+    assert io.tombstone is True
+
+
+async def test_release_without_cleanup_mutates_nothing() -> None:
+    io = _FakeIO(_metadata("recovered"))
+    request = _request(purpose="release", operation=AuthorityOperation.RELEASE)
+
+    await _adapter(io).commit(request, AuthorityOperation.RELEASE.value)
+
+    assert "cleanup" not in io.actions
+    assert io.tombstone is False
+
+
+async def test_the_admitted_watermark_is_bounded_across_many_activations() -> None:
+    """The in-process watermark must not grow without limit.
+
+    Evicting the oldest lane can only make this check under-reject, which the service's
+    own journal watermark still catches; retaining every lane forever cannot be undone.
+    """
+    instance = _adapter(_FakeIO())
+    overflow = adapter_module._MAX_ADMITTED_LANES + 25
+    for _ in range(overflow):
+        lane = _request().model_copy(update={"system_id": uuid4(), "activation_id": uuid4()})
+        instance._require_admissible_generation(lane)
+
+    assert len(instance._admitted) == adapter_module._MAX_ADMITTED_LANES

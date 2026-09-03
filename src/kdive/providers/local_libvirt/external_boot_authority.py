@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from uuid import UUID, uuid5
 
 from kdive.providers.external_boot_authority.protocol import (
@@ -34,9 +35,16 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
 )
 
+logger = logging.getLogger(__name__)
+
 # Namespace for deriving a stable observation id from the observed facts, so the same
 # observation of the same state is the same id across a retry or an authority restart.
 _OBSERVATION_NAMESPACE = UUID("6f3f0f6e-7a1a-4e3b-9a2f-2b6b1d4c8e57")
+
+# Bound on the per-activation admission watermarks retained in process. The journal is the
+# authoritative watermark; dropping the oldest entry here can only make this check
+# under-reject, which the service's own ``resolve_current`` still catches.
+_MAX_ADMITTED_LANES = 256
 
 # Commit points that reach a provider mutation. Every other legal operation is a
 # bookkeeping edge whose provider effect is exactly one observation: ADR-0584 makes
@@ -51,6 +59,10 @@ _MUTATING_OPERATIONS = frozenset(
         AuthorityOperation.TEARDOWN,
     }
 )
+
+# Commit points that destroy recovery evidence. These must positively name the recovery
+# object they destroy, not merely fail to name a foreign one.
+_DELETING_OPERATIONS = frozenset({AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN})
 
 
 def _authority_ref(request: AuthorityMutationRequestV1) -> OpaqueProviderRef:
@@ -118,13 +130,19 @@ class LocalExternalBootAuthorityAdapter:
 
         ``commit_point`` crosses the adapter seam as a bare ``str``, so
         ``AuthorityMutationRequestV1``'s own purpose/operation validator does not cover it
-        and this check cannot lean on the model layer.
+        and this check cannot lean on the model layer. Two things must hold: the operation
+        is legal for the request's purpose, and it is the same operation the request
+        carries. Without the second, a request could journal one operation while driving
+        the provider through another, and the journal record — the evidence ADR-0584 makes
+        authoritative for what mutation may have happened — would name the wrong one.
         """
         try:
             operation = AuthorityOperation(commit_point)
         except ValueError:
             raise AuthorityServiceError("provider_conflict") from None
         if not operation_is_permitted(request.purpose, operation):
+            raise AuthorityServiceError("provider_conflict")
+        if operation is not request.operation:
             raise AuthorityServiceError("provider_conflict")
         return operation
 
@@ -133,6 +151,9 @@ class LocalExternalBootAuthorityAdapter:
         admitted = self._admitted.get(lane)
         if admitted is not None and request.generation < admitted:
             raise AuthorityServiceError("superseded")
+        if lane not in self._admitted and len(self._admitted) >= _MAX_ADMITTED_LANES:
+            # Insertion-ordered, so this drops the least recently first-seen lane.
+            del self._admitted[next(iter(self._admitted))]
         self._admitted[lane] = max(admitted or 0, request.generation)
 
     def _commit(
@@ -142,7 +163,9 @@ class LocalExternalBootAuthorityAdapter:
         authority = _authority_ref(request)
         point = self._resolve_point(binding, authority)
         matched = self._require_matching_identities(request, point)
-        if not _ownership_is_proven(request, matched):
+        if not _ownership_is_proven(
+            request, matched, require_named=operation in _DELETING_OPERATIONS
+        ):
             # Quarantine: the objects are neither reused for a mutation nor deleted, and
             # the state is reported as the conflict ADR-0584 calls an unowned observation.
             raise AuthorityServiceError("provider_conflict")
@@ -171,11 +194,16 @@ class LocalExternalBootAuthorityAdapter:
                 AuthorityOperation.RECOVERY_ATTEMPT,
             }:
                 self._ports.recover(point, authority)
-            else:
+            elif operation in {AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN}:
                 self._ports.cleanup(point, authority)
+            else:
+                # An operation added to _MUTATING_OPERATIONS without a mapping here must
+                # not fall through to whichever branch happens to be last.
+                raise AuthorityServiceError("provider_conflict")
         except AuthorityServiceError:
             raise
         except Exception:  # noqa: BLE001 - bound provider failure to a closed category
+            logger.exception("external-boot provider commit failed", extra={"operation": operation})
             raise AuthorityServiceError("provider_conflict") from None
 
     def _observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
@@ -190,6 +218,9 @@ class LocalExternalBootAuthorityAdapter:
         try:
             return self._ports.recovery_point(binding, authority)
         except Exception:  # noqa: BLE001 - an unresolvable point is an unreadable state
+            # Logged in full inside the authority, where the diagnostic is allowed to
+            # exist; only the bounded category ever crosses the boundary.
+            logger.exception("external-boot recovery point is unresolvable")
             return None
 
     @staticmethod
@@ -220,10 +251,11 @@ class LocalExternalBootAuthorityAdapter:
     ) -> AuthorityObservationV1:
         observed = self._read_state(binding, authority)
         category = self._categorize(request, point, observed)
+        composite_state = self._composite_state(request, observed)
         return AuthorityObservationV1(
-            observation_id=self._observation_id(request, observed, category),
+            observation_id=self._observation_id(request, composite_state, category),
             category=category,
-            composite_state=self._composite_state(request, observed),
+            composite_state=composite_state,
         )
 
     def _read_state(
@@ -232,6 +264,7 @@ class LocalExternalBootAuthorityAdapter:
         try:
             return self._ports.observe_state(binding, authority)
         except Exception:  # noqa: BLE001 - a failed read is the unreadable classification
+            logger.exception("external-boot provider state is unreadable")
             return LocalObservedState(definition=None, modules=None, active=None)
 
     @staticmethod
@@ -300,9 +333,15 @@ class LocalExternalBootAuthorityAdapter:
     @staticmethod
     def _observation_id(
         request: AuthorityMutationRequestV1,
-        observed: LocalObservedState,
+        composite_state: str,
         category: ObservationCategory,
     ) -> UUID:
+        """Identify an observation by everything that distinguishes it.
+
+        Keyed on the composite digest rather than any single observed field, so two
+        observations that differ in the module tree alone — or in which half was
+        unreadable — cannot collide on one id.
+        """
         return uuid5(
             _OBSERVATION_NAMESPACE,
             "\0".join(
@@ -311,20 +350,35 @@ class LocalExternalBootAuthorityAdapter:
                     str(request.generation),
                     request.operation.value,
                     category,
-                    observed.definition or "",
+                    composite_state,
                 )
             ),
         )
 
 
-def _ownership_is_proven(request: AuthorityMutationRequestV1, point: RecoveryPoint | None) -> bool:
+def _ownership_is_proven(
+    request: AuthorityMutationRequestV1,
+    point: RecoveryPoint | None,
+    *,
+    require_named: bool = False,
+) -> bool:
     """Prove every named recovery object is the one this activation actually owns.
 
     Local recovery ownership is the stable ``(System, activation, recovery reference)``
     triple ADR-0584 requires takeover to preserve. An object naming any other reference
     cannot be proven to belong here, so it is quarantined rather than resumed or deleted.
+
+    ``require_named`` additionally demands that the activation's own recovery reference be
+    among those named. ADR-0584 permits deleting a recovery object "only when the journal
+    and provider observation prove that stable binding", so an operation that destroys
+    recovery evidence must name what it destroys. Without it the check is purely negative
+    and an empty set stands in for a proof.
     """
     if point is None:
+        return False
+    if require_named and point.recovery_ref.ref not in {
+        item.reference for item in request.recovery_objects
+    }:
         return False
     return all(
         item.reference == point.recovery_ref.ref
