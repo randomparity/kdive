@@ -1500,9 +1500,16 @@ class LocalLibvirtExternalBoot:
         The authority seam addresses an activation by its owner identities, not by a
         recovery point it never held, so the point is rebuilt from the durable record
         under the same authenticated lease every other operation uses.
+
+        The recovery reference encodes only System and activation, so the durable record
+        is checked against the whole requested binding here. Without that, a Run mismatch
+        would surface two layers down as an opaque lease failure rather than at the seam
+        that made the claim.
         """
         with self._io.open(authority, _expected_binding(binding)) as operation:
             metadata = operation.reopen_binding(binding)
+            if metadata.binding != binding:
+                raise ValueError("external-boot recovery record does not match the binding")
             return RecoveryPoint(
                 binding=metadata.binding,
                 plan_identity=metadata.plan_identity,

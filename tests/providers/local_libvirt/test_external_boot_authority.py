@@ -741,3 +741,61 @@ async def test_the_admitted_watermark_is_bounded_across_many_activations() -> No
         instance._require_admissible_generation(lane)
 
     assert len(instance._admitted) == adapter_module._MAX_ADMITTED_LANES
+
+
+async def test_composite_state_is_bound_to_the_activation_it_observed() -> None:
+    """Identical observed content on two activations must not mint the same token.
+
+    ``recover_from_conflict`` refuses a recovery unless the acknowledged composite state
+    equals the recorded conflict evidence, so the digest proves a *particular* activation
+    was observed. Observed content alone cannot carry that: a plain source domain's boot
+    identity derives only from the ``<os>`` kernel, initrd and cmdline, all absent and
+    therefore constant fleet-wide.
+    """
+    observed = _observed(SOURCE_IDENTITY, SOURCE_MODULES)
+    mine = _request()
+    theirs = mine.model_copy(
+        update={"system_id": uuid4(), "activation_id": uuid4(), "run_id": uuid4()}
+    )
+
+    digest = LocalExternalBootAuthorityAdapter._composite_state
+    assert digest(mine, observed) != digest(theirs, observed)
+
+
+async def test_an_unreadable_observation_is_still_bound_to_its_activation() -> None:
+    """The all-None path carries no content, so binding is the only distinguisher."""
+    blank = _observed(None, None, None)
+    mine = _request()
+    theirs = mine.model_copy(
+        update={"system_id": uuid4(), "activation_id": uuid4(), "run_id": uuid4()}
+    )
+
+    digest = LocalExternalBootAuthorityAdapter._composite_state
+    assert digest(mine, blank) != digest(theirs, blank)
+
+
+async def test_composite_state_still_moves_with_the_plan_it_was_observed_under() -> None:
+    observed = _observed(SOURCE_IDENTITY, SOURCE_MODULES)
+    mine = _request()
+    replanned = mine.model_copy(update={"plan_identity": "sha256:" + "f" * 64})
+
+    digest = LocalExternalBootAuthorityAdapter._composite_state
+    assert digest(mine, observed) != digest(replanned, observed)
+
+
+async def test_the_recovery_record_must_match_the_whole_requested_binding() -> None:
+    """A Run mismatch is refused at the seam that made the claim, not two layers below."""
+    foreign_run = _metadata().model_copy(
+        update={
+            "binding": _BINDING.model_copy(
+                update={"run_id": "00000000-0000-0000-0000-0000000000ee"}
+            )
+        }
+    )
+    io = _FakeIO(foreign_run)
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(_request(), AuthorityOperation.ACTIVATE.value)
+
+    assert caught.value.category == "provider_conflict"
+    assert "activate-modules" not in io.actions

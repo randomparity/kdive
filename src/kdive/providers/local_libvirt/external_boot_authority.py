@@ -306,14 +306,28 @@ class LocalExternalBootAuthorityAdapter:
 
     @staticmethod
     def _composite_state(request: AuthorityMutationRequestV1, observed: LocalObservedState) -> str:
-        """Digest the observed pair together with the requested identities.
+        """Digest the observed state together with the activation it was observed on.
 
-        Changing either observed identity, or either requested identity, changes the
-        digest. It carries no provider message, path, URI, or secret — only digests and
-        closed component states already recorded for this activation.
+        The digest is a proof-of-observation token: ``recover_from_conflict`` refuses a
+        conflict recovery unless the acknowledged value equals the recorded conflict
+        evidence, so it has to identify *which* activation was observed, not only what was
+        seen. Observed content alone is not sufficient to do that — a source-state domain
+        contributes a boot identity derived solely from the ``<os>`` kernel, initrd and
+        cmdline, which are all absent on a plain domain and therefore constant fleet-wide,
+        and an unreadable observation contributes nothing at all. Binding System,
+        activation, Run and plan keeps two identically provisioned systems from minting
+        interchangeable tokens.
+
+        Changing any observed value, any requested identity, or any owner identity changes
+        the digest. It carries no provider message, path, URI, or secret — only closed
+        identifiers and digests already recorded for this activation.
         """
         payload = json.dumps(
             {
+                "system_id": str(request.system_id),
+                "activation_id": str(request.activation_id),
+                "run_id": str(request.run_id),
+                "plan_identity": request.plan_identity,
                 "definition": observed.definition,
                 "modules": (
                     None if observed.modules is None else observed.modules.model_dump(mode="json")
@@ -362,7 +376,7 @@ def _ownership_is_proven(
     *,
     require_named: bool = False,
 ) -> bool:
-    """Prove every named recovery object is the one this activation actually owns.
+    """Check every named recovery object against the one this activation owns.
 
     Local recovery ownership is the stable ``(System, activation, recovery reference)``
     triple ADR-0584 requires takeover to preserve. An object naming any other reference
@@ -373,6 +387,15 @@ def _ownership_is_proven(
     and provider observation prove that stable binding", so an operation that destroys
     recovery evidence must name what it destroys. Without it the check is purely negative
     and an empty set stands in for a proof.
+
+    What this does and does not establish, stated precisely because the reference arm reads
+    stronger than it is: ``point.recovery_ref`` is derived from the binding the peer
+    supplied, and ``protocol.py`` already binds each object's System and activation to the
+    request, so comparing the reference cannot by itself distinguish an owned object from a
+    fabricated one. The load-bearing part is ``point``: it exists only because a durable
+    recovery record was read back from the owner-derived path under an authenticated lease.
+    An empty set on a non-deleting operation asserts nothing and so disproves nothing;
+    that is why deletion is the case that must name its object.
     """
     if point is None:
         return False
