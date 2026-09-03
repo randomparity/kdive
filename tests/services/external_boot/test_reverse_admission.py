@@ -18,10 +18,15 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, _lock_key
-from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capacity.state import ExternalBootActivationState, RunState, SystemState
+from kdive.db.repositories import RUNS, SNAPSHOTS, SYSTEMS
+from kdive.domain.capacity.state import (
+    ExternalBootActivationState,
+    RunState,
+    SnapshotState,
+    SystemState,
+)
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.records import Run, Snapshot
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.control.registrar import (
     capture_traffic_system,
@@ -818,6 +823,124 @@ def test_a_boot_does_not_cross_a_restriction_committed_mid_flight(
     response, enqueued = asyncio.run(_run())
     _assert_denied(response, _ACTIVE_ACTIONS)
     assert enqueued == 0
+
+
+_REPLAY_SNAP = "replay-snap"
+
+
+async def _snapshot_unkeyed(pool: AsyncConnectionPool, system_id: str, _run: str) -> ToolResponse:
+    return await with_runtime_for_system(
+        pool,
+        _resolver(),
+        _ctx(),
+        system_id,
+        lambda runtime: snapshot_system(
+            pool, _ctx(), runtime, system_id=system_id, name=_REPLAY_SNAP, include_memory=False
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _delete_snapshot_unkeyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str
+) -> ToolResponse:
+    return await with_runtime_for_system(
+        pool,
+        _resolver(),
+        _ctx(),
+        system_id,
+        lambda runtime: delete_snapshot(
+            pool, _ctx(), runtime, system_id=system_id, name=_REPLAY_SNAP
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _reprovision_unkeyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str
+) -> ToolResponse:
+    return await SYSTEM_ADMIN_HANDLERS.reprovision_system(
+        pool, _ctx(), system_id=system_id, profile=provisioning_profile()
+    )
+
+
+async def _vmcore_unkeyed(pool: AsyncConnectionPool, _system: str, run_id: str) -> ToolResponse:
+    handlers = VmcoreHandlers(_resolver(), SecretRegistry())
+    return await handlers.fetch_vmcore(
+        pool, _ctx(), run_id=run_id, method="host_dump", idempotency_key=None
+    )
+
+
+async def _seed_available_snapshot(pool: AsyncConnectionPool, system_id: str) -> None:
+    async with pool.connection() as conn:
+        await SNAPSHOTS.insert(
+            conn,
+            Snapshot(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                system_id=UUID(system_id),
+                name=_REPLAY_SNAP,
+                include_memory=False,
+                state=SnapshotState.AVAILABLE,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _UnkeyedReplayCase:
+    """A tool whose replay is its fixed dedup key rather than a stored envelope."""
+
+    state: ExternalBootActivationState
+    invoke: Callable[[AsyncConnectionPool, str, str], Awaitable[ToolResponse]]
+    prepare: Callable[[AsyncConnectionPool, str], Awaitable[None]] | None = None
+
+
+# `capture_vmcore` is admitted in `active` for the owning Run, so its denial needs
+# `recovery_conflict`; the three `system_snapshot`/`system_reprovision` tools are denied in
+# `active`.
+_UNKEYED_REPLAY_CASES: dict[str, _UnkeyedReplayCase] = {
+    "systems.delete_snapshot": _UnkeyedReplayCase(
+        _STATE.ACTIVE, _delete_snapshot_unkeyed, _seed_available_snapshot
+    ),
+    "systems.reprovision": _UnkeyedReplayCase(_STATE.ACTIVE, _reprovision_unkeyed),
+    "systems.snapshot": _UnkeyedReplayCase(_STATE.ACTIVE, _snapshot_unkeyed),
+    "vmcore.fetch": _UnkeyedReplayCase(
+        _STATE.RECOVERY_CONFLICT, _vmcore_unkeyed, _crash_the_system
+    ),
+}
+
+
+@pytest.mark.parametrize("tool", sorted(_UNKEYED_REPLAY_CASES))
+def test_an_unkeyed_dedup_replay_survives_an_activation(
+    migrated_url: str, seeded_activation: SeedActivation, tool: str
+) -> None:
+    """The same rule as the keyed sites, on the path that has no stored envelope.
+
+    ``keyed_mutation`` calls ``do_work()`` straight through when ``idempotency_key is None``, so
+    on the unkeyed path — the default for every tool here — the replay is the fixed dedup key,
+    not a recorded envelope. Putting the guard inside the closure therefore protects nothing
+    here; each of these sites has to probe its own dedup key ahead of the guard. Without that, an
+    agent polling work it already enqueued is told the operation was denied while its job stays
+    queued against the same System and runs.
+    """
+    case = _UNKEYED_REPLAY_CASES[tool]
+
+    async def _run() -> tuple[ToolResponse, ToolResponse]:
+        async with runs_support.pool(migrated_url) as conn_pool:
+            system_id, run_id = await _ready_system_with_run(conn_pool)
+            if case.prepare is not None:
+                await case.prepare(conn_pool, system_id)
+            first = await case.invoke(conn_pool, system_id, run_id)
+            await _restrict(conn_pool, seeded_activation, system_id, run_id, case.state)
+            return first, await case.invoke(conn_pool, system_id, run_id)
+
+    first, replay = asyncio.run(_run())
+    assert first.status == "queued", first.model_dump()
+    assert replay.error_category is None, replay.model_dump()
+    assert replay.model_dump() == first.model_dump()
 
 
 def test_a_cancel_refuses_a_run_bound_after_its_pre_lock_read(

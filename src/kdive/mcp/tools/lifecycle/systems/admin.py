@@ -172,12 +172,6 @@ async def _reprovision_in_lock(
     # bypasses the registrar gate), mirroring control.power.
     require_role(ctx, system.project, Role.CONTRIBUTOR)
     try:
-        await check_external_boot_admission(
-            conn, system_id, ExternalBootOperation.SYSTEM_REPROVISION, project=system.project
-        )
-    except ExternalBootDenied as exc:
-        return _external_boot_denial(str(system_id), exc, ctx)
-    try:
         # An upload-rootfs reprovision resolves the base within the System's investigation, so the
         # System must already carry a write-once binding (ADR-0441 §2); reject a missing one here
         # rather than let the worker fetch fail late.
@@ -202,6 +196,16 @@ async def _reprovision_in_lock(
         if existing is not None:
             return job_envelope(existing, "system_id", system_id)
         return _config_error(str(system_id), data={"current_status": system.state.value})
+    # Below the `REPROVISIONING` replay return above: a repeat call that finds the live dedup job
+    # enqueues nothing and returns it unchanged, so it is a poll rather than fresh work, and an
+    # activation that appeared since must not turn it into a `conflict` while that job stays
+    # queued and runs. Still ahead of every write — `_admit_reprovision` is the first.
+    try:
+        await check_external_boot_admission(
+            conn, system_id, ExternalBootOperation.SYSTEM_REPROVISION, project=system.project
+        )
+    except ExternalBootDenied as exc:
+        return _external_boot_denial(str(system_id), exc, ctx)
     if system.state is not SystemState.READY:
         return _config_error(str(system_id), data={"current_status": system.state.value})
     if await _has_live_run(conn, system_id):
@@ -381,11 +385,21 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
-        # ADR-0583 admits teardown in every restricted state, so this can only ever return; it is
-        # called for symmetry with the other System-lifecycle sites.
-        await check_external_boot_admission(
-            conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
-        )
+        # ADR-0583 admits teardown in every restricted state, so this cannot deny today. Handled
+        # anyway: teardown is the one operation admitted everywhere, and both `_ESCALATION_HINT`
+        # and the recovery rows of `_STATE_NEXT_ACTIONS` steer every denied caller here, so it is
+        # the single exit from a wedged activation. Two open records contemplate revisiting
+        # `_ALWAYS_ADMITTED` —
+        # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md and
+        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md — and if that set ever
+        # narrows this must degrade to the typed envelope every other site renders rather than
+        # an unhandled exception.
+        try:
+            await check_external_boot_admission(
+                conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(system_id, exc, ctx)
         if system.state is SystemState.TORN_DOWN:
             # The System is already terminal, but its Allocation may still be `active`; point the
             # agent at the second wind-down step so the idempotent replay steers identically to a

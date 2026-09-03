@@ -116,14 +116,34 @@ async def _active_snapshot_op(conn: AsyncConnection, system_id: UUID) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _snapshot_replay(
+    conn: AsyncConnection, system_id: UUID, name: str
+) -> ToolResponse | None:
+    """The genuinely in-flight ``creating`` case: a repeat call is a poll, not fresh work.
+
+    Split out of :func:`_resolve_snapshot_collision` so it can run *ahead* of the external-boot
+    guard, the rule ``runs/steps.py`` states and the ``keyed_mutation`` sites follow. Without
+    that, an activation appearing after the capture was enqueued turns an agent's poll into a
+    ``conflict`` — steering it at ``systems.teardown`` while its snapshot job is still queued
+    against the same System and will run. Both reads; the guard still precedes every write.
+    """
+    existing = await snapshot_by_name(conn, system_id, name)
+    if existing is None or existing.state is not SnapshotState.CREATING:
+        return None
+    active = await _active_job_by_dedup(conn, f"{system_id}:snapshot:{name}")
+    return None if active is None else job_envelope(active, "system_id", system_id)
+
+
 async def _resolve_snapshot_collision(
     conn: AsyncConnection, system_id: UUID, name: str
 ) -> ToolResponse | None:
     """Apply the name-reuse rules; return a short-circuit envelope, or ``None`` to create fresh.
 
-    ``available`` → reject (durable name in use); genuinely in-flight ``creating`` → replay the
-    job; ``failed`` or a stale ``creating`` (its ``SNAPSHOT`` job already terminal/gone) → delete
-    the stranded ledger row and fall through to create a fresh row + job (auto-reclaim).
+    ``available`` → reject (durable name in use); ``failed`` or a stale ``creating`` (its
+    ``SNAPSHOT`` job already terminal/gone) → delete the stranded ledger row and fall through to
+    create a fresh row + job (auto-reclaim). The genuinely in-flight ``creating`` replay is
+    :func:`_snapshot_replay`'s and has already returned by the time this runs, because it must
+    precede the admission guard and the ``SNAPSHOTS.delete`` below must follow it.
     """
     existing = await snapshot_by_name(conn, system_id, name)
     if existing is None:
@@ -134,10 +154,6 @@ async def _resolve_snapshot_collision(
             detail="snapshot name in use; call systems.delete_snapshot first",
             data={"reason": "snapshot_name_in_use", "name": name},
         )
-    if existing.state is SnapshotState.CREATING:
-        active = await _active_job_by_dedup(conn, f"{system_id}:snapshot:{name}")
-        if active is not None:
-            return job_envelope(active, "system_id", system_id)
     await SNAPSHOTS.delete(conn, existing.id)
     return None
 
@@ -197,6 +213,9 @@ async def snapshot_system(
                 return _config_error(system_id)
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
+            replay = await _snapshot_replay(conn, uid, validated)
+            if replay is not None:
+                return replay
             try:
                 await check_external_boot_admission(
                     conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project
@@ -405,6 +424,12 @@ async def delete_snapshot(
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
+            # `queue.enqueue` below is idempotent on this dedup key, so a repeat call while the
+            # deletion is queued or running returns that job unchanged — a poll, not fresh work.
+            # Probe it ahead of the guard for the same reason every other site does.
+            in_flight = await _active_job_by_dedup(conn, f"{uid}:delete_snapshot:{name}")
+            if in_flight is not None:
+                return job_envelope(in_flight, "system_id", uid)
             try:
                 await check_external_boot_admission(
                     conn, uid, ExternalBootOperation.SYSTEM_SNAPSHOT, project=system.project

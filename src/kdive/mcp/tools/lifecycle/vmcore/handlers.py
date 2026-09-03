@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capacity.state import SystemState
+from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
@@ -281,9 +281,28 @@ async def _fetch_vmcore(
                 if capability is not None:
                     return _kdump_capability_refusal(run_id, capability=capability)
 
+            dedup_key = f"{run_id}:capture_vmcore:{capture_method.value}"
+
             async def _enqueue() -> ToolResponse:
                 # Inside the closure, so `keyed_mutation`'s replay lookup runs first and only a
                 # fresh enqueue is guarded: an activation must not un-idempotent a retry.
+                #
+                # That covers the keyed path only. `idempotency_key` is optional on this tool and
+                # `keyed_mutation` calls `do_work()` straight through when it is `None`, so the
+                # unkeyed — default — path has no envelope replay at all. Its replay is the fixed
+                # dedup key below, which `queue.enqueue` returns unchanged for a live job, so the
+                # same rule needs its own probe here.
+                #
+                # Unkeyed only, deliberately. A *fresh* key is the caller asserting this is new
+                # work, and the matrix has to decide it — replaying the in-flight job there would
+                # let a restricted System be polled through a key it has never seen
+                # (`test_a_keyed_mutation_admitted_before_the_activation_still_replays` pins it).
+                # The control tools need no probe at all: they mix a `uuid4()` into their unkeyed
+                # dedup suffix, so an unkeyed call there is always genuinely fresh work.
+                if idempotency_key is None:
+                    prior = await queue.get_by_dedup_key(conn, dedup_key)
+                    if prior is not None and prior.state in {JobState.QUEUED, JobState.RUNNING}:
+                        return job_envelope(prior, "run_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn,
@@ -299,7 +318,7 @@ async def _fetch_vmcore(
                     JobKind.CAPTURE_VMCORE,
                     CaptureVmcorePayload(run_id=run_id, method=capture_method),
                     job_authorizing(ctx, run.project),
-                    f"{run_id}:capture_vmcore:{capture_method.value}",
+                    dedup_key,
                 )
                 return job_envelope(job, "run_id", uid)
 
