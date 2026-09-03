@@ -205,6 +205,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify the guest userland before declaring a volume
 - Restore external boot to its disk/GRUB baseline
 - Add the module volume-name grammar and bounded XML parsing
+- Decide admission with one closed matrix
+- Enforce the admission matrix at every call site
+- Admit the three recovery contracts without writing
+- Expose the three recovery contracts as MCP tools
 
 ### Changed
 
@@ -1121,6 +1125,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - State ADR-0590's contract generally and fix a #2110 claim
 - Define the canonical byte form of remote-module documents
 - Accept ADR-0588 and record how a 256-byte name is refused
+- Design external boot agent contracts
+- Revalidate external boot agent contract design
+- Record the refuted premises blocking external boot contracts
+- Rescope external boot contracts to admission surfaces
+- Close the scope audit's ten findings on the design set
+- Retarget the records at the moved contract module
 
 ### Fixed
 
@@ -1829,6 +1839,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the hosted checkout traversable by worker accounts
 - Tolerate a foreign container removed during sweep enumeration
 - Install the capture manifest with the lifecycle venv
+- Bound the release refusal's blocking id lists
+- Close the review findings on the admission matrix
+- Close the adversarial review on the admission matrix
+- Close the confirming review on the release path
+- Guard behind the replay at the four unkeyed sites
+- Close the guard-versus-replay class with a derived gate
+- Probe the exact dedup key, and cover the settled arms
 
 ### Security
 
@@ -1868,6 +1885,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merge the split ports.traffic imports into two plain lines
 - Adopt ruff 0.16 formatter output (ADR-0569)
 - Format the plan's fenced python to match the shipped test
+- Wrap the denial signature in the admission plan
 
 ## [0.4.0] - 2026-07-23
 
