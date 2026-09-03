@@ -30,12 +30,20 @@ from kdive.providers.core.runtime import (
     ResourceBindingCapabilities,
     RootfsCapabilities,
 )
+from kdive.providers.external_boot_authority.host import (
+    AuthorityHostConfig,
+    validate_credential_paths,
+)
 from kdive.providers.infra.reaping import CaptureReaper, InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LocalExternalBootIO,
+    LocalLibvirtExternalBoot,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     Connect,
@@ -193,6 +201,38 @@ def build_external_boot_session_factory(
     )
 
 
+def external_boot_authority_is_configured() -> bool:
+    """Report whether the authenticated authority service-host boundary is installed.
+
+    ADR-0584 makes this a precondition of advertising external-boot v1: a provider that
+    cannot place every commit point behind the authority does not advertise it. The
+    boundary is the authority host configuration together with its validated credential
+    paths, so a host missing either fails closed rather than advertising an unfenced
+    provider.
+    """
+    try:
+        validate_credential_paths(AuthorityHostConfig.from_environment())
+    except Exception:  # noqa: BLE001 - any unmet precondition closes the gate
+        return False
+    return True
+
+
+def build_external_boot(
+    io: LocalExternalBootIO | None = None,
+) -> LocalLibvirtExternalBoot | None:
+    """Bind the external-boot port only behind the authenticated authority boundary.
+
+    ``io`` carries the local provider primitives: the operation lease, artifact root,
+    guest access, readiness probe and payload cleanup that ``RealLocalExternalBootIO``
+    composes. Both halves of ADR-0584's precondition must hold — the boundary configured
+    *and* the primitives installed — so an absent ``io`` and an unconfigured boundary each
+    leave ``ProviderRuntime.external_boot`` as ``None``.
+    """
+    if io is None or not external_boot_authority_is_configured():
+        return None
+    return LocalLibvirtExternalBoot(io)
+
+
 def _rebind_for_resource(
     secret_registry: SecretRegistry, store: ObjectStore
 ) -> Callable[[str], ProviderRuntime]:
@@ -215,6 +255,7 @@ def build_runtime(
     secret_registry: SecretRegistry,
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     resource_name: str | None = None,
+    external_boot_io: LocalExternalBootIO | None = None,
 ) -> ProviderRuntime:
     """Build local-libvirt provider ports without opening live provider connections.
 
@@ -223,6 +264,9 @@ def build_runtime(
     operator ``guest_egress`` opt-in, resolved op-time from ``systems.toml``. The resolver
     chokepoint (``ProviderRuntime.for_resource`` → ``rebind_for_resource``) supplies it per op; a
     ``None`` (host-agnostic construction) keeps the secure default (``restrict=on``).
+    ``external_boot_io`` supplies the local external-boot primitives; external boot is
+    advertised only when they are present *and* the authenticated authority service-host
+    boundary is configured (ADR-0584, #2199).
     """
     guest_egress = (
         local_guest_egress_for_resource(resource_name) if resource_name is not None else False
@@ -248,6 +292,7 @@ def build_runtime(
         crash_postmortem=retrieve,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
+        external_boot=build_external_boot(external_boot_io),
         # ADR-0208: advertise the core-producing capture methods local can actually fetch a vmcore
         # for — KDUMP (host-side overlay harvest, #115/ADR-0203), FADUMP (the pseries firmware-
         # assisted variant sharing that harvest, ADR-0349; host support is gated at admission), and

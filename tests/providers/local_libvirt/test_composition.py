@@ -14,6 +14,10 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LocalExternalBootIO,
+    LocalLibvirtExternalBoot,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     LocalExternalBootSessionFactory,
@@ -227,3 +231,68 @@ def test_build_runtime_redactor_factory_masks_values_from_the_registry() -> None
     assert isinstance(redactor, Redactor)
     masked = redactor.redact_text("prefix local-libvirt-capability-secret suffix")
     assert "local-libvirt-capability-secret" not in masked
+
+
+# --------------------------------------------------------------------------------------
+# External-boot advertisement gate (ADR-0584, #2199 acceptance criterion 11)
+# --------------------------------------------------------------------------------------
+
+
+def _external_boot_io() -> LocalExternalBootIO:
+    """A stand-in for the local primitives; the gate must never dereference it."""
+    return cast(LocalExternalBootIO, object())
+
+
+def test_authority_service_host_boundary_is_unconfigured_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+
+    assert composition.external_boot_authority_is_configured() is False
+
+
+def test_runtime_without_the_authority_boundary_leaves_external_boot_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+
+    runtime = composition.build_runtime(
+        secret_registry=SecretRegistry(), external_boot_io=_external_boot_io()
+    )
+
+    assert runtime.external_boot is None
+
+
+def test_runtime_without_the_local_primitives_leaves_external_boot_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(composition, "external_boot_authority_is_configured", lambda: True)
+
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+
+    assert runtime.external_boot is None
+
+
+def test_runtime_advertises_external_boot_only_with_boundary_and_primitives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(composition, "external_boot_authority_is_configured", lambda: True)
+
+    runtime = composition.build_runtime(
+        secret_registry=SecretRegistry(), external_boot_io=_external_boot_io()
+    )
+
+    assert isinstance(runtime.external_boot, LocalLibvirtExternalBoot)
+
+
+def test_build_external_boot_refuses_each_half_of_the_precondition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(composition, "external_boot_authority_is_configured", lambda: False)
+    assert composition.build_external_boot(_external_boot_io()) is None
+
+    monkeypatch.setattr(composition, "external_boot_authority_is_configured", lambda: True)
+    assert composition.build_external_boot(None) is None
+    assert isinstance(
+        composition.build_external_boot(_external_boot_io()), LocalLibvirtExternalBoot
+    )
