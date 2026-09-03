@@ -160,7 +160,14 @@ the threat model forbids. So the mechanism catches `OSError` around the whole wa
 
 **The `from None` is load-bearing.** `raise ... from exc` re-attaches the original exception, and
 its `filename`, through the chained traceback — which reaches a log or a CI transcript looking
-exactly like the fixed version. Suppressing the context is what actually removes the path.
+exactly like the fixed version. Suppressing the context is what actually removes the path. The
+tests assert the suppression itself — `__cause__ is None`, `__suppress_context__ is True`, and the
+root's path string absent from `str(exc)` — because a wrapper written with `from exc` produces an
+identical message and would satisfy a message-only assertion.
+
+**Only `OSError` is wrapped.** `_require_private_owned_directory` raises `ValueError` carrying its
+own label and no path, so it is already within contract; re-wrapping it would trade a message that
+names the failing check for one that does not.
 
 **One honest limitation.** Reusing `_open_or_create_private_child` means a *child* failure carries
 that helper's fixed `"recovery directory"` label, not a per-component one; only the root's own open
@@ -200,7 +207,12 @@ Two bounded removals, in order:
    of the root path follows a symlink, so an attacker-substituted root would be opened and then
    deleted from; without the re-validation the mechanism would trust that the root is still what
    startup checked, which the read path explicitly refuses to do. Both controls apply identically
-   here, and the same `ValueError ... from None` wrapping keeps the path out of the message.
+   here, and the same `ValueError ... from None` wrapping keeps the path out of the message — fixed
+   as `"recovery directory is not an owner-only service-owned directory"`, parallel to the artifact
+   root's. Only `OSError` is wrapped: `_require_private_owned_directory` already raises a
+   `ValueError` carrying its label and no path, so re-wrapping it would replace a more precise
+   path-free message with a less precise one. Both forms match the same
+   `"owner-only service-owned directory"` substring, so a test need not know which fired.
 
 No recursion, no glob, no `listdir`-driven removal, no name the mechanism did not write literally.
 The recovery-directory name is built from the binding's own `system_id` and `activation_id`, both
@@ -400,13 +412,20 @@ The load-bearing tests:
   observer and that calling `session.observe_running()` raises
   `"local external-boot running observation is not configured"`. This is the deferral's guard: it
   fails the moment someone binds it without doing the domain-XML work.
-- **Artifact-root confinement.** Separate tests for a foreign root outside the configured one, a
-  symlinked `system_id` component, a symlinked `run_id` component, a mode-0755 component, and a
-  non-directory root. Each asserts refusal, and asserts no descriptor is leaked. The foreign-root
-  case is the one that demonstrates the mechanism cannot be pointed elsewhere by its caller: it
-  constructs `LocalArtifactRoot` on one root, asks it to resolve an ownership whose directories
-  exist only under a *different* root, and asserts refusal rather than a silent open of the wrong
-  tree.
+- **Artifact-root confinement.** Separate tests for a symlinked `system_id` component, a symlinked
+  `run_id` component, a mode-0755 component, a non-directory root, a missing root, and a
+  non-canonical component name. Each asserts refusal, asserts the fixed path-free message, and
+  asserts no descriptor is leaked. What these discharge is that the root is **re-validated on every
+  open** — not that it cannot be pointed elsewhere.
+
+  **There is deliberately no foreign-root test** (charter amendment 3). An earlier revision of this
+  spec called one "the test that demonstrates the mechanism cannot be pointed elsewhere by its
+  caller"; it is not, and it cannot be. `.open`'s only argument is an `OperationOwnership` carrying
+  two canonical UUIDs, so no caller-supplied input can name a second root — which means no input
+  distinguishes a correct implementation from an incorrect one, and a test built on one would pass
+  against both. The caller-level claim follows from the type signatures instead. Writing a third
+  such test would repeat, one level up, the tautological-gate error ADR-0591 rejects
+  `recovery_directory_name` for.
 - **The euid check is not claimed as covered.** `_require_private_owned_directory` also rejects a
   directory owned by another uid, and an ordinary unprivileged test process cannot create one. That
   case is exercised only by a fixture that skips unless a non-owner directory is genuinely
@@ -427,8 +446,19 @@ The load-bearing tests:
   `config.require(LIBVIRT_RECOVERY_ROOT)` returned (via a sentinel), and that the builder itself
   takes no parameters, so no caller can inject configuration into it.
 - **The payload names are coupled to their source.** A test asserts `set(PAYLOAD_NAMES)` equals the
-  set `_artifact_ref_parts` admits as a reference's fifth component, so a projection that renames
-  or adds an artifact fails here instead of making cleanup a silent no-op.
+  set discovered by iterating `TargetProjectionV1`'s `*_filename` fields and unwrapping each
+  `Literal`, so a projection that renames or adds an artifact fails here instead of making cleanup
+  a silent no-op.
+
+  **Not `_artifact_ref_parts`**, which an earlier revision named. It holds `{"kernel", "modules",
+  "initrd"}` as an inline literal inside a boolean expression, with no module-level constant and no
+  accessor, so a test could only restate the set it exists to check or probe it with candidates it
+  had already restated. `model_fields` is genuinely introspectable, and field *discovery* — rather
+  than a hard-coded list of the three known names — is what catches an **added** fourth artifact: a
+  new `dtb_filename: Literal["dtb"]` would otherwise never enter the expected set, the equality
+  would still hold, and cleanup would silently stop removing it. The test asserts the discovered set
+  is non-empty first, because an unwrapping that silently yields nothing would make the equality
+  vacuous.
 - **Cleanup removes the archive, and this is proven to bite.** One test drives a real
   `RecoveryMetadataStore` through `publish_pre_stop` → `recovery_archive_sink` → `sink.publish`
   (which really writes `modules.tar`) → `complete_preparation` → `record_phase("recovered")` →

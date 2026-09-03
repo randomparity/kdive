@@ -226,24 +226,37 @@ Steps:
    `_require_private_owned_directory(fd, "artifact root")` →
    `_open_or_create_private_child(root_fd, str(ownership.system_id))` →
    `_open_or_create_private_child(system_fd, ownership.binding.run_id)`, closing each intermediate
-   in a `finally`.
+   in a `finally`. Wrap the whole walk in `except OSError: raise ValueError("artifact root is not
+   an owner-only service-owned directory") from None` — `OSError` only, since
+   `_require_private_owned_directory`'s `ValueError` is already path-free and more precise.
 4. Re-run; expect `1 passed`.
 5. Write `test_open_refuses_a_symlinked_component`, parametrized over the `system_id` and `run_id`
    components: pre-create the component as a symlink to a valid 0700 directory elsewhere; expect
-   `NotADirectoryError` with `errno.ENOTDIR`.
+   the mechanism's fixed `ValueError`.
 
-   **Measured, not assumed** (Python 3.14.7, Linux 7.1.12-200.fc44, x86_64): opening a
-   symlink-to-directory with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` raises `NotADirectoryError`
-   (`errno` 20, `ENOTDIR`) — **not** `ELOOP`. On Linux `O_DIRECTORY` reports `ENOTDIR` for the
-   symlink before the `O_NOFOLLOW` `ELOOP` path is reached, and the same holds for the
-   `dir_fd`-relative form `_open_private_directory` actually uses. Asserting `ELOOP` here would
-   make the test fail against correct code.
+   **The mechanism raises `ValueError`, not the `OSError` subclass.** The spec's error contract
+   wraps the whole walk, because a by-path `os.open` puts the recovery root in `OSError.filename`.
+   Measured on this host (Python 3.14.7, Linux 7.1.12-200.fc44, x86_64):
 
-   Because `ENOTDIR` is also what a regular-file component raises, the errno alone does not prove
-   the symlink was refused *for being a symlink*. Pin that separately in the same test: assert
-   that the identical open **without** `O_NOFOLLOW` succeeds. Measured on the same host, it does —
-   which is what makes `O_NOFOLLOW` load-bearing rather than decorative, and is the assertion that
-   would go red if someone dropped the flag from `_open_private_directory`.
+   ```
+   by-path non-dir:  NotADirectoryError errno=20 filename='/tmp/<tmp>/file'
+   by-path missing:  FileNotFoundError  errno=2  filename='/tmp/<tmp>/missing'
+   ```
+
+   So a test asserting `NotADirectoryError` *from the mechanism* would enforce the host-path leak
+   the threat model forbids. Assert the `ValueError`, and assert the redaction with it: `__cause__
+   is None`, `__suppress_context__ is True`, and the constructed root's path string absent from
+   `str(exc)`. That last triple is what makes `from None` load-bearing rather than decorative.
+
+   **The `O_NOFOLLOW` measurement still belongs in this test, as a direct `os.open`.** It is a
+   claim about the flag, not about the mechanism's error contract, so it is asserted against the
+   syscall rather than through the wrapper. Measured on the same host: a `dir_fd`-relative open of
+   a symlink-to-directory with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` raises `NotADirectoryError`
+   (`errno` 20, `ENOTDIR`) — **not** `ELOOP`, because `O_DIRECTORY` reports the symlink as
+   not-a-directory before the `O_NOFOLLOW` `ELOOP` path is reached. The identical open **without**
+   `O_NOFOLLOW` succeeds. That pair is what would go red if someone dropped the flag from
+   `_open_private_directory`, and `ENOTDIR` alone would not prove it, since a regular-file
+   component raises the same errno.
 6. Write `test_open_refuses_a_wide_mode_component` (chmod 0o755), expecting `ValueError` matching
    `"owner-only service-owned directory"`.
 
@@ -254,7 +267,9 @@ Steps:
    otherwise by skipping. A `pytest.mark.skipif(os.geteuid() != 0)` test is worse than none here:
    it never runs in CI while reading, in the file, as though the case were covered.
 7. Write `test_open_refuses_a_root_that_is_not_a_directory` and
-   `test_open_refuses_a_missing_root` → `NotADirectoryError` / `FileNotFoundError`.
+   `test_open_refuses_a_missing_root` → the same fixed `ValueError`, with the same redaction triple
+   as step 5. These two are the cases that motivated the wrapping: both are by-path opens, so both
+   carry the constructed root in `OSError.filename` before it is suppressed.
 8. Write `test_open_leaks_no_descriptor_on_failure`: capture `len(os.listdir("/proc/self/fd"))`
    before and after a failing `open`, asserting equality. This is the test most likely to be
    written so it cannot fail — verify its bite by deliberately dropping the `finally` close and
@@ -363,10 +378,16 @@ Steps:
 5. Run it against the **current** descriptor-scoped implementation. Expect it to FAIL with
    `ValueError: cleanup tombstone directory contains unexpected payload`. Record that exact output
    — it is the demonstrated defect, and this step is the one that must not be skipped.
-6. Implement the second half of `cleanup`: `_open_private_directory(root_fd_of_recovery_root,
+6. Implement the second half of `cleanup`: open the recovery root itself by path with
+   `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` and `_require_private_owned_directory(fd, "recovery root")`,
+   then `_open_private_directory(root_fd_of_recovery_root,
    f"{binding.system_id}.{binding.activation_id}")`, then `os.unlink("modules.tar",
    dir_fd=recovery_fd)`, with `FileNotFoundError` on either the directory or the unlink treated as
-   success, and the descriptor closed in a `finally`.
+   success, and both descriptors closed in a `finally`. Wrap this half in `except OSError: raise
+   ValueError("recovery directory is not an owner-only service-owned directory") from None`, on the
+   same `OSError`-only rule as Task 2 step 3 — the root's open is by path and would otherwise carry
+   it in `.filename`. The absent-directory success rule is checked **before** the wrapper, so a
+   missing recovery directory stays success rather than becoming a `ValueError`.
 7. Re-run step 4's test; expect `1 passed`. Re-run step 3's idempotence test; expect it still
    passes, now covering both removals.
 8. Write `test_cleanup_leaves_foreign_files_in_the_recovery_directory`: place `foreign.json` beside
@@ -385,10 +406,10 @@ Steps:
    derived from the binding, so no other activation's directory can be named. The wide-mode case is
    covered for the artifact root at T2.6 and was **not** covered for the recovery directory, which
    is the deleting path.
-9. Write `test_cleanup_refuses_a_symlinked_recovery_directory` → `NotADirectoryError` with
-   `errno.ENOTDIR`, for the reason measured in Task 2 step 5 — **not** `ELOOP`. Assert also that
-   the payloads under `root_fd` were still removed first, so the refusal is scoped to the second
-   removal and does not silently skip the first.
+9. Write `test_cleanup_refuses_a_symlinked_recovery_directory` → the mechanism's fixed `ValueError`
+   with the redaction triple, per Task 2 step 5; cleanup's own root open is by path, so it leaks
+   the same way if unwrapped. Assert also that the payloads under `root_fd` were still removed
+   first, so the refusal is scoped to the second removal and does not silently skip the first.
 10. Write `test_cleanup_refuses_a_non_canonical_binding` for a binding whose `activation_id` is not
     a canonical UUID (built with `model_construct`, per Task 2 step 9) → `ValueError`, before any
     unlink happens (assert the payloads are still present after the refusal).
