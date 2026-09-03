@@ -213,6 +213,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reopen the worker claim path for marked external-boot jobs
 - Bind external boot to the authority adapter
 - Gate external-boot advertisement on the authority
+- Add the local external-boot recovery root setting
+- Create and gate the external-boot recovery roots
 
 ### Changed
 
@@ -1139,6 +1141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record why the recovery reference and the cascades are there
 - Design the claim-lane reopening for #2201
 - Correct the finalization-fence cross-reference
+- Design the recovery root setting and provisioning
+- Record the design review dispositions
+- Bound what the pre-create guard actually claims
+- Record the branch review and threat scan
 
 ### Fixed
 
@@ -1868,6 +1874,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep bounded adapter errors at the seam
 - Harden the external-boot authority adapter
 - Bind the composite observation to its activation
+- Scope the recovery root setting to the worker process
+- Close the recovery-root symlink and owner-gate gaps
+- Drop the per-slot group requirement
+- Report an unresolvable recovery-root owner
 
 ### Security
 
