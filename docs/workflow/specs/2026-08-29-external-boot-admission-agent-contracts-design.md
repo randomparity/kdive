@@ -434,5 +434,44 @@ Two tests exist specifically to hold the amendment's hard rule:
 Existing control, snapshot, vmcore, Run, and DebugSession tests gain negative cases at the shared
 service boundary. Generated tool reference output is regenerated with `just docs`. `just lint`,
 `just type`, focused `just test-verbose` commands, and `just ci` are the required gates.
+### Guard placement against idempotent replay
+
+The guard must never convert an idempotent replay into a refusal. `keyed_mutation` short-circuits
+to `do_work()` when `idempotency_key is None`, so on the unkeyed path — the default for every tool
+below — there is no stored envelope and the tool's dedup key is the only replay there is. A guard
+ahead of it tells an agent its work was denied while the job it is polling stays queued and runs.
+
+This table is the complete guarded set, classified by what a repeat call actually returns. It was
+built by reading every site after three review rounds found the same defect at six, then four, then
+three more sites: enumeration by discovery kept sampling the class instead of closing it.
+
+| tool | dedup key | unkeyed repeat returns | placement |
+| --- | --- | --- | --- |
+| `control.power`, `control.diagnostic_sysrq`, `control.capture_traffic` | `…:{key or uuid4()}` | fresh work | guard decides, correctly |
+| `control.force_crash` | `{sys}:force_crash`, `NEVER` | prior job | replay probed first |
+| `control.watch_for_crash` | `{sys}:watch_for_crash`, `TERMINAL_OR_CANCELED` | prior job | replay probed first |
+| `systems.authorize_ssh_key` | `{sys}:authorize_ssh_key:{fp}`, `NEVER` | prior job | replay probed first; no `idempotency_key` parameter exists, so this is its only replay path |
+| `systems.snapshot` | `{sys}:snapshot:{name}`, `TERMINAL_OR_CANCELED` | prior job | `_snapshot_replay` ahead of the guard |
+| `systems.delete_snapshot` | `{sys}:delete_snapshot:{name}`, `TERMINAL_OR_CANCELED` | prior job | replay probed first |
+| `vmcore.fetch` | `{run}:capture_vmcore:{method}`, `NEVER` | prior job, terminal included | replay probed first |
+| `systems.reprovision` | `{sys}:reprovision:{digest}` | prior job via the `REPROVISIONING` branch | guard below that branch |
+| `systems.teardown` | `{uid}:teardown`, `NEVER` | prior job | replay and the `TORN_DOWN` short-circuit both ahead of the guard |
+| `systems.restore` | `{uid}:restore:{name}:{paused}`, `TERMINAL` | **nothing** — `_active_snapshot_op` refuses first | not in the class |
+| `runs.install`, `runs.boot` | `{run}:{step}` | prior job | guard already behind the lookup |
+| `runs.create`, `runs.bind`, `runs.cancel`, `debug.*`, the two recovery contracts | — | enqueue no job | nothing to preempt |
+
+Replay-eligible states are a function of the site's `recycle` policy, not a hand-listed set:
+`queue.enqueue` defaults to `NEVER`, under which *every* prior row is returned unchanged including
+a terminal one. `dedup_replay` derives them from the same enum `enqueue` branches on, because a
+hand-listed set is exactly what got `vmcore.fetch` wrong on the first attempt.
+
+The probes are scoped to the unkeyed path wherever a keyed one exists. A fresh idempotency key is a
+new logical request and the matrix decides it even when it would map onto an existing job.
+
+`test_every_guarded_tool_is_classified_for_the_replay_gate` derives its coverage from
+`GUARDED_TOOLS` rather than a hand-written list, so a newly guarded tool fails the gate until it is
+classified — the same inverted-gate technique that proves the matrix is closed. Disabling all the
+probes turns exactly the six affected tools red.
+
 Verification for this issue runs on x86_64; the native ppc64le proof is deferred to a separate later
 run on native POWER hardware.

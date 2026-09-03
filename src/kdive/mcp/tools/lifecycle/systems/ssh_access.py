@@ -28,6 +28,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.handles import SystemHandle
 from kdive.security.authz.context import RequestContext
@@ -155,6 +156,13 @@ async def authorize_ssh_key(
             # this block defers to the request's own commit and holds the SYSTEM lock until then.
             # Nothing but the envelope render follows it, so the lock never spans later work.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
+                # This tool takes no `idempotency_key`, so the fingerprinted dedup key above is
+                # its only replay path — a caller has no keyed escape hatch. Probed ahead of the
+                # guard: re-authorizing the same key while its job is live must keep returning
+                # that job rather than becoming a refusal.
+                replay = await dedup_replay(conn, f"{system_id}:authorize_ssh_key:{fingerprint}")
+                if replay is not None:
+                    return ToolResponse.from_job(replay)
                 try:
                     await check_external_boot_admission(
                         conn,

@@ -69,7 +69,7 @@ from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -264,6 +264,18 @@ async def force_crash_system(
                 # ADR-0583's owning-Run modifier on force-crash is unenforced here — this handler
                 # carries no caller Run; the bound is the admin role plus the ADR-0130 gate. See
                 # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
+                #
+                # `f"{uid}:force_crash"` is stable across calls and recycles nothing, so an
+                # unkeyed repeat returns the prior job unchanged. That must stay a replay: the
+                # crash job is queued and will fire, and telling the agent it was refused
+                # diverges what it believes from what the System is about to do.
+                # Unkeyed only: the keyed path already replays through `keyed_mutation`, and a
+                # *fresh* key is a new logical request the matrix decides even when it would map
+                # onto the existing job.
+                if idempotency_key is None:
+                    replay = await dedup_replay(conn, f"{uid}:force_crash")
+                    if replay is not None:
+                        return job_envelope(replay, "system_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn, uid, ExternalBootOperation.FORCE_CRASH, project=system.project
@@ -428,6 +440,19 @@ async def watch_for_crash_system(
                 # a retry. ADR-0583's owning-Run modifier is unenforced here — this handler
                 # carries no caller Run. The record below covers `SYSTEM_WATCH_CRASH` too. See
                 # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md
+                #
+                # The stable key described above is exactly a replay, so it is probed ahead of
+                # the guard. Terminal-or-canceled rows are recycled into a fresh watch, so
+                # `dedup_replay` correctly reports those as fresh work the matrix must decide.
+                # Unkeyed only, for the reason given at `force_crash`.
+                if idempotency_key is None:
+                    replay = await dedup_replay(
+                        conn,
+                        f"{system_id}:watch_for_crash",
+                        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+                    )
+                    if replay is not None:
+                        return job_envelope(replay, "system_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn, uid, ExternalBootOperation.SYSTEM_WATCH_CRASH, project=system.project

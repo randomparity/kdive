@@ -40,7 +40,11 @@ from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
-from kdive.mcp.tools.lifecycle.systems.snapshot import delete_snapshot, snapshot_system
+from kdive.mcp.tools.lifecycle.systems.snapshot import (
+    delete_snapshot,
+    restore_system,
+    snapshot_system,
+)
 from kdive.mcp.tools.lifecycle.systems.ssh_access import authorize_ssh_key
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VmcoreHandlers
 from kdive.providers.ports.handles import SystemHandle, TransportHandle
@@ -56,6 +60,7 @@ from tests.mcp.systems_support import (
     provider_resolver,
     provisioning_profile,
 )
+from tests.services.external_boot.admission_support import GUARDED_TOOLS
 from tests.services.external_boot.conftest import SeedActivation
 
 _STATE = ExternalBootActivationState
@@ -828,47 +833,87 @@ def test_a_boot_does_not_cross_a_restriction_committed_mid_flight(
 _REPLAY_SNAP = "replay-snap"
 
 
-async def _snapshot_unkeyed(pool: AsyncConnectionPool, system_id: str, _run: str) -> ToolResponse:
-    return await with_runtime_for_system(
-        pool,
-        _resolver(),
-        _ctx(),
-        system_id,
-        lambda runtime: snapshot_system(
-            pool, _ctx(), runtime, system_id=system_id, name=_REPLAY_SNAP, include_memory=False
-        ),
-        required_role=Role.CONTRIBUTOR,
+async def _force_crash(restricted: _Restricted) -> ToolResponse:
+    return await force_crash_system(
+        restricted.pool, _ctx(), system_id=restricted.system_id, resolver=_resolver()
     )
 
 
-async def _delete_snapshot_unkeyed(
-    pool: AsyncConnectionPool, system_id: str, _run: str
-) -> ToolResponse:
-    return await with_runtime_for_system(
-        pool,
-        _resolver(),
-        _ctx(),
-        system_id,
-        lambda runtime: delete_snapshot(
-            pool, _ctx(), runtime, system_id=system_id, name=_REPLAY_SNAP
-        ),
-        required_role=Role.CONTRIBUTOR,
-    )
+async def _teardown(restricted: _Restricted) -> ToolResponse:
+    return await teardown_system(restricted.pool, _ctx(), restricted.system_id)
 
 
-async def _reprovision_unkeyed(
-    pool: AsyncConnectionPool, system_id: str, _run: str
-) -> ToolResponse:
-    return await SYSTEM_ADMIN_HANDLERS.reprovision_system(
-        pool, _ctx(), system_id=system_id, profile=provisioning_profile()
-    )
-
-
-async def _vmcore_unkeyed(pool: AsyncConnectionPool, _system: str, run_id: str) -> ToolResponse:
+async def _vmcore_owning_run(restricted: _Restricted) -> ToolResponse:
     handlers = VmcoreHandlers(_resolver(), SecretRegistry())
     return await handlers.fetch_vmcore(
-        pool, _ctx(), run_id=run_id, method="host_dump", idempotency_key=None
+        restricted.pool, _ctx(), run_id=restricted.owning_run_id, method="host_dump"
     )
+
+
+async def _restore(restricted: _Restricted) -> ToolResponse:
+    return await with_runtime_for_system(
+        restricted.pool,
+        _resolver(),
+        _ctx(),
+        restricted.system_id,
+        lambda runtime: restore_system(
+            restricted.pool,
+            _ctx(),
+            runtime,
+            system_id=restricted.system_id,
+            name=_REPLAY_SNAP,
+            start_paused=False,
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _snapshot_replay_name(restricted: _Restricted) -> ToolResponse:
+    return await with_runtime_for_system(
+        restricted.pool,
+        _resolver(),
+        _ctx(),
+        restricted.system_id,
+        lambda runtime: snapshot_system(
+            restricted.pool,
+            _ctx(),
+            runtime,
+            system_id=restricted.system_id,
+            name=_REPLAY_SNAP,
+            include_memory=False,
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _delete_snapshot_replay_name(restricted: _Restricted) -> ToolResponse:
+    return await with_runtime_for_system(
+        restricted.pool,
+        _resolver(),
+        _ctx(),
+        restricted.system_id,
+        lambda runtime: delete_snapshot(
+            restricted.pool, _ctx(), runtime, system_id=restricted.system_id, name=_REPLAY_SNAP
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _prepare_crashed(restricted: _Restricted) -> None:
+    await _crash_the_system(restricted.pool, restricted.system_id)
+
+
+async def _prepare_installed(restricted: _Restricted) -> None:
+    await _mark_installed(restricted.pool, restricted.owning_run_id)
+
+
+async def _boot_only(restricted: _Restricted) -> ToolResponse:
+    """`_boot_owning_run` marks installed itself, which a repeat call cannot do twice."""
+    return await boot_run(restricted.pool, _ctx(), restricted.owning_run_id)
+
+
+async def _prepare_available_snapshot(restricted: _Restricted) -> None:
+    await _seed_available_snapshot(restricted.pool, restricted.system_id)
 
 
 async def _seed_available_snapshot(pool: AsyncConnectionPool, system_id: str) -> None:
@@ -890,57 +935,117 @@ async def _seed_available_snapshot(pool: AsyncConnectionPool, system_id: str) ->
 
 
 @dataclass(frozen=True, slots=True)
-class _UnkeyedReplayCase:
-    """A tool whose replay is its fixed dedup key rather than a stored envelope."""
+class _JobTool:
+    """How to invoke a guarded job-enqueuing tool unkeyed, and a state that denies it."""
 
     state: ExternalBootActivationState
-    invoke: Callable[[AsyncConnectionPool, str, str], Awaitable[ToolResponse]]
-    prepare: Callable[[AsyncConnectionPool, str], Awaitable[None]] | None = None
+    invoke: Callable[[_Restricted], Awaitable[ToolResponse]]
+    prepare: Callable[[_Restricted], Awaitable[None]] | None = None
 
 
-# `capture_vmcore` is admitted in `active` for the owning Run, so its denial needs
-# `recovery_conflict`; the three `system_snapshot`/`system_reprovision` tools are denied in
-# `active`.
-_UNKEYED_REPLAY_CASES: dict[str, _UnkeyedReplayCase] = {
-    "systems.delete_snapshot": _UnkeyedReplayCase(
-        _STATE.ACTIVE, _delete_snapshot_unkeyed, _seed_available_snapshot
+# Guarded tools that enqueue a job. `force_crash`, `watch_for_crash`, `capture_traffic` and
+# `capture_vmcore` are admitted in `active`, so their denial needs `recovery_conflict`.
+_JOB_TOOLS: dict[str, _JobTool] = {
+    "control.capture_traffic": _JobTool(_STATE.RECOVERY_CONFLICT, _capture_traffic_owning_run),
+    "control.diagnostic_sysrq": _JobTool(_STATE.ACTIVE, _sysrq),
+    "control.force_crash": _JobTool(_STATE.RECOVERY_CONFLICT, _force_crash),
+    "control.power": _JobTool(_STATE.ACTIVE, _power),
+    "control.watch_for_crash": _JobTool(_STATE.RECOVERY_CONFLICT, _watch_for_crash),
+    "runs.boot": _JobTool(_STATE.ACTIVE, _boot_only, _prepare_installed),
+    "runs.install": _JobTool(_STATE.ACTIVE, _install_owning_run),
+    "systems.authorize_ssh_key": _JobTool(_STATE.ACTIVE, _authorize_ssh_key),
+    "systems.delete_snapshot": _JobTool(
+        _STATE.ACTIVE, _delete_snapshot_replay_name, _prepare_available_snapshot
     ),
-    "systems.reprovision": _UnkeyedReplayCase(_STATE.ACTIVE, _reprovision_unkeyed),
-    "systems.snapshot": _UnkeyedReplayCase(_STATE.ACTIVE, _snapshot_unkeyed),
-    "vmcore.fetch": _UnkeyedReplayCase(
-        _STATE.RECOVERY_CONFLICT, _vmcore_unkeyed, _crash_the_system
+    "systems.reprovision": _JobTool(_STATE.ACTIVE, _reprovision),
+    "systems.restore": _JobTool(_STATE.ACTIVE, _restore, _prepare_available_snapshot),
+    "systems.snapshot": _JobTool(_STATE.ACTIVE, _snapshot_replay_name),
+    "systems.teardown": _JobTool(_STATE.ACTIVE, _teardown),
+    "vmcore.fetch": _JobTool(_STATE.RECOVERY_CONFLICT, _vmcore_owning_run, _prepare_crashed),
+}
+
+# Guarded tools that enqueue nothing, so there is no dedup replay for a guard to preempt. Each
+# reason is the mechanism, not a restatement: a tool that grows a job path belongs above.
+_NO_JOB_PATH: dict[str, str] = {
+    "debug.end_session": "transitions a DebugSession row; enqueues no job",
+    "debug.start_session": "inserts a DebugSession row; enqueues no job",
+    "runs.bind": "writes runs.system_id; enqueues no job",
+    "runs.cancel": "transitions the Run and cancels an existing job; enqueues none",
+    "runs.create": "inserts a Run; the build job is runs.install's",
+    "runs.release_external_boot": (
+        "returns configuration_error/recovery_executor_unavailable until #2118; enqueues nothing"
+    ),
+    "systems.resolve_external_boot_conflict": (
+        "returns configuration_error/recovery_executor_unavailable until #2118; enqueues nothing"
     ),
 }
 
 
-@pytest.mark.parametrize("tool", sorted(_UNKEYED_REPLAY_CASES))
-def test_an_unkeyed_dedup_replay_survives_an_activation(
+def test_every_guarded_tool_is_classified_for_the_replay_gate() -> None:
+    """Derived from `GUARDED_TOOLS`, so a newly guarded tool cannot skip the gate below.
+
+    The hand-written table this replaced enumerated four tools and silently omitted three that
+    had the same defect — `control.force_crash`, `control.watch_for_crash` and
+    `systems.authorize_ssh_key` — because a list only covers what someone remembered. This is
+    the same inverted-gate technique `test_admission.py` uses to prove the matrix is closed:
+    walk the decided set and require every member to be classified, so the omission fails here
+    rather than shipping.
+    """
+    classified = _JOB_TOOLS.keys() | _NO_JOB_PATH.keys()
+    assert GUARDED_TOOLS.keys() - classified == set()
+    assert classified - GUARDED_TOOLS.keys() == set()
+    assert _JOB_TOOLS.keys().isdisjoint(_NO_JOB_PATH)
+    assert all(reason.strip() for reason in _NO_JOB_PATH.values())
+
+
+async def _unkeyed_repeat(
+    pool: AsyncConnectionPool,
+    case: _JobTool,
+    seed: SeedActivation | None,
+) -> tuple[ToolResponse, ToolResponse]:
+    """Call the tool unkeyed twice, restricting between the calls when ``seed`` is given."""
+    system_id, run_id = await _ready_system_with_run(pool)
+    restricted = _Restricted(pool=pool, system_id=system_id, owning_run_id=run_id)
+    if case.prepare is not None:
+        await case.prepare(restricted)
+    first = await case.invoke(restricted)
+    if seed is not None:
+        await _restrict(pool, seed, system_id, run_id, case.state)
+    return first, await case.invoke(restricted)
+
+
+@pytest.mark.parametrize("tool", sorted(_JOB_TOOLS))
+def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
     migrated_url: str, seeded_activation: SeedActivation, tool: str
 ) -> None:
-    """The same rule as the keyed sites, on the path that has no stored envelope.
+    """Whatever an unkeyed repeat does without an activation, it must do with one.
 
-    ``keyed_mutation`` calls ``do_work()`` straight through when ``idempotency_key is None``, so
-    on the unkeyed path — the default for every tool here — the replay is the fixed dedup key,
-    not a recorded envelope. Putting the guard inside the closure therefore protects nothing
-    here; each of these sites has to probe its own dedup key ahead of the guard. Without that, an
-    agent polling work it already enqueued is told the operation was denied while its job stays
-    queued against the same System and runs.
+    The property is differential rather than declared: the unrestricted arm decides whether this
+    tool's repeat is a replay, so nothing here hand-asserts which dedup keys are stable. A tool
+    that mixes a `uuid4()` into its key (`control.power`, `control.diagnostic_sysrq`,
+    `control.capture_traffic`) enqueues fresh work on the repeat, is correctly denied, and this
+    gate says nothing about it. A tool whose key is stable replays, and that replay must survive
+    the activation — `keyed_mutation` short-circuits to `do_work()` when `idempotency_key is
+    None`, so on that path the dedup key is the only replay there is and a guard ahead of it
+    turns an agent's poll into a refusal while the job it is polling stays queued and runs.
     """
-    case = _UNKEYED_REPLAY_CASES[tool]
+    case = _JOB_TOOLS[tool]
 
-    async def _run() -> tuple[ToolResponse, ToolResponse]:
+    async def _run() -> tuple[ToolResponse, ToolResponse, ToolResponse, ToolResponse]:
         async with runs_support.pool(migrated_url) as conn_pool:
-            system_id, run_id = await _ready_system_with_run(conn_pool)
-            if case.prepare is not None:
-                await case.prepare(conn_pool, system_id)
-            first = await case.invoke(conn_pool, system_id, run_id)
-            await _restrict(conn_pool, seeded_activation, system_id, run_id, case.state)
-            return first, await case.invoke(conn_pool, system_id, run_id)
+            plain_first, plain_second = await _unkeyed_repeat(conn_pool, case, None)
+            held_first, held_second = await _unkeyed_repeat(conn_pool, case, seeded_activation)
+            return plain_first, plain_second, held_first, held_second
 
-    first, replay = asyncio.run(_run())
-    assert first.status == "queued", first.model_dump()
-    assert replay.error_category is None, replay.model_dump()
-    assert replay.model_dump() == first.model_dump()
+    plain_first, plain_second, held_first, held_second = asyncio.run(_run())
+    assert plain_first.status == "queued", plain_first.model_dump()
+    if plain_second.model_dump() != plain_first.model_dump():
+        # The repeat enqueued fresh work, which the matrix is entitled to deny; the denial
+        # itself is `test_a_restricting_activation_denies_every_reverse_operation`'s.
+        return
+    assert held_first.status == "queued", held_first.model_dump()
+    assert held_second.error_category is None, held_second.model_dump()
+    assert held_second.model_dump() == held_first.model_dump()
 
 
 def test_a_cancel_refuses_a_run_bound_after_its_pre_lock_read(

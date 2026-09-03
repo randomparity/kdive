@@ -7,7 +7,10 @@ from collections.abc import Awaitable, Callable
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
 
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError
+from kdive.domain.operations.jobs import Job
+from kdive.jobs import queue
 from kdive.mcp.responses import ToolResponse
 from kdive.services.idempotency.envelope import (
     StoredResult,
@@ -28,6 +31,44 @@ def _stored(envelope: ToolResponse) -> StoredResult:
 
 def _envelope(result: StoredResult) -> ToolResponse:
     return ToolResponse.model_validate(result.document)
+
+
+# States `queue.enqueue` resets to a fresh queued attempt, per policy. Its `NEVER` default
+# recycles nothing, so under it *every* prior row is returned unchanged — including a terminal
+# one. Derived from the same enum `enqueue` branches on, so a site cannot hand-list a narrower
+# set than its own policy implies (#2117 review: the `vmcore.fetch` probe did exactly that).
+_RECYCLED: dict[queue.JobRecyclePolicy, frozenset[JobState]] = {
+    queue.JobRecyclePolicy.NEVER: frozenset(),
+    queue.JobRecyclePolicy.TERMINAL: frozenset({JobState.FAILED, JobState.SUCCEEDED}),
+    queue.JobRecyclePolicy.TERMINAL_OR_CANCELED: frozenset(
+        {JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED}
+    ),
+}
+
+
+async def dedup_replay(
+    conn: AsyncConnection,
+    dedup_key: str,
+    *,
+    recycle: queue.JobRecyclePolicy = queue.JobRecyclePolicy.NEVER,
+) -> Job | None:
+    """The job a repeat ``enqueue`` on ``dedup_key`` would return unchanged, else ``None``.
+
+    ``None`` means the call would commit fresh work — a new row, or a recycled terminal one.
+
+    This is what an unkeyed repeat call replays on. ``keyed_mutation`` short-circuits to
+    ``do_work()`` when ``idempotency_key is None``, so on that path there is no stored envelope
+    and the dedup key is the only replay there is. Sites that admit against the external-boot
+    matrix (ADR-0583) must consult this *before* their guard, or an activation that appeared
+    after the work was enqueued turns an agent's poll into a refusal while the job it is
+    polling stays queued and runs.
+
+    Pass the same ``recycle`` the site's own ``enqueue`` passes; the states are derived from it.
+    """
+    prior = await queue.get_by_dedup_key(conn, dedup_key)
+    if prior is None or prior.state in _RECYCLED[recycle]:
+        return None
+    return prior
 
 
 async def resolve_envelope_replay(

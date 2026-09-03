@@ -14,14 +14,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SNAPSHOTS, SYSTEMS, snapshot_by_name, snapshots_for_system
 from kdive.domain.capacity.state import JobState, RunState, SnapshotState, SystemState
 from kdive.domain.lifecycle.records import Snapshot
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import RestorePayload, SnapshotDeletePayload, SnapshotPayload
 from kdive.log import bind_context
@@ -34,6 +33,7 @@ from kdive.mcp.tools._common import external_boot_denial as _external_boot_denia
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle._recovery import iso
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -87,16 +87,6 @@ def _admit_snapshot_op(system_id: str, runtime: ProviderRuntime) -> UUID | ToolR
     return uid
 
 
-async def _active_job_by_dedup(conn: AsyncConnection, dedup_key: str) -> Job | None:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT * FROM jobs WHERE dedup_key = %s AND state = ANY(%s)",
-            (dedup_key, list(_ACTIVE_JOB_STATES)),
-        )
-        row = await cur.fetchone()
-    return Job.model_validate(row) if row else None
-
-
 async def _has_live_run(conn: AsyncConnection, system_id: UUID) -> bool:
     async with conn.cursor() as cur:
         await cur.execute(
@@ -130,7 +120,11 @@ async def _snapshot_replay(
     existing = await snapshot_by_name(conn, system_id, name)
     if existing is None or existing.state is not SnapshotState.CREATING:
         return None
-    active = await _active_job_by_dedup(conn, f"{system_id}:snapshot:{name}")
+    active = await dedup_replay(
+        conn,
+        f"{system_id}:snapshot:{name}",
+        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+    )
     return None if active is None else job_envelope(active, "system_id", system_id)
 
 
@@ -427,7 +421,11 @@ async def delete_snapshot(
             # `queue.enqueue` below is idempotent on this dedup key, so a repeat call while the
             # deletion is queued or running returns that job unchanged — a poll, not fresh work.
             # Probe it ahead of the guard for the same reason every other site does.
-            in_flight = await _active_job_by_dedup(conn, f"{uid}:delete_snapshot:{name}")
+            in_flight = await dedup_replay(
+                conn,
+                f"{uid}:delete_snapshot:{name}",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
             if in_flight is not None:
                 return job_envelope(in_flight, "system_id", uid)
             try:

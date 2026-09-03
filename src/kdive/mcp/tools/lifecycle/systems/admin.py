@@ -31,6 +31,7 @@ from kdive.mcp.tools._common import external_boot_denial as _external_boot_denia
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.mcp.tools.lifecycle.support._idempotency import (
+    dedup_replay,
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
@@ -385,21 +386,6 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
-        # ADR-0583 admits teardown in every restricted state, so this cannot deny today. Handled
-        # anyway: teardown is the one operation admitted everywhere, and both `_ESCALATION_HINT`
-        # and the recovery rows of `_STATE_NEXT_ACTIONS` steer every denied caller here, so it is
-        # the single exit from a wedged activation. Two open records contemplate revisiting
-        # `_ALWAYS_ADMITTED` —
-        # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md and
-        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md — and if that set ever
-        # narrows this must degrade to the typed envelope every other site renders rather than
-        # an unhandled exception.
-        try:
-            await check_external_boot_admission(
-                conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
-            )
-        except ExternalBootDenied as exc:
-            return _external_boot_denial(system_id, exc, ctx)
         if system.state is SystemState.TORN_DOWN:
             # The System is already terminal, but its Allocation may still be `active`; point the
             # agent at the second wind-down step so the idempotent replay steers identically to a
@@ -412,6 +398,28 @@ async def _teardown_locked(
                 suggested_next_actions=["allocations.release", "systems.get"],
                 data={"project": system.project},
             )
+        # `{uid}:teardown` is stable and recycles nothing, so an unkeyed repeat while the teardown
+        # job is live replays it. Both replays sit above the guard, matching every other site.
+        if idempotency_key is None:
+            replay = await dedup_replay(conn, f"{uid}:teardown")
+            if replay is not None:
+                return job_envelope(replay, "system_id", uid)
+        # ADR-0583 admits teardown in every restricted state, so this cannot deny today. Ordered
+        # and handled as if it could, because teardown is the one operation admitted everywhere:
+        # `_ESCALATION_HINT` and the recovery rows of `_STATE_NEXT_ACTIONS` steer every denied
+        # caller here, so it is the single exit from a wedged activation. Two open records
+        # contemplate narrowing `_ALWAYS_ADMITTED` —
+        # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md and
+        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md. If that happens, a caller
+        # who already tore the System down, or whose teardown job is queued, must keep its
+        # idempotent answer rather than receive a `conflict` steering it at the tool it just
+        # called — and a denial must render the typed envelope every other site renders.
+        try:
+            await check_external_boot_admission(
+                conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(system_id, exc, ctx)
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,

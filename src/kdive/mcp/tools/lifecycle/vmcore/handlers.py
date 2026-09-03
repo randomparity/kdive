@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capacity.state import JobState, SystemState
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
@@ -29,7 +29,7 @@ from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import kdump_capability_refusal as _kdump_capability_refusal
-from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.lifecycle.vmcore._vmcore_kdump_gate import refusing_kdump_capability
 from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
@@ -290,19 +290,24 @@ async def _fetch_vmcore(
                 # That covers the keyed path only. `idempotency_key` is optional on this tool and
                 # `keyed_mutation` calls `do_work()` straight through when it is `None`, so the
                 # unkeyed — default — path has no envelope replay at all. Its replay is the fixed
-                # dedup key below, which `queue.enqueue` returns unchanged for a live job, so the
-                # same rule needs its own probe here.
+                # dedup key below, which `queue.enqueue` returns unchanged, so the same rule needs
+                # its own probe here. The enqueue passes no `recycle`, so `NEVER` applies and a
+                # *terminal* row replays too — `dedup_replay` derives that from the policy rather
+                # than leaving it to a hand-listed state set.
                 #
-                # Unkeyed only, deliberately. A *fresh* key is the caller asserting this is new
-                # work, and the matrix has to decide it — replaying the in-flight job there would
-                # let a restricted System be polled through a key it has never seen
+                # Which control tools need this varies, and the difference is load-bearing:
+                # `control.power`, `control.diagnostic_sysrq` and `control.capture_traffic` mix a
+                # `uuid4()` into their unkeyed dedup suffix, so an unkeyed call there is always
+                # genuinely fresh work and needs no probe. `control.force_crash` and
+                # `control.watch_for_crash` use stable keys with no suffix and do need one.
+                #
+                # Unkeyed only, deliberately: a fresh key is a new logical request and the matrix
+                # decides it even when it would map onto an existing job
                 # (`test_a_keyed_mutation_admitted_before_the_activation_still_replays` pins it).
-                # The control tools need no probe at all: they mix a `uuid4()` into their unkeyed
-                # dedup suffix, so an unkeyed call there is always genuinely fresh work.
                 if idempotency_key is None:
-                    prior = await queue.get_by_dedup_key(conn, dedup_key)
-                    if prior is not None and prior.state in {JobState.QUEUED, JobState.RUNNING}:
-                        return job_envelope(prior, "run_id", uid)
+                    replay = await dedup_replay(conn, dedup_key)
+                    if replay is not None:
+                        return job_envelope(replay, "run_id", uid)
                 try:
                     await check_external_boot_admission(
                         conn,
