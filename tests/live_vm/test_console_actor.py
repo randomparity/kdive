@@ -5,10 +5,15 @@ Runs in ordinary CI, like the other tests/live_vm guards: the live tier is where
 parameter precisely so the foreign-owner branch is provable without root and without a second
 account — passing an euid that is not the file's owner is exactly the runner's situation, where the
 worker account creates the log and the operator account starts the domain.
+
+The last test is a source guard rather than a behaviour test. The call site lives in a
+``live_vm``-gated body that ordinary CI never executes, so nothing but the self-hosted dispatch
+would notice its removal; the guard reads the boot test's AST instead, and fails here.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 from uuid import UUID
@@ -20,6 +25,8 @@ from tests.live_vm.console_actor import _claim_console_inode, claim_console_inod
 
 _SYS = UUID("61510773-cdf7-489f-9a8f-254e6ec98227")
 _FOREIGN_UID = os.geteuid() + 1
+_INSTALL_TEST = Path(__file__).resolve().parents[1] / "providers/local_libvirt/test_install.py"
+_BOOT_TEST = "test_live_vm_real_install_boot"
 
 
 def _console_log(tmp_path: Path) -> Path:
@@ -86,3 +93,37 @@ def test_claim_targets_the_systems_own_console_path(
     assert claim_console_inode(_SYS) is True
     assert seen == [_SYS]
     assert not log.exists()
+
+
+def _first_statement_calling(body: list[ast.stmt], callee: str) -> int | None:
+    """The index of the first statement in ``body`` containing a call to ``callee``."""
+    for index, statement in enumerate(body):
+        for node in ast.walk(statement):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == callee:
+                return index
+            if isinstance(func, ast.Attribute) and func.attr == callee:
+                return index
+    return None
+
+
+def test_the_live_boot_test_claims_the_inode_before_it_boots() -> None:
+    """A source guard for a live_vm body ordinary CI never runs (see the module docstring)."""
+    tree = ast.parse(_INSTALL_TEST.read_text(encoding="utf-8"), filename=str(_INSTALL_TEST))
+    bodies = [
+        node.body
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == _BOOT_TEST
+    ]
+    assert len(bodies) == 1, f"expected exactly one {_BOOT_TEST} in {_INSTALL_TEST}"
+
+    claim = _first_statement_calling(bodies[0], "claim_console_inode")
+    boot = _first_statement_calling(bodies[0], "boot")
+    assert boot is not None, f"{_BOOT_TEST} no longer starts a domain — this guard is stale"
+    assert claim is not None, (
+        f"{_BOOT_TEST} starts a worker-provisioned System's domain in-process without claiming "
+        "its console inode first; the boot will fail ADR-0576's identity check on the runner"
+    )
+    assert claim < boot, f"{_BOOT_TEST} must claim the console inode BEFORE the boot, not after"
