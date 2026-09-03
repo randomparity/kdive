@@ -57,6 +57,10 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+
+# The authority service's own repository double. Reused rather than reimplemented here:
+# a second implementation of `AuthorityRepository` in this package could drift from the
+# contract the service is actually tested against, which is the thing these tests rely on.
 from tests.providers.external_boot_authority.service_support import _Repository
 
 pytestmark = pytest.mark.anyio
@@ -157,6 +161,9 @@ class _FakeIO:
         self.observe_fault = observe_fault
         self.actions: list[str] = []
         self.tombstone = False
+        # `publish_tombstone` writes the tombstone and then unlinks `intent.json`. Modelling
+        # both lets `finalize_tombstone` below refuse exactly where the real store refuses.
+        self.intent_present = True
         self.finalized_proof: FinalizeCleanupProof | None = None
         # Raised by `reopen_binding` in place of returning the record. `FileNotFoundError` is
         # what the real store raises for every state in which the recovery record cannot be
@@ -171,6 +178,11 @@ class _FakeIO:
 
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         del recovery
+        if self.tombstone and self.intent_present:
+            # What `RecoveryMetadataStore.finalize_tombstone` does when the recovery
+            # directory holds anything besides the tombstone — the interrupted-publish state.
+            # Modelled so the double cannot report a success the store refuses.
+            raise ValueError("cleanup tombstone directory contains unexpected payload")
         self.finalized_proof = proof
         self.actions.append("finalize")
 
@@ -243,6 +255,7 @@ class _FakeIO:
         del metadata, point_digest
         self.actions.append("cleanup")
         self.tombstone = True
+        self.intent_present = False
 
     def materialize(self, plan: object) -> object:
         raise AssertionError("the authority adapter must not materialize")
@@ -1044,23 +1057,27 @@ async def test_a_cleanup_commit_refuses_every_unresolvable_recovery_point(
     assert "finalize" not in io.actions
 
 
-async def test_a_cleanup_commit_short_circuits_on_the_tombstone_it_already_published(
+async def test_a_cleanup_commit_neither_recleans_nor_finalizes_an_accounted_tombstone(
     tmp_path: Path,
 ) -> None:
-    """Positive-evidence idempotency: the durable tombstone, not an absence.
+    """Positive-evidence idempotency, on the durable tombstone rather than on an absence.
 
-    `_FakeIO.reopen_binding` keeps the recovery point resolvable after a cleanup, where the
-    real store does not — `publish_tombstone` unlinks `intent.json` in the same operation that
-    writes the tombstone. So this pins the coordinator's `cleanup_complete` early-return
-    branch, whose production window is the crash between those two writes. It is not the
-    guarantee that ordinary commits do not double-mutate; that comes from `commit` having one
-    call site per `execute_mutation`.
+    The state is the crash window inside `publish_tombstone`: the tombstone is written and
+    `intent.json` is not yet unlinked, so the record is still resolvable. Two things must
+    hold, and both are production behaviour rather than fake behaviour.
 
-    The fault it catches is removing the `cleanup_complete` early return, which makes a second
-    `cleanup` action appear.
+    No second provider mutation: the coordinator's `cleanup_complete` early return fires.
+    Removing that early return makes a second `cleanup` action appear.
+
+    And no finalization: `RecoveryMetadataStore.finalize_tombstone` refuses a directory
+    holding anything besides the tombstone, so finalizing here would raise and turn a harmless
+    retry into a permanent `provider_conflict`. `_FakeIO.finalize_tombstone` reproduces that
+    refusal, so removing the adapter's `cleanup_is_accounted` guard turns this red rather than
+    quietly passing.
     """
     io = _FakeIO(_metadata("recovered"))
     io.tombstone = True  # a cleanup that published its tombstone and did not finalize
+    io.intent_present = True  # ...and was interrupted before unlinking the record
     service, repository, peer, takeover = _cleanup_service(io, tmp_path)
     await service.acknowledge_takeover(peer, takeover)
     repository.current = True
@@ -1068,4 +1085,4 @@ async def test_a_cleanup_commit_short_circuits_on_the_tombstone_it_already_publi
     await service.execute_mutation(peer, _cleanup_mutation())
 
     assert "cleanup" not in io.actions
-    assert io.actions.count("finalize") == 1
+    assert "finalize" not in io.actions

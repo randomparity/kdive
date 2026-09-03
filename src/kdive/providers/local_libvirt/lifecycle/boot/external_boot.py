@@ -1496,6 +1496,24 @@ class LocalLibvirtExternalBoot:
             if metadata.phase == "source-restored":
                 operation.restore_power(metadata)
 
+    def cleanup_is_accounted(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> bool:
+        """Whether accounted cleanup evidence for this exact point already exists.
+
+        The authority adapter asks before cleaning, because only a tombstone that *this*
+        commit publishes is safe to finalize. ``publish_tombstone`` writes ``tombstone.json``
+        and then unlinks ``intent.json``; a crash between those leaves both present, and
+        ``cleanup`` below then short-circuits without completing the unlink.
+        ``RecoveryMetadataStore.finalize_tombstone`` refuses a directory holding anything but
+        the tombstone, so finalizing that state raises — and a caller that finalized
+        unconditionally would turn a harmless retry into a permanent failure.
+
+        Kept separate from ``cleanup`` rather than returned by it: ``cleanup`` is part of the
+        provider-neutral ``ExternalBootPorts`` protocol, which the remote provider also
+        implements, and that signature is not this change's to widen.
+        """
+        with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
+            return operation.cleanup_complete(recovery)
+
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         with self._io.open(authority, _expected_binding(recovery.binding)) as operation:
             if operation.cleanup_complete(recovery):

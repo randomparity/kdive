@@ -907,12 +907,21 @@ class ExternalBootAuthorityService:
                 )
                 if rechecked is None or not self._binding_matches(rechecked, request):
                     raise AuthorityServiceError("superseded")
-                # Both refusals here leave the operation unresolved at `mutation-started`, and
-                # that is the journal's design rather than a gap. `_NEXT_OPERATION_PHASES`
+                # Both refusals here leave the operation unresolved at `mutation-started`,
+                # which is the journal's design rather than a gap: `_NEXT_OPERATION_PHASES`
                 # allows `mutation-started` to be followed only by `provider-returned`, so a
-                # `terminal`/`never-began` record is not a legal successor: once the anchor is
-                # written, ADR-0584 treats the mutation as possibly-begun and requires the
-                # observation cycle `_finish_recovery` runs to settle what actually happened.
+                # `terminal`/`never-began` record is not a legal successor. Once the anchor is
+                # written, ADR-0584 treats the mutation as possibly-begun.
+                #
+                # The two refusals then differ, and only the first is self-healing. A
+                # `superseded` recheck failure is settled by the observation cycle
+                # `_finish_recovery` runs on the next admission. A `journal_conflict` from the
+                # head check is not: it means the trusted head already disagrees with the
+                # record this service anchored under the same operation identity, so
+                # `_recover` and `_anchor`'s compare-and-set both keep failing against that
+                # head and the lane answers `journal_conflict` until a takeover or an operator
+                # reconciles it. That is the correct visible answer for a head the service
+                # cannot reconcile, not a state it should paper over.
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
                 try:

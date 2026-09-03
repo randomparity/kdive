@@ -3737,7 +3737,7 @@ def test_a_target_xml_substituted_on_disk_is_refused_at_reopen(tmp_path: Path) -
         reference = store.publish(metadata)
         name = recovery_directory_name(reference, metadata.binding)
         _substitute_target_xml_on_disk(root, name)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValidationError, match="target domain XML digest"):
             store.reopen(reference, metadata.binding)
 
 
@@ -3771,6 +3771,51 @@ def test_activate_never_defines_a_target_xml_substituted_on_disk(tmp_path: Path)
         )
 
     assert [action for action in host.actions if action.startswith("define:")] == []
+
+
+def test_finalization_refuses_a_directory_whose_recovery_record_was_never_unlinked(
+    tmp_path: Path,
+) -> None:
+    """`publish_tombstone` writes the tombstone and *then* unlinks `intent.json`.
+
+    A crash between those two writes leaves both files present. `cleanup_complete` reports
+    True for that directory, so `LocalLibvirtExternalBoot.cleanup` short-circuits without
+    completing the unlink — and finalization then refuses, because the directory holds more
+    than the tombstone. No fake can carry this precondition, so it is pinned here against the
+    real store. The authority adapter must not finalize in this state; it asks
+    `cleanup_is_accounted` first for exactly this reason.
+    """
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    digest = LocalLibvirtExternalBoot.point_digest(point)
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        name = recovery_directory_name(reference, metadata.binding)
+        store.publish_tombstone(reference, metadata.binding, metadata, digest)
+        # Restore the record `publish_tombstone` unlinked, reproducing the interrupted state.
+        record = root / name / "intent.json"
+        record.write_bytes(external_boot_module._metadata_bytes(metadata))
+        record.chmod(0o600)
+
+        assert sorted(path.name for path in (root / name).iterdir()) == [
+            "intent.json",
+            "tombstone.json",
+        ]
+        assert store.cleanup_complete(reference, point) is True
+
+        proof = FinalizeCleanupProof(
+            point_digest=digest,
+            binding=point.binding,
+            operation_id="op-1",
+            attempt_id="00000000-0000-0000-0000-000000000005",
+            journal_sequence=1,
+            journal_digest="sha256:" + "4" * 64,
+            phase="mutation-started",
+        )
+        with pytest.raises(ValueError, match="unexpected payload"):
+            store.finalize_tombstone(reference, point, proof)
 
 
 def test_target_projection_digest_still_measures_projection_inputs() -> None:

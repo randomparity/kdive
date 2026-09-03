@@ -197,13 +197,21 @@ class LocalExternalBootAuthorityAdapter:
             }:
                 self._ports.recover(point, authority)
             elif operation is AuthorityOperation.CLEANUP:
+                # Finalize only a tombstone this commit published. If one already existed,
+                # the evidence came from an earlier operation, and in the interrupted-publish
+                # case `intent.json` is still beside it — a directory `finalize_tombstone`
+                # refuses, which would turn a harmless retry into a permanent
+                # provider_conflict. That stranded state is a recorded residual of ADR-0592,
+                # not something this call can discharge.
+                accounted = self._ports.cleanup_is_accounted(point, authority)
                 self._ports.cleanup(point, authority)
-                # Built inside this try on purpose: FinalizeCleanupProof is a validating
-                # model, so a bad field raises ValidationError, which renders field values.
-                # The handler below bounds it to a category `from None`.
-                self._ports.finalize_cleanup_tombstone(
-                    point, _cleanup_proof(context, point), authority
-                )
+                if not accounted:
+                    # Built inside this try on purpose: FinalizeCleanupProof is a validating
+                    # model, so a bad field raises ValidationError, which renders field
+                    # values. The handler below bounds it to a category `from None`.
+                    self._ports.finalize_cleanup_tombstone(
+                        point, _cleanup_proof(context, point), authority
+                    )
             elif operation is AuthorityOperation.TEARDOWN:
                 # Teardown publishes a tombstone through the same primitive and still has no
                 # finalizer. That gap is recorded in ADR-0592 and routed to #2212; it is not

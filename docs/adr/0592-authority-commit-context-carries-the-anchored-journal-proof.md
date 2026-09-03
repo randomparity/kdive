@@ -146,6 +146,14 @@ calls `finalize_cleanup_tombstone` twice with the same point and proof
 
 Three residuals this decision does not close, all inherited and none made worse here.
 
+- **A `journal_conflict` from the head check is not self-healing.** It fires only when the
+  trusted head already disagrees, under this operation identity, with the record this service
+  anchored — a second authority instance sharing the identity, or a head row changed beneath
+  `advance`. The observation cycle cannot settle it: `_recover` and `_anchor`'s compare-and-set
+  both compare against that same head, so the lane answers `journal_conflict` until a takeover
+  or an operator reconciles it. That is the right visible answer for a head the service cannot
+  reconcile, and it is stated here rather than left for a reader to discover; adding
+  reconciliation machinery is not this charter's to authorize.
 - **A crash between `cleanup()` and finalization strands the tombstone with no recovery path.**
   Recovering it would need finalization addressable without a `RecoveryPoint`, and that is not
   constructible: `FinalizeCleanupProof.point_digest` is computed from the recovery point, so
