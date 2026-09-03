@@ -204,6 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prove external-boot kernel and command-line identity
 - Verify the guest userland before declaring a volume
 - Restore external boot to its disk/GRUB baseline
+- Add the module volume-name grammar and bounded XML parsing
 
 ### Changed
 
@@ -1119,6 +1120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apply design-review findings to ADR-0590 and its plan
 - State ADR-0590's contract generally and fix a #2110 claim
 - Define the canonical byte form of remote-module documents
+- Accept ADR-0588 and record how a 256-byte name is refused
 
 ### Fixed
 
@@ -1823,6 +1825,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Install the mermaid checker's deps during just setup
 - Report both halves of a recovery stop conflict
 - Hold every remote-module document to one byte form
+- Record the 256-byte refusal class as an amendment, not a rewrite
 
 ### Security
 
