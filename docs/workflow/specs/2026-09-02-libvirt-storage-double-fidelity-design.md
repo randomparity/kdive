@@ -66,12 +66,18 @@ The submitted overlay document carried a `<metadata>` child, a `<bogusElement>` 
   - `unit=''` is accepted the same way.
   - Suffix matching is **case-insensitive**: `k`, `kib`, `Kib`, `KIB` all give 1024, and `b` and
     `Bytes` both give 1.
-  - The table runs past `GB`: `b`/`byte`/`bytes` = 1, `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576,
-    `MB` = 1000000, `G`/`GiB` = 2^30, `GB` = 10^9, `T`/`TiB` = 2^40, `TB` = 10^12, `P`/`PiB` = 2^50,
-    `PB` = 10^15, `E`/`EiB` = 2^60, `EB` = 10^18. The suffixes from `T` up parse — a
-    `<capacity unit='T'>1</capacity>` fails with `VIR_ERR_SYSTEM_ERROR` (code 38) because a 1 TiB
-    file will not fit on the probe filesystem, which is a create failure after a successful parse,
-    not a parse refusal.
+  - The table runs past `GB`, and **every multiplier below was read off a readback, none inferred**:
+    `b`/`byte`/`bytes` = 1, `K`/`KiB` = 1024, `KB` = 1000, `M`/`MiB` = 1048576, `MB` = 1000000,
+    `G`/`GiB` = 1073741824, `GB` = 1000000000, `T`/`TiB` = 1099511627776, `TB` = 1000000000000,
+    `P`/`PiB` = 1125899906842624, `PB` = 1000000000000000, `E`/`EiB` = 1152921504606846976,
+    `EB` = 1000000000000000000.
+  - Observing the suffixes from `T` up takes a second probe, and the first attempt is worth
+    recording because its failure is easy to misread. A `<capacity unit='T'>1</capacity>` over a
+    pool on `/tmp` fails with `VIR_ERR_SYSTEM_ERROR` (code 38) — the suffix parsed and the 1 TiB
+    file would not fit. Re-probing over a pool on a real disk with
+    `<allocation unit='bytes'>0</allocation>` creates each volume sparsely and returns the readbacks
+    above. Code 38 versus code 8 is what separates a create failure from a parse refusal, and
+    stopping at the first probe would have left six multipliers transcribed rather than seen.
   - Only a suffix outside that set is refused, with `VIR_ERR_INVALID_ARG` (code 8): `' K'` (leading
     space) and `'bogusUnit'` both take that path, and code 8 versus code 38 is what distinguishes a
     parse refusal from a create failure.
