@@ -441,6 +441,90 @@ def test_evidence_columns_cannot_be_written_piecemeal(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize(
+    ("assignment", "value", "constraint"),
+    [
+        ("reap_discharged_at = now()", None, "reap_discharge"),
+        ("mutation_discharged_at = now()", None, "mutation_discharge"),
+        ("mutation_discharge_reason = %s", "restored", "mutation_discharge"),
+        (
+            "mutation_discharged_at = now(), mutation_discharge_reason = %s",
+            "abandoned",
+            "mutation_reason",
+        ),
+    ],
+)
+def test_database_rejects_a_half_written_obligation(
+    migrated_url: str, assignment: str, value: str | None, constraint: str
+) -> None:
+    """An obligation is discharged with its reason, and never discharged before it is opened.
+
+    No Python-side check stands in front of these: they exist so a writer reaching the table
+    directly cannot leave the sweep a row it would read as a discharge that never happened.
+    """
+
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            params = ((value,) if value is not None else ()) + attempt.key
+            with pytest.raises(psycopg.errors.CheckViolation, match=constraint):
+                async with conn.transaction():
+                    await conn.execute(
+                        (
+                            "UPDATE remote_module_attempt_obligations SET "
+                            + assignment
+                            + " WHERE system_id = %s AND run_id = %s AND operation_nonce = %s"
+                        ).encode(),
+                        params,
+                    )
+            assert await repo.retained_owners(conn) == (
+                RetainedModuleAttempt(attempt, mutation_retained=True, reap_retained=False),
+            )
+
+    asyncio.run(_run())
+
+
+def test_database_rejects_a_key_that_is_not_a_module_operation_nonce(migrated_url: str) -> None:
+    """The nonce in the key is the one the sweep parses out of a volume name, so its shape holds."""
+
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            with pytest.raises(psycopg.errors.CheckViolation, match="attempt_nonce"):
+                await conn.execute(
+                    "INSERT INTO remote_module_attempt_obligations "
+                    "(system_id, run_id, operation_nonce) VALUES (%s, %s, %s)",
+                    (system_id, run_id, "not-a-nonce"),
+                )
+
+    asyncio.run(_run())
+
+
+def test_discharge_rejects_a_reason_outside_the_three_adr_0585_events(migrated_url: str) -> None:
+    """The caller gets the list of events, not a constraint name, when it names another."""
+
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            await repo.open_mutation_obligation(conn, attempt)
+            with pytest.raises(ValueError, match="baseline_committed"):
+                await repo.discharge_mutation_obligation(
+                    conn,
+                    attempt,
+                    reason="abandoned",  # ty: ignore[invalid-argument-type]
+                )
+            assert await repo.retained_owners(conn) == (
+                RetainedModuleAttempt(attempt, mutation_retained=True, reap_retained=False),
+            )
+
+    asyncio.run(_run())
+
+
 def test_attempt_rejects_a_nonce_that_is_not_a_module_operation_nonce() -> None:
     """The key is the tuple ADR-0588 encodes into the volume name, so its shape is fixed."""
     for nonce in ("", "0" * 31, "0" * 33, "A" * 32, "g" * 32):
