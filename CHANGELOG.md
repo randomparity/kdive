@@ -203,6 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Activate the external-boot target definition
 - Prove external-boot kernel and command-line identity
 - Verify the guest userland before declaring a volume
+- Restore external boot to its disk/GRUB baseline
 
 ### Changed
 
@@ -1819,6 +1820,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refuse an empty userland contract and sharpen the cache key
 - Stop the gate invocation masking a failed exit code
 - Install the mermaid checker's deps during just setup
+- Report both halves of a recovery stop conflict
 
 ### Security
 
