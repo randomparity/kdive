@@ -8,15 +8,24 @@ running guest, and the factory keeps its fail-closed `_unconfigured_observation`
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID
 
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    _open_or_create_private_child,
+    _require_private_owned_directory,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     OperationOwnership,
     PinnedOperationOwnership,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+
+_ARTIFACT_ROOT_REFUSED = "artifact root is not an owner-only service-owned directory"
+_NOT_CANONICAL = "artifact root component is not a canonical identifier"
 
 
 @dataclass
@@ -77,3 +86,61 @@ class LocalOperationLane:
             OperationOwnership(lease.system_id, lease.binding),
             _Pin(lease),
         )
+
+
+def _canonical_name(value: str) -> str:
+    """Return `value` unchanged if it is a canonical UUID, refusing anything else.
+
+    `ExternalBootActivationBinding` already types both component names as `CanonicalUuid`, so
+    this re-assertion is redundant against today's binding. It is here so a future loosening
+    of that type cannot silently turn a component into a traversal: `str(UUID(value))` yields
+    only the lowercase hyphenated form, which contains neither `/` nor `..`, so requiring
+    equality with it admits exactly the canonical spelling.
+    """
+    try:
+        canonical = str(UUID(value))
+    except AttributeError, TypeError, ValueError:
+        raise ValueError(_NOT_CANONICAL) from None
+    if canonical != value:
+        raise ValueError(_NOT_CANONICAL)
+    return value
+
+
+class LocalArtifactRoot:
+    """Opens `<recovery_root>/<system_id>/<run_id>`, creating the two children when absent.
+
+    ADR-0591 binds this walk to the configured recovery root: the root is held from
+    construction and every later resolution is descriptor-relative from it, so the only
+    per-call input is an `OperationOwnership` carrying two canonical UUIDs.
+
+    **It writes.** #2210 provisions the per-slot recovery root and nothing beneath it, so an
+    open-only walk would fail closed on every first activation. Creation carries the same
+    guards as opening: `_open_or_create_private_child` creates mode 0700 and then delegates to
+    `_open_private_directory`, so `O_NOFOLLOW` and the mode and euid checks apply either way.
+    Nothing here reclaims the created directories; that is #2212's.
+    """
+
+    def __init__(self, recovery_root: Path) -> None:
+        self._root = recovery_root
+
+    def open(self, ownership: OperationOwnership) -> int:
+        system = _canonical_name(str(ownership.system_id))
+        run = _canonical_name(ownership.binding.run_id)
+        try:
+            root_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                _require_private_owned_directory(root_fd, "artifact root")
+                system_fd = _open_or_create_private_child(root_fd, system)
+            finally:
+                os.close(root_fd)
+            try:
+                return _open_or_create_private_child(system_fd, run)
+            finally:
+                os.close(system_fd)
+        except OSError:
+            # `from None`, not `from exc`: the root is opened by path, so its `OSError` holds
+            # the host path in `.filename`, and chaining would re-attach it to the traceback
+            # that reaches a log. Only `OSError` is wrapped —
+            # `_require_private_owned_directory` raises a `ValueError` that already carries no
+            # path and names the failing check more precisely than this message could.
+            raise ValueError(_ARTIFACT_ROOT_REFUSED) from None
