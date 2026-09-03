@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
+import libvirt
 import pytest
 
 from tests.live_vm import (
+    _STORAGE_DOUBLE_PROBE,
     LiveVmEnvState,
+    _is_local_session_uri,
     require_live_vm_bzimage,
     require_live_vm_provisioned,
     require_live_vm_remote,
+    require_live_vm_storage_double,
     require_live_vm_throwaway,
     require_live_vm_vmlinux,
     resolve_bzimage_contract,
     resolve_provisioned_contract,
     resolve_remote_contract,
+    resolve_storage_double_contract,
     resolve_throwaway_contract,
     resolve_vmlinux_contract,
 )
@@ -381,3 +387,198 @@ def test_remote_returns_contract_when_available(monkeypatch: pytest.MonkeyPatch)
     contract = require_live_vm_remote()
     assert contract.libvirt_uri == _REMOTE_URI
     assert contract.base_image == "kdive-base-fedora.qcow2"
+
+
+# --- the storage-double fidelity gate (#2164) ---------------------------------------------
+
+_PUBLISHED_SOCKET = "qemu+unix:///session?socket=/run/user/1000/libvirt/virtqemud-sock"
+
+
+class _FakeConn:
+    """A libvirt connection slice: listStoragePools + close, each recorded."""
+
+    def __init__(self, *, list_error: libvirt.libvirtError | None = None) -> None:
+        self._list_error = list_error
+        self.listed = False
+        self.closed = False
+
+    def listStoragePools(self) -> list[str]:  # noqa: N802 - libvirt binding name
+        self.listed = True
+        if self._list_error is not None:
+            raise self._list_error
+        return []
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _opener(conn: _FakeConn | None = None, *, error: bool = False, calls: list[str] | None = None):
+    """Build a libvirt.open replacement that records its URIs."""
+
+    def _open(uri: str) -> _FakeConn:
+        if calls is not None:
+            calls.append(uri)
+        if error:
+            raise libvirt.libvirtError("cannot connect")
+        assert conn is not None
+        return conn
+
+    return _open
+
+
+@pytest.fixture(autouse=True)
+def _reset_storage_double_latch() -> Iterator[None]:
+    """ADR-0580's test consequence: a fabricated verdict never leaks out of a test."""
+    saved = dict(_STORAGE_DOUBLE_PROBE)
+    _STORAGE_DOUBLE_PROBE.clear()
+    try:
+        yield
+    finally:
+        _STORAGE_DOUBLE_PROBE.clear()
+        _STORAGE_DOUBLE_PROBE.update(saved)
+
+
+def test_storage_double_absent_when_no_session_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    monkeypatch.setattr(libvirt, "open", _opener(error=True))
+    result = resolve_storage_double_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.ABSENT
+    assert "qemu:///session" in result.reason
+
+
+def test_storage_double_absent_when_the_storage_driver_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    conn = _FakeConn(list_error=libvirt.libvirtError("no storage driver"))
+    monkeypatch.setattr(libvirt, "open", _opener(conn))
+    result = resolve_storage_double_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.ABSENT
+    assert "storage driver" in result.reason
+    assert conn.closed
+
+
+def test_storage_double_misconfigured_when_declared_uri_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+unix:///session?socket=/nonexistent/sock")
+    monkeypatch.setattr(libvirt, "open", _opener(error=True))
+    result = resolve_storage_double_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_LIBVIRT_URI" in result.reason
+
+
+def test_storage_double_misconfigured_when_override_moves_off_a_local_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The proof's pool target is a client-side tmp_path, so system mode means nothing here."""
+    calls: list[str] = []
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///system")
+    monkeypatch.setattr(libvirt, "open", _opener(error=True, calls=calls))
+    result = resolve_storage_double_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "local session" in result.reason
+    assert calls == []
+
+
+def test_storage_double_available_closes_its_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    conn = _FakeConn()
+    monkeypatch.setattr(libvirt, "open", _opener(conn))
+    result = resolve_storage_double_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.AVAILABLE
+    assert result.contract is not None
+    assert result.contract.libvirt_uri == "qemu:///session"
+    assert conn.listed
+    assert conn.closed
+
+
+def test_storage_double_available_honors_libvirt_uri_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", _PUBLISHED_SOCKET)
+    monkeypatch.setattr(libvirt, "open", _opener(_FakeConn()))
+    result = resolve_storage_double_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.AVAILABLE
+    assert result.contract is not None
+    assert result.contract.libvirt_uri == _PUBLISHED_SOCKET
+
+
+def test_storage_double_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    monkeypatch.setattr(libvirt, "open", _opener(error=True))
+    with pytest.raises(pytest.skip.Exception):
+        require_live_vm_storage_double()
+
+
+def test_storage_double_fails_loud_when_misconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///system")
+    monkeypatch.setattr(libvirt, "open", _opener(error=True))
+    with pytest.raises(pytest.fail.Exception):
+        require_live_vm_storage_double()
+
+
+def test_storage_double_probes_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0580: a gate probing a live resource probes once per process and reuses the verdict."""
+    calls: list[str] = []
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    monkeypatch.setattr(libvirt, "open", _opener(_FakeConn(), calls=calls))
+    first = resolve_storage_double_contract("qemu:///session")
+    second = resolve_storage_double_contract("qemu:///session")
+    assert calls == ["qemu:///session"]
+    assert first == second
+
+
+def test_storage_double_latches_an_absent_verdict_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The available side latches as hard as the unavailable side (ADR-0580, both directions)."""
+    calls: list[str] = []
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    monkeypatch.setattr(libvirt, "open", _opener(error=True, calls=calls))
+    first = resolve_storage_double_contract("qemu:///session")
+    second = resolve_storage_double_contract("qemu:///session")
+    assert calls == ["qemu:///session"]
+    assert first.state is LiveVmEnvState.ABSENT
+    assert second.state is LiveVmEnvState.ABSENT
+
+
+def test_storage_double_latch_is_keyed_by_uri(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    monkeypatch.setattr(libvirt, "open", _opener(_FakeConn(), calls=calls))
+    resolve_storage_double_contract("qemu:///session")
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", _PUBLISHED_SOCKET)
+    second = resolve_storage_double_contract("qemu:///session")
+    assert calls == ["qemu:///session", _PUBLISHED_SOCKET]
+    assert second.contract is not None
+    assert second.contract.libvirt_uri == _PUBLISHED_SOCKET
+
+
+def test_storage_double_latched_probe_still_honours_the_env_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The latch holds the probe outcome, not the resolution.
+
+    ``_resolved_uri`` returns the same string for an unset variable defaulting to
+    ``qemu:///session`` and for one explicitly set to it, so latching the whole resolution would
+    serve the ABSENT verdict back under the set case — turning a mis-provisioned runner into a
+    silent skip, which is the one outcome the module's discipline exists to prevent.
+    """
+    calls: list[str] = []
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    monkeypatch.setattr(libvirt, "open", _opener(error=True, calls=calls))
+    assert resolve_storage_double_contract("qemu:///session").state is LiveVmEnvState.ABSENT
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///session")
+    assert resolve_storage_double_contract("qemu:///session").state is LiveVmEnvState.MISCONFIGURED
+    assert calls == ["qemu:///session"]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/virtqemud-sock",
+        "qemu+unix:///session?socket=/run/kdive/live-libvirt/libvirt/libvirt-sock",
+    ],
+)
+def test_storage_double_accepts_the_published_socket_uri_shape(uri: str) -> None:
+    """The two values live.yml exports as KDIVE_LIBVIRT_URI before running this tier."""
+    assert _is_local_session_uri(uri)
