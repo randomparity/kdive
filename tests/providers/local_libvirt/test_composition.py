@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -83,6 +84,35 @@ def test_external_boot_session_factory_builder_is_lazy_and_unadvertised(
 
     assert isinstance(factory, LocalExternalBootSessionFactory)
     assert opened == []
+
+
+def test_configuring_a_recovery_root_does_not_advertise_external_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #2210 configures and provisions the recovery root; #2212 alone constructs
+    # RealLocalExternalBootIO and binds it. A configured root is the one input that could
+    # plausibly open the composition advertisement gate (#2199), so configure a valid one
+    # and require composition to stay unadvertised anyway. This fails the moment someone
+    # binds external_boot off the setting, which is the reordering the criterion exists to
+    # catch.
+    root = tmp_path / "external-boot-recovery" / "1"
+    root.parent.mkdir()
+    # mkdir() + chmod(), never mkdir(mode=...): the mode argument is masked by the umask.
+    root.parent.chmod(0o711)
+    root.mkdir()
+    root.chmod(0o700)
+    monkeypatch.setenv("KDIVE_LIBVIRT_RECOVERY_ROOT", str(root))
+    composition.config.reset()
+
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+
+    # Presence before value. Without this line the assertion below would pass vacuously if
+    # the attribute were ever renamed or removed, and a gate test that passes on nothing is
+    # worse than no gate test: it reads as proof the gate is still closed. Both halves were
+    # fault-proven: a stub binding fails the value assertion, and a renamed attribute fails
+    # this one while the getattr form silently passes.
+    assert hasattr(runtime, "external_boot")
+    assert runtime.external_boot is None
 
 
 def test_build_runtime_wires_local_ports_and_capabilities() -> None:
