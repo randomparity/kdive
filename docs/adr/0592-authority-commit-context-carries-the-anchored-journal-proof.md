@@ -79,35 +79,68 @@ the field can carry the real identity; deriving a UUID from it would make the pr
 operation field synthesized, which is what the field exists to avoid. The model is
 pre-release with no production caller, so it is replaced in place.
 
-Cleanup destroys the durable recovery record it commits against, and that produces **two**
-distinct post-cleanup states, which must not be conflated:
+`FinalizeCleanupProof.phase` also loses its `= "mutation-started"` default and becomes
+required. With a default, the field carried no information: `AuthorityCommitContextV1.phase`
+is pinned to the same single literal, so passing it explicitly and letting the default fire
+produce the same value and no assertion at any layer can tell them apart — a check on that
+field would compare a compile-time constant against itself. Required, omitting it is a
+`ValidationError`, which is a fault a test can actually observe.
 
-1. **Tombstone live.** `publish_tombstone` writes `tombstone.json` and unlinks `intent.json`.
-   The recovery directory still exists, and `recovery_point` fails with `FileNotFoundError`
-   raised by `_read_private_file` on the missing `intent.json`.
-2. **Fully finalized.** `finalize_tombstone` unlinks the tombstone and `rmdir`s the directory,
-   so the same `FileNotFoundError` is raised one level earlier, by `_open_private_directory`.
+### The adapter never infers from absence, and that is the whole of the retry story
 
-The adapter's already-accounted branch is keyed on state 2 — the **recovery directory** being
-provably gone — never on `intent.json` alone. State 1 stays the bounded `provider_conflict` it
-already is today, which quarantines rather than reporting a success that never finalized. So
-does any other operation, and any read that merely failed. Without that distinction a crash
-between the cleanup and the finalization would make the retry return success while the
-tombstone leaked silently, which is the opposite of ADR-0586's accounted cleanup.
+Cleanup destroys the durable recovery record it commits against, so after a cleanup the
+adapter can no longer resolve a `RecoveryPoint` for that activation. Two review rounds were
+spent trying to make the adapter answer a later cleanup commit from that absence, and both
+attempts failed the same way, so the decision is to stop trying.
 
-Three residuals this decision does not close. The first is new and is the cost of this
-decision; the other two are inherited from #2199's adapter and neither is made worse here.
+An absence is a fact about what could not be observed. It cannot carry which of several
+histories produced it. `recovery_point` raises `FileNotFoundError` in at least four states —
+the tombstone is live and only `intent.json` is unlinked; the cleanup fully finalized and the
+directory is gone; the activation was never prepared, and the binding is peer-chosen; and
+`prepare` was interrupted, leaving a `.{name}.partial` directory holding the captured recovery
+archive while the final directory never existed. Keying on `intent.json` conflates the first
+two; keying on the directory conflates the last three. Each discriminator is one layer further
+out and fails for the same reason, which is what ADR-0586 means by "never treat absence
+generally as success".
 
-- **A crash between `cleanup()` and finalization strands the tombstone with no recovery path,
-  and this decision does not add one.** Recovering state 1 would need finalization addressable
-  without a `RecoveryPoint`, and that is not constructible: `FinalizeCleanupProof.point_digest`
-  is computed from the recovery point, so once `intent.json` is gone the proof the store
-  compares cannot be built. Reading the digest back out of the tombstone instead would make
-  the comparison assert what it is supposed to check. Closing this needs a different
-  `FinalizeCleanupProof`/`CleanupTombstoneV1` shape, which is ADR-0586's to decide, not this
-  seam's. **Non-regression boundary:** state 1 is exactly the state #2199 already leaves after
-  every cleanup commit — the record unlinked, the tombstone retained, a retry answering
-  `provider_conflict`. This decision does not widen it; it only declines to narrow it.
+So the adapter does not branch on absence at all. **A cleanup commit whose recovery point does
+not resolve is `provider_conflict`, exactly as it is today.** All four states land there
+together, so there is no state to conflate, and neither `_require_matching_identities` nor
+`_ownership_is_proven(require_named=True)` — the gate ADR-0584 requires for an operation that
+destroys recovery evidence — is ever bypassed on a peer-chosen binding.
+
+**The idempotency this seam owes is met on positive evidence, in the place the evidence
+exists.** `self._adapter.commit` is called at exactly one site in `service.py`, once per
+`execute_mutation`; `_finish_recovery` re-drives only `observe`. The authority therefore never
+re-drives a cleanup commit for the same operation, and a "retried cleanup" is a new operation
+with a new operation identity. Within the one commit that does run, the path is idempotent
+against a durable positive record rather than an absence: `LocalLibvirtExternalBoot.cleanup`
+early-returns on `cleanup_complete`, which matches the on-disk tombstone against this point's
+digest, and `finalize_tombstone` returns cleanly when the tombstone is already gone — both
+evaluated with the recovery point in hand.
+
+**This makes one of issue #2207's acceptance criteria unsatisfiable as written, and the record
+says so rather than quietly meeting a weaker version.** The criterion asks for a test that
+"commits cleanup twice against the same recovery point and asserts the second call succeeds
+against the post-delete absence the store already handles". At the service seam it cannot be
+written honestly: the first commit destroys the record the adapter needs to address the second,
+and no positive record reachable from the adapter distinguishes "already cleaned" from "never
+existed". A test that made it pass would be discriminating on absence. The primitive-level
+idempotency the criterion points at is real and is already proven, by an existing test that
+calls `finalize_cleanup_tombstone` twice with the same point and proof
+(`tests/providers/local_libvirt/test_external_boot.py:3566-3567`).
+
+Three residuals this decision does not close, all inherited and none made worse here.
+
+- **A crash between `cleanup()` and finalization strands the tombstone with no recovery path.**
+  Recovering it would need finalization addressable without a `RecoveryPoint`, and that is not
+  constructible: `FinalizeCleanupProof.point_digest` is computed from the recovery point, so
+  once `intent.json` is gone the proof the store compares cannot be built, and reading the
+  digest back out of the tombstone would make the comparison assert its own input. Closing
+  this needs a different `FinalizeCleanupProof`/`CleanupTombstoneV1` shape, which is ADR-0586's
+  to decide. **Non-regression boundary:** this is exactly the state #2199 already leaves after
+  every cleanup commit — the record unlinked, the tombstone retained, a later cleanup answering
+  `provider_conflict`. This decision does not widen it; it declines to narrow it.
 - The `teardown` commit point also publishes a tombstone through `cleanup()` and still has no
   finalizer, so teardown retains its tombstone directory.
 - Because cleanup destroys the record the post-commit observation reads, the service's
@@ -135,13 +168,23 @@ an optional field fails canonicality even though it parses. Any schema addition 
 records is a breaking change for existing files. There is no cheap compatible variant to
 prefer.
 
-**No existing file can break, because the feature is dormant.** `ProviderRuntime.external_boot`
-is `None`, `LocalExternalBootMaterializer` has no implementation under `src/`, and
-`RealLocalExternalBootIO` — the only writer of a `RecoveryMetadataStore` — is constructed
-nowhere in `src/`: `rg -n 'RealLocalExternalBootIO' src/ tests/` returns nine test hits and a
-single `src/` hit that is a docstring mention in `composition.py`. No durable recovery record
-exists in any deployment, so no compatibility contract is owed and the repository's
-replace-by-default rule for pre-release persisted data applies.
+**No existing file can break, because the feature is dormant.** The property, with the lines
+that establish it — not a hit count, which measures a moving tree and goes stale the moment
+anyone adds a test:
+
+- `RealLocalExternalBootIO` is the only writer of a `RecoveryMetadataStore`, and **no
+  construction site for it exists in `src/`**. It occurs in `src/` exactly twice, and neither
+  is a call: the class definition at
+  `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py:756`, and a docstring
+  mention at `src/kdive/providers/local_libvirt/composition.py:226`. Every construction is in
+  the test tree.
+- `LocalExternalBootMaterializer` (`external_boot.py:738`) is a `Protocol` with no
+  implementation under `src/`, and `RealLocalExternalBootIO` cannot be built without one.
+- `build_external_boot` (`composition.py:220-233`) returns `None` unless a caller supplies an
+  `io`, so `ProviderRuntime.external_boot` is `None` in the assembled runtime.
+
+No durable recovery record can exist in any deployment, so no compatibility contract is owed
+and the repository's replace-by-default rule for pre-release persisted data applies.
 
 **That window closes when the feature is wired, so this must land before #2212.** #2212
 constructs `RealLocalExternalBootIO` and binds composition. Once it lands and a deployment
@@ -173,12 +216,28 @@ new field as a write site.
   `FileAuthorityJournal` the service owns per lane (`service.py:233-240`), and ADR-0584 makes
   the authority the sole principal for its own records. An adapter that reads it would be a
   second reader of the evidence it is supposed to be presented with.
-- **Do nothing and leave `finalize_cleanup_tombstone` uncalled.** verified: `rg` over `src/`
-  reaches only the local module's own definitions of `finalize_cleanup_tombstone` and
-  `finalize_tombstone`; every exercising call site is in
-  `tests/providers/local_libvirt/test_external_boot.py`. ADR-0584's accounted-cleanup
-  evidence stays incomplete for as long as that holds, and the tombstone accumulates with no
-  finalizer.
+- **Do nothing and leave `finalize_cleanup_tombstone` uncalled.** verified: the method has no
+  caller in `src/` outside its own definition chain — `external_boot.py:1530` defines it,
+  `:1542` delegates to `LocalExternalBootIO.finalize_tombstone` declared at `:735`,
+  implemented at `:798`, and reaching `RecoveryMetadataStore.finalize_tombstone` at `:1875`.
+  Every call that exercises it is in `tests/providers/local_libvirt/test_external_boot.py`.
+  ADR-0584's accounted-cleanup evidence stays incomplete for as long as that holds, and the
+  tombstone accumulates with no finalizer.
+- **Let the adapter answer a later cleanup commit from the absence of the recovery record.**
+  verified: absence does not identify its cause. `recovery_point` raises `FileNotFoundError`
+  from `_read_private_file` (`external_boot.py:1615`) when only `intent.json` is unlinked and
+  a live tombstone remains, and from `_open_private_directory` (`:2012`) when the directory is
+  gone — which covers a finalized cleanup, an activation never prepared, and one whose
+  `prepare` was interrupted before `complete_preparation`'s rename (`:1787`) so that only
+  `.{name}.partial` exists. Keying on `intent.json` conflates the first two; keying on the
+  directory conflates the last three. Either way a peer-chosen binding that never had a
+  recovery object would skip `_ownership_is_proven(require_named=True)`. The seam has no
+  positive record to discriminate with, so it refuses instead of guessing.
+- **Give the adapter in-process bookkeeping of the cleanups it already completed.** judgment:
+  it would discriminate correctly in one process and degrade to `provider_conflict` after a
+  restart, which is the safe direction but is state the adapter's own design says must be
+  re-derived from the journal rather than remembered. Refusing an unresolvable point outright
+  gets the same safety with no state and no new surface.
 - **Skip the trusted-head recheck and trust the just-completed compare-and-set.** judgment:
   the recheck is worth one read because `advance` reports what the repository accepted, not
   what it still holds. Under this operation identity it is the only thing that would catch a

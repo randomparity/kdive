@@ -58,11 +58,9 @@ must land before #2212**; after it, the same addition owes a real migration.
                  proof.operation_id     == context.operation_identity
                  proof.attempt_id       == str(context.attempt_id)
                  proof.point_digest     == point_digest(point)
-                 proof.phase            == context.phase        (carried, not defaulted)
-             point unresolved, CLEANUP, recovery directory provably gone:
-               already accounted — observation only, no provider mutation
-             anything else:
-               provider_conflict
+                 proof.phase            == context.phase        (required, no default)
+             point unresolved, any operation:
+               provider_conflict — absence never identifies its own cause
 
 Nothing on that path reads `AuthorityMutationRequestV1` for a journal value, because the
 request has none.
@@ -107,31 +105,46 @@ request has none.
   new falsehood in the journal.
 - **N5.** The local adapter's `cleanup` commit point calls `finalize_cleanup_tombstone` with a
   proof whose every field comes from the context or the resolved recovery point; none is
-  defaulted or synthesized. `phase` is included in that: it is passed from `context.phase`
-  rather than left to `FinalizeCleanupProof`'s model default, so an assertion on the proof's
-  phase observes the anchored record's phase reaching the proof instead of observing the
-  default. Source: criteria 3 and 7.
-- **N6.** A second `cleanup` commit against the same recovery point succeeds and performs no
-  provider mutation.
+  defaulted or synthesized. To make that literally true of `phase`,
+  `FinalizeCleanupProof.phase` loses its model default and becomes required. With a default it
+  carried no information — `AuthorityCommitContextV1.phase` pins the same single literal, so
+  passing it and defaulting it produce the same value and no assertion could distinguish them.
+  Required, omitting it is a `ValidationError`. Source: criteria 3 and 7.
+- **N6.** The adapter never infers from the absence of the recovery record. A `cleanup` commit
+  whose recovery point does not resolve is `provider_conflict`, exactly as it is today.
 
-  Cleanup leaves **two** distinct states, and the branch keys on the second only:
+  `recovery_point` raises `FileNotFoundError` in at least four states, and no discriminator
+  available at this seam separates them:
 
-  1. **Tombstone live** — `publish_tombstone` wrote `tombstone.json` and unlinked
-     `intent.json`. The recovery directory still exists; `recovery_point` fails with
-     `FileNotFoundError` from `_read_private_file` on the missing `intent.json`.
-  2. **Fully finalized** — `finalize_tombstone` unlinked the tombstone and `rmdir`ed the
-     directory, so the same `FileNotFoundError` comes one level earlier from
+  1. **Tombstone live** — only `intent.json` is unlinked; the directory remains. Raised by
+     `_read_private_file`.
+  2. **Fully finalized** — the tombstone and directory are gone. Raised by
      `_open_private_directory`.
+  3. **Never prepared** — the directory never existed, and the binding is peer-chosen. Same
+     raise site as 2.
+  4. **Prepare interrupted** — only `.{name}.partial` exists, holding the captured recovery
+     archive, because `complete_preparation`'s rename never ran. Same raise site as 2.
 
-  The already-accounted branch requires state 2 — the **recovery directory** provably gone —
-  and is bounded to `AuthorityOperation.CLEANUP`. State 1 keeps today's `provider_conflict`,
-  which quarantines rather than reporting a success that never finalized; so does every other
-  operation and every read that merely failed. Keying on `intent.json` instead would let a
-  crash between the cleanup and the finalization return success while the tombstone leaked
-  silently, and would skip `_require_matching_identities` and the
-  `_ownership_is_proven(require_named=True)` deletion gate for a binding whose record never
-  existed. Source: criterion 8, plus the necessary consequence that no implementation
-  satisfies it while a fully finalized cleanup is a conflict.
+  Keying on `intent.json` conflates 1 with 2; keying on the directory conflates 2, 3 and 4.
+  Either way a peer-chosen binding that never owned a recovery object would reach a success
+  answer while skipping `_require_matching_identities` and the
+  `_ownership_is_proven(require_named=True)` deletion gate. Refusing all four together is the
+  only answer that bypasses no gate.
+
+  **The idempotency the seam owes is met on positive evidence instead.**
+  `self._adapter.commit` is called at one site, once per `execute_mutation`;
+  `_finish_recovery` re-drives only `observe`. So the authority never re-drives a cleanup
+  commit for the same operation, and within the one commit that runs, `cleanup` early-returns
+  on `cleanup_complete` — a positive match against the on-disk tombstone's recorded
+  `point_digest` — and `finalize_tombstone` returns cleanly when the tombstone is already
+  gone, both with the recovery point in hand.
+
+  Source: criterion 8's intent. **Criterion 8's literal form is not satisfiable and this design
+  does not claim it.** A test that "commits cleanup twice against the same recovery point and
+  asserts the second call succeeds" cannot be written honestly at this seam, because the first
+  commit destroys the record the adapter needs to address the second and any passing version
+  would be discriminating on absence. The primitive-level idempotency the criterion points at
+  is already proven at `tests/providers/local_libvirt/test_external_boot.py:3566-3567`.
 - **N7.** `LocalRecoveryMetadataV1` and `LocalPreStopIntentV1` each carry `target_xml_sha256`
   and each validator refuses a record whose `target_xml` does not digest to it.
   `_metadata_extends_intent` compares the new field too. Source: criteria 9 and 10.
@@ -177,11 +190,10 @@ euid; it trusts nothing the peer sends.
 - Cleanup finalization: `finalize_cleanup_tombstone` already compares `proof.binding` and
   `proof.point_digest` against the recovery point, and the store re-reads and re-compares the
   tombstone before unlinking. Those are the existing controls and they are kept.
-- Idempotent-retry branch: bounded to `cleanup` and to a provably absent **recovery
-  directory** at the owner-derived path for exactly this binding. A live tombstone is not
-  absence, and neither is a read that merely failed; neither takes the branch (N6). This is
-  the control that keeps the branch from bypassing `_require_matching_identities` and the
-  `_ownership_is_proven(require_named=True)` deletion gate.
+- Unresolvable recovery point: refused as `provider_conflict` with no branch of any kind, so
+  `_require_matching_identities` and `_ownership_is_proven(require_named=True)` are reached on
+  every path that could delete recovery evidence (N6). There is no absence-derived success
+  answer to bypass them.
 - Durable record: `target_xml_sha256` is checked in the same validator arm as
   `source_xml_sha256`, on both records, because `_metadata_extends_intent` compares the pair
   to each other and a consistently tampered pair would otherwise pass. This is an integrity
@@ -213,11 +225,14 @@ Every criterion gets a test that drives a real entry point.
   so the scoping is proved rather than asserted.
 - N4a is proved by asserting the journal's last record after a refused commit is `terminal`
   with `outcome="never-began"`, and that no `provider-returned` record was written.
-- N6 is proved by two `execute_mutation` cleanup rounds against one recovery point, asserting
-  the second returns and that the coordinator's `cleanup` and finalize action counts did not
-  grow; and by a companion asserting that the *tombstone-live* state — the recovery directory
-  present with `intent.json` gone — still raises `provider_conflict`, which is the arm that
-  makes the branch key on the directory rather than on the record.
+- N6 is proved by driving a `cleanup` commit through the service for each of the four
+  unresolvable states — tombstone live, fully finalized, never prepared, prepare interrupted —
+  and asserting every one raises `provider_conflict` and that the coordinator recorded no
+  `cleanup` and no `finalize` action. The fault each catches is adding back any
+  absence-derived success branch: with one present, the state it keys on returns instead of
+  raising. Positive-evidence idempotency is proved separately at the primitive, by committing
+  a cleanup whose tombstone already exists and asserting `cleanup_complete` short-circuits it
+  with no second provider mutation.
 - N7's refusal is proved per record by writing a record to the store, substituting
   `target_xml` on disk, and asserting the reopen is refused. Criterion 10's reachability is
   proved by driving the coordinator path that would define — `LocalLibvirtExternalBoot.activate`

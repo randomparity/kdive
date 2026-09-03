@@ -15,9 +15,11 @@ tombstone. `lifecycle/boot/external_boot.py` changes only where those seams meet
 
 **Tech stack.** Python 3.14, `uv`, pydantic 2.13.4, pytest + anyio, `ruff`, `ty`.
 
-Expected implementation size: 450–650 changed lines (M) — from the file map below: roughly 170
-source lines, roughly 340 test lines including the migration of the 24 existing `commit(...)` call
-sites, and no new module.
+Expected implementation size: 420–560 changed lines (M) — from the file map below: roughly 130
+source lines, roughly 320 test lines including the migration of the 24 existing `commit(...)` call
+sites, and no new module. The adapter adds no absence probe, so no `RecoveryMetadataStore` method,
+no `LocalExternalBootIO`/`LocalExternalBootOperation` protocol entry and no coordinator method are
+in scope — see Task 3.
 
 Spec: [`docs/workflow/specs/2026-09-03-authority-commit-context-design.md`](../specs/2026-09-03-authority-commit-context-design.md).
 Decision: [ADR-0592](../../adr/0592-authority-commit-context-carries-the-anchored-journal-proof.md).
@@ -48,9 +50,13 @@ Decision: [ADR-0592](../../adr/0592-authority-commit-context-carries-the-anchore
   an optional field with a default fails canonicality exactly as a required field fails on
   absence — there is no compatible variant. It is free today only because the feature is dormant:
   `ProviderRuntime.external_boot` is `None` and `RealLocalExternalBootIO` is constructed nowhere in
-  `src/` (`rg -n 'RealLocalExternalBootIO' src/ tests/` → nine test hits, one `src/` docstring
-  mention in `composition.py`). #2212 wires that construction; after it, this addition owes a real
-  migration.
+  `src/`. State that as a property with its lines, not as a hit count, which measures a moving
+  tree: `RealLocalExternalBootIO` occurs in `src/` exactly twice and neither is a call — the class
+  definition at `lifecycle/boot/external_boot.py:756` and a docstring mention at
+  `composition.py:226`. `LocalExternalBootMaterializer` (`external_boot.py:738`) has no
+  implementation under `src/`, and `build_external_boot` (`composition.py:220-233`) returns `None`
+  without a caller-supplied `io`. #2212 wires that construction; after it, this addition owes a
+  real migration.
 - Do not touch `src/kdive/providers/local_libvirt/lifecycle/boot/session.py` — #2211 holds it.
 
 ## File map
@@ -59,12 +65,12 @@ Decision: [ADR-0592](../../adr/0592-authority-commit-context-carries-the-anchore
 |---|---|---|
 | `src/kdive/providers/external_boot_authority/protocol.py` | closed authority values | add `AuthorityCommitContextV1`; refresh the `operation_is_permitted` docstring |
 | `src/kdive/providers/external_boot_authority/service.py` | lane serialization and journaling | adapter `Protocol` signature; `_require_anchored_head`; anchor `never-began` on refusal; build and pass the context |
-| `src/kdive/providers/local_libvirt/external_boot_authority.py` | local adapter | accept the context; finalize the tombstone on `CLEANUP`; directory-keyed already-accounted branch |
+| `src/kdive/providers/local_libvirt/external_boot_authority.py` | local adapter | accept the context; finalize the tombstone on `CLEANUP`; no absence branch of any kind |
 | `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py` | local records and coordinator | widen `FinalizeCleanupProof.operation_id`; add `target_xml_sha256` to both records; extend `_metadata_extends_intent`; correct the stale comment |
 | `tests/providers/external_boot_authority/test_protocol.py` | context model behaviour | `for_record` phase gate, closure, and the wire-request field-set pin |
 | `tests/providers/external_boot_authority/service_support.py` | shared service doubles | `_Adapter.commit` signature and context recording; `_Repository` head-override hooks |
 | `tests/providers/external_boot_authority/test_service.py` | service behaviour | context reaches the adapter; scoped head disagreement refused; takeover overlap still runs; `never-began` anchored |
-| `tests/providers/local_libvirt/test_external_boot_authority.py` | local adapter behaviour | **migrate the 24 existing `commit(request, <str>)` call sites**; cleanup finalization; retry idempotency; tombstone-live conflict |
+| `tests/providers/local_libvirt/test_external_boot_authority.py` | local adapter behaviour | **migrate the 24 existing `commit(request, <str>)` call sites**; cleanup finalization; the four-state unresolvable-point refusal |
 | `tests/providers/local_libvirt/test_external_boot.py` | local records and store | `target_xml_sha256` refusals; the non-vacuous `define_xml` reachability test; projection digest pin |
 | `tests/providers/contract/bindings/local_libvirt.py` | contract binding fixture | supply `target_xml_sha256` |
 
@@ -267,16 +273,19 @@ with `never-began`; a different-identity head does not refuse.
    that the recorded proof's `journal_sequence`, `journal_digest`, `operation_id`, `attempt_id`,
    `phase` and `point_digest` equal the anchored record's values and `point_digest(io.point)`.
    Extend `_FakeIO.finalize_tombstone` to store the proof.
-4. Write the failing idempotency test for criterion 8: run a second cleanup mutation with
-   `_FakeIO` reporting the **recovery directory** gone, and assert both counts are still 1 — no
-   second `cleanup`, no second `finalize`. Model the two post-cleanup states on the double
-   distinctly: `recovery_directory_absent` (fully finalized) and `recovery_record_absent`
-   (tombstone live, `intent.json` gone).
-5. Write the two negative arms, which may call `instance.commit` directly because the service
-   cannot construct these states: a **tombstone-live** cleanup raises `provider_conflict`, and an
-   unreadable point (`recovery_point` raising `OSError`) raises `provider_conflict`. Also assert a
-   `TEARDOWN` commit never appends `"finalize"`.
-6. Run the module — expect the four new tests to fail.
+4. Write the four-state refusal test, which is what replaces an absence branch. Parametrise
+   `_FakeIO` over the four ways `recovery_point` fails — tombstone live, fully finalized, never
+   prepared, prepare interrupted — plus a merely-unreadable point (`OSError`), and assert every one
+   raises `provider_conflict` and that `io.actions` gained no `"cleanup"` and no `"finalize"`.
+   All five raise from the same place, so model them on the double as `recovery_point` raising
+   `FileNotFoundError` or `OSError`; the point of the parametrisation is that no state is special.
+   **The fault this catches** is adding back any absence-derived success branch: with one present,
+   whichever state it keys on returns an observation instead of raising. Task 5 proves that.
+5. Write the positive-evidence idempotency test at the primitive, where the evidence exists: drive
+   a cleanup commit whose tombstone is already published for this point, and assert
+   `cleanup_complete` short-circuits it — `io.actions` gains no second `"cleanup"` — and that the
+   commit still finalizes. Also assert a `TEARDOWN` commit never appends `"finalize"`.
+6. Run the module — expect the new tests to fail.
 7. Change `commit` to take `context: AuthorityCommitContextV1`, and pass it through to `_commit`
    and `_apply`.
 8. Rewrite `_require_permitted_commit_point` to take the context. Drop the
@@ -284,17 +293,17 @@ with `never-began`; a different-identity head does not refuse.
    remaining checks with #2199's reasoning intact: the operation must be legal for the request's
    purpose, and it must equal `request.operation`, or a request could journal one operation while
    driving the provider through another.
-9. Add the directory-keyed absence probe. `_resolve_point` stays unchanged so `_observe` keeps
-   classifying an unresolvable point as `unreadable`. The new probe asks the coordinator whether
-   the recovery **directory** is gone, and answers `False` for any read that merely failed — a
-   live tombstone is not absence, and treating it as one would return success for a cleanup that
-   never finalized and would skip `_require_matching_identities` and
-   `_ownership_is_proven(require_named=True)`.
-10. In `_commit`, take the already-accounted branch only when the point did not resolve, the
-    operation is `AuthorityOperation.CLEANUP`, and the probe proves the directory gone. Return
-    `self._observation(request, binding, authority, None)` — no provider mutation, so no deletion
-    authority is exercised. Everything else falls through to `_require_matching_identities` as
-    today.
+9. **Add nothing here.** `_resolve_point` stays exactly as it is, and `_commit` keeps handing its
+   result straight to `_require_matching_identities`, so an unresolvable point stays
+   `provider_conflict` for every operation. Do not add an absence probe, a
+   `RecoveryMetadataStore` method, a `LocalExternalBootIO`/`LocalExternalBootOperation` protocol
+   entry, a coordinator method, or in-process bookkeeping. Two review rounds established that no
+   discriminator at this seam separates the four states in step 4, and that any success answer
+   derived from absence skips `_require_matching_identities` and
+   `_ownership_is_proven(require_named=True)` on a peer-chosen binding. This step exists so the
+   omission is deliberate and reviewable rather than looking like something forgotten.
+10. Leave `_commit`'s structure alone apart from threading `context` through. The only behavioural
+    change in this task is step 11.
 11. In `_apply`, split the `{CLEANUP, TEARDOWN}` arm. `CLEANUP` calls `self._ports.cleanup(...)`
     then `self._ports.finalize_cleanup_tombstone(point, proof, authority)`. `TEARDOWN` calls
     `cleanup` only, with a comment that its missing finalizer is a known residual recorded in
@@ -357,7 +366,12 @@ There is no `_RecordingSession` and no `_io_for` — do not reference them.
    (`min_length=1, max_length=255`), with a one-line comment that the authority's operation
    identifier is `_AuthorityBinding.operation_identity` — bounded text per ADR-0584, not a UUID —
    and that deriving one would make the field synthesized. Leave `attempt_id`'s UUID pattern alone;
-   the journal's `attempt_id` really is a `UUID`.
+   the journal's `attempt_id` really is a `UUID`. In the same edit, delete
+   `FinalizeCleanupProof.phase`'s `= "mutation-started"` default (`:184`) so the field is required.
+   With a default it carried no information — `AuthorityCommitContextV1.phase` pins the same single
+   literal, so passing it and defaulting it are the same value and no assertion can tell them
+   apart. Required, omitting it raises `ValidationError`, which is a fault Task 5 can observe. The
+   model is pre-release with no production caller, so this is a replacement, not a migration.
 10. Replace the stale comment at `:1538-1541` in `finalize_cleanup_tombstone`: the authority now
     supplies the anchored `mutation-started` proof as `AuthorityCommitContextV1` (ADR-0592); the
     local seam still does not decode it and still compares the closed owner/point fields.
@@ -388,9 +402,10 @@ is dormant, which is the same window the ordering constraint names.
    drop the `phase` guard in `for_record`; drop the `head.digest` arm in `_require_anchored_head`;
    widen `_require_anchored_head` to compare the bare head (must turn the takeover-overlap test
    red); drop the `never-began` anchor; drop the `finalize_cleanup_tombstone` call in `_apply`;
-   change the already-accounted probe to key on the record instead of the directory (must turn the
-   tombstone-live test red); pass no `phase` in the proof builder (must turn the proof-phase
-   assertion red); delete the `target_xml_sha256` comparison (must turn both validator tests and
+   add an absence-derived success branch keyed on the recovery directory (must turn the
+   never-prepared and prepare-interrupted arms of the four-state test red); omit `phase` in the
+   proof builder (must turn it red with a `ValidationError`, which is only possible because the
+   model default was removed); delete the `target_xml_sha256` comparison (must turn both validator tests and
    the `define_xml` reachability test red); add a `journal_sequence` field to
    `AuthorityMutationRequestV1` (must turn the field-set pin red).
 3. Each must produce a **clean assertion failure naming the asserted value** — not a collection or
