@@ -1857,6 +1857,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound the lock hold through the executor join, per arm
 - Report statement-ceiling expiry and unblock cleanup
 - Claim the console inode before an in-process boot
+- Announce the console-inode handoff on the live run
+- Boot the panicking debug domain with nokaslr
 
 ### Security
 
