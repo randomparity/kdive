@@ -159,16 +159,24 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
   orphaned:
 
   ```sh
-  docker ps -aq --filter "label=kdive.test-scratch" --filter "status=exited" |
-    xargs -r docker rm -v
+  docker ps -aq --filter "label=kdive.test-scratch" | xargs -r docker rm -v
   ```
 
-  Unlike the command above, this one is safe to run with suites in flight, by construction
-  rather than by warning: it takes only *exited* containers, and a test that is still
-  running holds a running one. An orphan runs for five minutes before exiting, so a
-  cleanup that finds nothing may simply be early — run it again later. `-v` takes the
-  anonymous volume with the container, which is the part `docker volume prune` cannot
-  reclaim on its own.
+  Unlike the command above, this one is safe to run **with suites in flight**, and the
+  guard is the daemon's rather than the filter's: **no `-f`**. `docker rm` removes an
+  `exited` or `created` container and *refuses* a running or paused one with
+  `container is running: stop the container before removing or force remove`. So a
+  concurrent test's container cannot be taken out from under it — the errors printed for
+  those, and the non-zero exit they produce, are the guard working, not a failure. `-v`
+  takes the anonymous volume with the container, which is the part `docker volume prune`
+  cannot reclaim while the container exists. Never add `-f` here.
+
+  Two limits worth knowing rather than rediscovering. An orphan sleeps for five minutes
+  before exiting, so a cleanup run immediately after a killed run reports nothing for the
+  container still counting down — it is removable as soon as it exits, and the command
+  above will take it then. And this is the *only* thing that collects these: there is
+  deliberately no automatic reap, because a fixture would fire while sibling workers of
+  its own run held live containers, and would still miss the orphan it was there for.
 
 ## Architecture
 
