@@ -209,6 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce the admission matrix at every call site
 - Admit the three recovery contracts without writing
 - Expose the three recovery contracts as MCP tools
+- Add the durable module-attempt obligation row
 
 ### Changed
 
@@ -1131,6 +1132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rescope external boot contracts to admission surfaces
 - Close the scope audit's ten findings on the design set
 - Retarget the records at the moved contract module
+- Record why the recovery reference and the cascades are there
 
 ### Fixed
 
@@ -1847,6 +1849,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the guard-versus-replay class with a derived gate
 - Probe the exact dedup key, and cover the settled arms
 - Give the sweep tests a lock that is not host-global
+- Revoke the trigger function's PUBLIC EXECUTE and repin the tail
 
 ### Security
 
