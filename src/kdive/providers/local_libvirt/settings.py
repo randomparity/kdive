@@ -158,7 +158,16 @@ LIBVIRT_RECOVERY_ROOT = Setting(
     name="KDIVE_LIBVIRT_RECOVERY_ROOT",
     parse=_private_owned_directory,
     group="local-libvirt",
-    processes=_RT,
+    # Worker only, deliberately not _RT. The five sibling settings are host-uniform values —
+    # a libvirt URI, a cap, two second-counts, a multiplier — so the same string is correct
+    # in every process. This one is uid-bound: parse requires st_uid == geteuid(), and the
+    # roots are 0700 owned by kdive-worker-N. The reconciler runs as User=kdive
+    # (deploy/systemd/system/kdive-reconciler.service:9), and __main__ calls
+    # config.validate(command) for every runnable, so declaring "reconciler" here would make
+    # the reconciler fail to start with a CONFIGURATION_ERROR on exactly the hosts that
+    # configure this setting. It would also publish "reconciler" in the generated reference's
+    # Processes column, inviting an operator to put the value in the shared kdive.env.
+    processes=frozenset({"worker"}),
     help=(
         "Provider-owned root holding one local external-boot recovery point per activation "
         "(ADR-0586). Must be an existing owner-only directory — mode 0700, owned by the "

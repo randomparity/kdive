@@ -114,7 +114,12 @@ def test_recovery_root_setting_fields() -> None:
     # startup preflight as well.
     assert s.default is None
     assert s.group == "local-libvirt"
-    assert s.processes == _RT
+    # Worker only, deliberately NOT _RT. parse() requires st_uid == geteuid() and the roots
+    # are 0700 owned by kdive-worker-N, while the reconciler runs as User=kdive; since
+    # __main__ calls config.validate(command) for every runnable, declaring "reconciler"
+    # would make the reconciler fail to start on exactly the hosts that set this variable.
+    assert s.processes == frozenset({"worker"})
+    assert "reconciler" not in s.processes
     assert s.secret is False
     # Identity, not equality: gen_config_reference.py compares `required_when is
     # never_required` against the sentinel, so a locally defined always-false predicate
