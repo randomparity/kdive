@@ -110,11 +110,15 @@ class _Repository:
         # concurrent takeover likewise moves the head *after* the mutation was admitted.
         self.head_override_after_phase: JournalPhase | None = None
         self._head_override_armed = False
-        # Disagree by sequence and digest while keeping the same operation identity — the
-        # shape a second authority instance sharing that identity would produce.
-        self.corrupt_head = False
-        # Report a head belonging to a different operation identity — the shape a concurrent
-        # takeover produces, which the identity-scoped check must ignore.
+        # Disagree on exactly one field while keeping the same operation identity — the shape
+        # a second authority instance sharing that identity would produce. One field at a
+        # time, so a check that drops either comparison is caught by that field's case.
+        self.corrupt_head_field: Literal["sequence", "digest"] | None = None
+        # Report a head belonging to a different operation identity *and* moved past the
+        # anchored record, which is what a concurrent takeover actually produces since it
+        # anchors its own watermark records. Both halves matter: with only the identity
+        # changed, a check that ignored the scoping entirely would still see a matching
+        # sequence and digest and pass, so the test would not discriminate.
         self.head_operation_identity_override: str | None = None
 
     async def resolve_current_candidate(
@@ -193,9 +197,16 @@ class _Repository:
         if self.head is None or not self._head_override_armed:
             return self.head
         if self.head_operation_identity_override is not None:
-            return replace(self.head, operation_identity=self.head_operation_identity_override)
-        if self.corrupt_head:
-            return replace(self.head, sequence=self.head.sequence + 1, digest="sha256:" + "f" * 64)
+            return replace(
+                self.head,
+                operation_identity=self.head_operation_identity_override,
+                sequence=self.head.sequence + 1,
+                digest="sha256:" + "e" * 64,
+            )
+        if self.corrupt_head_field == "sequence":
+            return replace(self.head, sequence=self.head.sequence + 1)
+        if self.corrupt_head_field == "digest":
+            return replace(self.head, digest="sha256:" + "f" * 64)
         return self.head
 
     async def advance(

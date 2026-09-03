@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import pytest
@@ -994,15 +994,19 @@ async def test_commit_receives_the_anchored_mutation_started_sequence_and_digest
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("field", ["sequence", "digest"])
 async def test_a_head_disagreeing_under_the_same_operation_identity_refuses_the_commit(
-    tmp_path: Path,
+    tmp_path: Path, field: str
 ) -> None:
-    """The head is re-read because ``advance`` reports what was accepted, not what is held."""
+    """The head is re-read because ``advance`` reports what was accepted, not what is held.
+
+    One field at a time: dropping either comparison leaves the other case red.
+    """
     service, repository, adapter, peer, request = _service(tmp_path)
     await service.acknowledge_takeover(peer, request)
     repository.current = True
     repository.head_override_after_phase = JournalPhase.MUTATION_STARTED
-    repository.corrupt_head = True
+    repository.corrupt_head_field = cast(Literal["sequence", "digest"], field)
 
     with pytest.raises(AuthorityServiceError) as caught:
         await service.execute_mutation(peer, _mutation(request))
