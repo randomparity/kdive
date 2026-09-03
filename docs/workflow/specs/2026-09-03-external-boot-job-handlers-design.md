@@ -57,6 +57,7 @@ through `commit_external_boot_authority_result`.
 class BootPayload(RunPayload):
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
 
+
 class TeardownPayload(SystemPayload):
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
 ```
@@ -165,6 +166,7 @@ def route_marked(operations: ExternalBootOperations, ordinary: JobHandler) -> Jo
         if EXTERNAL_BOOT_AUTHORITY_MARKER_KEY not in job.payload:
             return await ordinary(conn, job)
         return await operations.run(conn, job)
+
     return handler
 ```
 
@@ -196,6 +198,7 @@ type ExternalBootOperationHandler = Callable[
     [AsyncConnection, Job, ExternalBootAuthorityMarkerV1], Awaitable[ExternalBootAuthorityResultV1]
 ]
 
+
 class ExternalBootOperations:
     def register(self, operation: str, handler: ExternalBootOperationHandler) -> None: ...
     def get(self, operation: str) -> ExternalBootOperationHandler | None: ...
@@ -219,10 +222,12 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTakeoverRequestV1,
 )
 
+
 class ExternalBootAuthorityAcknowledger(Protocol):
     async def acknowledge(
         self, request: AuthorityTakeoverRequestV1
     ) -> AuthorityAcknowledgementV1: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExternalBootHandlerPorts:

@@ -157,8 +157,10 @@ step 6 run actually produced, not a count predicted before it.
 class BootPayload(RunPayload):
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
 
+
 class TeardownPayload(SystemPayload):
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
+
 
 ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS: Final[frozenset[str]] = frozenset(
     {"activate", "recover", "resolve-conflict", "release", "cleanup", "teardown"}
@@ -285,16 +287,19 @@ Later tasks rely on `BootPayload`, `TeardownPayload`,
 # ports.py
 EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: Final = "external_boot_authority_v1"
 
+
 class ExternalBootAuthorityAcknowledger(Protocol):
     async def acknowledge(
         self, request: AuthorityTakeoverRequestV1
     ) -> AuthorityAcknowledgementV1: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExternalBootHandlerPorts:
     resolver: ProviderResolver
     incarnation_credential: SecretStr
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
+
 
 # operations.py
 type ExternalBootOperationHandler = Callable[
@@ -303,15 +308,20 @@ type ExternalBootOperationHandler = Callable[
 ]
 from kdive.jobs.payloads import ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS  # defined in Task 1
 
+
 class DuplicateExternalBootHandler(RuntimeError): ...
+
+
 class ExternalBootOperations:
     def register(self, operation: str, handler: ExternalBootOperationHandler) -> None: ...
     def get(self, operation: str) -> ExternalBootOperationHandler | None: ...
     def registered_operations(self) -> frozenset[str]: ...
     async def run(self, conn: AsyncConnection, job: Job) -> ExternalBootAuthorityResultV1: ...
 
+
 # router.py
 def route_marked(operations: ExternalBootOperations, ordinary: JobHandler) -> JobHandler: ...
+
 
 # registrar.py
 def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations: ...
@@ -429,13 +439,15 @@ class AllocatedAuthority:
     generation: int
     operation_digest: str
 
+
 async def allocate_authority(
     conn: AsyncConnection,
     job: Job,
     marker: ExternalBootAuthorityMarkerV1,
     *,
     incarnation_credential: SecretStr,
-) -> AllocatedAuthority | None: ...   # None means the function returned 'superseded'
+) -> AllocatedAuthority | None: ...  # None means the function returned 'superseded'
+
 
 # runner.py
 @dataclass(frozen=True, slots=True)
@@ -447,6 +459,7 @@ class OperationContext:
     port: ExternalBootPorts
     authority: AllocatedAuthority
     acknowledgement: AuthorityAcknowledgementV1
+
 
 async def run_operation(
     conn: AsyncConnection,
@@ -465,6 +478,7 @@ async def run_operation(
     ],
     call_port: Callable[[OperationContext], RunningKernelObservation | None],
 ) -> ExternalBootAuthorityResultV1: ...
+
 
 # evidence.py
 def terminal_evidence(context: OperationContext, outcome: str) -> dict[str, object]: ...
@@ -658,6 +672,7 @@ def resolve_conflict_handler(ports) -> ExternalBootOperationHandler: ...
 def release_handler(ports) -> ExternalBootOperationHandler: ...
 def cleanup_handler(ports) -> ExternalBootOperationHandler: ...
 def teardown_handler(ports) -> ExternalBootOperationHandler: ...
+
 
 ACTIVATION_READINESS_WINDOW: Final[timedelta] = timedelta(minutes=15)
 ```
