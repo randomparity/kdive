@@ -10,18 +10,17 @@ records.
 `mutation-started` `JournalRecordV1`. `service.py` builds it from the record it just anchored,
 re-reads the trusted head to confirm the record is still this operation's head, and passes it to
 `commit` in place of the bare `commit_point` string. `local_libvirt/external_boot_authority.py`
-takes the context, keeps its existing commit-point legality checks, and on `CLEANUP` builds a
-`FinalizeCleanupProof` from it and finalizes the tombstone.
-`lifecycle/boot/external_boot.py` changes only where those seams meet it.
+takes the context and, on `CLEANUP`, builds a `FinalizeCleanupProof` from it and finalizes the
+tombstone. `lifecycle/boot/external_boot.py` changes only where those seams meet it.
 
-**Tech stack.** Python 3.14, `uv`, pydantic v2, pytest + pytest-asyncio, `ruff`, `ty`.
+**Tech stack.** Python 3.14, `uv`, pydantic 2.13.4, pytest + anyio, `ruff`, `ty`.
 
-Expected implementation size: 380–520 changed lines (M) — derived from the file map below: four
-source files totalling roughly 120 changed lines, five test files totalling roughly 300, and no
-new module.
+Expected implementation size: 450–650 changed lines (M) — from the file map below: roughly 170
+source lines, roughly 340 test lines including the migration of the 24 existing `commit(...)` call
+sites, and no new module.
 
 Spec: [`docs/workflow/specs/2026-09-03-authority-commit-context-design.md`](../specs/2026-09-03-authority-commit-context-design.md).
-Decision: [ADR-0591](../../adr/0591-authority-commit-context-carries-the-anchored-journal-proof.md).
+Decision: [ADR-0592](../../adr/0592-authority-commit-context-carries-the-anchored-journal-proof.md).
 
 ## Global Constraints
 
@@ -29,216 +28,128 @@ Decision: [ADR-0591](../../adr/0591-authority-commit-context-carries-the-anchore
 - Guardrails: `just lint`, `just type`, `just test-changed` while iterating; `just ci` bare as the
   pre-push gate. Never pipe a gate recipe; never append `; echo $?`. Capture with
   `just ci > <file> 2>&1 < /dev/null`.
-- Run `just format` before committing a Python-only change so the mutating `ruff` hooks do not
-  rewrite the tree during `git commit`.
-- Line limit 100 characters (`ruff` config). Prefer functions under 100 lines and complexity ≤ 8.
+- A fresh worktree has no `node_modules`, so `just check-mermaid` dies with
+  `ERR_MODULE_NOT_FOUND: jsdom` before checking anything. Run `just install-mermaid-deps` once.
+- `ruff format` covers Python code blocks inside Markdown under `docs/workflow/`, so this plan's
+  own fenced blocks are formatted. `docs/adr/` is `extend-exclude`d. Run `just format` after
+  editing either.
+- Line limit 100 characters. Prefer functions under 100 lines and complexity ≤ 8.
 - `just type` is whole-tree (`src` **and** `tests`). Test doubles must type-check.
 - `AuthorityMutationRequestV1` must gain no field. It is the client-supplied wire request.
-- Every value on the new context is derived from a `JournalRecordV1` the service anchored. None is
+- Every value on the new context derives from a `JournalRecordV1` the service anchored. None is
   read from protocol input.
 - `docs/adr/` records are append-only once merged; ADR-0584 is edited by **appending** a bullet to
-  its `## Consequences` section only. ADR-0591 is a new file, and this PR fully implements its
-  decision, so it ships at `Accepted (2026-09-03)` — `just adr-status-check` rejects a `Proposed`
-  ADR cited from `src/` or `tests/`, and Task 3 cites it from `src/`.
-- Do not touch `src/kdive/providers/local_libvirt/lifecycle/boot/session.py` — issue #2211 holds it
-  in a concurrent worktree.
+  its `## Consequences`. ADR-0592 is new and ships at `Accepted (2026-09-03)` because this PR fully
+  implements its decision — `just adr-status-check` rejects a `Proposed` ADR cited from `src/`, and
+  Task 3 cites it from `src/`.
+- **Ordering: this change must land before #2212.** Task 4 adds a required field to two durable
+  records. `RecoveryMetadataStore._read` validates and then requires byte-exact canonical
+  re-encoding (`"recovery intent is not canonical JSON"`), and `_read_pre_stop` does the same, so
+  an optional field with a default fails canonicality exactly as a required field fails on
+  absence — there is no compatible variant. It is free today only because the feature is dormant:
+  `ProviderRuntime.external_boot` is `None` and `RealLocalExternalBootIO` is constructed nowhere in
+  `src/` (`rg -n 'RealLocalExternalBootIO' src/ tests/` → nine test hits, one `src/` docstring
+  mention in `composition.py`). #2212 wires that construction; after it, this addition owes a real
+  migration.
+- Do not touch `src/kdive/providers/local_libvirt/lifecycle/boot/session.py` — #2211 holds it.
 
 ## File map
 
 | Path | Answerable for | Change |
 |---|---|---|
 | `src/kdive/providers/external_boot_authority/protocol.py` | closed authority values | add `AuthorityCommitContextV1`; refresh the `operation_is_permitted` docstring |
-| `src/kdive/providers/external_boot_authority/service.py` | lane serialization and journaling | adapter `Protocol` signature; `_require_anchored_head`; build and pass the context |
-| `src/kdive/providers/local_libvirt/external_boot_authority.py` | local adapter | accept the context; finalize the tombstone on `CLEANUP`; proven-absence retry branch |
+| `src/kdive/providers/external_boot_authority/service.py` | lane serialization and journaling | adapter `Protocol` signature; `_require_anchored_head`; anchor `never-began` on refusal; build and pass the context |
+| `src/kdive/providers/local_libvirt/external_boot_authority.py` | local adapter | accept the context; finalize the tombstone on `CLEANUP`; directory-keyed already-accounted branch |
 | `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py` | local records and coordinator | widen `FinalizeCleanupProof.operation_id`; add `target_xml_sha256` to both records; extend `_metadata_extends_intent`; correct the stale comment |
-| `docs/adr/0591-...md`, `docs/adr/0584-...md`, `docs/workflow/specs/...`, `docs/workflow/plans/...` | design record | already written |
-| `tests/providers/external_boot_authority/test_protocol.py` | context model behaviour | new tests for `for_record` and closure |
-| `tests/providers/external_boot_authority/service_support.py` | shared service doubles | update the recording adapter's `commit` signature |
-| `tests/providers/external_boot_authority/test_service.py` | service behaviour | context reaches the adapter; head disagreement refused |
-| `tests/providers/local_libvirt/test_external_boot_authority.py` | local adapter behaviour | context-shaped commits; cleanup finalization; retry idempotency |
-| `tests/providers/local_libvirt/test_external_boot.py` | local records and store | `target_xml_sha256` refusals; projection digest pin; `operation_id` |
+| `tests/providers/external_boot_authority/test_protocol.py` | context model behaviour | `for_record` phase gate, closure, and the wire-request field-set pin |
+| `tests/providers/external_boot_authority/service_support.py` | shared service doubles | `_Adapter.commit` signature and context recording; `_Repository` head-override hooks |
+| `tests/providers/external_boot_authority/test_service.py` | service behaviour | context reaches the adapter; scoped head disagreement refused; takeover overlap still runs; `never-began` anchored |
+| `tests/providers/local_libvirt/test_external_boot_authority.py` | local adapter behaviour | **migrate the 24 existing `commit(request, <str>)` call sites**; cleanup finalization; retry idempotency; tombstone-live conflict |
+| `tests/providers/local_libvirt/test_external_boot.py` | local records and store | `target_xml_sha256` refusals; the non-vacuous `define_xml` reachability test; projection digest pin |
 | `tests/providers/contract/bindings/local_libvirt.py` | contract binding fixture | supply `target_xml_sha256` |
+
+Not a write site to change, but named because it inherits an obligation:
+`LocalExternalBootMaterializer.inspect_prepare` (`external_boot.py:744`) has no implementation
+under `src/`; whoever writes it must populate `target_xml_sha256` on `LocalPreStopIntentV1`.
+`_complete_preparation_metadata` (`:1315`) copies the intent's fields, so the metadata side needs
+no separate write site.
 
 ## Task 1 — the closed commit context
 
-**Where it fits.** The value every later task consumes. Nothing else can be written first.
+**Where it fits.** The value every later task consumes.
 
-**Files.** Modifies `src/kdive/providers/external_boot_authority/protocol.py`. Tests in
+**Files.** `src/kdive/providers/external_boot_authority/protocol.py`; tests in
 `tests/providers/external_boot_authority/test_protocol.py`.
 
 **Interfaces produced.**
 
 ```python
 class AuthorityCommitContextV1(_ClosedValue):
-    schema_: Literal["external-boot-authority-v1"]
+    schema_: Literal["external-boot-authority-v1"]  # alias "schema"
     commit_point: AuthorityOperation
-    operation_identity: str
+    operation_identity: str  # _bounded_text, max 255
     attempt_id: UUID
     journal_sequence: PositiveBigInt
     journal_digest: Digest
-    phase: Literal[JournalPhase.MUTATION_STARTED]
+    phase: Literal[JournalPhase.MUTATION_STARTED] = JournalPhase.MUTATION_STARTED
 
     @classmethod
     def for_record(cls, record: JournalRecordV1) -> AuthorityCommitContextV1: ...
 ```
 
 **Consumes.** `_ClosedValue`, `Digest`, `PositiveBigInt`, `AuthorityOperation`, `JournalPhase`,
-`JournalRecordV1`, `record_digest`, `_bounded_text` — all already defined in this module.
-`record_digest` is defined at `protocol.py:343`, so the new class goes at the end of the file.
+`JournalRecordV1`, `record_digest`, `_bounded_text` — all already in this module. `record_digest`
+is at `protocol.py:343`, so the class goes at the end of the file.
+
+`Literal[<StrEnum member>]` with that member as the default is **verified** on pydantic 2.13.4 /
+CPython 3.14.7: the default is the member, `model_dump(mode="json")` gives `"mutation-started"`,
+`model_validate({"phase": "mutation-started"})` round-trips to the member, and `"observed"` is
+refused. No fallback shape is needed.
 
 **Steps.**
 
-1. Add this failing test to `tests/providers/external_boot_authority/test_protocol.py`. Reuse the
-   module's existing record helper if one exists; otherwise build a record with
-   `JournalRecordV1.model_validate` from an existing test's values.
-
-   ```python
-   def test_commit_context_is_built_only_from_an_anchored_mutation_started_record() -> None:
-       started = _mutation_record(JournalPhase.MUTATION_STARTED, sequence=4)
-       context = AuthorityCommitContextV1.for_record(started)
-       assert context.journal_sequence == started.sequence
-       assert context.journal_digest == record_digest(started)
-       assert context.operation_identity == started.operation_identity
-       assert context.attempt_id == started.attempt_id
-       assert context.commit_point is started.operation
-       assert context.phase is JournalPhase.MUTATION_STARTED
-       for refused in (JournalPhase.ADMITTED, JournalPhase.PROVIDER_RETURNED):
-           with pytest.raises(ValueError, match="mutation-started"):
-               AuthorityCommitContextV1.for_record(_mutation_record(refused, sequence=4))
-   ```
-
+1. Write a failing test that `for_record` copies `sequence`, `record_digest(record)`,
+   `operation_identity`, `attempt_id` and `operation` off the record, and raises `ValueError`
+   matching `mutation-started` for `ADMITTED`, `PROVIDER_RETURNED` and `OBSERVED` records. Build
+   records with `JournalRecordV1.model_validate`; the module's existing record helpers are the
+   pattern to follow.
 2. Run `uv run python -m pytest tests/providers/external_boot_authority/test_protocol.py -q`.
-   Expect a failure: `ImportError`/`AttributeError` on `AuthorityCommitContextV1`.
-3. Add a second failing test for the `observed` phase and for closure:
-
-   ```python
-   def test_commit_context_refuses_observed_records_and_forbids_extra_fields() -> None:
-       observed = _mutation_record(
-           JournalPhase.OBSERVED, sequence=5, observation=_observation()
-       )
-       with pytest.raises(ValueError, match="mutation-started"):
-           AuthorityCommitContextV1.for_record(observed)
-       values = AuthorityCommitContextV1.for_record(
-           _mutation_record(JournalPhase.MUTATION_STARTED, sequence=5)
-       ).model_dump(mode="json", by_alias=True)
-       assert AuthorityCommitContextV1.model_validate(values).journal_sequence == 5
-       with pytest.raises(ValidationError):
-           AuthorityCommitContextV1.model_validate(values | {"extra": "forbidden"})
-       with pytest.raises(ValidationError):
-           AuthorityCommitContextV1.model_validate(values | {"phase": "observed"})
-   ```
-
-4. Run the same pytest command; expect the same import failure.
-5. Add the test that pins the wire request closed, which is the criterion saying a client can
-   neither set nor influence a journal value:
-
-   ```python
-   def test_the_wire_mutation_request_carries_no_journal_field() -> None:
-       assert set(AuthorityMutationRequestV1.model_fields) == {
-           "schema_",
-           "authority_id",
-           "generation",
-           "system_id",
-           "activation_id",
-           "run_id",
-           "plan_identity",
-           "purpose",
-           "operation",
-           "provider_kind",
-           "authority_instance",
-           "operation_identity",
-           "operation_digest",
-           "attempt_id",
-           "expected_source_identity",
-           "intended_target_identity",
-           "recovery_objects",
-       }
-       values = _mutation_request().model_dump(mode="json", by_alias=True)
-       for smuggled in ("journal_sequence", "journal_digest", "phase"):
-           with pytest.raises(ValidationError):
-               AuthorityMutationRequestV1.model_validate(values | {smuggled: 1})
-       payload = json.dumps(
-           values | {"journal_sequence": 1}, sort_keys=True, separators=(",", ":")
-       ).encode()
-       with pytest.raises(ValueError):
-           decode_authority_request(payload)
-   ```
-
-   The literal field set is deliberate: a set comparison against
-   `AuthorityMutationRequestV1.model_fields` itself would pass no matter what the model grew.
-   Reuse the module's existing request builder for `_mutation_request()`.
-6. Run the same pytest command. This test may already pass — it pins existing behaviour rather than
-   driving new code. Confirm it passes now, and confirm it *bites* in Task 5 by adding a journal
-   field to the model and observing the assertion fail.
-7. Append to `protocol.py`, after `record_digest`:
-
-   ```python
-   class AuthorityCommitContextV1(_ClosedValue):
-       """Service-constructed proof of the anchored ``mutation-started`` record.
-
-       Carried across the ``AuthorityMutationAdapter`` seam so a provider adapter can tie its
-       own commit to the exact authority journal record without reading the journal. Every
-       field comes from a record the authority anchored; none is reachable from
-       ``AuthorityMutationRequestV1``, which is peer-supplied and carries no journal field.
-       """
-
-       schema_: Literal["external-boot-authority-v1"] = Field(
-           "external-boot-authority-v1", alias="schema"
-       )
-       commit_point: AuthorityOperation
-       operation_identity: str
-       attempt_id: UUID
-       journal_sequence: PositiveBigInt
-       journal_digest: Digest
-       phase: Literal[JournalPhase.MUTATION_STARTED] = JournalPhase.MUTATION_STARTED
-
-       @field_validator("operation_identity")
-       @classmethod
-       def _identity_is_bounded(cls, value: str) -> str:
-           return _bounded_text(value)
-
-       @classmethod
-       def for_record(cls, record: JournalRecordV1) -> AuthorityCommitContextV1:
-           """Build the context for one anchored record, refusing any other phase."""
-           if record.phase is not JournalPhase.MUTATION_STARTED:
-               raise ValueError("commit context requires an anchored mutation-started record")
-           return cls(
-               commit_point=record.operation,
-               operation_identity=record.operation_identity,
-               attempt_id=record.attempt_id,
-               journal_sequence=record.sequence,
-               journal_digest=record_digest(record),
-           )
-   ```
-
-8. Update the `operation_is_permitted` docstring (`protocol.py:92-99`): the seam now carries
+   Expect `ImportError` on `AuthorityCommitContextV1`.
+3. Write a second failing test that the model is closed: a `model_dump(mode="json", by_alias=True)`
+   round-trips, and `model_validate` raises `ValidationError` for an `extra` key and for
+   `phase="observed"`.
+4. Write the wire-request pin. Assert `set(AuthorityMutationRequestV1.model_fields)` equals the
+   **literal** seventeen-name set (`schema_`, `authority_id`, `generation`, `system_id`,
+   `activation_id`, `run_id`, `plan_identity`, `purpose`, `operation`, `provider_kind`,
+   `authority_instance`, `operation_identity`, `operation_digest`, `attempt_id`,
+   `expected_source_identity`, `intended_target_identity`, `recovery_objects`) — a comparison
+   against `model_fields` itself would pass whatever the model grew. Then assert
+   `model_validate` rejects `journal_sequence`, `journal_digest` and `phase`, and that
+   `decode_authority_request` rejects canonical bytes carrying `journal_sequence`.
+   This test passes before the implementation; it is bite-proved in Task 5 by adding a journal
+   field to the model.
+5. Implement `AuthorityCommitContextV1` with the shape above. `for_record` raises
+   `ValueError("commit context requires an anchored mutation-started record")` unless
+   `record.phase is JournalPhase.MUTATION_STARTED`, then copies the five values.
+6. Update the `operation_is_permitted` docstring (`protocol.py:92-99`): the seam now carries
    `AuthorityCommitContextV1`, whose `commit_point` is an `AuthorityOperation`, so the model layer
-   guarantees the *member* but still not that it is legal for the request's purpose or equal to the
-   request's own operation. Say exactly that; do not delete the function.
-9. Run `uv run python -m pytest tests/providers/external_boot_authority/test_protocol.py -q`.
-   Expect all tests to pass.
-10. `just lint && just type`, then commit.
+   guarantees the member but still not that it is legal for the request's purpose or equal to the
+   request's own operation. Keep the function.
+7. `uv run python -m pytest tests/providers/external_boot_authority/test_protocol.py -q` — green.
+   Then `just lint && just type`, and commit.
 
-**Acceptance.** `for_record` accepts only `mutation-started`; the model is frozen, `extra="forbid"`,
-and round-trips through `model_dump(mode="json", by_alias=True)`.
-
-**Note for the implementer.** `Literal[JournalPhase.MUTATION_STARTED]` with an enum default is the
-intended shape. If pydantic rejects the enum member as a `Literal` argument on the pinned version,
-fall back to `phase: Literal["mutation-started"] = "mutation-started"`, matching
-`FinalizeCleanupProof` at `external_boot.py:184`, and keep the `for_record` guard unchanged. Confirm
-which shape you used in the commit message.
+**Acceptance.** `for_record` accepts only `mutation-started`; the model is frozen and
+`extra="forbid"`; `AuthorityMutationRequestV1`'s field set is pinned literally.
 
 ## Task 2 — the service constructs, verifies, and passes the context
 
-**Where it fits.** Consumes Task 1's model. Produces the seam Task 3 implements against.
-
-**Files.** Modifies `src/kdive/providers/external_boot_authority/service.py`. Tests in
-`tests/providers/external_boot_authority/test_service.py`; double updated in
+**Files.** `src/kdive/providers/external_boot_authority/service.py`; tests in
+`tests/providers/external_boot_authority/test_service.py`; doubles in
 `tests/providers/external_boot_authority/service_support.py`.
 
-**Interfaces consumed.** `AuthorityCommitContextV1.for_record(record) -> AuthorityCommitContextV1`
-from Task 1. `JournalHead` (already imported) exposes `.sequence`, `.digest`, `.phase`, and
-`.operation_identity` — the same fields `_recover` already reads at `service.py:337-344`.
+**Interfaces consumed.** `AuthorityCommitContextV1.for_record` from Task 1. `JournalHead` exposes
+`.sequence`, `.digest`, `.phase`, `.operation_identity` — the same fields `_recover` reads at
+`service.py:337-344`.
 
 **Interfaces produced.**
 
@@ -250,556 +161,252 @@ class AuthorityMutationAdapter(Protocol):
     ) -> AuthorityObservationV1: ...
 ```
 
+**The existing test fixtures, exactly.** `service_support._service(tmp_path)` returns
+`(service, repository, adapter, peer, takeover_request)`. The journal the service wrote is
+`repository.records`, a `list[JournalRecordV1]`; `test_service.py:41-46` already compares against
+it. Build a mutation with `_mutation(takeover)` and set `repository.current = True` before
+`execute_mutation`. There is no `_harness()` — do not invent one.
+
 **Steps.**
 
-1. Update the recording adapter in `tests/providers/external_boot_authority/service_support.py:278`
-   to the new signature, recording the context rather than only its name:
+1. In `service_support.py`, change `_Adapter.commit` to take
+   `context: AuthorityCommitContextV1`. **Keep** `self.calls.append(f"commit:{context.commit_point.value}")`
+   — `test_service.py` asserts `adapter.calls == ["commit:activate", "observe"]` and that must keep
+   passing unchanged in intent. Add `self.commit_contexts: list[AuthorityCommitContextV1] = []` and
+   append the context.
+2. In `_Repository`, add two head-override hooks used only by tests, both applied in `read_head`:
+   - `corrupt_head_after_phase: JournalPhase | None` — once a record of that phase has been
+     advanced, return the real head with `sequence + 1` and `digest = "sha256:" + "f" * 64`,
+     **keeping** `operation_identity` and `phase`. Keeping the identity is what makes the test
+     exercise the scoped arm rather than the takeover arm.
+   - `head_operation_identity_override: str | None` — return the real head with that
+     `operation_identity`, which is the concurrent-takeover shape.
+3. Write the failing test for criterion 1: after `execute_mutation`, the single recorded context's
+   `journal_sequence`, `journal_digest`, `attempt_id` and `operation_identity` equal those of the
+   last `MUTATION_STARTED` record in `repository.records` for that operation identity, and
+   `commit_point is mutation.operation`. Run the module — expect failure on the signature.
+4. Write the failing test for criterion 5: with `corrupt_head_after_phase = MUTATION_STARTED`,
+   `execute_mutation` raises `AuthorityServiceError` with category `journal_conflict`,
+   `adapter.commit_contexts == []`, and no `commit:` entry is in `adapter.calls`.
+5. Write the test for N4a: after that refusal, `repository.records[-1].phase is TERMINAL` with
+   `outcome == "never-began"`, and no `PROVIDER_RETURNED` record exists for that operation identity.
+6. Write the scoping regression: with `head_operation_identity_override = "takeover-next"`,
+   `execute_mutation` completes and exactly one context was recorded. This one guards against the
+   *over-strict* implementation, so it passes trivially with no implementation — Task 5 bite-proves
+   it by widening `_require_anchored_head` to compare the bare head.
+7. Change `AuthorityMutationAdapter.commit`'s signature and import `AuthorityCommitContextV1`.
+8. Add `_require_anchored_head(binding, context)` after `_provider_error`. It reads
+   `await self._repository.read_head(binding)` and raises
+   `AuthorityServiceError("journal_conflict")` when the head is `None`, **or** when
+   `head.operation_identity == context.operation_identity` and any of `head.sequence`,
+   `head.digest`, `head.phase` disagrees with the context. Its docstring must say why the identity
+   scoping is there (`acknowledge_takeover` anchors under a different identity while an admitted
+   mutation is in flight, `service.py:628-639` before the wait at `:695-696`) and what the check is
+   therefore able to catch — a second authority instance sharing the identity, or a head row that
+   changed after `advance` returned. Do not repeat the wrong claim that it closes the
+   takeover window.
+9. In `execute_mutation`, inside the lock that anchors `MUTATION_STARTED` (`service.py:865-871`)
+   and right after `active.phase = JournalPhase.MUTATION_STARTED`, build
+   `context = AuthorityCommitContextV1.for_record(records[-1])`.
+10. Replace the commit call (`service.py:880-887`) so the head check runs first. On its
+    `journal_conflict`, anchor `TERMINAL` with `outcome="never-began"` under `lane.lock` before
+    re-raising — the same shape as the `stop_before_start` path at `service.py:852-864` — so the
+    lane is left resolved. Keep #2199's `except AuthorityServiceError: raise` arm ahead of the bare
+    `except Exception` exactly as it is.
+11. `uv run python -m pytest tests/providers/external_boot_authority -q` — every test green,
+    including the pre-existing ones. `just lint && just type`, commit.
 
-   ```python
-   async def commit(
-       self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
-   ) -> AuthorityObservationV1:
-       self.calls.append(f"commit:{context.commit_point.value}")
-       self.commit_contexts.append(context)
-       ...
-   ```
-
-   Add `self.commit_contexts: list[AuthorityCommitContextV1] = []` to its `__init__`. Keep the
-   existing `calls` string format so current assertions in `test_service.py` keep passing
-   unchanged in intent.
-
-2. Add this failing test to `tests/providers/external_boot_authority/test_service.py`, driving
-   `execute_mutation` — not `adapter.commit` — and comparing against the journal the service wrote:
-
-   ```python
-   async def test_commit_receives_the_anchored_mutation_started_sequence_and_digest() -> None:
-       harness = _harness()                       # existing helper in this module
-       await harness.acknowledge()
-       await harness.service.execute_mutation(harness.peer, harness.mutation_request)
-       [context] = harness.adapter.commit_contexts
-       started = [
-           record
-           for record in harness.records()
-           if record.phase is JournalPhase.MUTATION_STARTED
-           and record.operation_identity == harness.mutation_request.operation_identity
-       ][-1]
-       assert context.journal_sequence == started.sequence
-       assert context.journal_digest == record_digest(started)
-       assert context.attempt_id == started.attempt_id
-       assert context.operation_identity == started.operation_identity
-       assert context.commit_point is harness.mutation_request.operation
-   ```
-
-   Adapt `_harness()`, `harness.records()` and the peer/request names to whatever the module
-   already uses; read the file first and reuse its existing fixtures rather than adding new ones.
-
-3. Run `uv run python -m pytest tests/providers/external_boot_authority/test_service.py -q`.
-   Expect a failure on `commit_contexts` being empty or on the signature.
-4. Add the head-disagreement test. It must drive the real service and control the head from the
-   repository double, so the compared value is not one the production code also produced:
-
-   ```python
-   async def test_a_head_that_disagrees_with_the_anchored_record_refuses_the_commit() -> None:
-       harness = _harness()
-       await harness.acknowledge()
-       harness.repository.corrupt_head_after_phase = JournalPhase.MUTATION_STARTED
-       with pytest.raises(AuthorityServiceError) as raised:
-           await harness.service.execute_mutation(harness.peer, harness.mutation_request)
-       assert raised.value.category == "journal_conflict"
-       assert harness.adapter.commit_contexts == []
-       assert "commit:cleanup" not in harness.adapter.calls
-   ```
-
-   Implement `corrupt_head_after_phase` on the repository double in `service_support.py`: when set,
-   `read_head` returns the real head with `sequence` incremented by 1 and `digest` replaced by
-   `"sha256:" + "f" * 64`, **keeping** `operation_identity` and `phase`, but only for reads that
-   happen after a record of that phase was advanced. Keeping the operation identity is what makes
-   the test exercise the scoped arm rather than the takeover arm.
-
-5. Run the same command; expect a failure (no exception raised, adapter was called).
-6. Add the takeover-overlap regression test, so the scoping is proved rather than asserted:
-
-   ```python
-   async def test_a_head_moved_by_a_concurrent_takeover_still_lets_the_commit_finish() -> None:
-       harness = _harness()
-       await harness.acknowledge()
-       harness.repository.head_operation_identity_override = "takeover-next"
-       await harness.service.execute_mutation(harness.peer, harness.mutation_request)
-       assert len(harness.adapter.commit_contexts) == 1
-   ```
-
-   `head_operation_identity_override` makes `read_head` report a different operation identity,
-   which is what a concurrent takeover produces. Implement it beside the previous flag.
-
-7. Run the same command. This test guards against the *over-strict* implementation, so with no
-   implementation at all it passes trivially. That is expected and is not a bite proof: Task 5
-   proves it by widening `_require_anchored_head` to compare the bare head and observing this test
-   fail with `journal_conflict`.
-8. In `service.py`, change the `AuthorityMutationAdapter.commit` signature to the block above, and
-   import `AuthorityCommitContextV1` in the existing `protocol` import list.
-9. Add the head check as a method on `ExternalBootAuthorityService`, placed after `_provider_error`:
-
-   ```python
-   async def _require_anchored_head(
-       self, binding: AuthorityBinding, context: AuthorityCommitContextV1
-   ) -> None:
-       """Refuse a commit whose anchored record is no longer this operation's head.
-
-       Scoped to the mutation's own operation identity. ``acknowledge_takeover`` anchors its
-       supersession and watermark records under a different identity while an admitted
-       mutation is still in flight and then waits on it, so an unscoped comparison would
-       reject the overlap ADR-0584 designs for.
-       """
-       head = await self._repository.read_head(binding)
-       if head is None or (
-           head.operation_identity == context.operation_identity
-           and (
-               head.sequence != context.journal_sequence
-               or head.digest != context.journal_digest
-               or head.phase is not JournalPhase.MUTATION_STARTED
-           )
-       ):
-           raise AuthorityServiceError("journal_conflict")
-   ```
-
-10. In `execute_mutation`, inside the `async with lane.lock` block that anchors
-    `MUTATION_STARTED` (`service.py:865-871`), build the context from the record just anchored,
-    immediately after `active.phase = JournalPhase.MUTATION_STARTED`:
-
-    ```python
-    context = AuthorityCommitContextV1.for_record(records[-1])
-    ```
-
-11. Replace the commit call (`service.py:880-887`) so the head check runs first and the context is
-    passed:
-
-    ```python
-    await self._require_anchored_head(binding, context)
-    try:
-        await self._adapter.commit(request, context)
-    except AuthorityServiceError:
-        # Already a bounded category; re-classifying it as provider_conflict would
-        # lose a superseded verdict the adapter is entitled to reach.
-        raise
-    except Exception:
-        raise self._provider_error(request) from None
-    ```
-
-    Leave the `except AuthorityServiceError: raise` arm exactly as #2199 wrote it.
-12. Run `uv run python -m pytest tests/providers/external_boot_authority -q`. Expect every test to
-    pass, including the pre-existing ones.
-13. `just lint && just type`, then commit.
-
-**Acceptance.** `execute_mutation` hands the adapter a context whose sequence and digest equal the
-`mutation-started` record in the journal; a same-identity head disagreement raises
-`journal_conflict` before the adapter is called; a different-identity head does not.
+**Acceptance.** The adapter receives a context matching the journal; a same-identity head
+disagreement raises `journal_conflict` before the adapter is called and leaves the lane terminal
+with `never-began`; a different-identity head does not refuse.
 
 ## Task 3 — the local adapter finalizes the tombstone
 
-**Where it fits.** Consumes Task 2's seam and Task 4's widened `operation_id`. Do Task 4 first if
-`FinalizeCleanupProof(operation_id=...)` rejects the operation identity; otherwise the order does
-not matter.
-
-**Files.** Modifies `src/kdive/providers/local_libvirt/external_boot_authority.py`. Tests in
+**Files.** `src/kdive/providers/local_libvirt/external_boot_authority.py`; tests in
 `tests/providers/local_libvirt/test_external_boot_authority.py`.
 
 **Interfaces consumed.**
 
-- `AuthorityCommitContextV1` with `commit_point`, `operation_identity`, `attempt_id`,
-  `journal_sequence`, `journal_digest` (Task 1).
-- `LocalLibvirtExternalBoot.finalize_cleanup_tombstone(recovery: RecoveryPoint, proof: FinalizeCleanupProof, authority: OpaqueProviderRef) -> None`
-  — confirmed at `external_boot.py:1530-1542`.
-- `LocalLibvirtExternalBoot.point_digest(recovery: RecoveryPoint) -> str` — static, at `:1364`.
-- `FinalizeCleanupProof(point_digest, binding, operation_id, attempt_id, journal_sequence, journal_digest, phase="mutation-started")`
-  — at `:177-184`.
+- `AuthorityCommitContextV1` (Task 1).
+- `LocalLibvirtExternalBoot.finalize_cleanup_tombstone(recovery, proof, authority) -> None`
+  (`external_boot.py:1530`).
+- `LocalLibvirtExternalBoot.point_digest(recovery) -> str`, static (`:1364`).
+- `FinalizeCleanupProof(point_digest, binding, operation_id, attempt_id, journal_sequence,
+  journal_digest, phase)` (`:177`), with Task 4's widened `operation_id`.
+
+**Three module facts that govern the tests.**
+
+- `_FakeIO.finalize_tombstone` appends the string `"finalize"` (`:154-156`). **Keep that string.**
+  `test_unproven_recovery_object_is_quarantined_not_reused_or_deleted` asserts
+  `"finalize" not in io.actions` at `:538`, and renaming the action would make that assertion
+  vacuous — it is the assertion proving an unproven recovery object is never finalized, which is
+  the path this task makes reachable for the first time.
+- `io.actions` also collects `open:{ref}`, `reopen`, `observe-state` and `phase:{p}` entries, so
+  **never assert list equality on it.** Every existing test in the module uses membership. New
+  assertions use `io.actions.count("cleanup")` and `io.actions.count("finalize")`.
+- There are **24** existing `await ....commit(request, AuthorityOperation.X.value)` call sites in
+  this module. They all have to move to the context form; step 1 does that before anything else.
 
 **Steps.**
 
-1. Add this failing test to `tests/providers/local_libvirt/test_external_boot_authority.py`. It must
-   drive `ExternalBootAuthorityService.execute_mutation`, not `instance.commit` — a test that calls
-   the adapter directly bypasses the service and proves nothing about the wiring:
+1. **Migrate first.** Add a `_context(operation, *, sequence=4)` helper to the module that builds a
+   `JournalRecordV1` in `MUTATION_STARTED` phase from the same values `_request()` uses and returns
+   `AuthorityCommitContextV1.for_record(record)`. Then rewrite all 24 `commit(request, <str>)` call
+   sites as `commit(request, _context(<operation>))`. Run the module: it must fail only on the new
+   signature, not on anything else.
+2. Dispose of `test_commit_refuses_a_commit_point_that_is_not_an_operation_at_all` (`:337`). It
+   exists because the seam took a bare string, and a closed model cannot carry a non-member, so the
+   case is now unreachable at this layer. Delete it and replace it with a `ValidationError` test on
+   `AuthorityCommitContextV1` asserting a non-member `commit_point` is refused at construction —
+   the same ground, at the layer that now owns it. Record the swap in the commit message.
+3. Write the failing test for criteria 3 and 7, driving
+   `ExternalBootAuthorityService.execute_mutation` over the real adapter — not `instance.commit`,
+   which bypasses the service and proves nothing about the wiring. Import the repository and
+   journal doubles from `tests/providers/external_boot_authority/service_support.py`; do not write
+   new ones. Assert `io.actions.count("cleanup") == 1` and `io.actions.count("finalize") == 1`, and
+   that the recorded proof's `journal_sequence`, `journal_digest`, `operation_id`, `attempt_id`,
+   `phase` and `point_digest` equal the anchored record's values and `point_digest(io.point)`.
+   Extend `_FakeIO.finalize_tombstone` to store the proof.
+4. Write the failing idempotency test for criterion 8: run a second cleanup mutation with
+   `_FakeIO` reporting the **recovery directory** gone, and assert both counts are still 1 — no
+   second `cleanup`, no second `finalize`. Model the two post-cleanup states on the double
+   distinctly: `recovery_directory_absent` (fully finalized) and `recovery_record_absent`
+   (tombstone live, `intent.json` gone).
+5. Write the two negative arms, which may call `instance.commit` directly because the service
+   cannot construct these states: a **tombstone-live** cleanup raises `provider_conflict`, and an
+   unreadable point (`recovery_point` raising `OSError`) raises `provider_conflict`. Also assert a
+   `TEARDOWN` commit never appends `"finalize"`.
+6. Run the module — expect the four new tests to fail.
+7. Change `commit` to take `context: AuthorityCommitContextV1`, and pass it through to `_commit`
+   and `_apply`.
+8. Rewrite `_require_permitted_commit_point` to take the context. Drop the
+   `AuthorityOperation(commit_point)` parse — the model guarantees the member — and keep both
+   remaining checks with #2199's reasoning intact: the operation must be legal for the request's
+   purpose, and it must equal `request.operation`, or a request could journal one operation while
+   driving the provider through another.
+9. Add the directory-keyed absence probe. `_resolve_point` stays unchanged so `_observe` keeps
+   classifying an unresolvable point as `unreadable`. The new probe asks the coordinator whether
+   the recovery **directory** is gone, and answers `False` for any read that merely failed — a
+   live tombstone is not absence, and treating it as one would return success for a cleanup that
+   never finalized and would skip `_require_matching_identities` and
+   `_ownership_is_proven(require_named=True)`.
+10. In `_commit`, take the already-accounted branch only when the point did not resolve, the
+    operation is `AuthorityOperation.CLEANUP`, and the probe proves the directory gone. Return
+    `self._observation(request, binding, authority, None)` — no provider mutation, so no deletion
+    authority is exercised. Everything else falls through to `_require_matching_identities` as
+    today.
+11. In `_apply`, split the `{CLEANUP, TEARDOWN}` arm. `CLEANUP` calls `self._ports.cleanup(...)`
+    then `self._ports.finalize_cleanup_tombstone(point, proof, authority)`. `TEARDOWN` calls
+    `cleanup` only, with a comment that its missing finalizer is a known residual recorded in
+    ADR-0592 and not this seam's to close. Leave the surrounding
+    `except AuthorityServiceError: raise` / `except Exception:` wrapper alone, so a finalization
+    `ValueError` becomes a bounded `provider_conflict`.
+12. Add the module-level proof builder. Every field comes from the context or the resolved point,
+    and `phase` is passed as `context.phase` rather than left to the model default — otherwise the
+    proof's phase assertion observes the default and would pass even if the context had no `phase`
+    field at all.
+13. Run the module — green. `just lint && just type`, commit.
 
-   ```python
-   async def test_a_cleanup_commit_finalizes_the_tombstone_through_the_service() -> None:
-       io = _FakeIO()
-       harness = _service_harness(_adapter(io))   # wires the real service over this adapter
-       await harness.acknowledge()
-       await harness.service.execute_mutation(harness.peer, harness.cleanup_request)
-       assert io.actions == ["cleanup", "finalize_tombstone"]
-       proof = io.finalized_proof
-       assert proof is not None
-       started = harness.started_record()
-       assert proof.journal_sequence == started.sequence
-       assert proof.journal_digest == record_digest(started)
-       assert proof.operation_id == started.operation_identity
-       assert proof.attempt_id == str(started.attempt_id)
-       assert proof.phase == "mutation-started"
-       assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(io.point)
-   ```
-
-   `_FakeIO` at `test_external_boot_authority.py:154` already stubs `finalize_tombstone`; extend it
-   to record the proof and to append `"finalize_tombstone"` to its action list. Build
-   `_service_harness` from the repository/journal doubles in
-   `tests/providers/external_boot_authority/service_support.py`; import them rather than writing new
-   ones.
-
-2. Run `uv run python -m pytest tests/providers/local_libvirt/test_external_boot_authority.py -q`.
-   Expect a failure: `io.actions == ["cleanup"]`.
-3. Add the idempotency test:
-
-   ```python
-   async def test_a_retried_cleanup_commit_succeeds_against_the_finalized_absence() -> None:
-       io = _FakeIO()
-       harness = _service_harness(_adapter(io))
-       await harness.acknowledge()
-       await harness.service.execute_mutation(harness.peer, harness.cleanup_request)
-       io.recovery_point_absent = True            # what finalization leaves behind
-       await harness.acknowledge(generation=2)
-       await harness.service.execute_mutation(harness.peer, harness.cleanup_request_2)
-       assert io.actions == ["cleanup", "finalize_tombstone"]
-   ```
-
-   `recovery_point_absent` makes `_FakeIO`'s `reopen_binding` raise `FileNotFoundError`, which is
-   what the real store raises once the recovery directory is gone. The assertion is that the action
-   list did **not** grow: no second `cleanup` and no second `finalize_tombstone`.
-
-4. Add the negative arm, so the branch cannot be widened silently:
-
-   ```python
-   async def test_an_unreadable_recovery_point_is_still_a_conflict_on_cleanup() -> None:
-       io = _FakeIO()
-       io.recovery_point_error = OSError("device busy")
-       instance = _adapter(io)
-       with pytest.raises(AuthorityServiceError) as raised:
-           await instance.commit(_request(AuthorityOperation.CLEANUP), _context(AuthorityOperation.CLEANUP))
-       assert raised.value.category == "provider_conflict"
-
-   async def test_a_teardown_commit_does_not_finalize_the_tombstone() -> None:
-       io = _FakeIO()
-       io.recovery_point_absent = True
-       instance = _adapter(io)
-       with pytest.raises(AuthorityServiceError) as raised:
-           await instance.commit(_request(AuthorityOperation.TEARDOWN), _context(AuthorityOperation.TEARDOWN))
-       assert raised.value.category == "provider_conflict"
-   ```
-
-   These two may call `instance.commit` directly: they assert the adapter's own bounding, and the
-   service cannot construct the states they need.
-
-5. Run `uv run python -m pytest tests/providers/local_libvirt/test_external_boot_authority.py -q`.
-   Expect failures on all four new tests.
-6. Change the adapter's public signature:
-
-   ```python
-   async def commit(
-       self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
-   ) -> AuthorityObservationV1:
-       """Apply one named commit point, then report the resulting observation."""
-       operation = self._require_permitted_commit_point(request, context)
-       self._require_admissible_generation(request)
-       return await asyncio.to_thread(self._commit, request, operation, context)
-   ```
-
-7. Rewrite `_require_permitted_commit_point` to take the context. Drop the
-   `AuthorityOperation(commit_point)` parse — the model already guarantees a member — and keep both
-   remaining checks with #2199's reasoning intact:
-
-   ```python
-   @staticmethod
-   def _require_permitted_commit_point(
-       request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
-   ) -> AuthorityOperation:
-       """Refuse an illegal commit point before any provider call.
-
-       The context's ``commit_point`` is an ``AuthorityOperation``, so the member itself is
-       model-guaranteed. Two things still are not: that the operation is legal for the
-       request's purpose, and that it is the same operation the request carries. Without the
-       second, a request could journal one operation while driving the provider through
-       another, and the journal record — the evidence ADR-0584 makes authoritative for what
-       mutation may have happened — would name the wrong one.
-       """
-       operation = context.commit_point
-       if not operation_is_permitted(request.purpose, operation):
-           raise AuthorityServiceError("provider_conflict")
-       if operation is not request.operation:
-           raise AuthorityServiceError("provider_conflict")
-       return operation
-   ```
-
-8. Add the proven-absence probe beside `_resolve_point`, leaving `_resolve_point` itself unchanged
-   so `_observe` keeps classifying an unresolvable point as `unreadable`:
-
-   ```python
-   def _recovery_record_is_absent(
-       self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
-   ) -> bool:
-       """Prove the durable recovery record is gone rather than merely unreadable.
-
-       Only ``FileNotFoundError`` from the owner-derived path counts. A read that failed for
-       any other reason is not absence and must not be treated as a completed cleanup.
-       """
-       try:
-           self._ports.recovery_point(binding, authority)
-       except FileNotFoundError:
-           return True
-       except Exception:  # noqa: BLE001 - an unreadable point is not a proven absence
-           logger.exception("external-boot recovery point is unresolvable")
-       return False
-   ```
-
-9. Add the cleanup branch to `_commit`, and thread the context into `_apply`:
-
-   ```python
-   def _commit(
-       self,
-       request: AuthorityMutationRequestV1,
-       operation: AuthorityOperation,
-       context: AuthorityCommitContextV1,
-   ) -> AuthorityObservationV1:
-       binding = _activation_binding(request)
-       authority = _authority_ref(request)
-       point = self._resolve_point(binding, authority)
-       if (
-           point is None
-           and operation is AuthorityOperation.CLEANUP
-           and self._recovery_record_is_absent(binding, authority)
-       ):
-           # Cleanup destroys the record it commits against: publish_tombstone unlinks the
-           # metadata and finalization removes the directory. A retried cleanup therefore
-           # finds a proven absence, which is this operation already accounted for. No
-           # provider mutation runs, so no deletion authority is exercised here.
-           return self._observation(request, binding, authority, None)
-       matched = self._require_matching_identities(request, point)
-       if not _ownership_is_proven(
-           request, matched, require_named=operation in _DELETING_OPERATIONS
-       ):
-           # Quarantine: the objects are neither reused for a mutation nor deleted, and
-           # the state is reported as the conflict ADR-0584 calls an unowned observation.
-           raise AuthorityServiceError("provider_conflict")
-       if operation in _MUTATING_OPERATIONS:
-           self._apply(operation, matched, authority, context)
-       return self._observation(request, binding, authority, matched)
-   ```
-
-10. In `_apply`, split the `{CLEANUP, TEARDOWN}` arm and finalize on `CLEANUP` only:
-
-    ```python
-    elif operation is AuthorityOperation.CLEANUP:
-        self._ports.cleanup(point, authority)
-        self._ports.finalize_cleanup_tombstone(point, _cleanup_proof(context, point), authority)
-    elif operation is AuthorityOperation.TEARDOWN:
-        # Teardown publishes a tombstone through the same primitive and has no finalizer
-        # yet; that gap belongs to the local adapter, not to this seam (ADR-0591).
-        self._ports.cleanup(point, authority)
-    ```
-
-    Add `context: AuthorityCommitContextV1` as `_apply`'s fourth parameter. Leave the surrounding
-    `except AuthorityServiceError: raise` / `except Exception:` wrapper unchanged, so a
-    finalization `ValueError` becomes a bounded `provider_conflict`.
-
-11. Add the module-level proof builder beside `_ownership_is_proven`:
-
-    ```python
-    def _cleanup_proof(
-        context: AuthorityCommitContextV1, point: RecoveryPoint
-    ) -> FinalizeCleanupProof:
-        """Tie this cleanup to the exact authority record the service anchored for it.
-
-        Every field is either the recovery point this adapter resolved or a value the
-        authority read out of its own journal. Nothing here is defaulted or derived from
-        protocol input.
-        """
-        return FinalizeCleanupProof(
-            point_digest=LocalLibvirtExternalBoot.point_digest(point),
-            binding=point.binding,
-            operation_id=context.operation_identity,
-            attempt_id=str(context.attempt_id),
-            journal_sequence=context.journal_sequence,
-            journal_digest=context.journal_digest,
-        )
-    ```
-
-    Import `FinalizeCleanupProof` from
-    `kdive.providers.local_libvirt.lifecycle.boot.external_boot` in the existing import block.
-
-12. Run `uv run python -m pytest tests/providers/local_libvirt/test_external_boot_authority.py -q`.
-    Expect every test to pass.
-13. `just lint && just type`, then commit.
-
-**Acceptance.** A `cleanup` commit driven through the service calls `finalize_cleanup_tombstone`
-with a proof matching the anchored record; a retried cleanup performs no second provider mutation;
-an unreadable point and a teardown commit both stay `provider_conflict`.
-
-**Rollback.** No durable state is written by this task's tests; `_FakeIO` holds everything in
-memory.
+**Acceptance.** A cleanup commit driven through the service finalizes the tombstone with a proof
+matching the anchored record; a retried cleanup against a gone directory performs no second
+provider mutation; a live tombstone, an unreadable point and a teardown commit all stay as they
+are today.
 
 ## Task 4 — bind `target_xml` to its own digest
 
-**Where it fits.** Independent of Tasks 1–3 except that Task 3's proof needs the widened
-`operation_id`. Can be done first.
-
-**Files.** Modifies `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`. Tests in
-`tests/providers/local_libvirt/test_external_boot.py`; fixture updated in
+**Files.** `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`; tests in
+`tests/providers/local_libvirt/test_external_boot.py`; fixture in
 `tests/providers/contract/bindings/local_libvirt.py`.
 
 **Interfaces consumed.** `LocalRecoveryMetadataV1` (`:101`), `LocalPreStopIntentV1` (`:141`),
-`_metadata_extends_intent` (`:1977`), `TargetProjectionV1.digest` (`:226`),
-`FinalizeCleanupProof` (`:177`). All confirmed present at those lines.
+`_metadata_extends_intent` (`:1977`), `TargetProjectionV1.digest` (`:226`), `FinalizeCleanupProof`
+(`:177`). Test helpers that exist and must be reused: `_metadata(phase)` (`:565`),
+`_pre_stop(metadata)` (`:685`, derives the intent from the metadata dump so it inherits the new
+field automatically), `_real_io(root, preparation)` (`:3094`, returns
+`(RealLocalExternalBootIO, _RealSession)`), `_real_prepare(io, materialization)` (`:3109`).
+`_RealSession.define_xml` appends `f"define:{xml}"` to `preparation.actions` (`:1693-1694`).
+There is no `_RecordingSession` and no `_io_for` — do not reference them.
 
 **Steps.**
 
-1. Add these failing tests to `tests/providers/local_libvirt/test_external_boot.py`, one per record.
-   `_metadata()` at `:565` is the existing metadata builder; add a matching pre-stop builder if the
-   module does not already have one.
-
-   ```python
-   def test_metadata_refuses_a_substituted_target_xml() -> None:
-       metadata = _metadata()
-       values = metadata.model_dump(mode="json", by_alias=True)
-       with pytest.raises(ValidationError, match="target domain XML digest"):
-           LocalRecoveryMetadataV1.model_validate(values | {"target_xml": _SOURCE_XML + " "})
-
-   def test_pre_stop_intent_refuses_a_substituted_target_xml() -> None:
-       intent = _pre_stop_intent()
-       values = intent.model_dump(mode="json", by_alias=True)
-       with pytest.raises(ValidationError, match="target domain XML digest"):
-           LocalPreStopIntentV1.model_validate(values | {"target_xml": _SOURCE_XML + " "})
-   ```
-
-2. Add the on-disk substitution test, which is the one that covers the reachable path. It writes a
-   record through the store, rewrites `target_xml` in the file, and asserts the reopen is refused:
-
-   ```python
-   def test_a_target_xml_substituted_on_disk_is_refused_at_reopen(tmp_path: Path) -> None:
-       root = tmp_path / "recovery"
-       root.mkdir(mode=0o700)
-       metadata = _metadata("recovered")
-       with RecoveryMetadataStore(root) as store:
-           reference = store.publish(metadata)
-           name = recovery_directory_name(reference, metadata.binding)
-           record = root / name / "intent.json"
-           payload = json.loads(record.read_text())
-           payload["target_xml"] = payload["target_xml"] + " "
-           record.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-           with pytest.raises(ValueError):
-               store.reopen(reference, metadata.binding)
-   ```
-
-   If `store.publish` is not the right entry point for a `"recovered"` record in this module, use
-   whichever publish/complete helper the surrounding tests already use for the same phase; read
-   them first.
-
-3. Add the reachability test the criterion names — the recovery path never reaches `define_xml`
-   with substituted bytes. Drive `define_target` through the existing session double and assert the
-   substituted record never gets that far:
-
-   ```python
-   def test_define_target_never_defines_a_substituted_target_xml() -> None:
-       metadata = _metadata("module-restored")
-       substituted = metadata.model_dump(mode="json", by_alias=True) | {
-           "target_xml": metadata.target_xml + " "
-       }
-       with pytest.raises(ValidationError):
-           LocalRecoveryMetadataV1.model_validate(substituted)
-       # The bytes never reach a session: validation is the only door into _host_state and
-       # define_target, both of which take a LocalRecoveryMetadataV1.
-       session = _RecordingSession()
-       ports = _io_for(session, _metadata("module-restored"))
-       ports.define_target(_metadata("module-restored"))
-       assert metadata.target_xml + " " not in session.defined
-   ```
-
-   Use whichever recording session double the module already provides; do not add a new one.
-
-4. Add the projection-digest pin:
-
-   ```python
-   def test_target_projection_digest_still_measures_projection_inputs() -> None:
-       projection = _projection()
-       assert projection.digest == "sha256:" + hashlib.sha256(projection.canonical_bytes()).hexdigest()
-       assert "<domain" not in projection.canonical_bytes().decode()
-       changed = projection.model_copy(update={"cmdline": projection.cmdline + " quiet"})
-       assert changed.digest != projection.digest
-   ```
-
-5. Run `uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py -q`. Expect
-   failures on the two digest tests and the on-disk test (no `target_xml_sha256` field yet, so
-   validation accepts the substitution).
-6. Add `target_xml_sha256: Digest` to `LocalRecoveryMetadataV1` immediately after
-   `target_projection_sha256` (`:119`) and to `LocalPreStopIntentV1` after `:159`.
-7. Extend both validators. In each, after the existing `source_xml` check, add:
-
-   ```python
-   target_digest = "sha256:" + hashlib.sha256(self.target_xml.encode()).hexdigest()
-   if target_digest != self.target_xml_sha256:
-       raise ValueError("target domain XML digest does not match bytes")
-   ```
-
-   Rename each validator from `_source_xml_matches_digest` to `_domain_xml_matches_digests`, since
-   it now binds both.
-8. Add `"target_xml_sha256"` to `_metadata_extends_intent`'s `shared` tuple (`:1977-1998`),
-   immediately after `"target_projection_sha256"`.
-9. Widen `FinalizeCleanupProof.operation_id` (`:180`) from the UUID pattern to the shared
-   contract's bounded-text rule, and say why in one line:
-
-   ```python
-   # The authority's operation identifier is `_AuthorityBinding.operation_identity`, bounded
-   # text (ADR-0584), not a UUID. Deriving one here would make this field synthesized.
-   operation_id: Annotated[str, Field(min_length=1, max_length=255)]
-   ```
-
-   Leave `attempt_id`'s UUID pattern alone: the journal's `attempt_id` really is a `UUID`.
-10. Replace the stale comment at `:1538-1541` in `finalize_cleanup_tombstone`:
-
-    ```python
-    # The authority supplies the anchored mutation-started proof as
-    # AuthorityCommitContextV1 (ADR-0591). The local seam deliberately does not decode it;
-    # it compares the closed owner/point fields and handles present or post-delete absence
-    # idempotently.
-    ```
-
-11. Update every construction site to supply `target_xml_sha256`:
+1. Write two failing validator tests, one per record: dump the model, substitute `target_xml`, and
+   assert `ValidationError` matching `target domain XML digest`.
+2. Write the failing on-disk test: publish a record through `RecoveryMetadataStore`, rewrite
+   `target_xml` inside `intent.json`, and assert `store.reopen(...)` refuses.
+3. Write the criterion-10 reachability test, and make it non-vacuous. **The fault it must catch is
+   deleting the `target_xml_sha256` comparison from the validator**; with the comparison gone the
+   substituted record validates, `activate` proceeds, and a `define:` action is recorded. So the
+   test must hand the substituted record to the real path, not an unsubstituted one:
+   build the store and `_real_io` harness, write the metadata, substitute `target_xml` on disk,
+   call `LocalLibvirtExternalBoot(io).activate(point, authority)`, and assert it raises **and**
+   that no entry in `preparation.actions` starts with `"define:"`. Confirm in Task 5 that removing
+   the comparison turns this red on its own assertion.
+4. Write the projection pin: `TargetProjectionV1.digest` equals `sha256` over `canonical_bytes()`,
+   the canonical bytes contain no XML, and the digest changes when a projection input changes.
+5. Run `uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py -q` — expect
+   the first three to fail.
+6. Add `target_xml_sha256: Digest` to `LocalRecoveryMetadataV1` after `target_projection_sha256`
+   (`:119`) and to `LocalPreStopIntentV1` after `:159`.
+7. Extend both validators with the `target_xml` digest comparison beside the existing `source_xml`
+   one, raising `ValueError("target domain XML digest does not match bytes")`. Rename each
+   validator from `_source_xml_matches_digest` to `_domain_xml_matches_digests`.
+8. Add `"target_xml_sha256"` to `_metadata_extends_intent`'s `shared` tuple, after
+   `"target_projection_sha256"`. Both records must be bound: the function compares them
+   field-for-field, so a consistently tampered pair would otherwise pass.
+9. Widen `FinalizeCleanupProof.operation_id` (`:180`) from `^[0-9a-f-]{36}$` to bounded text
+   (`min_length=1, max_length=255`), with a one-line comment that the authority's operation
+   identifier is `_AuthorityBinding.operation_identity` — bounded text per ADR-0584, not a UUID —
+   and that deriving one would make the field synthesized. Leave `attempt_id`'s UUID pattern alone;
+   the journal's `attempt_id` really is a `UUID`.
+10. Replace the stale comment at `:1538-1541` in `finalize_cleanup_tombstone`: the authority now
+    supplies the anchored `mutation-started` proof as `AuthorityCommitContextV1` (ADR-0592); the
+    local seam still does not decode it and still compares the closed owner/point fields.
+11. Add `target_xml_sha256` at the three construction sites:
     `tests/providers/contract/bindings/local_libvirt.py:93`,
     `tests/providers/local_libvirt/test_external_boot_authority.py:96`, and
-    `tests/providers/local_libvirt/test_external_boot.py:565`, each already computing
-    `source_xml_sha256` the same way one line above.
-12. Run `uv run python -m pytest tests/providers/local_libvirt tests/providers/contract -q`. Expect
-    every test to pass.
-13. `just lint && just type`, then commit.
+    `tests/providers/local_libvirt/test_external_boot.py:565`. Each already computes
+    `source_xml_sha256` one line above. `_pre_stop` needs no change — it validates from the
+    metadata dump.
+12. `uv run python -m pytest tests/providers/local_libvirt tests/providers/contract -q` — green.
+    `just lint && just type`, commit.
 
-**Acceptance.** Both records refuse a substituted `target_xml`; `_metadata_extends_intent` compares
-the new field; `TargetProjectionV1.digest` is unchanged; `operation_id` carries a real operation
-identity.
+**Acceptance.** Both records refuse a substituted `target_xml`; the recovery path never reaches
+`define_xml` with substituted bytes, proved by a test that goes red when the comparison is removed;
+`_metadata_extends_intent` compares the new field; `TargetProjectionV1.digest` is unchanged.
+
+**Rollback.** Reverting this task leaves any record written by the new build unreadable by the old
+one, for the canonicality reason in Global Constraints. That is acceptable only while the feature
+is dormant, which is the same window the ordering constraint names.
 
 ## Task 5 — bite proofs and the full gate
 
-**Where it fits.** Last. Nothing depends on it; everything depends on it being honest.
-
 **Steps.**
 
-1. For each new test added in Tasks 1–4, with the implementation already committed: inject one
-   controlled fault into the source it covers (for example, drop the `phase` guard in `for_record`;
-   drop the `head.digest` arm in `_require_anchored_head`; drop the
-   `finalize_cleanup_tombstone` call in `_apply`; drop the `target_xml_sha256` comparison).
-2. Run that test alone and require a **clean assertion failure** naming the asserted value — not a
-   collection error, not an import error. A collection error means the test does not bite; fix the
-   test, not the fault.
-3. `git checkout -- <file>` to revert, and verify byte-identity with `sha256sum <file>` against the
-   value recorded before the injection.
-4. Record each fault, the observed failure line, and the two matching hashes in the commit message
-   or the PR body.
-5. Run the full gate bare, capturing output without displacing the exit code:
-
-   ```sh
-   just ci > /tmp/ci-2207.log 2>&1 < /dev/null
-   ```
-
-   Expect exit code 0. Read the log for the recipe list; do not pipe the recipe.
+1. With the implementation committed, record `sha256sum` for each source file you are about to
+   perturb.
+2. Inject one controlled fault per new test and run that test alone. At minimum:
+   drop the `phase` guard in `for_record`; drop the `head.digest` arm in `_require_anchored_head`;
+   widen `_require_anchored_head` to compare the bare head (must turn the takeover-overlap test
+   red); drop the `never-began` anchor; drop the `finalize_cleanup_tombstone` call in `_apply`;
+   change the already-accounted probe to key on the record instead of the directory (must turn the
+   tombstone-live test red); pass no `phase` in the proof builder (must turn the proof-phase
+   assertion red); delete the `target_xml_sha256` comparison (must turn both validator tests and
+   the `define_xml` reachability test red); add a `journal_sequence` field to
+   `AuthorityMutationRequestV1` (must turn the field-set pin red).
+3. Each must produce a **clean assertion failure naming the asserted value** — not a collection or
+   import error. A collection error means the test does not bite; fix the test, not the fault.
+4. `git checkout -- <file>` and confirm the `sha256sum` matches the pre-injection value.
+5. Record every fault, its observed failure line, and the matching hashes in the PR body.
+6. Run the gate bare: `just ci > /tmp/ci-2207.log 2>&1 < /dev/null`. Expect exit 0. A `failed=1`
+   inside `test-ansible`'s output is an intended negative case in
+   `run-remote-module-appliance.sh` and is not a real red.
 
 **Acceptance.** Every new test has an observed clean assertion failure under a controlled fault and
 a byte-identical revert. `just ci` exits 0.
 
 ## Deferrals carried into this plan
 
-None yet. Any deferral a `$trial-loop` run on this branch disposes of is appended here with its
-owning record path or tracker issue before the branch ships.
+None. The design review's one unclosable concern — a crash between `cleanup()` and its
+finalization strands a tombstone with no recovery path — is recorded as a consequence with its
+non-regression boundary in ADR-0592 rather than deferred, because the fix needs a
+`FinalizeCleanupProof`/`CleanupTombstoneV1` shape change that belongs to ADR-0586.
