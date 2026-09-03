@@ -255,6 +255,49 @@ def test_zombie_job_dead_lettered_with_lease_expired(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_zombie_authority_marked_job_is_left_for_the_authority_path(migrated_url: str) -> None:
+    """An authority-marked job is never terminalized by this sweep.
+
+    ``commit_external_boot_authority_result`` writes the jobs row under SECURITY DEFINER and
+    is the only path permitted to terminalize one. This sweep is raw SQL that 0122 never
+    fenced, because a marked job could not be claimed and so never held a lapsing lease;
+    0127_reopen_external_boot_claim_lane.sql makes that reachable (#2201). Reaping one here
+    would fail the job and drive its Run to failed from outside that commit.
+
+    The marked job is left ``running`` with an expired lease. Nothing reaps it until #2203
+    adds the detection lane that routes it to the authority path.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            marked = await seed_running_job(
+                seed,
+                "dk-zombie-marked",
+                payload={"external_boot_authority_v1": {"purpose": "activate"}},
+                lease_seconds=-60,
+                attempt=3,
+                max_attempts=3,
+            )
+            unmarked = await seed_running_job(
+                seed, "dk-zombie-unmarked", lease_seconds=-60, attempt=3, max_attempts=3
+            )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, repair_abandoned_jobs)
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT id, state, error_category FROM jobs WHERE id = ANY(%s) ORDER BY dedup_key",
+                ([marked, unmarked],),
+            )
+            rows = await cur.fetchall()
+        assert rows == [
+            (marked, "running", None),
+            (unmarked, "failed", "lease_expired"),
+        ]
+
+    asyncio.run(_run())
+
+
 def test_zombie_job_compensates_owning_run(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
