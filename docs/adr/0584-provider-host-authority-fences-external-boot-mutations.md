@@ -237,6 +237,13 @@ across authority restart does not advertise external-boot v1.
   responses and restarts classifiable without recapturing source state.
 - Existing non-external install, boot, control, and capture paths are unchanged. Moving another
   mutation family behind this authority requires a later decision.
+- Accounted cleanup is now evidenced end to end. The provider adapter receives the `sequence` and
+  digest of the `mutation-started` record this authority anchored for that same mutation, as the
+  service-constructed `AuthorityCommitContextV1` that [ADR-0591](0591-authority-commit-context-carries-the-anchored-journal-proof.md)
+  adds to the `commit` seam. The local adapter's `cleanup` commit point builds its finalization
+  proof from that context, so the tombstone ADR-0586 retains is discharged against this journal
+  rather than against an assertion. The `teardown` commit point still publishes a tombstone with no
+  finalizer; that remains open and belongs to the local adapter.
 
 ## Considered & rejected
 
