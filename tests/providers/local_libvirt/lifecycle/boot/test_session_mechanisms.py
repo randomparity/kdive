@@ -6,6 +6,8 @@ import errno
 import io
 import os
 import stat
+import sys
+import types
 from pathlib import Path
 from typing import get_args
 from uuid import UUID
@@ -31,6 +33,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalOperationLane,
     LocalOperationLease,
     LocalPayloadCleanup,
+    open_libguestfs_guest,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 from kdive.providers.shared.runtime_paths import overlay_path
@@ -419,8 +422,12 @@ class TestPayloadCleanup:
         assert set(PAYLOAD_NAMES) == expected
 
 
-def _archived_session(
-    recovery_root: Path, artifacts: Path, *, active: bool
+def _session(
+    artifacts: Path,
+    *,
+    active: bool = False,
+    binding: ExternalBootActivationBinding = _BINDING,
+    **mechanisms: object,
 ) -> LocalExternalBootSession:
     """Open a real session bound to `_BINDING`, with a real artifact descriptor.
 
@@ -430,7 +437,7 @@ def _archived_session(
     binding would aim the archive removal at a directory that never existed, hit the
     idempotence rule, and report success. That is the trap that would make this proof vacuous.
     """
-    system_id = UUID(_BINDING.system_id)
+    system_id = UUID(binding.system_id)
     events: list[str] = []
     domain = Domain(events, _xml(overlay=overlay_path(system_id), system_id=system_id))
     domain.active = active
@@ -442,14 +449,17 @@ def _archived_session(
         ),
         open_guest=lambda: Guest(events),
         worker_pid=4242,
+        # The production builder leaves `open_overlay` on its real default, which would open
+        # `/var/lib/kdive/rootfs/...`. Overridden here so these tests exercise the session,
+        # not the host filesystem layout.
         open_overlay=lambda _path: os.open(os.devnull, os.O_RDONLY),
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=os.close,
-        cleanup_payloads=LocalPayloadCleanup(recovery_root).cleanup,
+        **mechanisms,  # ty: ignore[invalid-argument-type]
     )
-    lease = LocalOperationLease(system_id=system_id, binding=_BINDING)
+    lease = LocalOperationLease(system_id=system_id, binding=binding)
     expected = ExpectedOperationOwnership(
-        system_id, UUID(_BINDING.run_id), UUID(_BINDING.activation_id)
+        system_id, UUID(binding.run_id), UUID(binding.activation_id)
     )
     return factory.open(lease, expected)
 
@@ -519,7 +529,9 @@ class TestCleanupReachability:
             # Drive the session, not the mechanism. Calling `LocalPayloadCleanup.cleanup`
             # directly bypasses `require_inactive()`, so this proof would go green whether or
             # not that gate blocks the real path.
-            session = _archived_session(recovery_root, artifacts, active=False)
+            session = _session(
+                artifacts, cleanup_payloads=LocalPayloadCleanup(recovery_root).cleanup
+            )
             session.cleanup_payloads()
             session.close()
 
@@ -536,7 +548,11 @@ class TestCleanupReachability:
 
         with RecoveryMetadataStore(recovery_root) as store:
             _archived_activation(store)
-            session = _archived_session(recovery_root, artifacts, active=True)
+            session = _session(
+                artifacts,
+                active=True,
+                cleanup_payloads=LocalPayloadCleanup(recovery_root).cleanup,
+            )
             with pytest.raises(RuntimeError, match="domain must be inactive"):
                 session.cleanup_payloads()
             session.close()
@@ -552,3 +568,50 @@ class TestCleanupReachability:
     # `record_phase(..., "recovered")` only from the branch requiring `active`. Closing that
     # gap needs an integration-level test over the whole recover-then-cleanup path, which is
     # recorded as a residual rather than written here.
+
+
+class _RecordingGuestFS:
+    """A libguestfs stand-in that records every call the opener might wrongly make."""
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> object:
+        def record(*_args: object, **_kwargs: object) -> None:
+            self.calls.append(name)
+
+        return record
+
+
+class TestOpenGuest:
+    def test_open_guest_attaches_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        handles: list[_RecordingGuestFS] = []
+
+        def build(**kwargs: object) -> _RecordingGuestFS:
+            handles.append(_RecordingGuestFS(**kwargs))
+            return handles[-1]
+
+        module = types.ModuleType("guestfs")
+        module.GuestFS = build  # ty: ignore[unresolved-attribute]
+        monkeypatch.setitem(sys.modules, "guestfs", module)
+
+        guest = open_libguestfs_guest()
+
+        assert guest is handles[0]
+        assert handles[0].kwargs == {"python_return_dict": True}
+        # `_ConcreteSession._open_guest_context` owns the drive, launch and mount, and only
+        # after `require_inactive()`. An opener that did any of it here would move guest
+        # access outside that gate.
+        assert handles[0].calls == []
+
+    def test_session_refuses_guest_access_while_the_domain_is_active(self, tmp_path: Path) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        session = _session(artifacts, active=True)
+        try:
+            # The refusal comes from the existing `require_inactive` path, not from a new
+            # check in the opener -- the opener is reached only inside the guest context.
+            with pytest.raises(RuntimeError, match="domain must be inactive"), session.guest():
+                pass
+        finally:
+            session.close()

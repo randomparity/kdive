@@ -12,6 +12,7 @@ import os
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
@@ -27,6 +28,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     OperationOwnership,
     PinnedOperationOwnership,
+    _Guest,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 
@@ -204,3 +206,15 @@ class LocalPayloadCleanup:
                 os.close(recovery_fd)
         finally:
             os.close(root_fd)
+
+
+def open_libguestfs_guest() -> _Guest:
+    """Return an unlaunched libguestfs handle.
+
+    It attaches no drive, launches nothing and mounts nothing. `_ConcreteSession`'s
+    `_open_guest_context` owns all of that, and only after `require_inactive()`, so an opener
+    that did any of it here would move guest access outside that gate.
+    """
+    import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+
+    return cast("_Guest", guestfs.GuestFS(python_return_dict=True))
