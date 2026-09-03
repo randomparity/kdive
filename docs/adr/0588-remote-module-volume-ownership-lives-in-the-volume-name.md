@@ -68,11 +68,7 @@ renders; the grammar covers them because a kind it omits is a volume the sweep c
 foreign and leaks forever. The longest name the grammar can render is 135 bytes —
 `13 + 36 + 1 + 36 + 1 + 32 + 1 + 15`, the last term being `reaping.journal`. Measured on the same
 host, a dir-pool volume name round-trips byte-identically up to 255 bytes and is refused at 256 —
-the filesystem `NAME_MAX` a dir pool inherits, surfacing *after* a clean parse as libvirt error
-code 38, `File name too long`, from the `open()` the pool performs, and not as a parse refusal
-from libvirt's own name grammar (which would be code 8) — so the grammar holds 120 bytes of
-headroom. A test for the 256-byte case asserts the host failure class, not an invalid-argument
-one.
+the filesystem `NAME_MAX` a dir pool inherits — so the grammar holds 120 bytes of headroom.
 
 Recognition is a single anchored parse of the whole name. A name that does not match is a foreign
 volume: never read further, never deleted, never counted. There is no prefix match, no partial
@@ -174,6 +170,28 @@ provider renders, or admits a foreign shape fails the budget, coverage, and nega
 sweep that keys retention on the running attempt rather than the un-discharged obligation deletes
 a completed-but-unrestored attempt's scratch volume, and the test for that case is the one that
 fails.
+
+### Amendment (2026-09-03): the 256-byte refusal is a host `NAME_MAX` error, not a name-grammar rejection (#2165)
+
+This is an amendment rather than an edit to the prose above because the record is merged and
+`## Decision` is append-only. It qualifies one claim in *The name carries the whole owner tuple*:
+that a dir-pool volume name "round-trips byte-identically up to 255 bytes and is refused at 256 —
+the filesystem `NAME_MAX` a dir pool inherits". That sentence records the boundary but not how the
+refusal arrives, and the two candidate failure classes are not interchangeable.
+
+The refusal at 256 bytes happens *after* libvirt has cleanly parsed and accepted the request. It
+is the filesystem `NAME_MAX` surfacing from the `open()` the dir pool performs, reported as
+libvirt error code 38, `File name too long`. It is not a rejection from libvirt's own name
+grammar, which would be code 8. Probed against libvirt 12.0.0 on the same host: 255 bytes creates
+and round-trips byte-identically; 256 fails with code 38.
+
+The distinction is load-bearing for the children of #2129 that write name-grammar tests against
+this record. Code 8 is libvirt refusing a document it parsed and judged invalid; code 38 is a host
+fact surfacing after acceptance. A test for the 256-byte case therefore asserts the host failure
+class, not an invalid-argument one.
+
+The budget itself is unchanged: 135 bytes rendered against a 255-byte limit, 120 bytes of
+headroom.
 
 ## Consequences
 
