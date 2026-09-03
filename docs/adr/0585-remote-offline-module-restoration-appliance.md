@@ -138,6 +138,26 @@ redactor before persistence and is limited to operation phase, stable error code
 counts, and manifests. File content, directory listings, credentials, host paths, and raw tool
 output are never returned or persisted.
 
+### Amendment (2026-09-02): the durable owner is the volume name (#2157)
+
+This is an amendment because
+[ADR-0588](0588-remote-module-volume-ownership-lives-in-the-volume-name.md) — **Proposed**, and
+Accepted when the pull request implementing it merges — supersedes only the unnamed ownership
+channel behind two claims above, and leaves the rest of this decision in force.
+The claims it qualifies are "deletes only attempt-scoped staging volumes whose durable owner and
+digest match" and "Reaper logic applies the same identity checks after worker death" in the
+preceding section: this record never named the channel carrying those durable identities, and the
+libvirt storage-volume `<metadata>` element the implementation used does not persist. ADR-0588
+carries the owner tuple in the volume name instead, and requires the durable attempt row to be
+written before any of an attempt's volumes are created, which qualifies "Core stores the result
+and the exact scratch-volume reference as part of the ADR-0583 recovery point before activation"
+under *Durable capture and identity* by putting one earlier durable write ahead of it. ADR-0588
+also states, rather than changes, what the preceding section requires of reaping: the set a sweep
+retains against is the set of un-discharged recovery obligations, so a scratch volume stays
+"retained until recovery or successful baseline commitment makes it unnecessary" even though its
+writing attempt has ended. The appliance, isolation, retry, restoration, and teardown decisions
+here remain in force.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor
