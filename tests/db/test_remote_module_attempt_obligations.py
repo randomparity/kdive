@@ -19,6 +19,12 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
     RetainedModuleAttempt,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleRecoveryRefV1,
+    RemoteModuleResultV1,
+    identity_for,
+)
 
 _PLAN = "sha256:" + "a" * 64
 _DIGEST = "sha256:" + "b" * 64
@@ -84,6 +90,12 @@ def _operation(attempt: ModuleAttempt) -> dict[str, Any]:
 
 
 def _result(attempt: ModuleAttempt) -> dict[str, Any]:
+    """A successful `restored` result, complete enough for RemoteModuleResultV1 to accept it.
+
+    Its shape is the one `_validate_terminal_evidence` demands of a reap marker: the full
+    nine-field identity, `installed_manifest` present, exactly one capture form, and the counts
+    absent — which is what `restored` requires.
+    """
     return {
         "protocol": "remote-module-result-v1",
         "status": "success",
@@ -93,6 +105,12 @@ def _result(attempt: ModuleAttempt) -> dict[str, Any]:
         "plan_identity": _PLAN,
         "operation_nonce": attempt.operation_nonce,
         "appliance_image_digest": _DIGEST,
+        "release": "6.12.0",
+        "root_volume_key": "kdive-module-root",
+        "root_volume_identity": _DIGEST,
+        "source_manifest": _MANIFEST,
+        "installed_manifest": _MANIFEST,
+        "capture_absent": True,
     }
 
 
@@ -280,6 +298,75 @@ def test_terminal_evidence_round_trips_and_is_write_once(migrated_url: str) -> N
                         (Jsonb(changed), *attempt.key),
                     )
             assert await repo.read_terminal_evidence(conn, attempt) == evidence
+
+    asyncio.run(_run())
+
+
+def test_real_documents_survive_the_jsonb_round_trip_byte_for_byte(migrated_url: str) -> None:
+    """A stored document still re-canonicalizes to the exact bytes its identity digest covers.
+
+    ``jsonb`` stores a normalized value, not bytes: PostgreSQL reorders keys, drops insignificant
+    whitespace, and canonicalizes numbers on ingest. ``from_canonical_json`` compares
+    ``value.to_canonical_json() != data`` and rejects anything that is not already canonical, so a
+    lossy round trip would break every reap reader for reasons unrelated to the data.
+
+    It is safe here for reasons that are properties of these documents, not of ``jsonb``: the
+    canonical form is ``sort_keys=True`` with compact separators, so PostgreSQL's key ordering and
+    whitespace cannot matter; every field is a string, bool, int or nested object, with no float
+    for ``numeric`` to reformat; and a canonical document carries no nulls for ``exclude_none`` to
+    disagree about. This exercises the real classes rather than restating that argument, so the
+    day one stops holding — #2176 owns this serialization and is changing it — this fails.
+
+    The identity digests are stored in their own columns, computed from the original bytes and
+    never re-derived from the readback, which is why the assertion below can be an equality
+    against the column rather than a recomputation trusted on faith.
+    """
+
+    async def _run() -> None:
+        repo = RemoteModuleAttemptObligationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            attempt = _attempt(system_id, run_id)
+            operation = RemoteModuleOperationV1.model_validate(_operation(attempt))
+            result = RemoteModuleResultV1.model_validate(_result(attempt))
+            reference = RemoteModuleRecoveryRefV1.model_validate(
+                _recovery_reference(attempt)
+                | {
+                    "operation_identity": identity_for(operation),
+                    "result_identity": identity_for(result),
+                }
+            )
+
+            evidence = replace(
+                _evidence(attempt),
+                terminal_operation_identity=identity_for(operation),
+                terminal_result_identity=identity_for(result),
+                recovery_reference=reference.model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                ),
+            )
+            await repo.open_mutation_obligation(conn, attempt)
+            await repo.record_terminal_evidence(conn, attempt, evidence)
+
+            stored = await repo.read_terminal_evidence(conn, attempt)
+            assert stored is not None
+            round_tripped = RemoteModuleOperationV1.model_validate(stored.terminal_operation)
+            assert round_tripped.to_canonical_json() == operation.to_canonical_json()
+            assert identity_for(round_tripped) == stored.terminal_operation_identity
+            # The strict reader itself, on bytes rebuilt from the readback rather than kept.
+            assert (
+                RemoteModuleOperationV1.from_canonical_json(round_tripped.to_canonical_json())
+                == operation
+            )
+
+            round_tripped_result = RemoteModuleResultV1.model_validate(stored.terminal_result)
+            assert round_tripped_result.to_canonical_json() == result.to_canonical_json()
+            assert identity_for(round_tripped_result) == stored.terminal_result_identity
+
+            round_tripped_reference = RemoteModuleRecoveryRefV1.model_validate(
+                stored.recovery_reference
+            )
+            assert round_tripped_reference.to_canonical_json() == reference.to_canonical_json()
 
     asyncio.run(_run())
 

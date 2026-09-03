@@ -26,7 +26,33 @@
 --
 -- The terminal evidence is the payload the discarded `attempt-reap` volume metadata element
 -- carried. Libvirt does not persist <metadata> on a storage volume (ADR-0588), so this row is the
--- only source its readers have.
+-- only source its readers have. The recovery reference is here for the same reason: ADR-0588
+-- moved ownership into the volume name, and a 135-byte name cannot carry a nine-field document,
+-- so after that decision the reference has no durable home unless this row gives it one.
+--
+-- The three documents are jsonb, following 0121's `materialization` / `recovery_point` /
+-- `terminal_evidence` columns, so this layer never has to know their field sets — a virtue while
+-- their serialization is still being settled elsewhere.
+--
+-- Read this before trusting a readback: **jsonb stores a normalized value, not bytes.** PostgreSQL
+-- reorders keys, drops insignificant whitespace, and canonicalizes numbers on ingest, so a
+-- document read out of these columns is NOT the byte string that was written. That matters because
+-- `RemoteModuleDocument.from_canonical_json` re-serializes what it parsed and rejects anything
+-- that differs, byte for byte.
+--
+-- The round trip is nonetheless exact for these three documents, for reasons that are properties
+-- of the documents rather than of jsonb: the canonical form sorts keys and uses compact
+-- separators, so neither PostgreSQL's key ordering nor its whitespace can matter; every field is a
+-- string, bool, int or nested object, with no float for `numeric` to reformat; and a canonical
+-- document carries no nulls, so nothing survives ingest for `exclude_none` to disagree about.
+-- Rebuild with `Model.model_validate(readback)` and take `to_canonical_json()` from the result;
+-- never assume `json.dumps(readback)` reproduces the original bytes.
+--
+-- The four identity digests are therefore their own columns, computed over the original bytes at
+-- write time and never re-derived from a readback. A digest recomputed from normalized jsonb would
+-- be checking the normalization, not the evidence.
+-- `test_real_documents_survive_the_jsonb_round_trip_byte_for_byte` holds all of this against the
+-- real document classes, so the day the argument above stops being true, it fails.
 
 CREATE TABLE remote_module_attempt_obligations (
     system_id                   uuid NOT NULL REFERENCES systems (id) ON DELETE CASCADE,
