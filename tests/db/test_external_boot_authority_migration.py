@@ -2402,8 +2402,10 @@ def test_no_external_boot_readiness_switch_exists(migrated_url: str) -> None:
     ``0127_reopen_external_boot_claim_lane.sql`` reverses that half deliberately (#2201),
     so the claim behaviour is asserted in
     ``tests/db/test_migration_0127_reopen_external_boot_claim_lane.py``. The generic
-    finalization half stays fenced and is asserted both there and by
-    ``test_protocol_three_and_generic_external_job_paths_remain_denied`` above.
+    finalization half stays fenced, and that same module asserts it for both
+    ``complete_worker_job`` and ``fail_worker_job``, on the definition text and
+    behaviourally. ``test_protocol_three_and_generic_external_job_paths_remain_denied``
+    above covers ``complete_worker_job`` only.
     """
     with psycopg.connect(migrated_url) as conn:
         functions = conn.execute(
