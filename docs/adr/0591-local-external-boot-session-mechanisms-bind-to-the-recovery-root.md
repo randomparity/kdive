@@ -61,10 +61,19 @@ easily it would pass a test.
 
 **The recovery root is the one configured host location, and the artifact root is a System/Run
 subtree beneath it.** `open_artifact_root(ownership)` opens `KDIVE_LIBVIRT_RECOVERY_ROOT`, then
-`str(ownership.system_id)`, then `ownership.binding.run_id`, each with
-`O_DIRECTORY|O_NOFOLLOW` and each validated by `_require_private_owned_directory` — a real
-directory, mode exactly 0700, owned by the running euid. Both child names are `CanonicalUuid`
-values, so neither can carry a separator or a traversal component. This matches the System/Run
+resolves `str(ownership.system_id)` and `ownership.binding.run_id` as children through
+`_open_or_create_private_child`, **creating either when absent** with mode 0700. Every open is
+`O_DIRECTORY|O_NOFOLLOW` and validated by `_require_private_owned_directory` — a real directory,
+mode exactly 0700, owned by the running euid — because `_open_or_create_private_child` delegates
+to `_open_private_directory` after its `mkdir`, so creation carries the identical guard as
+opening. Both child names are `CanonicalUuid` values, so neither can carry a separator or a
+traversal component.
+
+Creation is necessary, not incidental: #2210 provisions the per-slot recovery root and nothing
+below it, so an open-only resolution could never succeed for a System that has not run before. It
+is also not novel — `TargetProjectionStore.publish` already creates the same `<system>/<run>` pair
+with the same helper under an artifact root. This mechanism **writes** to the privileged recovery
+root, and every description of it says so. This matches the System/Run
 artifact directory ADR-0587 and the #2144 design already assume, and it keeps the per-activation
 recovery directories — named `<system_id>.<activation_id>`, with a separator no UUID contains —
 disjoint from it under the same root.
@@ -88,8 +97,8 @@ repeated cleanup after a crash converges instead of failing.
 **Running observation stays unbound, on its fail-closed default.** Local has no host-reachable
 channel into a *running* guest. The qemu-guest-agent is installed and enabled in every catalog
 image, but local's `render_domain_xml` emits no `<channel>` element at all, so the host half of
-the virtio channel does not exist and `qemuAgentCommand` fails deterministically against a local
-domain. Rendering that channel changes the domain XML of every local System, not only
+the virtio channel does not exist and there is nothing for `qemuAgentCommand` to reach. Rendering
+that channel changes the domain XML of every local System, not only
 external-boot ones, and is therefore its own change with its own tests and its own redefinition
 consequence for already-provisioned Systems. `observe_running` keeps
 `_unconfigured_observation`, which raises at first call — the loud partial-wiring failure this
@@ -111,6 +120,49 @@ untouched and stay the fallback for an unsupplied mechanism.
 would not be under a descriptor-scoped cleanup. That reachability is proven by a test that fails
 with the real "unexpected payload" error when cleanup is bound descriptor-scoped and passes when
 it is bound as decided here.
+
+**Cleanup and the recovery store must resolve one root, and the builder is what makes that so.**
+Cleanup opens `<recovery_root>/<system_id>.<activation_id>` using the root it was constructed
+with, while the directory actually holding `modules.tar` is the one
+`RecoveryMetadataStore(self._recovery_root)` uses — and that `_recovery_root` is a constructor
+argument of `RealLocalExternalBootIO`, which #2212 owns. If the two ever diverged, cleanup would
+open a path that does not exist, the idempotence rule would report success, and
+`finalize_tombstone` would raise for every archived activation: the exact state this record
+refuses to ship, arriving silently. A documented invariant is not a control, because it depends on
+a future change honouring it. So the composition builder returns the resolved root alongside the
+factory, as one value, and that is the value #2212 passes the store. A mismatch then requires
+deliberately discarding what the builder handed you rather than merely forgetting an invariant.
+
+That is as far as this seam reaches, and the limit is stated rather than papered over: #2212 could
+still call `config.require` itself and ignore the returned root. This change cannot prevent that;
+it can only make the correct wiring the obvious one and leave a single resolution point to point
+at in review.
+
+**Two states this decision does not reach, recorded so its enumeration is not read as complete.**
+First, `RecoveryArchiveSink.publish` writes `modules.tar` into the `.{system}.{activation}.partial`
+directory, and the archive reaches the final directory only when `complete_preparation` renames it.
+A worker that dies between a successful publish and that rename leaves the partial holding
+`{intent.json, modules.tar}`, which `_publish_initial_intent` then refuses on every retry with the
+same activation — permanently, until an operator intervenes — while a retry under a fresh
+activation orphans it on the per-slot root with no reaper. `cleanup_payloads` cannot reach either
+state, because cleanup runs only after `record_phase(..., "recovered")` on a completed directory.
+This is a gap in the recovery model rather than in this mechanism, and it is not fixed here.
+Second, nothing removes the `<system_id>` and `<run_id>` directories this mechanism creates:
+`finalize_tombstone` rmdirs only `<system>.<activation>`. Both are reported for routing rather than
+absorbed.
+
+**The artifact root is per-Run while cleanup and recovery are per-activation.** Two activations
+within one Run share one payload directory and the same three names, so the second
+materialization overwrites the first's payloads and either activation's cleanup removes the
+other's. The likely surface is a hard mid-recovery failure rather than silent corruption, because
+`_kernel_bundle_source` checks the payload's digest and byte count against the recovery metadata
+before use. The layout follows the System/Run artifact directory the accepted design already
+assumes, so this record keeps it and states the consequence instead of inventing a per-activation
+layout no other component expects. Relatedly, `_projection_ref` mints
+`local-artifact-v1/<system>/<run>/<digest>/<filename>` while payloads sit one level above that
+`<digest>` directory; merged code never notices because `_kernel_bundle_source` discards the first
+components and opens `parts[4]` relative to the session descriptor, but a future reader resolving
+a reference as a path would look in the wrong place.
 
 Payload cleanup now deletes outside the descriptor it is handed. That is the part of this
 decision that can go wrong badly, so the deletion is by exact name at an exact
@@ -145,8 +197,11 @@ advertisement still requires both.
   it, `_publish_initial_intent` raises "recovery partial is not the exact pre-stop intent" because
   `set(os.listdir(directory_fd)) - {"intent.json", ".intent.initial"}` is non-empty, and
   `complete_preparation`'s `os.rename(partial_name, final_name, ...)` fails `ENOTEMPTY` renaming a
-  directory onto a non-empty one (POSIX `rename(2)`; Linux 6.17, external_boot.py at
-  54f346f55). No ordering of materialize and prepare avoids both.
+  directory onto a non-empty one. Measured: `os.rename` of a directory onto a non-empty directory
+  raises `OSError` `errno` 39 (`ENOTEMPTY`), while the same rename onto an *empty* directory
+  succeeds — so the distinction the argument rests on is real (Python 3.14.7, Linux
+  7.1.12-200.fc44, x86_64; `external_boot.py` at 54f346f55). No ordering of materialize and
+  prepare avoids both.
 - **Gate `open_artifact_root` through `recovery_directory_name`, as #2211 originally asked.**
   verified: the mechanism's only input is `OperationOwnership`, so the reference argument can come
   only from `_recovery_ref(binding)`, and `recovery_directory_name` compares that reference's
@@ -164,10 +219,16 @@ advertisement still requires both.
   unbounded by construction; an exact name is checkable and a sweep is not.
 - **Bind `observe_running` on the qemu-guest-agent, as remote does.** verified:
   `grep -rn "org.qemu.guest_agent" src/ deploy/ tests/` (exit 0) hits `remote_libvirt/lifecycle/
-  xml.py:32` and four remote tests, and nothing under `local_libvirt/`; local's `render_domain_xml`
-  renders no `<channel>`, so `qemuAgentCommand` returns `VIR_ERR_ARGUMENT_UNSUPPORTED` ("QEMU guest
-  agent is not configured") against every local domain. The images are not the gap —
-  `guest_base_image/tasks/build_scratch.yml:72-80` enables the service — the host-side channel is.
+  xml.py:32` and four remote tests, and nothing under `local_libvirt/`;
+  `rg -n "channel" src/kdive/providers/local_libvirt/lifecycle/xml.py` returns nothing, so local
+  domains carry no host-side virtio channel. That grep is the whole of the reproduced ground and is
+  sufficient on its own. The further claim that `qemuAgentCommand` answers
+  `VIR_ERR_ARGUMENT_UNSUPPORTED` ("QEMU guest agent is not configured") is **inferred** — from
+  libvirt's behaviour for a domain with no agent channel, and from remote's own
+  `_DETERMINISTIC_CONFIG_CODES` comment in `remote_libvirt/guest/agent.py` — and was **not**
+  reproduced: no libvirt daemon or defined domain is reachable from this worktree, and defining one
+  would write outside a read-only review. The rejection does not rest on it. The images are not the
+  gap — `guest_base_image/tasks/build_scratch.yml:72-80` enables the service — the host half is.
 - **Render the guest-agent channel into local domain XML here, then bind the observer.**
   judgment: it changes the domain definition of every local System rather than only external-boot
   ones, carries its own provisioning and redefinition consequence for already-provisioned Systems,

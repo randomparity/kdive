@@ -16,9 +16,12 @@ dependency.
 Design: [spec](../specs/2026-09-03-local-external-boot-session-mechanisms-design.md),
 [ADR-0591](../../adr/0591-local-external-boot-session-mechanisms-bind-to-the-recovery-root.md).
 
-Expected implementation size: 600–850 changed lines (L) — derived from the file map below: ~240
-lines of new production module, ~35 lines in `composition.py`, ~420 lines of new tests, ~60 lines
-added to `test_composition.py`.
+Expected implementation size: 700–950 changed lines (L) — derived from the file map and task list
+below: ~250 lines of new production module (five mechanisms plus the canonical-UUID guard), ~45
+lines in `composition.py` (the builder plus the `LocalExternalBootMechanisms` result), ~500 lines
+of new tests across Tasks 1–5, and ~65 lines added to `test_composition.py`. Revised up from
+600–850 in the first revision, which predated the five tests the design review added (foreign
+root, single-root, readiness binding, constructor shape, payload-name coupling).
 
 ## Global Constraints
 
@@ -80,7 +83,28 @@ def open_libguestfs_guest() -> _Guest: ...
 PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
 
 # composition.py
-def build_external_boot_session_mechanisms() -> LocalExternalBootSessionFactory: ...
+@dataclass(frozen=True, slots=True)
+class LocalExternalBootMechanisms:
+    factory: LocalExternalBootSessionFactory
+    recovery_root: Path        # the SAME value LocalPayloadCleanup holds; #2212 passes this
+                               # to RecoveryMetadataStore rather than re-resolving the setting
+
+def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms: ...
+```
+
+Modified in place (the only edit to existing code outside the new module):
+
+```python
+# composition.py — observe_running widens to `| None` and STAYS REQUIRED (no default)
+def build_external_boot_session_factory(
+    *,
+    pin_lease: PinOperationLease,
+    open_artifact_root: OpenArtifactRoot,
+    open_guest: OpenGuest,
+    readiness: ReadinessProbe,
+    observe_running: RunningObserver | None,   # was: RunningObserver
+    cleanup_payloads: CleanupPayloads,
+) -> LocalExternalBootSessionFactory: ...
 ```
 
 Consumed from existing code, each **confirmed to exist with this signature** on this branch:
@@ -155,10 +179,22 @@ A shared fixture builds a valid root:
 @pytest.fixture
 def recovery_root(tmp_path: Path) -> Path:
     root = tmp_path / "recovery"
-    root.mkdir()          # never mkdir(mode=...) — the umask masks it
-    root.chmod(0o700)
+    root.mkdir()
+    root.chmod(0o700)     # two-step, never mkdir(mode=...) — see the note below
     return root
 ```
+
+**The umask rule, stated accurately.** `mkdir(mode=...)` masks its argument with the process
+umask, but a mode of `0o700` carries only owner bits and no realistic umask clears those, so the
+one-step form would in fact produce `0o700` here. Measured on this host (Python 3.14.7, Linux
+7.1.12-200.fc44, x86_64): `mkdir(mode=0o700)` yields `0o700` under umask `0o022`, `0o077` and
+`0o007` alike. The two-step form is used anyway because it is the repository's convention
+(`test_composition.py` states it) and because it *is* load-bearing the moment a directory needs
+group or other bits — the same measurement shows `mkdir(mode=0o711)` yielding `0o700` under umask
+`0o077`, and `mkdir(mode=0o755)` yielding `0o750` under umask `0o007`. Any parent directory these
+tests create with `0o711` must therefore use the two-step form or it will silently be `0o700` on a
+developer machine with a restrictive umask. Do not write a code comment claiming the `0o700` call
+itself is masked; that claim is false and would be a fresh instance of the defect it warns about.
 
 Steps:
 
@@ -176,14 +212,34 @@ Steps:
 4. Re-run; expect `1 passed`.
 5. Write `test_open_refuses_a_symlinked_component`, parametrized over the `system_id` and `run_id`
    components: pre-create the component as a symlink to a valid 0700 directory elsewhere; expect
-   `OSError` with `errno.ELOOP`. Implement nothing — `O_NOFOLLOW` in `_open_private_directory`
-   already does it — and confirm the test passes for that reason by asserting the `errno`, not just
-   that something raised.
-6. Write `test_open_refuses_a_wide_mode_component` (chmod 0o755) and
-   `test_open_refuses_a_non_owner_root`. The mode case expects `ValueError` matching
-   `"owner-only service-owned directory"`. The owner case is skipped unless the test can find a
-   directory owned by another uid — mark it `pytest.mark.skipif` on `os.geteuid() != 0` rather than
-   faking `os.fstat`, so it never passes vacuously.
+   `NotADirectoryError` with `errno.ENOTDIR`.
+
+   **Measured, not assumed** (Python 3.14.7, Linux 7.1.12-200.fc44, x86_64): opening a
+   symlink-to-directory with `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` raises `NotADirectoryError`
+   (`errno` 20, `ENOTDIR`) — **not** `ELOOP`. On Linux `O_DIRECTORY` reports `ENOTDIR` for the
+   symlink before the `O_NOFOLLOW` `ELOOP` path is reached, and the same holds for the
+   `dir_fd`-relative form `_open_private_directory` actually uses. Asserting `ELOOP` here would
+   make the test fail against correct code.
+
+   Because `ENOTDIR` is also what a regular-file component raises, the errno alone does not prove
+   the symlink was refused *for being a symlink*. Pin that separately in the same test: assert
+   that the identical open **without** `O_NOFOLLOW` succeeds. Measured on the same host, it does —
+   which is what makes `O_NOFOLLOW` load-bearing rather than decorative, and is the assertion that
+   would go red if someone dropped the flag from `_open_private_directory`.
+6. Write `test_open_refuses_a_wide_mode_component` (chmod 0o755), expecting `ValueError` matching
+   `"owner-only service-owned directory"`.
+
+   Do **not** write a non-owner-root test that an ordinary process cannot set up. An unprivileged
+   test cannot create a directory owned by another uid, and faking `os.fstat` would assert against
+   the mock rather than against `_require_private_owned_directory`'s euid check. The euid case is
+   therefore **not claimed as covered** — the spec says so explicitly, and no test may imply
+   otherwise by skipping. A `pytest.mark.skipif(os.geteuid() != 0)` test is worse than none here:
+   it never runs in CI while reading, in the file, as though the case were covered.
+6a. Write `test_open_refuses_a_foreign_root`: construct `LocalArtifactRoot` on root A, create the
+   ownership's `<system_id>/<run_id>` directories only under a different root B, and assert the
+   resolution does not open B's tree — it creates or opens under A. This is the test that shows the
+   mechanism cannot be pointed elsewhere by its caller, and it is charter criterion 4's foreign-root
+   case.
 7. Write `test_open_refuses_a_root_that_is_not_a_directory` and
    `test_open_refuses_a_missing_root` → `NotADirectoryError` / `FileNotFoundError`.
 8. Write `test_open_leaks_no_descriptor_on_failure`: capture `len(os.listdir("/proc/self/fd"))`
@@ -191,10 +247,13 @@ Steps:
    written so it cannot fail — verify its bite by deliberately dropping the `finally` close and
    observing it go red.
 9. Write `test_open_refuses_a_non_canonical_component`: construct an `OperationOwnership` whose
-   binding carries a `run_id` of `"../escape"`, and expect `ValueError`. Since
-   `ExternalBootActivationBinding` validates `CanonicalUuid`, build the impostor with
-   `dataclasses.replace` on a plain object or `model_construct`, so the mechanism's own guard is
-   what is exercised rather than pydantic's. Implement the explicit canonical-UUID check.
+   binding carries a `run_id` of `"../escape"`, and expect `ValueError`. Build the impostor binding
+   with `ExternalBootActivationBinding.model_construct(...)`, which bypasses validation — **not**
+   `dataclasses.replace`, which raises `TypeError` here: `ExternalBootActivationBinding` is a
+   pydantic `_ClosedValue`, not a dataclass. (`OperationOwnership` *is* a frozen dataclass, which is
+   where that confusion comes from — `replace` works on the ownership, never on the binding.)
+   Implement the explicit canonical-UUID check so the mechanism's own guard is exercised rather
+   than pydantic's.
 10. `just lint`; `just type`; commit `feat(local-libvirt): confine the external-boot artifact root`.
 
 **Acceptance.** Every component is re-validated; symlink, mode, owner, missing and non-canonical
@@ -218,13 +277,35 @@ Steps:
 3. Write `test_cleanup_is_idempotent`: run twice; the second run does not raise, and
    `sorted(os.listdir(...))` is identical before and after the second run.
 4. **Write the reachability proof, and watch it fail.**
-   `test_finalize_tombstone_succeeds_after_cleanup_of_an_archived_activation` drives a real
-   `RecoveryMetadataStore`: `publish_pre_stop(intent)` → `recovery_archive_sink(...)` →
-   `sink.publish(io.BytesIO(b"..."))` (this really writes `modules.tar`) → build a
-   `ModuleArchiveCapture` from the returned digest/size → `complete_preparation` →
-   `record_phase(..., "recovered")` → `LocalPayloadCleanup(root).cleanup(artifact_fd, BINDING)` →
-   `publish_tombstone(...)` → `finalize_tombstone(...)`, asserting it returns without raising and
-   that the recovery directory no longer exists.
+   `test_finalize_tombstone_succeeds_after_cleanup_of_an_archived_activation` drives a **real**
+   `RecoveryMetadataStore` — never a stub, because a stubbed store is exactly the vacuous form this
+   proof exists to avoid. Every operand it needs, with the real signatures:
+
+   - `reference = store.publish_pre_stop(intent)` where `intent` is a `LocalPreStopIntentV1`.
+     Reuse `test_external_boot.py`'s `_metadata()` / `_pre_stop()` helpers rather than hand-rolling
+     one; `_metadata()` defaults `capture={"state": "absent"}`, which is why no existing test
+     reaches this path.
+   - `sink = store.recovery_archive_sink(reference, intent)`, then
+     `archive_sha256, archive_bytes = sink.publish(io.BytesIO(payload))` — this is what really
+     writes `modules.tar`.
+   - `capture = ModuleArchiveCapture(manifest=..., entry_count=0, uncompressed_bytes=0,
+     archive_sha256=archive_sha256, archive_bytes=archive_bytes)`, then
+     `metadata = template.model_copy(update={"capture": capture})`.
+   - `store.complete_preparation(reference, intent, metadata)` — enforces
+     `_metadata_extends_intent`, so `metadata` must keep every shared field of `intent`.
+   - `recovered = store.record_phase(reference, binding, expected, "recovered")` — re-reads and
+     compares the exact prior metadata, so pass the metadata `complete_preparation` returned.
+   - `LocalPayloadCleanup(root).cleanup(artifact_fd, BINDING)`.
+   - `store.publish_tombstone(reference, binding, recovered, point_digest)` — additionally requires
+     `recovered.phase == "recovered"`, which is why the `record_phase` step above is not optional.
+   - `store.finalize_tombstone(reference, recovery, proof)` — needs a `RecoveryPoint` and a
+     `FinalizeCleanupProof` whose `binding` matches and whose `point_digest` equals
+     `LocalLibvirtExternalBoot.point_digest(recovery)`. `test_external_boot.py`'s
+     `_point(metadata)` helper builds the point; the proof also needs `operation_id`, `attempt_id`,
+     `journal_sequence` and `journal_digest`.
+
+   Assert `finalize_tombstone` returns without raising and that the recovery directory no longer
+   exists.
 5. Run it against the **current** descriptor-scoped implementation. Expect it to FAIL with
    `ValueError: cleanup tombstone directory contains unexpected payload`. Record that exact output
    — it is the demonstrated defect, and this step is the one that must not be skipped.
@@ -237,11 +318,20 @@ Steps:
 8. Write `test_cleanup_leaves_foreign_files_in_the_recovery_directory`: place `foreign.json` beside
    `modules.tar`; after cleanup `modules.tar` is gone and `foreign.json` remains. This is what
    bounds the deletion.
-9. Write `test_cleanup_refuses_a_symlinked_recovery_directory` → `OSError` with `errno.ELOOP`,
-   asserting the `errno`.
+9. Write `test_cleanup_refuses_a_symlinked_recovery_directory` → `NotADirectoryError` with
+   `errno.ENOTDIR`, for the reason measured in Task 2 step 5 — **not** `ELOOP`. Assert also that
+   the payloads under `root_fd` were still removed first, so the refusal is scoped to the second
+   removal and does not silently skip the first.
 10. Write `test_cleanup_refuses_a_non_canonical_binding` for a binding whose `activation_id` is not
-    a canonical UUID → `ValueError`, before any unlink happens (assert the payloads are still
-    present after the refusal).
+    a canonical UUID (built with `model_construct`, per Task 2 step 9) → `ValueError`, before any
+    unlink happens (assert the payloads are still present after the refusal).
+11. Write `test_payload_names_match_the_artifact_reference_components`: assert
+    `set(PAYLOAD_NAMES) == {"kernel", "modules", "initrd"}` **read from the source of truth**, not
+    restated — the literal set `_artifact_ref_parts` admits as a reference's fifth component, which
+    is the same set `TargetProjectionV1`'s `kernel_filename` / `modules_filename` /
+    `initrd_filename` literals fix. Because cleanup treats a missing name as success, a projection
+    that renames or adds an artifact would otherwise make cleanup silently skip it; this test is
+    what turns that into a red.
 11. `just lint`; `just type`; commit
     `feat(local-libvirt): remove the activation recovery archive on cleanup`.
 
@@ -249,7 +339,12 @@ Steps:
 foreign files survive; a symlinked or non-canonical recovery directory is refused; and step 5's
 recorded failure output demonstrates why the second removal exists.
 
-**Rollback.** None needed — the mechanism creates nothing durable.
+**Rollback.** `LocalPayloadCleanup` itself creates nothing. The change as a whole does:
+`LocalArtifactRoot.open` creates `<system_id>` and `<run_id>` directories, mode 0700, under the
+per-slot recovery root, and nothing in `lifecycle/boot/` removes them — `finalize_tombstone` rmdirs
+only `<system>.<activation>`. Reverting the code leaves any such directories in place; they are
+empty once cleanup has run, and removing them is an operator action. Reclamation has no owner
+today and is reported for routing rather than invented here.
 
 ## Task 4 — the guest opener, and the production caller
 
@@ -273,21 +368,58 @@ Steps:
    `test_session_mechanisms.py`, building a factory with the existing `test_session.py` helpers and
    an active `Domain`, asserting `RuntimeError` matching `"domain must be inactive"` — proving the
    refusal comes from the existing `require_inactive` path and not from a new check in the opener.
-4. Implement `build_external_boot_session_mechanisms()` in `composition.py`: resolve
-   `config.require(LIBVIRT_RECOVERY_ROOT)`, construct `LocalOperationLane()`,
-   `LocalArtifactRoot(root)`, `LocalPayloadCleanup(root)`, and call the existing
-   `build_external_boot_session_factory(pin_lease=..., open_artifact_root=...,
-   open_guest=open_libguestfs_guest, readiness=_real_readiness, cleanup_payloads=...)`.
-   **Do not pass `observe_running`.** `build_external_boot_session_factory` currently declares
-   `observe_running` as a required keyword — change that one parameter to
-   `RunningObserver | None = None` and forward it, so the factory's own
-   `or _unconfigured_observation` fallback selects the default. That is the only edit to the
-   existing builder.
-5. Add `test_build_external_boot_session_mechanisms_opens_nothing`: monkeypatch
-   `composition.config.require` and `composition.libvirt.open` exactly as
-   `test_external_boot_session_factory_builder_is_lazy_and_unadvertised` already does, assert the
-   returned object is a `LocalExternalBootSessionFactory`, and assert the recording list is `[]` —
-   no descriptor, connection or guest opened at build time.
+4. Implement `build_external_boot_session_mechanisms()` in `composition.py`. Resolve
+   `config.require(LIBVIRT_RECOVERY_ROOT)` **exactly once** into a local `root`, construct
+   `LocalOperationLane()`, `LocalArtifactRoot(root)` and `LocalPayloadCleanup(root)` from that one
+   value, call `build_external_boot_session_factory(...)`, and return
+   `LocalExternalBootMechanisms(factory=factory, recovery_root=root)`.
+
+   Returning the root is not decoration: it is what stops cleanup's second removal and
+   `RecoveryMetadataStore` from ever resolving different roots. #2212 passes
+   `mechanisms.recovery_root` to the store rather than re-resolving the setting. Do not resolve the
+   setting in more than one place in this function.
+
+   Pass `observe_running=None` **explicitly**. `build_external_boot_session_factory` currently
+   declares `observe_running: RunningObserver` as a required keyword with no default; widen that
+   one parameter's type to `RunningObserver | None` and **do not give it a default**. The factory's
+   own `or _unconfigured_observation` fallback then selects the default. Giving it a default would
+   make every mechanism omittable by any caller, so a caller that forgot `readiness` or
+   `cleanup_payloads` would get a factory that looks built and fails only mid-operation; keeping it
+   required preserves the build-time failure for everyone and makes this one omission explicit at
+   the call site.
+5. Add `test_build_external_boot_session_mechanisms_opens_nothing`. Monkeypatch
+   `composition.config.require` **per setting**, not with a blanket lambda:
+
+   ```python
+   def _require(setting: object) -> object:
+       if setting is composition.LIBVIRT_RECOVERY_ROOT:
+           return recovery_root          # a real mode-0700 tmp_path directory
+       if setting is composition.LIBVIRT_URI:
+           return "qemu:///session"
+       raise AssertionError(f"unexpected setting: {setting}")
+   ```
+
+   The existing `test_external_boot_session_factory_builder_is_lazy_and_unadvertised` patches
+   `require` with `lambda _setting: "qemu:///session"` for *every* setting. Copying that idiom here
+   would construct `LocalArtifactRoot` and `LocalPayloadCleanup` with the string `"qemu:///session"`
+   as their recovery root; the test would still pass, because nothing opens it, and would still
+   type-check, because the patched callable is untyped — asserting laziness while proving nothing
+   about the value actually resolved. Assert the returned object is a `LocalExternalBootMechanisms`,
+   that `mechanisms.recovery_root == recovery_root`, and that the recording list is `[]`.
+5a. Add `test_mechanisms_share_one_recovery_root`: assert the `recovery_root` the builder returns is
+   the same value the cleanup mechanism holds, so the single-source property is checked rather than
+   described. This is the only in-change control on the #2212 divergence, and it must be a real
+   assertion on the built object, not a comment.
+5b. Add `test_production_builder_binds_readiness_and_open_guest`: assert by identity that the built
+   factory's `_readiness is _real_readiness` and `_open_guest is open_libguestfs_guest`. Without
+   this, dropping either argument leaves the class falling back to `_unconfigured_readiness` and
+   nothing goes red.
+5c. Add `test_no_mechanism_constructor_accepts_protocol_input` (charter criterion 8): for each of
+   `LocalOperationLane`, `LocalArtifactRoot`, `LocalPayloadCleanup` and `open_libguestfs_guest`,
+   use `inspect.signature` to assert the parameter set is exactly what the composition seam
+   supplies — `LocalArtifactRoot` and `LocalPayloadCleanup` take `recovery_root` only,
+   `LocalOperationLane` and `open_libguestfs_guest` take nothing — so no URI, path, command, XML
+   or credential can enter from a call argument.
 6. Add `test_mechanisms_builder_does_not_advertise_external_boot`: after building the mechanisms,
    `composition.build_runtime(secret_registry=SecretRegistry()).external_boot is None`.
 7. Add `test_observe_running_is_left_unconfigured`: build the factory through the production
@@ -335,19 +467,35 @@ every new test has a recorded fault-injection pair.
 3. If red, read the log and fix the cause; do not re-run hoping.
 4. Commit any formatting the hooks rewrote.
 
-## Self-review against the spec
+## Criterion-to-step mapping
 
-Each spec requirement maps to a task: lane → Task 1; artifact root and its confinement → Task 2;
-cleanup, its bound and the reachability proof → Task 3; guest opener, production caller, and the
-`observe_running` deferral guard → Task 4; fail-closed defaults and the bite audit → Task 5;
-guardrails → Task 6. The threat model's four boundary controls map to Task 2 (artifact-root walk),
-Task 3 (recovery-dir open, payload deletion, archive deletion). No task serves a requirement the
-spec does not state, and no spec requirement lacks a task.
+Every charter criterion, against the step that discharges it. A prose claim that "each requirement
+maps to a task" is not checkable and the previous revision of this plan made that claim while three
+requirements were unmapped; this table is checkable line by line instead.
 
-Names used across tasks are consistent: `PAYLOAD_NAMES`, `LocalOperationLane.pin`,
-`LocalArtifactRoot.open`, `LocalPayloadCleanup.cleanup`, `open_libguestfs_guest`,
-`build_external_boot_session_mechanisms` appear with the same spelling in the Interfaces block and
-in every task that uses them.
+| criterion | discharged by |
+| --- | --- |
+| 1 — five aliases implemented, passed to the builder, each with a test | Tasks 1–4; per-alias tests: lane T1.1–T1.8, artifact root T2.1–T2.9, cleanup T3.1–T3.11, guest opener T4.2–T4.3, **readiness T4.5b** |
+| 1 — `RunningObserver` not bound, keeps `_unconfigured_observation` | T4.7, T5.1 (`test_unconfigured_observation_raises`) |
+| 2 — three fail-closed defaults, independently, plus identity | T5.1, T5.2 |
+| 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
+| 4 — artifact root confined; foreign root, symlink, traversal refused | T2.5 (symlink, both components), **T2.6a (foreign root)**, T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical) |
+| 5 — cleanup removes payloads **and** the archive; bounded; idempotent | T3.1, T3.6, T3.7, T3.8, T3.9, T3.10 |
+| 6 — `open_guest` returns `_Guest`; guest access refused while active via the existing path | T4.2, T4.3 |
+| 7 — `readiness` returns `ReadinessResult` from a real read; bounded failure | reuse of `_real_readiness` (already tested at its own site); binding asserted at **T4.5b** |
+| 8 — no mechanism takes configuration from protocol input | **T4.5c** |
+| 9 — `ProviderRuntime.external_boot` still `None` | T4.6 |
+| 10 — guardrails pass | Task 6 |
+| 11 — bite proof: `finalize_tombstone` fails descriptor-scoped, passes fixed | T3.4 (operands named), T3.5 (**record the failure**), T3.7 |
+
+Three steps are bold because they did not exist in the first revision of this plan: the readiness
+binding assertion, the foreign-root test, and the constructor-shape test for criterion 8. The
+single-root control (T4.5a) and the payload-name coupling (T3.11) are likewise new.
+
+Names are consistent across the Interfaces block and every task that uses them: `PAYLOAD_NAMES`,
+`LocalOperationLane.pin`, `LocalArtifactRoot.open`, `LocalPayloadCleanup.cleanup`,
+`open_libguestfs_guest`, `build_external_boot_session_mechanisms`, `LocalExternalBootMechanisms` —
+all public, matching the spec, since #2212 is a named consumer of several of them.
 
 ## Deferrals carried into this change
 
@@ -359,3 +507,20 @@ in every task that uses them.
 - **Bind `LocalOperationLane` behind the per-System Postgres advisory lock — owner #2212.**
   ADR-0587 assigns lease issuance to the serialization-lane context; this change supplies the lane
   object and its invariants only.
+- **Pass `LocalExternalBootMechanisms.recovery_root` to `RecoveryMetadataStore` — owner #2212.**
+  Cleanup's archive removal and the store must resolve one root. The builder now returns the
+  resolved value so a mismatch requires discarding it rather than merely forgetting an invariant,
+  but #2212 could still re-resolve the setting itself. This is the residual, and it is the reason
+  the value is returned at all.
+- **Reclaim the `<system_id>` and `<run_id>` artifact directories — owner: routing pending.**
+  `LocalArtifactRoot.open` creates them under the per-slot recovery root and nothing removes them;
+  `finalize_tombstone` rmdirs only `<system>.<activation>`. Reported to the orchestrator for
+  routing rather than solved here.
+- **The interrupted-prepare `.partial` archive residue — owner: routing pending; converges with
+  #2207.** `RecoveryArchiveSink.publish` writes `modules.tar` into
+  `.{system}.{activation}.partial`, and only `complete_preparation` renames it into place. A worker
+  dying in between leaves a partial that `_publish_initial_intent` refuses on every same-activation
+  retry, and that a fresh-activation retry orphans. `cleanup_payloads` cannot reach either state —
+  it runs only after `record_phase(..., "recovered")` on a completed directory — so this is a gap
+  in the recovery model, not in this mechanism, and widening cleanup to sweep partials is
+  explicitly refused.

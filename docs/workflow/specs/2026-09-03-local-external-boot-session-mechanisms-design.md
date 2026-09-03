@@ -70,29 +70,46 @@ is the boundary ADR-0587 drew when it made them injected callables. `session.py`
 
 ```
 composition.build_external_boot_session_mechanisms()   # new production caller
+  │   resolves KDIVE_LIBVIRT_RECOVERY_ROOT exactly once, and returns it beside the
+  │   factory as LocalExternalBootMechanisms(factory=..., recovery_root=...) so #2212
+  │   passes RecoveryMetadataStore the same value cleanup uses (see "One root" below)
   ├── LocalArtifactRoot(recovery_root)      -> .open    : OpenArtifactRoot
   ├── LocalPayloadCleanup(recovery_root)    -> .cleanup : CleanupPayloads
   ├── LocalOperationLane()                  -> .pin     : PinOperationLease
-  ├── _open_libguestfs_guest                             : OpenGuest
+  ├── open_libguestfs_guest                              : OpenGuest
   └── _real_readiness                        (reused)    : ReadinessProbe
         │
         └── build_external_boot_session_factory(...)  # existing, unchanged signature
 ```
 
-`build_external_boot_session_factory` keeps its current keyword-only signature and its laziness:
-the existing test asserting it opens nothing at build time
-(`test_external_boot_session_factory_builder_is_lazy_and_unadvertised`) must keep passing, so the
-new builder resolves settings but opens no descriptor, no connection and no guest.
+`build_external_boot_session_factory` today declares `observe_running: RunningObserver` as a
+**required** keyword with no default, so it cannot simply be omitted — omitting it is a `TypeError`
+at build. Its type widens to `RunningObserver | None`, and it stays **required**: the new builder
+passes `observe_running=None` explicitly, and the factory's own `or _unconfigured_observation`
+fallback selects the default.
 
-`observe_running` is simply not passed, so the factory's `or _unconfigured_observation` fallback
-selects the default.
+Keeping the parameter required is the point. Giving it a default would make all six mechanisms
+omittable by any caller, so a caller that forgot `readiness` or `cleanup_payloads` would get a
+factory that looks built and raises only when an operation reaches that mechanism — possibly
+mid-activation with the domain already stopped. Today the builder fails at composition instead.
+Widening the type without adding a default keeps that property for every caller and makes the one
+deliberate omission explicit at the call site. Passing `_unconfigured_observation` directly would
+work too, but it imports a private name across modules for no gain; `None` routes through the
+factory's existing fallback.
+
+That is the only edit to existing code outside the new module. The builder's laziness is unchanged
+and `test_external_boot_session_factory_builder_is_lazy_and_unadvertised` must keep passing, so the
+new builder resolves settings but opens no descriptor, no connection and no guest.
 
 ## Component contracts
 
 ### `LocalArtifactRoot.open(ownership) -> int`
 
 Opens `<recovery_root>/<ownership.system_id>/<ownership.binding.run_id>` and returns the
-descriptor. Creates the two child directories with mode 0700 when absent.
+descriptor. **This mechanism writes:** it creates the two child directories, mode 0700, when they
+are absent. #2210 provisions the per-slot recovery root and nothing below it, so an open-only
+resolution could never succeed for a System that has not run before. Creation is not novel either —
+`TargetProjectionStore.publish` already creates the same `<system>/<run>` pair with the same helper.
 
 Confinement is a descriptor-relative walk, one component at a time:
 
@@ -101,9 +118,18 @@ Confinement is a descriptor-relative walk, one component at a time:
 2. `_open_or_create_private_child(root_fd, str(ownership.system_id))`.
 3. `_open_or_create_private_child(system_fd, ownership.binding.run_id)`.
 
+`_open_or_create_private_child` does `os.mkdir(name, 0o700, dir_fd=parent_fd)`, fsyncs the parent,
+swallows `FileExistsError`, and then delegates to `_open_private_directory` — so the `O_NOFOLLOW`
+open, the mode check and the owner check all still apply to the descriptor it returns. Creation
+carries the same guard as opening.
+
 Every component is re-validated as a real directory, mode exactly 0700, owned by the running euid.
-`O_NOFOLLOW` on each open means a symlinked component fails with `ELOOP` rather than being
-followed. Both child names are `CanonicalUuid` values, so neither can contain `/` or `..`; the
+`O_NOFOLLOW` on each open means a symlinked component is refused rather than followed. Measured on
+this host (Python 3.14.7, Linux 7.1.12-200.fc44, x86_64), that refusal surfaces as
+`NotADirectoryError` / `ENOTDIR`, not `ELOOP`: with `O_DIRECTORY` also set, Linux reports the
+symlink as not-a-directory before reaching the `O_NOFOLLOW` `ELOOP` path. The flag is nonetheless
+what does the work — the identical open *without* `O_NOFOLLOW` succeeds and follows the link.
+Both child names are `CanonicalUuid` values, so neither can contain `/` or `..`; the
 mechanism additionally rejects a name that is not a canonical UUID before using it, so a future
 loosening of the binding type cannot silently become a traversal.
 
@@ -122,8 +148,17 @@ mechanism on both the success and failure paths.
 
 Two bounded removals, in order:
 
-1. Under `root_fd`, unlink each name in `_PAYLOAD_NAMES = ("kernel", "initrd", "modules")`, by
+1. Under `root_fd`, unlink each name in `PAYLOAD_NAMES = ("kernel", "initrd", "modules")`, by
    exact name, `dir_fd=root_fd`. `FileNotFoundError` is success.
+
+   Those names are not free choices. `TargetProjectionV1` fixes them as
+   `kernel_filename: Literal["kernel"]`, `modules_filename: Literal["modules"]` and
+   `initrd_filename: Literal["initrd"] | None`, and `_artifact_ref_parts` admits exactly
+   `{"kernel", "modules", "initrd"}` as a reference's fifth component — which
+   `_kernel_bundle_source` then opens by bare name against this same descriptor. Because a missing
+   name is treated as success, a future projection that renames or adds an artifact would make
+   cleanup silently remove nothing for it. A test therefore couples the tuple to that admitted set
+   rather than restating it, so drift goes red instead of going quiet.
 2. Open `<recovery_root>/<binding.system_id>.<binding.activation_id>` through
    `_open_private_directory`, then unlink `modules.tar` by exact name. `FileNotFoundError` on the
    unlink is success. `FileNotFoundError` on the *directory* is also success: an activation whose
@@ -143,6 +178,18 @@ An enumeration of every deletion in `lifecycle/boot/` finds nothing else that re
 cleanup confined to `root_fd` leaves the archive behind and makes finalization fail permanently for
 every activation that captured one. See ADR-0591; the `binding` parameter the session already
 passes is what makes the second removal addressable.
+
+**A third state exists that this mechanism cannot reach, and it is not this change's.** The archive
+lands in `.{system}.{activation}.partial` first and only reaches the final directory when
+`complete_preparation` renames it. A worker that dies between a successful `sink.publish` and that
+rename leaves the partial holding `{intent.json, modules.tar}`; `_publish_initial_intent` then
+refuses every retry under the same activation, and a retry under a fresh activation orphans the
+partial on the per-slot root with no reaper. `cleanup_payloads` runs only after
+`record_phase(..., "recovered")` on a *completed* directory, so it can reach neither outcome.
+Widening it to sweep partials is explicitly not done here: that would be a deletion of unknown
+extent under the privileged root, aimed at a gap in the recovery model rather than in this
+mechanism. The state is recorded so this design's enumeration is not mistaken for a complete
+account of archive reachability, and it is reported for routing.
 
 ### `LocalOperationLane.pin(lease) -> PinnedOperationOwnership`
 
@@ -179,7 +226,7 @@ cannot do: prove the lease is live and lane-owned, and produce the pin.
 A lease the lane does not recognise, or one already released, propagates the lane's own refusal.
 Nothing is pinned in either case.
 
-### `_open_libguestfs_guest() -> _Guest`
+### `open_libguestfs_guest() -> _Guest`
 
 Constructs and returns a `guestfs.GuestFS` handle. It attaches no drive, launches nothing and
 mounts nothing: `_ConcreteSession._open_guest_context` does all of that, and does it only after
@@ -199,10 +246,13 @@ is imported and passed, not reimplemented and not wrapped.
 This change is security-relevant: it opens directories under a privileged worker-owned root from
 identifiers that arrive inside an operation binding, and it deletes files.
 
-**Boundary inventory.** One boundary is added and one is widened.
+**Boundary inventory.** Two boundaries are added and one is widened.
 
-- *Added:* `LocalArtifactRoot.open` — the configured recovery root is walked using two names taken
-  from `OperationOwnership`.
+- *Added (read):* `LocalArtifactRoot.open` — the configured recovery root is walked using two names
+  taken from `OperationOwnership`.
+- *Added (write):* `LocalArtifactRoot.open` again — the same walk **creates** the `<system_id>` and
+  `<run_id>` directories, mode 0700, when absent. This mechanism writes to the privileged
+  per-worker-slot recovery root, and the controls below cover creation as well as opening.
 - *Widened:* `LocalPayloadCleanup.cleanup` — deletion, previously confined to a descriptor the
   caller supplied, now also names a directory derived from the binding.
 
@@ -219,7 +269,8 @@ trust that the recovery root is still what startup validated.
 
 | boundary | validation | authorization | bound | leaks on failure |
 | --- | --- | --- | --- | --- |
-| artifact-root walk | `CanonicalUuid` on both names, re-asserted; `O_NOFOLLOW` per component | `_require_private_owned_directory` per component: directory, mode 0700, euid owner | exactly two components, both from the ownership | `ValueError`, no host path, no `strerror` |
+| artifact-root walk (read) | `CanonicalUuid` on both names, re-asserted; `O_NOFOLLOW` per component | `_require_private_owned_directory` per component: directory, mode 0700, euid owner | exactly two components, both from the ownership | `ValueError`, no host path, no `strerror` |
+| artifact-root walk (create) | same `CanonicalUuid` re-assertion before any `mkdir` | `mkdir(0o700, dir_fd=)` then the same per-component check via `_open_private_directory` | at most two directories per distinct `(system_id, run_id)`; **count is not otherwise bounded** — see below | as above |
 | recovery-dir open | `CanonicalUuid` on both name halves, re-asserted; `O_NOFOLLOW` | `_open_private_directory`, same three checks | one component | as above |
 | payload deletion | fixed `_PAYLOAD_NAMES` tuple | descriptor-relative, `dir_fd=root_fd` | three literal names | absence is success |
 | archive deletion | one literal name, `modules.tar` | descriptor-relative under the validated recovery dir | one literal name | absence is success |
@@ -227,6 +278,30 @@ trust that the recovery root is still what startup validated.
 TOCTOU between the setting's startup validation and an operation's open is handled by
 re-validating on every open rather than caching a verdict — which is what
 `_require_private_owned_directory` already exists to do, and why it is reused instead of replaced.
+
+**Directory growth is unbounded, and nothing reclaims it.** Under adversary (b) — a future caller
+supplying bindings from a less trusted source — each distinct `(system_id, run_id)` pair mints a
+fresh directory pair under the 0700 per-slot root. Every control above refuses a *bad* directory;
+none bounds how many *good* ones may be created. Nor does anything remove them:
+`finalize_tombstone` rmdirs only `<system>.<activation>`, and no code in `lifecycle/boot/` removes
+an artifact `<system_id>` or `<run_id>` directory. Bounding creation would mean rate-limiting or
+authenticating the binding, which is ADR-0584's authority chain and #2140's work, not this
+mechanism's; reclaiming the directories has no owner today. Both are reported for routing rather
+than silently accepted, and neither is reachable in this change because
+`ProviderRuntime.external_boot` is `None`.
+
+**One root, resolved once.** Cleanup's second removal targets
+`<recovery_root>/<system_id>.<activation_id>`, while the directory that actually holds
+`modules.tar` is the one `RecoveryMetadataStore` is constructed with — and that constructor
+argument belongs to #2212. A divergence would make cleanup open a non-existent path, report success
+under the idempotence rule, and leave `finalize_tombstone` failing for every archived activation:
+a silent failure producing exactly the state this design refuses to ship. An invariant in prose
+would not control that, because it depends on a future change honouring it. So the builder resolves
+the setting **once** and returns the value beside the factory as one
+`LocalExternalBootMechanisms(factory, recovery_root)`, and that is the value #2212 hands the store.
+The residual is stated plainly rather than claimed away: #2212 could still call `config.require`
+itself and discard what it was given. This seam cannot prevent that — it can only make the correct
+wiring the obvious one and leave a single resolution point for a reviewer to check.
 
 **Explicitly out of scope.** A worker account compromised at the OS level: every check here is
 `euid`-relative, so an attacker who *is* that account defeats them by definition, and the control
@@ -259,7 +334,30 @@ The load-bearing tests:
   fails the moment someone binds it without doing the domain-XML work.
 - **Artifact-root confinement.** Separate tests for a foreign root outside the configured one, a
   symlinked `system_id` component, a symlinked `run_id` component, a mode-0755 component, and a
-  component owned by another uid. Each asserts refusal, and asserts no descriptor is leaked.
+  non-directory root. Each asserts refusal, and asserts no descriptor is leaked. The foreign-root
+  case is the one that demonstrates the mechanism cannot be pointed elsewhere by its caller: it
+  constructs `LocalArtifactRoot` on one root, asks it to resolve an ownership whose directories
+  exist only under a *different* root, and asserts refusal rather than a silent open of the wrong
+  tree.
+- **The euid check is not claimed as covered.** `_require_private_owned_directory` also rejects a
+  directory owned by another uid, and an ordinary unprivileged test process cannot create one. That
+  case is exercised only by a fixture that skips unless a non-owner directory is genuinely
+  available, so it does not run in ordinary CI. Faking `os.fstat` to simulate it would assert
+  against the mock rather than the guard, so it is not done. This spec therefore does **not** list
+  the owner case among the refusals it proves — the gap is stated rather than papered over.
+- **The `readiness` binding is asserted, not assumed.** A test asserts the production builder binds
+  `readiness=_real_readiness` and `open_guest=open_libguestfs_guest` by identity on the built
+  factory. Without it, a future edit that drops either argument leaves the class quietly falling
+  back to `_unconfigured_readiness`, and nothing goes red — the same fail-open shape the
+  fail-closed tests exist to prevent, arriving through the builder instead of the class.
+- **No mechanism takes configuration from protocol input.** One test per mechanism constructor
+  (`LocalOperationLane`, `LocalArtifactRoot`, `LocalPayloadCleanup`, `open_libguestfs_guest`)
+  inspects its signature and asserts no parameter accepts a URI, filesystem path, command, XML
+  document or credential from a call argument — only the composition seam supplies configuration.
+  This is charter criterion 8 and it had no test until this revision.
+- **The payload names are coupled to their source.** A test asserts `set(PAYLOAD_NAMES)` equals the
+  set `_artifact_ref_parts` admits as a reference's fifth component, so a projection that renames
+  or adds an artifact fails here instead of making cleanup a silent no-op.
 - **Cleanup removes the archive, and this is proven to bite.** One test drives a real
   `RecoveryMetadataStore` through `publish_pre_stop` → `recovery_archive_sink` → `sink.publish`
   (which really writes `modules.tar`) → `complete_preparation` → `record_phase("recovered")` →
