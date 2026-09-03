@@ -346,6 +346,25 @@ class TestPayloadCleanup:
         assert os.listdir(artifacts) == []
         assert (recovery / "modules.tar").exists()
 
+    def test_cleanup_refuses_a_wide_mode_recovery_root(
+        self, recovery_root: Path, tmp_path: Path
+    ) -> None:
+        # The root's *own* re-validation, on the deleting path. Distinct from the
+        # per-component check above: this one fires before any component is resolved, and it
+        # is what stops cleanup trusting that the root is still what startup validated.
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+        recovery = _archive_directory(recovery_root)
+        recovery_root.chmod(0o755)
+
+        with pytest.raises(ValueError) as caught:
+            _cleanup(recovery_root, artifacts)
+
+        _assert_no_host_path(caught.value, recovery_root)
+        assert os.listdir(artifacts) == []
+        assert (recovery / "modules.tar").exists()
+
     def test_cleanup_refuses_a_symlinked_recovery_directory(
         self, recovery_root: Path, tmp_path: Path
     ) -> None:
