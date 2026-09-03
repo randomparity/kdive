@@ -145,9 +145,10 @@ Interfaces this task defines, relied on by Tasks 3 and 4:
 ```python
 # Keys are lower-cased; lookup lower-cases the submitted suffix. An absent or empty unit
 # means bytes and never reaches this table.
-CAPACITY_SUFFIXES: dict[str, int]   # b/byte/bytes=1, k/kib=1024, kb=1000, m/mib=1048576,
-                                    # mb=1000000, g/gib=2**30, gb=10**9, t/tib=2**40, tb=10**12,
-                                    # p/pib=2**50, pb=10**15, e/eib=2**60, eb=10**18
+CAPACITY_SUFFIXES: dict[str, int]  # b/byte/bytes=1, k/kib=1024, kb=1000, m/mib=1048576,
+# mb=1000000, g/gib=2**30, gb=10**9, t/tib=2**40, tb=10**12,
+# p/pib=2**50, pb=10**15, e/eib=2**60, eb=10**18
+
 
 @dataclass(frozen=True, slots=True)
 class VolumeState:
@@ -159,6 +160,7 @@ class VolumeState:
     backing_path: str | None
     backing_format: str | None
 
+
 class FakeStorageVolume:
     def __init__(self, state: VolumeState, pool: FakeStoragePool) -> None: ...
     def name(self) -> str: ...
@@ -168,9 +170,14 @@ class FakeStorageVolume:
     def XMLDesc(self, flags: int = 0) -> str: ...
     def delete(self, flags: int = 0) -> int: ...
 
+
 class FakeStoragePool:
-    def __init__(self, *, name: str = "default", target_path: str = "/var/lib/libvirt/images") -> None: ...
+    def __init__(
+        self, *, name: str = "default", target_path: str = "/var/lib/libvirt/images"
+    ) -> None: ...
+
     created_xml: list[str]
+
     def name(self) -> str: ...
     def createXML(self, xml: str, flags: int = 0) -> FakeStorageVolume: ...
     def storageVolLookupByName(self, name: str) -> FakeStorageVolume: ...
@@ -351,8 +358,11 @@ Interfaces this task defines, relied on by Task 4:
 class StorageDoubleContract:
     libvirt_uri: str
 
+
 def resolve_storage_double_contract(default_uri: str) -> EnvResolution[StorageDoubleContract]: ...
-def require_live_vm_storage_double(default_uri: str = "qemu:///session") -> StorageDoubleContract: ...
+def require_live_vm_storage_double(
+    default_uri: str = "qemu:///session",
+) -> StorageDoubleContract: ...
 ```
 
 It consumes, from the same module: `EnvResolution`, `LiveVmEnvState`, `LIBVIRT_URI_ENV`
