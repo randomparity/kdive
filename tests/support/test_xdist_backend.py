@@ -18,6 +18,25 @@ from _pytest.outcomes import Skipped
 from tests.support import xdist_backend
 
 
+@pytest.fixture(autouse=True)
+def _private_sweep_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test in this module its own sweep lock.
+
+    ``_SWEEP_LOCK_PATH`` is host-global per uid, deliberately: it serializes real sweeps
+    against each other so two suites cannot reap the same container at once. That makes it
+    shared state between *unrelated* runs, and ``sweep_stale_backend_containers`` returns
+    ``[]`` when it cannot take it. So a second kdive suite running as the same user turned
+    the assertions here into a function of what else was on the machine — ``in`` assertions
+    failed, and ``not in`` assertions passed **vacuously**, because ``[]`` satisfies those
+    too. Both directions were wrong, and the silent one is worse.
+
+    Serialization is not what these tests measure, and the tests that do exercise the lock
+    set the path themselves, so this only overrides the default. Tests keep their own
+    ``monkeypatch.setattr`` where they need a specific path; a later set wins.
+    """
+    monkeypatch.setattr(xdist_backend, "_SWEEP_LOCK_PATH", tmp_path / "sweep-lock")
+
+
 class _CountingProbe:
     """A stand-in for the Docker ping that records how often it was asked.
 
@@ -932,6 +951,9 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(tmp_path: P
 
     `postgres:17` is the image the db fixtures already use, so this pulls nothing extra;
     the entrypoint is overridden so it starts instantly instead of running initdb.
+
+    The module-wide ``_private_sweep_lock`` fixture keeps this independent of whatever
+    else is running on the host; see its docstring.
     """
     xdist_backend.skip_without_docker()
     import docker
@@ -942,12 +964,26 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(tmp_path: P
     container = client.containers.run(
         "postgres:17", entrypoint=["sleep", "300"], detach=True, labels=labels
     )
+    # A second container whose run is already gone: its liveness file is never locked, so
+    # it is stale from the start. Sweeping both in ONE call is what keeps the spare
+    # assertion honest — an empty result would satisfy `not in` on its own, so the reap of
+    # this one is the evidence that the sweep actually ran and still spared the live one.
+    stranded_root = tmp_path / "stranded"
+    stranded_root.mkdir()
+    stranded = client.containers.run(
+        "postgres:17",
+        entrypoint=["sleep", "300"],
+        detach=True,
+        labels=xdist_backend.backend_container_labels(stranded_root, "pg"),
+    )
     try:
         with xdist_backend._liveness_held(tmp_path, "pg"):
             # A concurrently-running suite holds its lock, so a sweep from any other run
             # must leave its backend alone. This is the property that makes the sweep
             # safe on a shared host.
-            assert container.id not in xdist_backend.sweep_stale_backend_containers()
+            reaped = xdist_backend.sweep_stale_backend_containers()
+            assert container.id not in reaped
+            assert stranded.id in reaped
             container.reload()
             assert container.status == "running"
 
@@ -956,5 +992,6 @@ def test_sweep_reaps_a_real_stranded_container_but_spares_a_live_one(tmp_path: P
         with pytest.raises(docker.errors.NotFound):
             client.containers.get(container.id)
     finally:
-        with suppress(docker.errors.NotFound):
-            client.containers.get(container.id).remove(force=True, v=True)
+        for leftover in (container.id, stranded.id):
+            with suppress(docker.errors.NotFound):
+                client.containers.get(leftover).remove(force=True, v=True)
