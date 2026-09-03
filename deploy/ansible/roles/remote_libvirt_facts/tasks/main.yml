@@ -54,6 +54,13 @@
 #
 # The verdict is cached against the volume's size and mtime and the contract's own identity, so
 # the appliance runs once per image per restaging rather than once per site.yml run.
+- name: Ensure the userland verdict cache dir exists
+  ansible.builtin.file:
+    path: "{{ remote_libvirt_facts_userland_cache_dir }}"
+    state: directory
+    mode: "0755"
+  when: remote_libvirt_facts_userland_verify | bool
+
 - name: Look up the cached userland verdict for each confirmed volume
   vars:
     volume: "{{ item.item }}"
@@ -146,7 +153,7 @@
     {{ remote_libvirt_facts_userland_probe.results | default([])
        | rejectattr('stdout_lines', 'contains', 'false') | list }}
   loop_control:
-    label: "{{ item.item.item.name }}"
+    label: "{{ volume.item.name }}"
   changed_when: false
 
 - name: Split the selection into confirmed and unconfirmed volumes

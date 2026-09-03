@@ -49,7 +49,9 @@ setup_case() {
   pool="$dir/pool"
   artifacts="$dir/artifacts"
   rendered="$artifacts/localhost-systems.toml"
-  mkdir -p "$pool" "$artifacts" "$dir/cache"
+  # $dir/cache is deliberately NOT created: a fresh managed host has no verdict cache, and the
+  # role must create it rather than fail on the first run that would write a verdict.
+  mkdir -p "$pool" "$artifacts"
 
   export FAKE_GUESTFISH_LOG="$dir/guestfish.log"
   : >"$FAKE_GUESTFISH_LOG"
