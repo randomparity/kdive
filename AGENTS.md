@@ -148,6 +148,36 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
   container from every project on the daemon, including any a concurrent run owns. The
   `-r` keeps it a no-op once the backlog is clear rather than an error.
 
+  The real-daemon sweep tests in `tests/support/test_xdist_backend.py` start their
+  containers directly rather than through testcontainers, so the command above cannot see
+  them, and most of them carry a label key unique to the test invocation so that
+  concurrent suites cannot reap each other's fixtures (#2219) — which puts those out of
+  the ADR-0551 sweep's reach too. (One container in that module deliberately carries the
+  repo-wide `kdive.test-backend` key, because a sibling suite's enumeration has to be able
+  to see it for the test to mean anything; that one stays reapable by the ordinary sweep.)
+  All of them carry `kdive.test-scratch`, which is the only handle on one a killed run
+  orphaned:
+
+  ```sh
+  docker ps -aq --filter "label=kdive.test-scratch" | xargs -r docker rm -v
+  ```
+
+  Unlike the command above, this one is safe to run **with suites in flight**, and the
+  guard is the daemon's rather than the filter's: **no `-f`**. `docker rm` removes an
+  `exited` or `created` container and *refuses* a running or paused one with
+  `container is running: stop the container before removing or force remove`. So a
+  concurrent test's container cannot be taken out from under it — the errors printed for
+  those, and the non-zero exit they produce, are the guard working, not a failure. `-v`
+  takes the anonymous volume with the container, which is the part `docker volume prune`
+  cannot reclaim while the container exists. Never add `-f` here.
+
+  Two limits worth knowing rather than rediscovering. An orphan sleeps for five minutes
+  before exiting, so a cleanup run immediately after a killed run reports nothing for the
+  container still counting down — it is removable as soon as it exits, and the command
+  above will take it then. And this is the *only* thing that collects these: there is
+  deliberately no automatic reap, because a fixture would fire while sibling workers of
+  its own run held live containers, and would still miss the orphan it was there for.
+
 ## Architecture
 
 ### Four runtime roles, one codebase
