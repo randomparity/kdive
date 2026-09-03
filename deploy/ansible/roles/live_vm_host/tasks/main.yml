@@ -472,7 +472,12 @@
     path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}"
     state: directory
     owner: "{{ item }}"
-    group: "{{ item }}"
+    # No group is set, deliberately. At mode 0700 the group has no access at all, so naming
+    # one constrains nothing about confinement while requiring a group named after each
+    # account to exist. That requirement is not universally satisfiable: GitHub-hosted
+    # Ubuntu runners give their account a primary group of `docker`, so a harness
+    # substituting the invoking account could not create these directories at all. The
+    # sibling slot directories do set a group because they are 0750, where it matters.
     mode: "0700"
     # See the parent above: without follow: false this would chown and chmod whatever a
     # symlink planted in the stat-to-create window points at.

@@ -161,24 +161,35 @@ LIBVIRT_RECOVERY_ROOT = Setting(
     # Worker only, deliberately not _RT. The five sibling settings are host-uniform values —
     # a libvirt URI, a cap, two second-counts, a multiplier — so the same string is correct
     # in every process. This one is uid-bound: parse requires st_uid == geteuid(), and the
-    # roots are 0700 owned by kdive-worker-N. The reconciler runs as User=kdive
-    # (deploy/systemd/system/kdive-reconciler.service:9), and __main__ calls
-    # config.validate(command) for every runnable, so declaring "reconciler" here would make
-    # the reconciler fail to start with a CONFIGURATION_ERROR on exactly the hosts that
-    # configure this setting. It would also publish "reconciler" in the generated reference's
-    # Processes column, inviting an operator to put the value in the shared kdive.env.
+    # roots are 0700 owned by kdive-worker-N. The reconciler runs as User=kdive, so
+    # declaring "reconciler" would fail its startup on exactly the hosts that configure this.
+    #
+    # This set cannot express the whole rule, and that is a property of the registry rather
+    # than an oversight: it keys on the COMMAND name, and both the shared
+    # kdive-worker.service (User=kdive) and the fixed live-worker gate exec `-m kdive
+    # worker`. So "worker" necessarily covers a process that can never own a per-slot root.
+    # That is the correct outcome, not a defect: the value genuinely is invalid there, and a
+    # loud CONFIGURATION_ERROR at startup beats failing deep inside a first recovery. What
+    # keeps it from happening is placement, which `suggest` below states explicitly —
+    # per-slot only, never the shared /etc/kdive/kdive.env.
     processes=frozenset({"worker"}),
     help=(
         "Provider-owned root holding one local external-boot recovery point per activation "
         "(ADR-0586). Must be an existing owner-only directory — mode 0700, owned by the "
-        "running worker account — which the recovery stores re-check on every open. It has "
-        "no default: an unset root is rejected by name rather than silently assumed, and "
-        "leaving it unset keeps the dormant external-boot path off."
+        "running worker account — which the recovery stores re-check on every open. This is "
+        "a PER-SLOT value, not a host-wide one: each fixed live-worker slot has its own "
+        "root, so it belongs in that slot's environment and never in the shared "
+        "/etc/kdive/kdive.env, where it would fail the startup preflight of every process "
+        "that cannot own it. It has no default: an unset root is rejected by name rather "
+        "than silently assumed, and leaving it unset keeps the dormant external-boot path "
+        "off."
     ),
     suggest=(
         "set an absolute path to an existing mode-0700 directory owned by the worker "
-        "account; provisioning creates one per slot under "
-        "/var/lib/kdive/live-workers/external-boot-recovery"
+        "account running this process; provisioning creates one per slot under "
+        "/var/lib/kdive/live-workers/external-boot-recovery. Set it in the per-slot "
+        "worker environment only — placing it in the shared /etc/kdive/kdive.env makes "
+        "every worker and reconciler process that cannot own the directory fail at startup"
     ),
 )
 

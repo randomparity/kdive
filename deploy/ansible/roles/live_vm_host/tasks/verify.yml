@@ -398,6 +398,11 @@
 - name: Assert the external-boot recovery parent is root-owned
   ansible.builtin.assert:
     that:
+      # exists first: this arm is separately selectable, so it can run without the shape
+      # arm above. Without this guard an absent parent fails on an undefined pw_name
+      # attribute instead of reporting what is actually wrong -- in exactly the diagnostic
+      # an operator reaches for when the gate is red.
+      - live_vm_host_recovery_root_check.stat.exists
       - live_vm_host_recovery_root_check.stat.pw_name == 'root'
       - live_vm_host_recovery_root_check.stat.gr_name == 'root'
     fail_msg: >-
@@ -423,7 +428,7 @@
       - item.stat.isdir
       - not item.stat.islnk
       - item.stat.pw_name == item.item
-      - item.stat.gr_name == item.item
+      # No group arm: at 0700 the group has no access, so the create task sets none.
       - item.stat.mode == '0700'
     fail_msg: >-
       The external-boot recovery root for {{ item.item }} under

@@ -7,7 +7,7 @@ Registry regime: [ADR-0087](../../adr/0087-config-registry.md).
 ## Why this exists
 
 `RealLocalExternalBootIO.__init__`
-(`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py:741`) takes a
+(`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py:761`) takes a
 `recovery_root: Path` that nothing supplies. ADR-0586 already decided what that root is —
 "Local-libvirt stores each recovery point beneath its configured provider-owned recovery
 root" — and its Consequences already state the obligation this change discharges: "The
@@ -24,11 +24,11 @@ the root.
 
 Two stores open the root itself, not merely its children:
 
-- `RecoveryMetadataStore.__init__` (`external_boot.py:1552-1558`)
-- `TargetProjectionStore.__init__` (`external_boot.py:238-244`)
+- `RecoveryMetadataStore.__init__` (`external_boot.py:1637-1643`)
+- `TargetProjectionStore.__init__` (`external_boot.py:239-245`)
 
 Both do `os.open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)` and then
-`_require_private_owned_directory` (`:1916-1922`), which raises unless the opened
+`_require_private_owned_directory` (`:2001-2008`), which raises unless the opened
 descriptor is a directory whose `S_IMODE` is exactly `0o700` and whose `st_uid` equals
 `os.geteuid()`.
 
@@ -55,6 +55,33 @@ this setting. It would also publish `reconciler` in the generated reference's `P
 column, inviting an operator to put the value in the shared `/etc/kdive/kdive.env` that both
 services read. Copying the siblings' process set is the one thing that must not be done
 here.
+
+**`{"worker"}` still cannot express the whole rule, and that is deliberate.** The registry
+keys on the *command* name, and both the shared `kdive-worker.service` (`User=kdive`,
+`ExecStart=... -m kdive worker`) and the fixed live-worker gate
+(`deploy/systemd/bin/kdive-live-worker-gate:148`, `execve(..., ["-m", "kdive", "worker"])`)
+run the same command. No `processes` value distinguishes them, so `"worker"` necessarily
+covers a process that can never own a per-slot root.
+
+That is the correct outcome rather than a defect. The value genuinely is invalid for a
+process that cannot own the directory, and a loud `CONFIGURATION_ERROR` at startup is better
+than a failure deep inside a first recovery — that is the whole point of validating at
+resolution. Dropping to `frozenset()` would buy silence by discarding the startup preflight,
+which is the setting's main safety property. What prevents the bad case is **placement**, so
+the `help` and `suggest` strings say it outright: this is a per-slot value and must never go
+in the shared `/etc/kdive/kdive.env`.
+
+### Prerequisite this hands to #2212
+
+`deploy/systemd/bin/kdive-live-worker-gate` builds the worker's environment strictly from the
+`_WORKER_ENV_NAMES` allowlist (`:131`) before `execve`. That frozenset contains
+`KDIVE_LIBVIRT_URI` and **not** `KDIVE_LIBVIRT_RECOVERY_ROOT`. So even once #2212 writes the
+value into `slots/N/worker.env`, the gate will strip it: `get` returns `None`,
+`never_required` lets `validate("worker")` pass, and the absence surfaces at first recovery
+as a `require()` `CONFIGURATION_ERROR` — precisely the deep failure the health gate exists to
+prevent. **#2212 must add `KDIVE_LIBVIRT_RECOVERY_ROOT` to `_WORKER_ENV_NAMES` in the same
+change that delivers the value.** Recorded here so that work inherits the constraint instead
+of rediscovering it.
 
 **It carries no default, and `required_when` stays at the registry default
 `never_required`.** Both halves are load-bearing:

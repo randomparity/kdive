@@ -22,15 +22,11 @@ trap 'chmod -R u+w "$test_root" 2>/dev/null || :; rm -rf "$test_root"' EXIT HUP 
 recovery_root="$test_root/external-boot-recovery"
 me=$(id -un)
 
-# The role names each slot's owner AND its group after the account (main.yml does the same
-# for the fixed slot directories), so substituting the invoking account for a worker account
-# needs a user-private group. Fail loudly rather than skipping: a silent skip here would let
-# the whole harness disappear from CI without anyone noticing.
-if [ "$(id -gn)" != "$me" ]; then
-  echo "FAIL: this harness substitutes the invoking account for a worker account and needs" >&2
-  echo "  a user-private group; id -un is '$me' but id -gn is '$(id -gn)'." >&2
-  exit 1
-fi
+# No group precondition on purpose. The per-slot roots are 0700 and the role sets no group
+# on them, so substituting the invoking account needs only that account to exist. Requiring
+# a user-private group here would have reddened this repo's required Ansible-role-tests step
+# on every PR: GitHub-hosted Ubuntu runners give their account a primary group of `docker`,
+# so `id -gn` never equals `id -un` there.
 
 # The parent is created root-owned by the role and asserted against the literal root, so an
 # unprivileged harness cannot create it. It makes its own 0711 parent and drives only the
@@ -168,3 +164,16 @@ fi
 grep -q 'must be owned by root' "$test_root/parent-owner.log" ||
   fail "parent-owner rejection did not name the invariant" "$test_root/parent-owner.log"
 echo "ok verify: parent-owner gate rejects a parent not owned by root"
+
+# 11. An absent parent reports what is wrong rather than failing on an undefined stat
+#     attribute. The owner arm is separately selectable, so it can run without the shape arm
+#     having established that the parent exists at all -- this is the diagnostic an operator
+#     reaches for when the gate is red, and it must not die with a Jinja error.
+rm -rf "${recovery_root:?}"
+if run "external_boot_recovery_root_verify_parent_owner" "$test_root/absent-parent.log"; then
+  fail "parent-owner gate accepted an absent parent" "$test_root/absent-parent.log"
+fi
+grep -q 'must be owned by root' "$test_root/absent-parent.log" ||
+  fail "absent parent produced an attribute error rather than the invariant message" \
+    "$test_root/absent-parent.log"
+echo "ok verify: an absent parent reports the invariant, not an undefined attribute"

@@ -1447,11 +1447,14 @@ def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
         'owner: root group: root mode: "0711"'
     )
     assert parent in tasks
-    slots = (
-        'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" state: directory '
-        'owner: "{{ item }}" group: "{{ item }}" mode: "0700"'
-    )
-    assert slots in tasks
+    # Asserted as pieces, not one contiguous run: explanatory comments sit between these
+    # keys in the role and would break a single-substring match without any behaviour
+    # changing.
+    assert 'path: "{{ live_vm_host_worker_recovery_root }}/{{ item }}" state: directory' in tasks
+    assert 'owner: "{{ item }}"' in tasks
+    # No group on the per-slot roots: at 0700 the group has no access, and requiring a group
+    # named after each account is not universally satisfiable.
+    assert 'owner: "{{ item }}" group: "{{ item }}" mode: "0700"' not in tasks
     # follow defaults to true; without this both create tasks would dereference a symlink
     # planted between the pre-create stat and the create, applying owner and mode to its
     # target. Verified: with the default, the module succeeds and changes the target's mode.
@@ -1475,8 +1478,7 @@ def test_external_boot_recovery_roots_are_health_gated() -> None:
     # failing on an undefined attribute.
     assert (
         "item.stat.exists - item.stat.isdir - not item.stat.islnk "
-        "- item.stat.pw_name == item.item - item.stat.gr_name == item.item "
-        "- item.stat.mode == '0700'" in verify
+        "- item.stat.pw_name == item.item" in verify
     )
     assert "live_vm_host_recovery_root_check.stat.mode == '0711'" in verify
     assert "live_vm_host_recovery_root_check.stat.exists" in verify
@@ -1486,6 +1488,10 @@ def test_external_boot_recovery_roots_are_health_gated() -> None:
     assert "live_vm_host_recovery_root_check.stat.pw_name == 'root'" in verify
     assert "live_vm_host_recovery_root_check.stat.gr_name == 'root'" in verify
     assert "live_vm_host_worker_recovery_root_owner" not in verify
+    # No group arm on the per-slot roots: at 0700 the group has no access, and requiring a
+    # group named after each account is not universally satisfiable (GitHub-hosted Ubuntu
+    # runners give their account a primary group of `docker`).
+    assert "item.stat.gr_name == item.item" not in verify
 
 
 def test_external_boot_recovery_slot_roots_are_checked_before_creation() -> None:
