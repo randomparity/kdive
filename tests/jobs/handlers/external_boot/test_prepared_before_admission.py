@@ -217,8 +217,7 @@ def test_a_recovery_point_without_a_materialization_cannot_decode_at_all(
     ``ExternalBootActivation``'s own validator (`domain/external_boot_activation.py:303-311`) lists
     ``self.materialization is None`` among the disjuncts that raise
     ``recovery point ownership does not match activation``, so the repository cannot decode it and
-    no handler ever sees it. The misleading refusal is therefore unreachable rather than merely
-    unproduced.
+    no handler ever sees it.
 
     ``release`` still names both fields in its required evidence so that complete, ownership-bound
     activation evidence is checked before allocation. This test says the requirement is defence in
