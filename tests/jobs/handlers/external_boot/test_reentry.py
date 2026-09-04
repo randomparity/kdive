@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ import pytest
 from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
@@ -84,5 +86,99 @@ def test_worker_uses_authority_observation_without_direct_provider_mutation(
         assert len(executor.requests) == 1
         assert executor.requests[0].operation.value == operation
         assert vehicle.port.calls == []
+
+    asyncio.run(main())
+
+
+def test_activate_commits_deadline_before_provider_and_reuses_it(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def main() -> None:
+        vehicle = build_vehicle()
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(seed, vehicle, purpose="activate", activation_state="prepared")
+            executor = RecordingExecutor("target")
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+                authority_executor=executor,
+                clock=lambda: now,
+                activation_readiness_timeout=timedelta(seconds=90),
+            )
+            handler = build_operations(ports).get("activate")
+            assert handler is not None
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            job = build_job(
+                JobKind.BOOT,
+                {"run_id": str(vehicle.run_id), "external_boot_authority_v1": case.marker},
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                result = await handler(worker, job, marker)
+                assert result.result.operation == "deadline"
+                assert executor.requests == []
+                committed = await queue.complete_external_boot(
+                    worker,
+                    job,
+                    result,
+                    incarnation_credential=SecretStr(case.credential),
+                )
+                assert committed is not None and committed.state.value == "running"
+                replay = await handler(worker, job, marker)
+            assert replay.result.operation == "activate"
+            assert replay.result.model_dump()["activation_readiness_deadline"] == now + timedelta(
+                seconds=90
+            )
+            assert len(executor.requests) == 1
+
+    asyncio.run(main())
+
+
+def test_recover_commits_attempt_before_provider_and_reuses_it(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def main() -> None:
+        vehicle = build_vehicle()
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="recover",
+                activation_state="active",
+                system_state="crashed",
+                with_reservation=True,
+            )
+            executor = RecordingExecutor("source")
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+                authority_executor=executor,
+                clock=lambda: now,
+                recovery_readiness_timeout=timedelta(seconds=120),
+            )
+            handler = build_operations(ports).get("recover")
+            assert handler is not None
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            job = build_job(
+                JobKind.BOOT,
+                {"run_id": str(vehicle.run_id), "external_boot_authority_v1": case.marker},
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                result = await handler(worker, job, marker)
+                assert result.result.operation == "recovery-attempt"
+                assert executor.requests == []
+                committed = await queue.complete_external_boot(
+                    worker,
+                    job,
+                    result,
+                    incarnation_credential=SecretStr(case.credential),
+                )
+                assert committed is not None and committed.state.value == "running"
+                replay = await handler(worker, job, marker)
+            assert replay.result.operation == "recover"
+            assert len(executor.requests) == 1
 
     asyncio.run(main())

@@ -306,7 +306,7 @@ class ExternalBootAuthorityResultV1(BaseModel):
         }
         if admitted_operation not in allowed[self.purpose]:
             raise ValueError("admitted operation does not match authority purpose")
-        if operation != "fail" and operation != admitted_operation:
+        if operation not in allowed[self.purpose]:
             raise ValueError("result operation does not match authority purpose")
         result_ref = getattr(self.result, "result_ref", None)
         if result_ref is not None:

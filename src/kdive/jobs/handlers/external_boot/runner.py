@@ -288,6 +288,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     ],
     call_port: Callable[[OperationContext], Any],
     build_result: Callable[[OperationContext, Any], R],
+    before_port: Callable[[OperationContext], R | None] | None = None,
 ) -> R:
     """Run one authority-bound operation and return its result for the worker to commit.
 
@@ -346,6 +347,11 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         acknowledgement=acknowledgement,
         prerequisites=prerequisites,
     )
+    try:
+        if before_port is not None and (intermediate := before_port(context)) is not None:
+            return intermediate
+    except Exception as exc:
+        raise _bound_failure(context, exc, phase=_COMMIT) from None
     try:
         # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
         called = call_port(context)

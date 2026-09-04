@@ -150,16 +150,21 @@ async def _no_preconditions(
     return {}
 
 
-async def _attempt_state(conn: AsyncConnection, activation: ExternalBootActivation) -> str | None:
+async def _attempt_state(
+    conn: AsyncConnection, activation: ExternalBootActivation
+) -> tuple[str, datetime | None] | None:
     if activation.current_attempt_id is None:
         return None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT state FROM external_boot_recovery_attempts WHERE attempt_id = %s",
+            "SELECT state, recovery_readiness_deadline "
+            "FROM external_boot_recovery_attempts WHERE attempt_id = %s",
             (activation.current_attempt_id,),
         )
         row = await cur.fetchone()
-    return None if row is None else str(row["state"])
+    if row is None:
+        return None
+    return str(row["state"]), row["recovery_readiness_deadline"]
 
 
 def _require_attempt_state(expected: str) -> Callable[..., Awaitable[Mapping[str, Any]]]:
@@ -177,13 +182,14 @@ def _require_attempt_state(expected: str) -> Callable[..., Awaitable[Mapping[str
         activation: ExternalBootActivation,
         marker: ExternalBootAuthorityMarkerV1,
     ) -> Mapping[str, Any]:
-        state = await _attempt_state(conn, activation)
+        attempt = await _attempt_state(conn, activation)
+        state = None if attempt is None else attempt[0]
         if state != expected:
             raise _refuse(
                 f"{marker.operation!r} requires the current recovery attempt in {expected!r}, "
                 f"not {state!r}"
             )
-        return {}
+        return {"attempt_deadline": attempt[1] if attempt is not None else None}
 
     return check
 
@@ -269,6 +275,7 @@ def _handler(
     build_result: Callable[
         [OperationContext, AuthorityObservationV1], ExternalBootAuthoritySuccessV1
     ],
+    before_port: Callable[[OperationContext], ExternalBootAuthoritySuccessV1 | None] | None = None,
 ) -> ExternalBootOperationHandler:
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
@@ -291,6 +298,7 @@ def _handler(
             ),
             call_port=_execute,
             build_result=checked_build,
+            before_port=before_port,
         )
 
     return handler
@@ -335,18 +343,43 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             },
         )
 
+    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+        if context.activation.state is not State.PREPARED:
+            deadline = context.activation.activation_readiness_deadline
+            if deadline is not None and ports.clock() >= deadline:
+                raise CategorizedError(
+                    "activation readiness deadline expired",
+                    category=ErrorCategory.BOOT_TIMEOUT,
+                    terminal=True,
+                )
+            return None
+        deadline = ports.clock() + ports.activation_readiness_timeout
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "deadline",
+                "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
     return _handler(
         ports,
-        require_activation_state=frozenset({State.ACTIVATING}),
+        require_activation_state=frozenset({State.PREPARED, State.ACTIVATING}),
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_no_preconditions,
         expected_observation="target",
         build_result=build,
+        before_port=before_port,
     )
 
 
 def _recovering_handler(
-    ports: ExternalBootHandlerPorts, *, operation: str, state: State, attempt_state: str
+    ports: ExternalBootHandlerPorts,
+    *,
+    operation: str,
+    state: State,
+    attempt_state: str,
 ) -> ExternalBootOperationHandler:
     """``recover`` and ``resolve-conflict`` differ in three parameters, so they share a body."""
 
@@ -375,8 +408,62 @@ def _recovering_handler(
 
 def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
     """Re-run the recovery point and confirm the kernel, under a ``recovering`` attempt row."""
-    return _recovering_handler(
-        ports, operation="recover", state=State.RECOVERING, attempt_state="recovering"
+
+    def build(
+        context: OperationContext, _observation: AuthorityObservationV1
+    ) -> ExternalBootAuthoritySuccessV1:
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recover",
+                "result_ref": None,
+                "evidence": terminal_evidence(context, "recovered"),
+            },
+        )
+
+    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+        if context.activation.state is not State.ACTIVE:
+            deadline = context.prerequisites.get("attempt_deadline")
+            if deadline is not None and ports.clock() >= deadline:
+                raise CategorizedError(
+                    "recovery readiness deadline expired",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    terminal=True,
+                )
+            return None
+        deadline = ports.clock() + ports.recovery_readiness_timeout
+        attempt_id = uuid5(
+            NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
+        )
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recovery-attempt",
+                "attempt_id": str(attempt_id),
+                "recovery_basis": "recovery_point",
+                "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    async def require_attempt(
+        conn: AsyncConnection,
+        activation: ExternalBootActivation,
+        marker: ExternalBootAuthorityMarkerV1,
+    ) -> Mapping[str, Any]:
+        if activation.state is State.ACTIVE:
+            return {}
+        return await _require_attempt_state("recovering")(conn, activation, marker)
+
+    return _handler(
+        ports,
+        require_activation_state=frozenset({State.ACTIVE, State.RECOVERING}),
+        require_activation_evidence=_ACTIVATION_EVIDENCE,
+        require_preconditions=require_attempt,
+        expected_observation="source",
+        build_result=build,
+        before_port=before_port,
     )
 
 

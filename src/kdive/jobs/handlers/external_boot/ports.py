@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from pydantic import SecretStr
@@ -66,3 +68,6 @@ class ExternalBootHandlerPorts:
     incarnation_credential: SecretStr
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
     authority_executor: ExternalBootAuthorityExecutor | None = None
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    activation_readiness_timeout: timedelta = timedelta(minutes=5)
+    recovery_readiness_timeout: timedelta = timedelta(minutes=5)
