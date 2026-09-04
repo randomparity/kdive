@@ -123,12 +123,12 @@ def inspect_module_attachments(
     for domain_index, domain in enumerate(domains):
         try:
             active = bool(domain.isActive())
-            documents = [(domain.XMLDesc(0), active)]
+            documents = [(domain.XMLDesc(0), active, active)]
             if active and domain.isPersistent():
-                documents.append((domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), False))
+                documents.append((domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), False, active))
         except (libvirt.libvirtError, ET.ParseError, DefusedXmlException) as exc:
             raise _conflict("could not inspect a remote module attachment") from exc
-        for document, definition_active in documents:
+        for document, definition_active, domain_active in documents:
             try:
                 root = xml_budget.parse(document)
             except (ET.ParseError, DefusedXmlException, ValueError) as exc:
@@ -139,7 +139,14 @@ def inspect_module_attachments(
             if name in seen_names and seen_names[name] != domain_index:
                 raise _conflict("duplicate or unnamed remote module domain", domain=name)
             seen_names[name] = domain_index
-            if _inspect_definition(conn, root, definition_active, expected, protected_paths):
+            if _inspect_definition(
+                conn,
+                root,
+                definition_active,
+                domain_active,
+                expected,
+                protected_paths,
+            ):
                 owner_domains.add(domain_index)
             if name == expected.appliance.name:
                 appliance_present = True
@@ -224,7 +231,8 @@ def _protected_volume_paths(
 def _inspect_definition(
     conn: AttachmentConn,
     root: ET.Element,
-    active: bool,
+    definition_active: bool,
+    domain_active: bool,
     expected: ExpectedAttachmentState,
     protected_paths: dict[str, str],
 ) -> bool:
@@ -246,7 +254,7 @@ def _inspect_definition(
     if system_tag == expected.system_id:
         resolved_paths = [_volume_path(conn, pool, volume) for pool, volume in sources]
         protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())
-        if active:
+        if domain_active:
             raise _conflict("owning System is active", domain=name)
         owning_root = (expected.pool, expected.root_volume)
         if _top_level_volume_references(root).count(owning_root) != 1:
@@ -264,7 +272,7 @@ def _inspect_definition(
             raise _conflict("owning System has duplicate root volume references", domain=name)
         return True
     if name == expected.appliance.name:
-        _validate_appliance(root, active, expected)
+        _validate_appliance(root, definition_active, expected)
         return False
     resolved_paths = [_volume_path(conn, pool, volume) for pool, volume in sources]
     protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())

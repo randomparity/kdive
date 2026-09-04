@@ -219,6 +219,15 @@ def test_active_domain_persistent_definition_is_also_scanned() -> None:
         inspect_module_attachments(Conn(domains, {"systems": pool}), state)
 
 
+def test_inactive_owner_definition_still_observes_active_domain() -> None:
+    state = expected()
+    live_xml = foreign_xml("live-owner", "<disk type='file'><source file='/other'/></disk>").xml
+    domain = Domain(live_xml, active=True, inactive_xml=system_xml(state.system_id))
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        inspect_module_attachments(Conn([domain]), state)
+
+
 def test_active_appliance_rejects_identical_persistent_definition() -> None:
     state = expected()
     xml = appliance_xml(state)
