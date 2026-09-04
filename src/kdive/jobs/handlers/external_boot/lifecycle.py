@@ -31,7 +31,10 @@ from kdive.jobs.handlers.external_boot.runner import (
     authority_ref,
     run_operation,
 )
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthorityResultV1
+from kdive.jobs.models import (
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 
 __all__ = [
@@ -232,12 +235,12 @@ def _handler(
     require_preconditions: Callable[..., Awaitable[Mapping[str, Any]]],
     call_port: Callable[[OperationContext], RunningKernelObservation | None],
     build_result: Callable[
-        [OperationContext, RunningKernelObservation | None], ExternalBootAuthorityResultV1
+        [OperationContext, RunningKernelObservation | None], ExternalBootAuthoritySuccessV1
     ],
 ) -> ExternalBootOperationHandler:
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         return await run_operation(
             conn,
             job,
@@ -271,7 +274,7 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
 
     def build(
         context: OperationContext, observation: RunningKernelObservation | None
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         _require_observed_kernel_matches(context, observation)
         deadline = datetime.now(UTC) + ACTIVATION_READINESS_WINDOW
         return authority_result(
@@ -308,7 +311,7 @@ def _recovering_handler(
 
     def build(
         context: OperationContext, observation: RunningKernelObservation | None
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         _require_observed_kernel_matches(context, observation)
         return authority_result(
             context,
@@ -371,7 +374,7 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
     def build(
         context: OperationContext, observation: RunningKernelObservation | None
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         _require_observed_kernel_matches(context, observation)
         reservation = context.prerequisites["reservation"]
         evidence = {
@@ -441,7 +444,7 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
     def build(
         context: OperationContext, _observation: RunningKernelObservation | None
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         ordinary = context.activation.state in _ORDINARY_CLEANUP_STATES
         return authority_result(
             context,
@@ -486,7 +489,7 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
 
     def build(
         context: OperationContext, _observation: RunningKernelObservation | None
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         identity = _teardown_identity(context)
         return authority_result(
             context,

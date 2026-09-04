@@ -26,7 +26,7 @@ from typing import Any
 
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.jobs.handlers.external_boot.runner import OperationContext
-from kdive.jobs.models import ExternalBootAuthorityResultV1
+from kdive.jobs.models import ExternalBootAuthoritySuccessV1
 
 __all__ = [
     "authority_result",
@@ -80,14 +80,21 @@ def release_identity(evidence: dict[str, Any]) -> str:
 
 def authority_result(
     context: OperationContext, result: dict[str, Any]
-) -> ExternalBootAuthorityResultV1:
+) -> ExternalBootAuthoritySuccessV1:
     """Wrap ``result`` in the binding the worker's ``_authority_binding_matches`` re-checks.
 
     Every binding field is taken from the marker or the allocation, never recomputed, so a result
     that reaches the commit carries exactly the admission facts the job was claimed under.
+
+    The **subclass** is load-bearing, not decoration. ``_commit_external_result`` dispatches on
+    ``isinstance``: an ``ExternalBootAuthoritySuccessV1`` goes to ``queue.complete_external_boot``,
+    an ``ExternalBootAuthorityFailureV1`` to ``queue.fail_external_boot``, and anything else — the
+    bare base class included — is logged as an "untyped result variant" and **written nowhere**, so
+    the job keeps its lease and wedges ``running``. Returning the base class would satisfy every
+    type annotation and every binding check and still never commit.
     """
     marker = context.marker
-    return ExternalBootAuthorityResultV1.model_validate(
+    return ExternalBootAuthoritySuccessV1.model_validate(
         {
             "schema": "external-boot-authority-result-v1",
             "authority_id": context.authority.authority_id,

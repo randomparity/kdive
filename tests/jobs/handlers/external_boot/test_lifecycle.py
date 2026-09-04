@@ -106,7 +106,7 @@ def _ports(
 
 async def _run_operation(
     dsns: Callable[[str], str], seed: AsyncConnection, case: SeededCase, operation: str
-) -> ExternalBootAuthorityResultV1:
+) -> ExternalBootAuthoritySuccessV1:
     ports = _ports(case, case.vehicle, dsns)
     operations = build_operations(ports)
     handler = operations.get(operation)
@@ -161,12 +161,17 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
         assert _authority_binding_matches(marker, result) is True
 
-        # 3. criterion 5
+        # 3. criterion 5. The result is passed to the commit **as the handler returned it**, not
+        # re-validated into the success subclass first: `_commit_external_result` dispatches on
+        # isinstance, and a bare ExternalBootAuthorityResultV1 is logged as an "untyped result
+        # variant" and written nowhere. Converting here would make this test more permissive than
+        # the worker and hide exactly that — which it did, until the end-to-end test caught it.
+        assert isinstance(result, ExternalBootAuthoritySuccessV1)
         async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
             committed = await queue.complete_external_boot(
                 worker,
                 _job(case),
-                ExternalBootAuthoritySuccessV1.model_validate(result.model_dump(by_alias=True)),
+                result,
                 incarnation_credential=SecretStr(case.credential),
             )
         assert committed is not None
@@ -214,7 +219,7 @@ def test_cleanup_marks_the_activation_cleanup_complete(
             await queue.complete_external_boot(
                 worker,
                 _job(case),
-                ExternalBootAuthoritySuccessV1.model_validate(result.model_dump(by_alias=True)),
+                result,
                 incarnation_credential=SecretStr(case.credential),
             )
 
@@ -232,7 +237,7 @@ def test_teardown_drives_the_system_to_torn_down(
             await queue.complete_external_boot(
                 worker,
                 _job(case),
-                ExternalBootAuthoritySuccessV1.model_validate(result.model_dump(by_alias=True)),
+                result,
                 incarnation_credential=SecretStr(case.credential),
             )
 

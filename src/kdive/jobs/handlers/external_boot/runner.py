@@ -226,7 +226,7 @@ def _bound_failure(
     )
 
 
-async def run_operation(
+async def run_operation[R: ExternalBootAuthorityResultV1](
     conn: AsyncConnection,
     job: Job,
     marker: ExternalBootAuthorityMarkerV1,
@@ -239,10 +239,8 @@ async def run_operation(
         Awaitable[Mapping[str, Any]],
     ],
     call_port: Callable[[OperationContext], RunningKernelObservation | None],
-    build_result: Callable[
-        [OperationContext, RunningKernelObservation | None], ExternalBootAuthorityResultV1
-    ],
-) -> ExternalBootAuthorityResultV1:
+    build_result: Callable[[OperationContext, RunningKernelObservation | None], R],
+) -> R:
     """Run one authority-bound operation and return its result for the worker to commit.
 
     Steps 1, 2, 2a, 2b and 2c all run **before** allocation, so every refusal happens while there
@@ -255,6 +253,11 @@ async def run_operation(
     The handler does **not** call the commit. It returns its result and the worker's
     ``_finalize_handler`` commits it, gated on ``_authority_binding_matches`` — the one check
     standing between a mismatched result and the authority tables.
+
+    Generic in the result type so the runner returns exactly what ``build_result`` produced. That
+    matters because ``_commit_external_result`` dispatches on ``isinstance``: collapsing an
+    ``ExternalBootAuthoritySuccessV1`` to the base class here would make a handler that commits
+    nothing type-check clean.
     """
     binding, port = await _resolve_port(conn, marker, ports)
     activation = await _read_activation(

@@ -39,7 +39,7 @@ from kdive.jobs.handlers.runs import registrar as runs_registrar
 from kdive.jobs.models import (
     DuplicateHandler,
     ExternalBootAuthorityMarkerV1,
-    ExternalBootAuthorityResultV1,
+    ExternalBootAuthoritySuccessV1,
     HandlerRegistry,
 )
 from kdive.jobs.payloads import ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS
@@ -250,8 +250,8 @@ def _recorder(name: str, calls: list[str]) -> ExternalBootOperationHandler:
 
     async def handler(
         _conn: AsyncConnection, _job: Job, _marker: ExternalBootAuthorityMarkerV1
-    ) -> ExternalBootAuthorityResultV1:
+    ) -> ExternalBootAuthoritySuccessV1:
         calls.append(name)
-        return cast(ExternalBootAuthorityResultV1, None)
+        return cast(ExternalBootAuthoritySuccessV1, None)
 
     return handler

@@ -8,7 +8,7 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthorityResultV1
+from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthoritySuccessV1
 from kdive.jobs.payloads import (
     ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS,
     BootPayload,
@@ -24,8 +24,17 @@ __all__ = [
 
 type ExternalBootOperationHandler = Callable[
     [AsyncConnection, Job, ExternalBootAuthorityMarkerV1],
-    Awaitable[ExternalBootAuthorityResultV1],
+    Awaitable[ExternalBootAuthoritySuccessV1],
 ]
+"""An operation either returns a **success** result or raises ``ExternalBootAuthorityFailure``.
+
+The success subclass rather than the base ``ExternalBootAuthorityResultV1`` is deliberate.
+``kdive.jobs.worker._commit_external_result`` dispatches on ``isinstance``: a success goes to
+``queue.complete_external_boot``, a failure to ``queue.fail_external_boot``, and a bare base
+instance is logged as an "untyped result variant" and written nowhere — so the job keeps its lease
+and wedges ``running``. Typing the seam as the base class let exactly that ship and type-check
+clean; typing it as the subclass makes the same mistake a ``ty`` error.
+"""
 
 
 class DuplicateExternalBootHandler(RuntimeError):
@@ -64,7 +73,7 @@ class ExternalBootOperations:
     def registered_operations(self) -> frozenset[str]:
         return frozenset(self._handlers)
 
-    async def run(self, conn: AsyncConnection, job: Job) -> ExternalBootAuthorityResultV1:
+    async def run(self, conn: AsyncConnection, job: Job) -> ExternalBootAuthoritySuccessV1:
         """Decode ``job``'s marker and dispatch to the handler bound to its operation.
 
         Decoding happens here rather than in the router, so the router needs no decoder of its own
