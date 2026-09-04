@@ -9,7 +9,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
@@ -40,6 +40,13 @@ class AuthorityMutationAdapter(Protocol):
     async def commit(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityMutationFinalizer(Protocol):
+    async def finalize(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> None: ...
 
 
 class AuthorityRepository(Protocol):
@@ -311,6 +318,47 @@ class ExternalBootAuthorityService:
             and binding.operation_identity == request.operation_identity
             and binding.operation_digest == request.operation_digest
         )
+
+    @staticmethod
+    def _operation_matches(record: JournalRecordV1, request: AuthorityMutationRequestV1) -> bool:
+        """Match immutable operation facts while allowing a successor authority generation."""
+        return (
+            record.system_id == request.system_id
+            and record.activation_id == request.activation_id
+            and record.run_id == request.run_id
+            and record.plan_identity == request.plan_identity
+            and record.purpose == request.purpose
+            and record.operation == request.operation
+            and record.provider_kind == request.provider_kind
+            and record.authority_instance == request.authority_instance
+            and record.operation_identity == request.operation_identity
+            and record.operation_digest == request.operation_digest
+        )
+
+    async def _finalize_adapter(
+        self,
+        request: AuthorityMutationRequestV1,
+        records: list[JournalRecordV1],
+    ) -> None:
+        if not isinstance(self._adapter, AuthorityMutationFinalizer):
+            return
+        started = next(
+            (
+                record
+                for record in reversed(records)
+                if record.operation_identity == request.operation_identity
+                and record.phase is JournalPhase.MUTATION_STARTED
+            ),
+            None,
+        )
+        if started is None:
+            raise AuthorityServiceError("journal_conflict")
+        try:
+            await self._adapter.finalize(request, AuthorityCommitContextV1.for_record(started))
+        except AuthorityServiceError:
+            raise
+        except Exception:
+            raise self._provider_error(request) from None
 
     async def _recover(
         self,
@@ -827,6 +875,12 @@ class ExternalBootAuthorityService:
                     phases_by_operation: dict[str, JournalRecordV1] = {}
                     for record in reversed(records):
                         phases_by_operation.setdefault(record.operation_identity, record)
+                    prior = phases_by_operation.get(request.operation_identity)
+                    if prior is not None and prior.phase is JournalPhase.TERMINAL:
+                        if not self._operation_matches(prior, request) or prior.observation is None:
+                            raise AuthorityServiceError("journal_conflict")
+                        await self._finalize_adapter(request, records)
+                        return prior.observation
                     unresolved = next(
                         (
                             record
@@ -963,7 +1017,7 @@ class ExternalBootAuthorityService:
                         if observation.category in {"absent", "source", "target", "conflict"}
                         else "conflict"
                     )
-                    await self._anchor(
+                    records = await self._anchor(
                         completion_binding,
                         journal,
                         records,
@@ -975,6 +1029,7 @@ class ExternalBootAuthorityService:
                             outcome=outcome,
                         ),
                     )
+                    await self._finalize_adapter(request, records)
                     return observation
             finally:
                 active.done.set()
