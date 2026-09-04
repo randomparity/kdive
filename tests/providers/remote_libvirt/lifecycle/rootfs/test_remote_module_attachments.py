@@ -1,5 +1,6 @@
 """Fail-closed remote module attachment inspection."""
 
+import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -8,7 +9,9 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
     ExpectedAttachmentState,
     inspect_module_attachments,
 )
+from kdive.providers.remote_libvirt.lifecycle.storage import render_volume_xml
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
+from tests.providers.remote_libvirt.fakes import FakeStoragePool, libvirt_error
 
 
 class Domain:
@@ -32,11 +35,27 @@ class Domain:
 
 
 class Conn:
-    def __init__(self, domains: list[Domain]) -> None:
+    def __init__(
+        self, domains: list[Domain], pools: dict[str, FakeStoragePool] | None = None
+    ) -> None:
         self.domains = domains
+        self.pools = pools or {"systems": storage_pool()}
 
     def listAllDomains(self, flags: int = 0) -> list[Domain]:  # noqa: N802
         return self.domains
+
+    def storagePoolLookupByName(self, name: str) -> FakeStoragePool:  # noqa: N802
+        try:
+            return self.pools[name]
+        except KeyError as exc:
+            raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_POOL) from exc
+
+
+def storage_pool(*, name: str = "systems", target_path: str = "/pool") -> FakeStoragePool:
+    pool = FakeStoragePool(name=name, target_path=target_path)
+    for volume in ("root", "source", "scratch"):
+        pool.createXML(render_volume_xml(volume, capacity_bytes=1024, backing_path="/base"))
+    return pool
 
 
 def system_xml(system: str, *, volume: str = "root", arch: str = "x86_64") -> str:
@@ -185,6 +204,8 @@ def test_resumed_appliance_rejects_non_allowlisted_disk_xml(mutation: str) -> No
 def test_active_domain_persistent_definition_is_also_scanned() -> None:
     state = expected()
     other = "00000000-0000-4000-8000-000000000099"
+    pool = storage_pool()
+    pool.createXML(render_volume_xml("unrelated", capacity_bytes=1024, backing_path="/base"))
     domains = [
         Domain(system_xml(state.system_id)),
         Domain(
@@ -195,7 +216,7 @@ def test_active_domain_persistent_definition_is_also_scanned() -> None:
     ]
 
     with pytest.raises(CategorizedError, match="another domain"):
-        inspect_module_attachments(Conn(domains), state)
+        inspect_module_attachments(Conn(domains, {"systems": pool}), state)
 
 
 def test_active_appliance_rejects_identical_persistent_definition() -> None:
@@ -287,12 +308,10 @@ def test_path_referenced_protected_volume_is_rejected(attribute: str, active: bo
             image_digest="sha256:" + "e" * 64,
             operation_nonce="a" * 32,
         ),
-        protected_paths=frozenset({"/var/lib/libvirt/images/systems/root.qcow2"}),
     )
     tenant = foreign_xml(
         "tenant",
-        f"<disk type='file'><source {attribute}="
-        "'/var/lib/libvirt/images/systems/root.qcow2'/></disk>",
+        f"<disk type='file'><source {attribute}='/pool/root'/></disk>",
         active=active,
     )
     with pytest.raises(CategorizedError) as raised:
@@ -306,3 +325,46 @@ def test_unprotected_path_reference_is_ignored() -> None:
     tenant = foreign_xml("tenant", "<disk type='file'><source file='/srv/other.qcow2'/></disk>")
     result = inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
     assert result.exclusive
+
+
+def test_volume_reference_through_alias_pool_is_rejected() -> None:
+    state = expected()
+    pools = {
+        state.pool: storage_pool(name=state.pool),
+        "alias": storage_pool(name="alias"),
+    }
+    tenant = foreign_xml(
+        "tenant",
+        f"<disk type='volume'><source pool='alias' volume='{state.root_volume}'/></disk>",
+    )
+
+    with pytest.raises(CategorizedError, match="by path"):
+        inspect_module_attachments(
+            Conn([Domain(system_xml(state.system_id)), tenant], pools), state
+        )
+
+
+def test_unresolvable_volume_reference_fails_closed() -> None:
+    state = expected()
+    tenant = foreign_xml(
+        "tenant",
+        "<disk type='volume'><source pool='missing' volume='root'/></disk>",
+    )
+
+    with pytest.raises(CategorizedError, match="could not resolve") as raised:
+        inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
+    assert raised.value.category is ErrorCategory.CONFLICT
+
+
+@pytest.mark.parametrize(("attribute", "volume"), [("file", "source"), ("dev", "scratch")])
+def test_owning_system_path_reference_to_attempt_volume_is_rejected(
+    attribute: str, volume: str
+) -> None:
+    state = expected()
+    xml = system_xml(state.system_id).replace(
+        "</devices>",
+        f"<disk type='file'><source {attribute}='/pool/{volume}'/></disk></devices>",
+    )
+
+    with pytest.raises(CategorizedError, match="attempt-scoped"):
+        inspect_module_attachments(Conn([Domain(xml)]), state)

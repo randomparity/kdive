@@ -70,12 +70,6 @@ class ExpectedAttachmentState:
     source_volume: str
     scratch_volume: str
     appliance: ExpectedAppliance
-    # Backing paths of the three protected volumes, resolved through
-    # virStorageVolGetPath. A `<disk type='volume'>` is indirection libvirt
-    # resolves to one of these paths at domain start, so a co-tenant naming the
-    # same image through `<source file=>`/`<source dev=>` is invisible to a
-    # pool/volume comparison alone -- the ADR-0585 exclusivity hazard.
-    protected_paths: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,8 +90,17 @@ class Domain(Protocol):
     def isPersistent(self) -> int: ...  # noqa: N802
 
 
+class StorageVolume(Protocol):
+    def path(self) -> str: ...
+
+
+class StoragePool(Protocol):
+    def storageVolLookupByName(self, name: str) -> StorageVolume: ...  # noqa: N802
+
+
 class AttachmentConn(Protocol):
     def listAllDomains(self, flags: int = 0) -> Sequence[Domain]: ...  # noqa: N802
+    def storagePoolLookupByName(self, name: str) -> StoragePool: ...  # noqa: N802
 
 
 def _conflict(message: str, **details: object) -> CategorizedError:
@@ -108,6 +111,7 @@ def inspect_module_attachments(
     conn: AttachmentConn, expected: ExpectedAttachmentState
 ) -> AttachmentInspection:
     """Prove the System is stopped and all three volumes have exclusive owners."""
+    protected_paths = _protected_volume_paths(conn, expected)
     try:
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
@@ -135,7 +139,7 @@ def inspect_module_attachments(
             if name in seen_names and seen_names[name] != domain_index:
                 raise _conflict("duplicate or unnamed remote module domain", domain=name)
             seen_names[name] = domain_index
-            if _inspect_definition(root, definition_active, expected):
+            if _inspect_definition(conn, root, definition_active, expected, protected_paths):
                 owner_domains.add(domain_index)
             if name == expected.appliance.name:
                 appliance_present = True
@@ -173,7 +177,41 @@ def _path_references(root: ET.Element) -> set[str]:
     return paths
 
 
-def _inspect_definition(root: ET.Element, active: bool, expected: ExpectedAttachmentState) -> bool:
+def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:
+    try:
+        pool = conn.storagePoolLookupByName(pool_name)
+        path = pool.storageVolLookupByName(volume_name).path()
+    except libvirt.libvirtError as exc:
+        raise _conflict(
+            "could not resolve remote module volume path",
+            pool=pool_name,
+            volume=volume_name,
+        ) from exc
+    if not path:
+        raise _conflict(
+            "remote module volume path is empty",
+            pool=pool_name,
+            volume=volume_name,
+        )
+    return path
+
+
+def _protected_volume_paths(
+    conn: AttachmentConn, expected: ExpectedAttachmentState
+) -> dict[str, str]:
+    return {
+        volume: _volume_path(conn, expected.pool, volume)
+        for volume in (expected.root_volume, expected.source_volume, expected.scratch_volume)
+    }
+
+
+def _inspect_definition(
+    conn: AttachmentConn,
+    root: ET.Element,
+    active: bool,
+    expected: ExpectedAttachmentState,
+    protected_paths: dict[str, str],
+) -> bool:
     name = root.findtext("name")
     protected = {expected.root_volume, expected.source_volume, expected.scratch_volume}
     # Scoped to pool/volume pairs on purpose: a file-, block-, or network-backed
@@ -184,25 +222,38 @@ def _inspect_definition(root: ET.Element, active: bool, expected: ExpectedAttach
     if len(sources) != len(set(sources)):
         raise _conflict("duplicate volume reference in domain", domain=name)
     referenced = {volume for pool, volume in sources if pool == expected.pool}
-    paths = _path_references(root) & expected.protected_paths
+    direct_paths = _path_references(root)
     system_tags = root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
     if len(system_tags) > 1:
         raise _conflict("duplicate System ownership metadata", domain=name)
     system_tag = system_tags[0].text if system_tags else None
     if system_tag == expected.system_id:
+        resolved_paths = [_volume_path(conn, pool, volume) for pool, volume in sources]
+        protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())
         if active:
             raise _conflict("owning System is active", domain=name)
         if (expected.pool, expected.root_volume) not in sources:
             raise _conflict("owning System definition has a different root volume", domain=name)
-        if referenced & {expected.source_volume, expected.scratch_volume}:
+        attempt_paths = {
+            protected_paths[expected.source_volume],
+            protected_paths[expected.scratch_volume],
+        }
+        if referenced & {expected.source_volume, expected.scratch_volume} or (
+            protected_references & attempt_paths
+        ):
             raise _conflict("System references attempt-scoped appliance storage", domain=name)
+        root_path = protected_paths[expected.root_volume]
+        if resolved_paths.count(root_path) + list(direct_paths).count(root_path) != 1:
+            raise _conflict("owning System has duplicate root volume references", domain=name)
         return True
     if name == expected.appliance.name:
         _validate_appliance(root, active, expected)
         return False
+    resolved_paths = [_volume_path(conn, pool, volume) for pool, volume in sources]
+    protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())
     if referenced & protected:
         raise _conflict("another domain references remote module storage", domain=name)
-    if paths:
+    if protected_references:
         raise _conflict("another domain references remote module storage by path", domain=name)
     return False
 
