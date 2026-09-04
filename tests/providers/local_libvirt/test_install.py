@@ -1746,13 +1746,12 @@ def test_domain_exit_probe_uses_resolved_virsh_path(monkeypatch: pytest.MonkeyPa
 
 # The ordinary stderr `virsh` writes when the session daemon is unreachable. Every fragment is
 # host-derived and none of it is actionable for an agent (#2220, ADR-0594).
+_SOCKET_PATH = "/run/user/1000/libvirt/virtqemud-sock"
 _LEAKY_DOMSTATE_STDERR = (
     "error: failed to connect to the hypervisor\n"
-    "error: Failed to connect socket to '/run/user/1000/libvirt/virtqemud-sock': "
-    "No such file or directory"
+    f"error: Failed to connect socket to '{_SOCKET_PATH}': No such file or directory"
 )
-_TRANSPORT_SUBSTRINGS = ("/run/user/1000/libvirt/virtqemud-sock", "/run/user", "virtqemud-sock")
-_SOCKET_PATH = "/run/user/1000/libvirt/virtqemud-sock"
+_TRANSPORT_SUBSTRINGS = (_SOCKET_PATH, "/run/user", "virtqemud-sock")
 
 
 def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
@@ -1807,7 +1806,7 @@ def test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload(
     # An OSError renders `.filename` and `.strerror` in `str(exc)`, so the socket path reaches
     # the payload through the exception rather than through stderr.
     def domstate_oserror(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
-        raise OSError(13, "Permission denied", "/run/user/1000/libvirt/virtqemud-sock")
+        raise OSError(13, "Permission denied", _SOCKET_PATH)
 
     monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
     monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_oserror)
