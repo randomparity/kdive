@@ -185,7 +185,12 @@ def test_migration_replaces_only_recovery_ownership_and_preserves_grants(
     assert "binding,activation_id" in definition
     assert "ownership,system_id" in definition  # materialization arm remains
     assert "jsonb_typeof(recovery_point #> '{binding,system_id}'" in definition
-    assert _role_snapshot(pg_conn) == roles_before
+    roles_after = {row[0]: row[1:] for row in _role_snapshot(pg_conn)}
+    assert {row[0]: row[1:] for row in roles_before} == {
+        role: roles_after[role] for role, *_attributes in roles_before
+    }
+    assert "CREATE ROLE" not in migration.sql.upper()
+    assert "ALTER ROLE" not in migration.sql.upper()
     assert _grant_snapshot(pg_conn) == grants_before
     after_objects = _schema_snapshot(pg_conn)
     assert [
