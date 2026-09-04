@@ -94,7 +94,7 @@ _CANDIDATE_SQL = {
 
 
 async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...]:
-    async with conn.cursor(row_factory=dict_row) as cur:
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             cast(LiteralString, _CANDIDATE_SQL[lane] + " ORDER BY a.id LIMIT %s"),
             (_REPAIR_BATCH,),
@@ -307,14 +307,15 @@ async def repair_external_boot_lane(
     )
     for candidate in candidates:
         try:
-            repaired += await _enqueue_candidate(
-                conn,
-                candidate,
-                resolver=resolver,
-                authority_instance=authority_instance,
-                source_jobs=source_jobs,
-                live_jobs=live_jobs,
-            )
+            async with conn.transaction():
+                repaired += await _enqueue_candidate(
+                    conn,
+                    candidate,
+                    resolver=resolver,
+                    authority_instance=authority_instance,
+                    source_jobs=source_jobs,
+                    live_jobs=live_jobs,
+                )
         except Exception:
             # Provider and durable payload exceptions may contain host identifiers. The lane's
             # bounded operation label is enough for telemetry; raw diagnostics stay private.

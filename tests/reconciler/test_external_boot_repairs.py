@@ -10,7 +10,8 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege
+from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege, QueryCanceled
+from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from kdive.jobs.payloads import BootPayload
@@ -160,7 +161,7 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
                 (Jsonb(str(uuid4())), case.job_id),
             )
         async with await psycopg.AsyncConnection.connect(
-            authority_role_dsns("kdive_reconciler"), autocommit=True
+            authority_role_dsns("kdive_reconciler")
         ) as reconciler:
             first = await external_boot.repair_external_boot_lane(
                 reconciler,
@@ -175,6 +176,7 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
                 authority_instance="authority-current",
             )
             assert (first, second) == (1, 0)
+            assert reconciler.info.transaction_status is TransactionStatus.IDLE
             row = await reconciler.execute(
                 "SELECT payload #>> '{external_boot_authority_v1,authority_instance}', state "
                 "FROM jobs WHERE dedup_key LIKE 'external-boot:repair:%'"
@@ -186,6 +188,33 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
                     "UPDATE external_boot_activations SET cleanup_complete = true WHERE id = %s",
                     (vehicle.activation_id,),
                 )
+
+    asyncio.run(body())
+
+
+def test_job_lookup_timeout_ends_its_transaction(
+    migrated_url: str, authority_role_dsns: _RoleDsns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def body() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as admin:
+            await seed_case(admin, vehicle, purpose="activate", activation_state="prepared")
+        async with (
+            await psycopg.AsyncConnection.connect(migrated_url) as blocker,
+            await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_reconciler")
+            ) as reconciler,
+        ):
+            await blocker.execute("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE")
+            monkeypatch.setattr(external_boot, "_JOB_LOOKUP_TIMEOUT_MS", 10)
+            with pytest.raises(QueryCanceled):
+                await external_boot.repair_external_boot_lane(
+                    reconciler,
+                    lane="activation",
+                    resolver=resolver_for(vehicle),
+                    authority_instance="authority-current",
+                )
+            assert reconciler.info.transaction_status is TransactionStatus.IDLE
 
     asyncio.run(body())
 
