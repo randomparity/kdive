@@ -208,8 +208,17 @@ class CleanupTombstoneV1(_ClosedValue):
         "local-libvirt-cleanup-tombstone-v1", alias="schema"
     )
     binding: ExternalBootActivationBinding
+    recovery_point: RecoveryPoint
     point_digest: Digest
     payload_absent: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _receipt_matches_point(self) -> CleanupTombstoneV1:
+        if self.recovery_point.binding != self.binding:
+            raise ValueError("cleanup tombstone recovery point has different ownership")
+        if LocalLibvirtExternalBoot.point_digest(self.recovery_point) != self.point_digest:
+            raise ValueError("cleanup tombstone recovery point digest does not match")
+        return self
 
 
 class TargetProjectionV1(_ClosedValue):
@@ -736,6 +745,9 @@ class LocalExternalBootOperation(Protocol):
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef: ...
     def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1: ...
     def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1: ...
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1: ...
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState: ...
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
@@ -937,6 +949,12 @@ class _RealLocalExternalBootOperation:
     def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.reopen(_recovery_ref(binding), binding)
+
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.reopen_tombstone(_recovery_ref(binding), binding)
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         # Each half is read independently so a readable definition still classifies when
@@ -1620,6 +1638,19 @@ class LocalLibvirtExternalBoot:
                 target_state=metadata.target_state,
             )
 
+    def cleanup_receipt(
+        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+    ) -> RecoveryPoint | None:
+        """Reconstruct an exact accounted-cleanup receipt after authority restart."""
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            try:
+                tombstone = operation.reopen_cleanup_tombstone(binding)
+            except FileNotFoundError:
+                return None
+            if tombstone.binding != binding:
+                raise ValueError("cleanup tombstone does not match requested binding")
+            return tombstone.recovery_point
+
     def observe_state(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
     ) -> LocalObservedState:
@@ -2072,7 +2103,19 @@ class RecoveryMetadataStore:
         self._require_open()
         name = recovery_directory_name(reference, binding)
         directory_fd = _open_private_directory(self._root_fd, name)
-        tombstone = CleanupTombstoneV1(binding=binding, point_digest=point_digest)
+        recovery_point = RecoveryPoint(
+            binding=expected.binding,
+            plan_identity=expected.plan_identity,
+            materialization_identity=expected.materialization_identity,
+            recovery_ref=reference,
+            source_state=expected.source_state,
+            target_state=expected.target_state,
+        )
+        tombstone = CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=recovery_point,
+            point_digest=point_digest,
+        )
         try:
             if expected.binding != binding or self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before cleanup")
@@ -2106,6 +2149,7 @@ class RecoveryMetadataStore:
             return False
         expected = CleanupTombstoneV1(
             binding=recovery.binding,
+            recovery_point=recovery,
             point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
         )
         if actual != expected:
@@ -2123,6 +2167,7 @@ class RecoveryMetadataStore:
         name = recovery_directory_name(reference, recovery.binding)
         expected = CleanupTombstoneV1(
             binding=recovery.binding,
+            recovery_point=recovery,
             point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
         )
         if proof.binding != recovery.binding or proof.point_digest != expected.point_digest:
@@ -2211,6 +2256,16 @@ class RecoveryMetadataStore:
             return self._read_tombstone(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def reopen_tombstone(
+        self, reference: OpaqueProviderRef, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        """Read one canonical owner-bound cleanup receipt without requiring intent metadata."""
+        self._require_open()
+        tombstone = self._read_tombstone_named(recovery_directory_name(reference, binding))
+        if tombstone.binding != binding or tombstone.recovery_point.recovery_ref != reference:
+            raise ValueError("cleanup tombstone does not match requested recovery object")
+        return tombstone
 
     @staticmethod
     def _read_tombstone(directory_fd: int) -> CleanupTombstoneV1:

@@ -875,6 +875,7 @@ def test_recovery_metadata_store_retries_interrupted_temporary_replacement(
             else:
                 expected_model = CleanupTombstoneV1(
                     binding=metadata.binding,
+                    recovery_point=_point(metadata),
                     point_digest=LocalLibvirtExternalBoot.point_digest(_point(metadata)),
                 )
                 temporary_name = ".tombstone.next"
@@ -1414,6 +1415,18 @@ class _ExternalIO:
         if self.operation_fault:
             raise LookupError("operation primary")
         return self.metadata
+
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        if not self.tombstone:
+            raise FileNotFoundError("tombstone.json")
+        point = _point(self.metadata)
+        return CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=point,
+            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        )
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         self.actions.append("observe-state")
@@ -3422,6 +3435,26 @@ def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path)
         ports.cleanup(crossed, OpaqueProviderRef(ref="authority/current"))
     assert host.actions == ["cleanup"]
     assert session.close_attempts == 3
+
+
+def test_real_adapter_restart_reconstructs_cleanup_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    io, _session = _real_io(root, host)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    LocalLibvirtExternalBoot(io).cleanup(point, OpaqueProviderRef(ref="authority/current"))
+    restarted = LocalLibvirtExternalBoot(io)
+
+    assert (
+        restarted.cleanup_receipt(point.binding, OpaqueProviderRef(ref="authority/current"))
+        == point
+    )
+    assert host.actions == ["cleanup"]
 
 
 def test_real_adapter_rechecks_exact_metadata_before_cleanup_mutation(

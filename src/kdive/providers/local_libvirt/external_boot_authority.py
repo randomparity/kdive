@@ -182,7 +182,9 @@ class LocalExternalBootAuthorityAdapter:
     ) -> AuthorityObservationV1:
         binding = _activation_binding(request)
         authority = _authority_ref(request)
-        point = self._resolve_point(binding, authority)
+        point = self._resolve_point(
+            binding, authority, allow_cleanup_receipt=operation is AuthorityOperation.CLEANUP
+        )
         if point is None and request.operation is AuthorityOperation.CLEANUP:
             point = self._pending_cleanup_finalization.get(request.operation_identity)
         matched = self._require_matching_identities(request, point)
@@ -240,7 +242,11 @@ class LocalExternalBootAuthorityAdapter:
     def _observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         binding = _activation_binding(request)
         authority = _authority_ref(request)
-        point = self._resolve_point(binding, authority)
+        point = self._resolve_point(
+            binding,
+            authority,
+            allow_cleanup_receipt=request.operation is AuthorityOperation.CLEANUP,
+        )
         if point is None and request.operation is AuthorityOperation.CLEANUP:
             point = self._pending_cleanup_finalization.get(request.operation_identity)
         if (
@@ -258,7 +264,11 @@ class LocalExternalBootAuthorityAdapter:
         return self._observation(request, binding, authority, point)
 
     def _resolve_point(
-        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        *,
+        allow_cleanup_receipt: bool,
     ) -> RecoveryPoint | None:
         try:
             return self._ports.recovery_point(binding, authority)
@@ -266,6 +276,12 @@ class LocalExternalBootAuthorityAdapter:
             # Logged in full inside the authority, where the diagnostic is allowed to
             # exist; only the bounded category ever crosses the boundary.
             logger.exception("external-boot recovery point is unresolvable")
+        if not allow_cleanup_receipt:
+            return None
+        try:
+            return self._ports.cleanup_receipt(binding, authority)
+        except Exception:  # noqa: BLE001 - malformed or unreadable receipt fails closed
+            logger.exception("external-boot cleanup receipt is unresolvable")
             return None
 
     @staticmethod
