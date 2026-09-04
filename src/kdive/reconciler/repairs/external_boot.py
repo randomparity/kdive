@@ -35,40 +35,51 @@ type RepairOperation = Literal[
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     activation_id: UUID
+    system_id: UUID
+    run_id: UUID
+    plan_identity: str
+    project: str
     operation: RepairOperation
+
+
+_REPAIR_BATCH = 100
+_SOURCE_JOB_SCAN_LIMIT = 100
 
 
 _CANDIDATE_SQL = {
     "activation": """
-        SELECT a.id AS activation_id,
+        SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
                'activate' AS operation
         FROM external_boot_activations a
+        JOIN systems system ON system.id = a.system_id
         WHERE a.state = 'prepared'
            OR (a.state = 'activating' AND a.activation_readiness_deadline < now())
     """,
     "recovery": """
-        SELECT a.id AS activation_id,
+        SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
                CASE WHEN attempt.recovery_basis = 'pre_recovery'
                     THEN 'resolve-conflict' ELSE 'recover' END AS operation
         FROM external_boot_activations a
         JOIN external_boot_recovery_attempts attempt
           ON attempt.activation_id = a.id AND attempt.attempt_id = a.current_attempt_id
+        JOIN systems system ON system.id = a.system_id
         WHERE a.state = 'recovering'
           AND attempt.state = 'recovering'
           AND attempt.recovery_readiness_deadline < now()
     """,
     "release": """
-        SELECT a.id AS activation_id,
+        SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
                'release' AS operation
         FROM external_boot_activations a
         JOIN external_boot_reservations reservation ON reservation.activation_id = a.id
+        JOIN systems system ON system.id = a.system_id
         LEFT JOIN external_boot_reservation_releases released ON released.activation_id = a.id
         WHERE a.state IN ('recovered', 'abandoned', 'recovery_conflict', 'recovery_failed')
           AND NOT a.cleanup_complete AND reservation.state = 'ready'
           AND released.activation_id IS NULL
     """,
     "cleanup": """
-        SELECT a.id AS activation_id,
+        SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
                CASE WHEN a.state IN ('recovered', 'abandoned')
                     THEN 'cleanup' ELSE 'teardown' END AS operation
         FROM external_boot_activations a
@@ -83,10 +94,21 @@ _CANDIDATE_SQL = {
 
 async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...]:
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(cast(LiteralString, _CANDIDATE_SQL[lane]))
+        await cur.execute(
+            cast(LiteralString, _CANDIDATE_SQL[lane] + " ORDER BY a.id LIMIT %s"),
+            (_REPAIR_BATCH,),
+        )
         rows = await cur.fetchall()
     return tuple(
-        _Candidate(activation_id=row["activation_id"], operation=row["operation"]) for row in rows
+        _Candidate(
+            activation_id=row["activation_id"],
+            system_id=row["system_id"],
+            run_id=row["run_id"],
+            plan_identity=row["plan_identity"],
+            project=row["project"],
+            operation=row["operation"],
+        )
+        for row in rows
     )
 
 
@@ -95,8 +117,8 @@ async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | Non
         await cur.execute(
             "SELECT * FROM jobs WHERE payload ? 'external_boot_authority_v1' "
             "AND payload #>> '{external_boot_authority_v1,activation_id}' = %s "
-            "ORDER BY created_at DESC, id DESC",
-            (str(candidate.activation_id),),
+            "ORDER BY created_at DESC, id DESC LIMIT %s",
+            (str(candidate.activation_id), _SOURCE_JOB_SCAN_LIMIT),
         )
         rows = await cur.fetchall()
     for row in rows:
@@ -112,7 +134,19 @@ async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | Non
             Authorizing.model_validate(job.authorizing)
         except PayloadValidationError, ValidationError:
             continue
-        if marker is not None and marker.activation_id == candidate.activation_id:
+        if marker is not None and (
+            marker.activation_id,
+            marker.system_id,
+            marker.run_id,
+            marker.plan_identity,
+            job.authorizing["project"],
+        ) == (
+            candidate.activation_id,
+            candidate.system_id,
+            candidate.run_id,
+            candidate.plan_identity,
+            candidate.project,
+        ):
             return job
     return None
 

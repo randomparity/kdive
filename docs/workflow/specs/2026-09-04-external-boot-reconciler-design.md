@@ -62,6 +62,10 @@ repair module issues `INSERT`, `UPDATE`, or `DELETE` against the four external-b
 activation repository mutator, or imports a provider adapter. Integration coverage executes the
 lanes as `kdive_reconciler`, for which migration 0121 grants SELECT alone.
 
+Each lane reads at most 100 activation candidates per pass and considers at most the newest 100
+authority-marked source jobs per activation. Stable identifier ordering makes the remainder
+eligible on later passes while bounding database work driven by durable tenant history.
+
 Concurrent passes may identify the same candidate, but the deterministic job deduplication key
 makes enqueue idempotent. The worker rechecks activation, Allocation, System, Run, authority, and
 deadline facts under the existing authority protocol before any provider mutation or commit.

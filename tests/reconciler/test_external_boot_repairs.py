@@ -34,7 +34,15 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
     source = marked_job(
         "activate", activation_id=str(activation_id), authority_instance="authority-old"
     )
-    candidate = external_boot._Candidate(activation_id, "activate")
+    marker = source.payload["external_boot_authority_v1"]
+    candidate = external_boot._Candidate(
+        activation_id,
+        marker["system_id"],
+        marker["run_id"],
+        marker["plan_identity"],
+        source.authorizing["project"],
+        "activate",
+    )
     payload = BootPayload.model_validate(source.payload)
     build = AsyncMock(return_value=(source.kind, payload))
     enqueue = AsyncMock()
@@ -61,7 +69,9 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
 
 
 def test_live_successor_suppresses_enqueue(monkeypatch: pytest.MonkeyPatch) -> None:
-    candidate = external_boot._Candidate(uuid4(), "cleanup")
+    candidate = external_boot._Candidate(
+        uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, "kernel-team", "cleanup"
+    )
     source = AsyncMock()
     monkeypatch.setattr(external_boot, "_live_successor_exists", AsyncMock(return_value=True))
     monkeypatch.setattr(external_boot, "_source_job", source)
