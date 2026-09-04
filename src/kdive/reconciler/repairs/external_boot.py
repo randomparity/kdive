@@ -112,38 +112,54 @@ async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...
     )
 
 
-async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | None:
+async def _candidate_jobs(
+    conn: AsyncConnection, candidates: tuple[_Candidate, ...], *, live_only: bool
+) -> tuple[Job, ...]:
+    if not candidates:
+        return ()
+    live_predicate = (
+        "AND (state = 'queued' OR (state = 'running' AND "
+        "(lease_expires_at >= now() OR attempt < max_attempts))) "
+        if live_only
+        else ""
+    )
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT * FROM jobs WHERE kind = ANY(%s) "
-            "AND payload #>> '{external_boot_authority_v1,activation_id}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,system_id}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,run_id}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,plan_identity}' = %s "
-            "AND authorizing ->> 'project' = %s "
-            "ORDER BY created_at DESC, id DESC LIMIT %s",
+            cast(
+                LiteralString,
+                "WITH ranked AS ("
+                "SELECT id, row_number() OVER ("
+                "PARTITION BY payload #>> '{external_boot_authority_v1,activation_id}' "
+                "ORDER BY created_at DESC, id DESC) AS candidate_rank "
+                "FROM jobs WHERE kind = ANY(%s) "
+                "AND payload #>> '{external_boot_authority_v1,activation_id}' = ANY(%s) "
+                + live_predicate
+                + ") SELECT jobs.* FROM ranked JOIN jobs USING (id) "
+                "WHERE candidate_rank <= %s ORDER BY jobs.created_at DESC, jobs.id DESC",
+            ),
             (
                 [JobKind.BOOT.value, JobKind.TEARDOWN.value],
-                str(candidate.activation_id),
-                str(candidate.system_id),
-                str(candidate.run_id),
-                candidate.plan_identity,
-                candidate.project,
+                [str(candidate.activation_id) for candidate in candidates],
                 _SOURCE_JOB_SCAN_LIMIT,
             ),
         )
         rows = await cur.fetchall()
+    jobs: list[Job] = []
     for row in rows:
-        job = Job.model_validate(row)
         try:
-            if job.kind is JobKind.BOOT:
-                payload = load_payload(job, BootPayload)
-            elif job.kind is JobKind.TEARDOWN:
-                payload = load_payload(job, TeardownPayload)
-            else:
-                continue
+            jobs.append(Job.model_validate(row))
+        except ValidationError:
+            continue
+    return tuple(jobs)
+
+
+def _source_job(candidate: _Candidate, jobs: tuple[Job, ...]) -> Job | None:
+    for job in jobs:
+        try:
+            payload_type = BootPayload if job.kind is JobKind.BOOT else TeardownPayload
+            payload = load_payload(job, payload_type)
             marker = payload.external_boot_authority_v1
-            Authorizing.model_validate(job.authorizing)
+            authorizing = Authorizing.model_validate(job.authorizing)
         except PayloadValidationError, ValidationError:
             continue
         if marker is not None and (
@@ -151,7 +167,7 @@ async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | Non
             marker.system_id,
             marker.run_id,
             marker.plan_identity,
-            job.authorizing["project"],
+            authorizing.project,
         ) == (
             candidate.activation_id,
             candidate.system_id,
@@ -163,43 +179,33 @@ async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | Non
     return None
 
 
-async def _live_successor_exists(
-    conn: AsyncConnection, candidate: _Candidate, *, authority_instance: str
+def _live_successor_exists(
+    candidate: _Candidate, jobs: tuple[Job, ...], *, authority_instance: str
 ) -> bool:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT * FROM jobs WHERE kind = ANY(%s) "
-            "AND payload #>> '{external_boot_authority_v1,activation_id}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,system_id}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,run_id}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,plan_identity}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,operation}' = %s "
-            "AND payload #>> '{external_boot_authority_v1,authority_instance}' = %s "
-            "AND authorizing ->> 'project' = %s "
-            "AND (state = 'queued' OR (state = 'running' AND "
-            "(lease_expires_at >= now() OR attempt < max_attempts))) "
-            "ORDER BY created_at DESC, id DESC LIMIT %s",
-            (
-                [JobKind.BOOT.value, JobKind.TEARDOWN.value],
-                str(candidate.activation_id),
-                str(candidate.system_id),
-                str(candidate.run_id),
-                candidate.plan_identity,
-                candidate.operation,
-                authority_instance,
-                candidate.project,
-                _SOURCE_JOB_SCAN_LIMIT,
-            ),
-        )
-        rows = await cur.fetchall()
-    for row in rows:
-        job = Job.model_validate(row)
+    for job in jobs:
         try:
             model = load_payload(job, BootPayload if job.kind is JobKind.BOOT else TeardownPayload)
-        except PayloadValidationError:
+            authorizing = Authorizing.model_validate(job.authorizing)
+        except PayloadValidationError, ValidationError:
             continue
         marker = model.external_boot_authority_v1
-        if marker is not None and marker.operation == candidate.operation:
+        if marker is not None and (
+            marker.activation_id,
+            marker.system_id,
+            marker.run_id,
+            marker.plan_identity,
+            marker.operation,
+            marker.authority_instance,
+            authorizing.project,
+        ) == (
+            candidate.activation_id,
+            candidate.system_id,
+            candidate.run_id,
+            candidate.plan_identity,
+            candidate.operation,
+            authority_instance,
+            candidate.project,
+        ):
             return True
     return False
 
@@ -216,10 +222,12 @@ async def _enqueue_candidate(
     *,
     resolver: ProviderResolver,
     authority_instance: str,
+    source_jobs: tuple[Job, ...],
+    live_jobs: tuple[Job, ...],
 ) -> bool:
-    if await _live_successor_exists(conn, candidate, authority_instance=authority_instance):
+    if _live_successor_exists(candidate, live_jobs, authority_instance=authority_instance):
         return False
-    source = await _source_job(conn, candidate)
+    source = _source_job(candidate, source_jobs)
     if source is None:
         _log.warning(
             "reconciler: external-boot %s candidate has no validated source job",
@@ -259,13 +267,18 @@ async def repair_external_boot_lane(
 ) -> int:
     """Enqueue deterministic successors for one post-prepared repair lane."""
     repaired = 0
-    for candidate in await _candidates(conn, lane):
+    candidates = await _candidates(conn, lane)
+    source_jobs = await _candidate_jobs(conn, candidates, live_only=False)
+    live_jobs = await _candidate_jobs(conn, candidates, live_only=True)
+    for candidate in candidates:
         try:
             repaired += await _enqueue_candidate(
                 conn,
                 candidate,
                 resolver=resolver,
                 authority_instance=authority_instance,
+                source_jobs=source_jobs,
+                live_jobs=live_jobs,
             )
         except Exception:
             # Provider and durable payload exceptions may contain host identifiers. The lane's

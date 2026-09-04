@@ -41,20 +41,19 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
     source = marked_job(
         "activate", activation_id=str(activation_id), authority_instance="authority-old"
     )
-    marker = source.payload["external_boot_authority_v1"]
+    payload = BootPayload.model_validate(source.payload)
+    marker = payload.external_boot_authority_v1
+    assert marker is not None
     candidate = external_boot._Candidate(
         activation_id,
-        marker["system_id"],
-        marker["run_id"],
-        marker["plan_identity"],
+        marker.system_id,
+        marker.run_id,
+        marker.plan_identity,
         source.authorizing["project"],
         "activate",
     )
-    payload = BootPayload.model_validate(source.payload)
     build = AsyncMock(return_value=(source.kind, payload))
     enqueue = AsyncMock(return_value=(source, True))
-    monkeypatch.setattr(external_boot, "_live_successor_exists", AsyncMock(return_value=False))
-    monkeypatch.setattr(external_boot, "_source_job", AsyncMock(return_value=source))
     monkeypatch.setattr(external_boot, "build_external_boot_payload", build)
     monkeypatch.setattr(external_boot.queue, "enqueue_with_status", enqueue)
 
@@ -64,6 +63,8 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
             candidate,
             resolver=cast(Any, object()),
             authority_instance="authority-current",
+            source_jobs=(source,),
+            live_jobs=(),
         )
     )
 
@@ -79,9 +80,14 @@ def test_live_successor_suppresses_enqueue(monkeypatch: pytest.MonkeyPatch) -> N
     candidate = external_boot._Candidate(
         uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, "kernel-team", "cleanup"
     )
-    source = AsyncMock()
-    monkeypatch.setattr(external_boot, "_live_successor_exists", AsyncMock(return_value=True))
-    monkeypatch.setattr(external_boot, "_source_job", source)
+    source = marked_job(
+        "cleanup",
+        activation_id=candidate.activation_id,
+        system_id=candidate.system_id,
+        run_id=candidate.run_id,
+        plan_identity=candidate.plan_identity,
+        authority_instance="authority-current",
+    )
 
     repaired = asyncio.run(
         external_boot._enqueue_candidate(
@@ -89,11 +95,20 @@ def test_live_successor_suppresses_enqueue(monkeypatch: pytest.MonkeyPatch) -> N
             candidate,
             resolver=cast(Any, object()),
             authority_instance="authority-current",
+            source_jobs=(source,),
+            live_jobs=(source,),
         )
     )
 
     assert repaired is False
-    source.assert_not_awaited()
+
+
+def test_job_lookup_is_set_oriented_and_bounded() -> None:
+    source = inspect.getsource(external_boot._candidate_jobs)
+    assert "row_number() OVER" in source
+    assert "candidate_rank <= %s" in source
+    repair = inspect.getsource(external_boot.repair_external_boot_lane)
+    assert repair.count("_candidate_jobs(") == 2
 
 
 def test_cleanup_uses_release_purpose() -> None:

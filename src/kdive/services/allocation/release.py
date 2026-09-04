@@ -170,7 +170,7 @@ async def _transition_and_audit(
 LockedPrecondition = Callable[[AsyncConnection], Awaitable[bool]]
 
 
-async def _guard_external_boot_release(
+async def guard_external_boot_release(
     conn: AsyncConnection, allocation_id: UUID, *, project: str
 ) -> None:
     """Lock every historical System and reject release while one remains restricted."""
@@ -238,7 +238,7 @@ async def reclaim_under_lock(
         if precondition is not None and not await precondition(conn):
             return ReleaseOutcome(released=False, current_status=current.state.value)
         try:
-            await _guard_external_boot_release(conn, uid, project=project)
+            await guard_external_boot_release(conn, uid, project=project)
         except ExternalBootDenied:
             return ReleaseOutcome(
                 released=False,
@@ -305,7 +305,7 @@ async def _release_locked(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 current_status=current.state.value,
             )
-        await _guard_external_boot_release(conn, uid, project=project)
+        await guard_external_boot_release(conn, uid, project=project)
         if current.state in _RELEASABLE:
             await _transition_and_audit(
                 conn, audit_writer, uid, current.state, AllocationState.RELEASING, project=project

@@ -9,6 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import ErrorCategory
+from kdive.reconciler.repairs.allocations import sweep_expired_allocations
 from kdive.security import audit
 from kdive.services.allocation.release import reclaim_under_lock, release_with_backstops
 from tests.services.external_boot.conftest import SeedActivation
@@ -72,5 +73,36 @@ def test_reconciler_reclaim_retains_an_uncleaned_activation(
             outcome = await reclaim_under_lock(conn, _noop_audit, row[0], project="proj")
             assert outcome.released is False
             assert outcome.category is ErrorCategory.CONFLICT
+
+    asyncio.run(body())
+
+
+def test_expiry_retains_an_allocation_needed_for_external_boot_cleanup(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            seeded = await seeded_activation(
+                conn,
+                state=ExternalBootActivationState.ABANDONED,
+                ready_reservation=True,
+            )
+            cursor = await conn.execute(
+                "SELECT allocation_id FROM systems WHERE id = %s", (seeded.system_id,)
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            allocation_id = row[0]
+            await conn.execute(
+                "UPDATE allocations SET state = 'active', lease_expiry = now() - interval '1s' "
+                "WHERE id = %s",
+                (allocation_id,),
+            )
+
+            assert await sweep_expired_allocations(conn) == 0
+            state = await conn.execute(
+                "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
+            )
+            assert await state.fetchone() == ("active",)
 
     asyncio.run(body())
