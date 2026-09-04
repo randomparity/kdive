@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -19,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import BootStepResult
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.runs import boot as runs_boot
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs import registrar as runs
@@ -180,7 +182,7 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
 
     registry = HandlerRegistry()
     ports = _ports()
-    runs.register_handlers(registry, ports=ports)
+    runs.register_handlers(registry, ports=ports, external_boot=ExternalBootOperations())
 
     claimed = {JobKind.INSTALL, JobKind.BOOT}
     for kind in claimed:
@@ -192,7 +194,11 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
             assert registry.get(kind) is None, f"facade should not claim {kind}"
 
     conn = cast(AsyncConnection, object())
-    job = cast(Job, object())
+    # The BOOT binding now dispatches through ``route_marked``, which reads ``job.payload`` to
+    # decide whether the job is authority-marked. An unmarked payload is what routes to
+    # ``boot_handler``, so the stand-in carries an empty one; the identity assertions below still
+    # hold because the router threads the same object through.
+    job = cast(Job, SimpleNamespace(payload={}))
 
     def _dispatch(kind: JobKind) -> JobHandlerResult:
         handler = registry.get(kind)

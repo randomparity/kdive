@@ -32,7 +32,7 @@ from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
+from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, TeardownPayload
 from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.security.audit import args_digest
@@ -472,7 +472,7 @@ def test_teardown_handler_deletes_key_row(migrated_url: str) -> None:
                 job = await queue.enqueue(
                     conn,
                     JobKind.TEARDOWN,
-                    SystemPayload(system_id=str(system_id)),
+                    TeardownPayload(system_id=str(system_id)),
                     {"principal": "alice", "agent_session": "s", "project": "proj"},
                     f"{system_id}:teardown",
                 )
@@ -509,7 +509,7 @@ def test_teardown_handler_reclaims_pcap_directory(migrated_url, tmp_path, monkey
                 job = await queue.enqueue(
                     conn,
                     JobKind.TEARDOWN,
-                    SystemPayload(system_id=str(system_id)),
+                    TeardownPayload(system_id=str(system_id)),
                     {"principal": "alice", "agent_session": "s", "project": "proj"},
                     f"{system_id}:teardown",
                 )
@@ -539,7 +539,7 @@ def test_teardown_handler_pcap_reclaim_tolerates_absent_dir(
                 job = await queue.enqueue(
                     conn,
                     JobKind.TEARDOWN,
-                    SystemPayload(system_id=str(system_id)),
+                    TeardownPayload(system_id=str(system_id)),
                     {"principal": "alice", "agent_session": "s", "project": "proj"},
                     f"{system_id}:teardown",
                 )

@@ -29,8 +29,9 @@ from kdive.domain.lifecycle.records import Allocation, Investigation, Run, Syste
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
+from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
@@ -200,7 +201,7 @@ async def _enqueue_teardown(pool: AsyncConnectionPool, system_id: str) -> Job:
         return await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
-            SystemPayload(system_id=system_id),
+            TeardownPayload(system_id=system_id),
             {"principal": "system:reconciler", "agent_session": None, "project": "proj"},
             f"{system_id}:teardown",
         )
@@ -2127,6 +2128,7 @@ def test_register_handlers_binds_provision_teardown_and_reprovision() -> None:
         resolver=provider_resolver(provisioner=FakeProvisioning()),
         secret_registry=SecretRegistry(),
         artifact_store=INERT_OBJECT_STORE,
+        external_boot=ExternalBootOperations(),
     )
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None

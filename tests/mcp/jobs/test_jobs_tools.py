@@ -30,6 +30,7 @@ from kdive.jobs.payloads import (
     CheckSshReachablePayload,
     InstallPayload,
     SystemPayload,
+    TeardownPayload,
     WatchForCrashPayload,
 )
 from kdive.mcp.auth import RequestContext
@@ -128,12 +129,18 @@ async def _list_jobs(
 
 
 async def _enqueue_system_job(pool: AsyncConnectionPool, kind: JobKind, dedup: str) -> str:
-    """Enqueue a SystemPayload job of ``kind`` (provision/force_crash) owned by ``proj``."""
+    """Enqueue a System-addressed job of ``kind`` (provision/force_crash/teardown) for ``proj``.
+
+    ``teardown`` takes ``TeardownPayload``, the model ``_ACTIVE_PAYLOAD_MODELS`` now names for that
+    kind; ``load_payload`` requires an exact model match, so the base class no longer serializes.
+    """
     async with pool.connection() as conn:
         job = await queue.enqueue(
             conn,
             kind,
-            SystemPayload(system_id=str(uuid4())),
+            TeardownPayload(system_id=str(uuid4()))
+            if kind is JobKind.TEARDOWN
+            else SystemPayload(system_id=str(uuid4())),
             Authorizing(principal="p", project="proj"),
             dedup,
         )
@@ -1153,7 +1160,7 @@ async def _enqueue_teardown(pool: AsyncConnectionPool, dedup: str) -> str:
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
-            SystemPayload(system_id=str(uuid4())),
+            TeardownPayload(system_id=str(uuid4())),
             Authorizing(principal="p", project="proj"),
             dedup,
         )

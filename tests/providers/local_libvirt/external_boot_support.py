@@ -64,6 +64,8 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         source_boot="sha256:" + "b" * 64,
         target_boot="sha256:" + "c" * 64,
         target_projection_sha256="sha256:" + "d" * 64,
+        target_xml_sha256="sha256:"
+        + hashlib.sha256(_SOURCE_XML.replace("/old", "/new").encode()).hexdigest(),
         target_xml=_SOURCE_XML.replace("/old", "/new"),
         expected_running=RunningKernelObservation(
             architecture="x86_64",

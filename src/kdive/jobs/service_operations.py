@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing
-from kdive.jobs.payloads import SystemPayload
+from kdive.jobs.payloads import SystemPayload, TeardownPayload
 from kdive.security.authz.context import RequestContext
 
 
@@ -46,7 +46,7 @@ class JobOperations:
         return await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
-            SystemPayload(system_id=str(system_id)),
+            TeardownPayload(system_id=str(system_id)),
             authorizing(ctx, project),
             f"{system_id}:teardown",
         )

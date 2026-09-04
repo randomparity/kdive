@@ -19,7 +19,7 @@ from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import InstallPayload, RunPayload
+from kdive.jobs.payloads import BootPayload, InstallPayload, RunPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -387,7 +387,7 @@ async def boot_run(
                     JobKind.BOOT,
                     "boot",
                     "runs.boot",
-                    payload=RunPayload(run_id=str(run.id)),
+                    payload=BootPayload(run_id=str(run.id)),
                     force=force,
                 ),
             )

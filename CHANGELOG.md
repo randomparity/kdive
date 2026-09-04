@@ -213,6 +213,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reopen the worker claim path for marked external-boot jobs
 - Bind external boot to the authority adapter
 - Gate external-boot advertisement on the authority
+- Add the local external-boot recovery root setting
+- Create and gate the external-boot recovery roots
+- Add the service-constructed authority commit context
+- Bind target_xml to its own digest on both records
+- Carry the anchored journal proof to the commit seam
 
 ### Changed
 
@@ -376,6 +381,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify authority core
 - Bind external boot to activation
 - Name the lock-queue report once
+- Trim the docstring AGENTS.md already carries
 
 ### Documentation
 
@@ -1139,6 +1145,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record why the recovery reference and the cascades are there
 - Design the claim-lane reopening for #2201
 - Correct the finalization-fence cross-reference
+- Design the recovery root setting and provisioning
+- Record the design review dispositions
+- Bound what the pre-create guard actually claims
+- Record the branch review and threat scan
+- Scope the golden-vector claim and record the NFC gap
+- Make the scratch-container cleanup safe under concurrency
+- Design the authority commit context seam
+- Harden the commit-context design after review
+- Stop inferring cleanup state from absence
+- Weight the cleanup guarantees as the audit found them
+- Fix both pre-provider refusal arms, not just the new one
+- Withdraw N4a, which the journal's own ordering forbids
+- Spec and plan for a closed probe-failure vocabulary
+- Carry the decision record in the spec, cut for proportionality
+- Fix review findings; record the decision as ADR-0594
+- Fix iteration-2 review findings
+- Cut the design set to 3.00x and fix a stale file count
+- Disposition the five confirming-pass notes
+- Discharge the scope audit's CLI-clause checkpoint
+- Record that the probe_error fix is forward-only
+- Apply the security pass's four record corrections
 
 ### Fixed
 
@@ -1868,6 +1895,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep bounded adapter errors at the seam
 - Harden the external-boot authority adapter
 - Bind the composite observation to its activation
+- Scope the recovery root setting to the worker process
+- Close the recovery-root symlink and owner-gate gaps
+- Drop the per-slot group requirement
+- Report an unresolvable recovery-root owner
+- Finalize only a tombstone the same commit published
+- Correct the provenance claims and pin the real outcome
+- Classify probe failures as a closed vocabulary
 
 ### Security
 

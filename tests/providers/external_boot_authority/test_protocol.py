@@ -13,6 +13,7 @@ from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
     MAX_SIGNED_BIGINT,
     AuthorityAcknowledgementV1,
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
@@ -394,3 +395,86 @@ def test_raw_request_decoder_rejects_malformed_without_echo(payload: bytes) -> N
 
     assert str(caught.value) == "invalid external-boot authority request"
     assert payload.decode(errors="ignore") not in str(caught.value)
+
+
+def _anchored(phase: JournalPhase, **changes: object) -> JournalRecordV1:
+    """One mutation-phase journal record, the shape the service anchors."""
+    return _record(
+        phase,
+        expected_source_identity=_DIGEST,
+        intended_target_identity=_OTHER_DIGEST,
+        recovery_objects=(),
+        **changes,
+    )
+
+
+def test_commit_context_is_built_only_from_an_anchored_mutation_started_record() -> None:
+    started = _anchored(JournalPhase.MUTATION_STARTED, sequence=4)
+    context = AuthorityCommitContextV1.for_record(started)
+
+    assert context.journal_sequence == started.sequence
+    assert context.journal_digest == record_digest(started)
+    assert context.operation_identity == started.operation_identity
+    assert context.attempt_id == started.attempt_id
+    assert context.commit_point is started.operation
+    assert context.phase is JournalPhase.MUTATION_STARTED
+
+    for refused in (JournalPhase.ADMITTED, JournalPhase.PROVIDER_RETURNED):
+        with pytest.raises(ValueError, match="mutation-started"):
+            AuthorityCommitContextV1.for_record(_anchored(refused, sequence=4))
+
+
+def test_commit_context_refuses_observed_records_and_is_closed() -> None:
+    observed = _anchored(
+        JournalPhase.OBSERVED,
+        sequence=5,
+        observation=AuthorityObservationV1(
+            observation_id=uuid4(), category="target", composite_state=_DIGEST
+        ),
+    )
+    with pytest.raises(ValueError, match="mutation-started"):
+        AuthorityCommitContextV1.for_record(observed)
+
+    values = AuthorityCommitContextV1.for_record(
+        _anchored(JournalPhase.MUTATION_STARTED, sequence=5)
+    ).model_dump(mode="json", by_alias=True)
+
+    assert AuthorityCommitContextV1.model_validate(values).journal_sequence == 5
+    for rejected in ({"extra": "forbidden"}, {"phase": "observed"}, {"commit_point": "not-an-op"}):
+        with pytest.raises(ValidationError):
+            AuthorityCommitContextV1.model_validate(values | rejected)
+
+
+def test_the_wire_mutation_request_carries_no_journal_field() -> None:
+    # Spelled out rather than compared against ``model_fields`` itself, which would pass
+    # whatever the model grew.
+    assert set(AuthorityMutationRequestV1.model_fields) == {
+        "schema_",
+        "authority_id",
+        "generation",
+        "system_id",
+        "activation_id",
+        "run_id",
+        "plan_identity",
+        "purpose",
+        "operation",
+        "provider_kind",
+        "authority_instance",
+        "operation_identity",
+        "operation_digest",
+        "attempt_id",
+        "expected_source_identity",
+        "intended_target_identity",
+        "recovery_objects",
+    }
+
+    values = _mutation().model_dump(mode="json", by_alias=True)
+    for smuggled in ("journal_sequence", "journal_digest", "phase"):
+        with pytest.raises(ValidationError):
+            AuthorityMutationRequestV1.model_validate(values | {smuggled: 1})
+
+    payload = json.dumps(
+        values | {"journal_sequence": 1}, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ValueError, match="invalid external-boot authority request"):
+        decode_authority_request(payload)

@@ -52,6 +52,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     _POLL_INTERVAL_SECONDS,
+    ProbeFailure,
     ReadinessResult,
     _real_readiness,
 )
@@ -243,7 +244,7 @@ class LocalLibvirtBooter:
             raise _libvirt_transport_failure("power-cycling", domain_name) from exc
 
     def _await_ready(self, system_id: UUID, polls: int) -> None:
-        first_probe_error: str | None = None
+        first_probe_error: ProbeFailure | None = None
         for _ in range(polls):
             result = self._readiness(system_id)
             if first_probe_error is None and result.probe_error is not None:
@@ -263,10 +264,13 @@ class LocalLibvirtBooter:
         )
 
     @staticmethod
-    def _boot_failure_details(system_id: UUID, first_probe_error: str | None) -> dict[str, object]:
+    def _boot_failure_details(
+        system_id: UUID, first_probe_error: ProbeFailure | None
+    ) -> dict[str, object]:
+        """The System plus a closed probe reason, rendered as a JSON scalar (ADR-0594)."""
         details: dict[str, object] = {"system_id": str(system_id)}
         if first_probe_error is not None:
-            details["probe_error"] = first_probe_error
+            details["probe_error"] = first_probe_error.value
         return details
 
 

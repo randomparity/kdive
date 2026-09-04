@@ -576,6 +576,9 @@ def _finalize(store: RecoveryMetadataStore, reference, recovered) -> None:
         attempt_id="00000000-0000-0000-0000-000000000005",
         journal_sequence=7,
         journal_digest="sha256:" + "4" * 64,
+        # Required since origin/main's da1ab0263 dropped its default: the proof must state
+        # which phase it was minted in, so a terminal-phase proof cannot finalize.
+        phase="mutation-started",
     )
     store.finalize_tombstone(reference, point, proof)
 

@@ -510,8 +510,16 @@ class Worker:
                 ):
                     await self._commit_external_result(job, exc.result)
                 else:
+                    # exc_info because this is the *only* diagnostic for a marked job that failed
+                    # before it could produce a binding-matching result: no `jobs` row is written,
+                    # both generic finalizers and `repair_abandoned_jobs` are fenced against a
+                    # marked payload, and the job then wedges `running`. A job id with no reason
+                    # leaves nothing to debug from.
                     _log.warning(
-                        "marked external boot job %s failed without authority result", job.id
+                        "marked external boot job %s failed without authority result: %s",
+                        job.id,
+                        exc,
+                        exc_info=True,
                     )
                 return
             span.set_outcome("error")
