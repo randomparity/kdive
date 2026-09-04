@@ -371,6 +371,27 @@ def test_builder_refresh_is_atomic_and_idempotent(tmp_path: Path) -> None:
     assert output.stat().st_ino == first_inode
 
 
+def test_builder_rejects_replaceable_ancestor_under_relaxed_umask(tmp_path: Path) -> None:
+    output = tmp_path / "manifest.json"
+    unhardened_source = tmp_path / "src"
+    shutil.copytree(_ROOT / "src", unhardened_source)
+    unhardened_source.chmod(0o775)
+    (unhardened_source / "kdive").chmod(0o775)
+
+    result = _run(
+        "build",
+        "--interpreter",
+        sys.executable,
+        "--source-root",
+        str(unhardened_source),
+        "--output",
+        str(output),
+    )
+    # Manifest build fails closed when ancestor is group/world writable
+    assert result.returncode != 0
+    assert "fingerprint_ancestor_replaceable" in result.stderr
+
+
 def test_verify_rejects_wrong_interpreter_and_import_trace_drift(tmp_path: Path) -> None:
     output = tmp_path / "manifest.json"
     built = _run(
