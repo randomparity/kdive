@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # nosec B404
@@ -22,6 +23,8 @@ _VIRSH = "virsh"
 
 _READINESS_MARKER = "kdive-ready"
 
+_log = logging.getLogger(__name__)
+
 
 class ConsoleVerdict(StrEnum):
     READY = "ready"
@@ -29,19 +32,32 @@ class ConsoleVerdict(StrEnum):
     PENDING = "pending"
 
 
+class ProbeFailure(StrEnum):
+    """Why a ``virsh domstate`` probe failed, as a closed agent-facing vocabulary (ADR-0594).
+
+    ``VIRSH_MISSING`` also covers every ENOENT raised by the exec, not only an absent binary:
+    ``OSError(2, ...)`` is a ``FileNotFoundError``, whose arm precedes the ``OSError`` arm.
+    """
+
+    VIRSH_MISSING = "virsh_missing"
+    VIRSH_TIMEOUT = "virsh_timeout"
+    VIRSH_PROBE_FAILED = "virsh_probe_failed"
+    VIRSH_NONZERO_EXIT = "virsh_nonzero_exit"
+
+
 class ReadinessResult(NamedTuple):
     """The run-readiness preflight result: did the System answer, and did its checks pass."""
 
     answered: bool
     ok: bool
-    probe_error: str | None = None
+    probe_error: ProbeFailure | None = None
 
 
 class _DomainExitProbe(NamedTuple):
-    """The domstate probe result plus a bounded probe-failure diagnostic."""
+    """The domstate probe result plus its classified probe-failure reason."""
 
     exited: bool
-    error: str | None = None
+    error: ProbeFailure | None = None
 
 
 def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
@@ -59,12 +75,23 @@ def _bounded_probe_error(message: str) -> str:
     return message[:200]
 
 
+def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _DomainExitProbe:
+    """Log the bounded diagnostic for the operator and return the classified failure (ADR-0594)."""
+    _log.warning(
+        "domstate probe failed for %s (%s): %s",
+        domain_name,
+        failure.value,
+        _bounded_probe_error(detail),
+    )
+    return _DomainExitProbe(False, failure)
+
+
 def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cover - live_vm
-    """Return whether ``virsh domstate`` reports terminal state plus probe diagnostics."""
+    """Return whether ``virsh domstate`` reports terminal state plus its classified failure."""
     uri = config.require(LIBVIRT_URI)
     virsh = shutil.which(_VIRSH)
     if virsh is None:
-        return _DomainExitProbe(False, "virsh executable not found")
+        return _probe_failed(domain_name, ProbeFailure.VIRSH_MISSING, "virsh executable not found")
     try:
         proc = subprocess.run(  # noqa: S603 - virsh argv; URI/domain are data  # nosec B603
             [virsh, "-c", uri, "domstate", domain_name],
@@ -74,14 +101,21 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        return _DomainExitProbe(
-            False,
+        return _probe_failed(
+            domain_name,
+            ProbeFailure.VIRSH_TIMEOUT,
             f"virsh domstate timed out after {exc.timeout:g}s",
         )
-    except FileNotFoundError:
-        return _DomainExitProbe(False, "virsh executable not found")
+    except FileNotFoundError as exc:
+        # Every ENOENT from the exec lands here, including one naming a transport socket path
+        # rather than the binary. The member stays VIRSH_MISSING; the log keeps the detail.
+        return _probe_failed(
+            domain_name, ProbeFailure.VIRSH_MISSING, f"virsh domstate probe failed: {exc}"
+        )
     except (subprocess.SubprocessError, OSError) as exc:
-        return _DomainExitProbe(False, _bounded_probe_error(f"virsh domstate probe failed: {exc}"))
+        return _probe_failed(
+            domain_name, ProbeFailure.VIRSH_PROBE_FAILED, f"virsh domstate probe failed: {exc}"
+        )
     if proc.stdout.strip().lower() in _TERMINAL_DOMSTATES:
         return _DomainExitProbe(True)
     stderr = proc.stderr.strip().lower()
@@ -93,8 +127,11 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
     if exited:
         return _DomainExitProbe(True)
     if proc.returncode != 0:
-        error = stderr or f"virsh domstate exited {proc.returncode}"
-        return _DomainExitProbe(False, _bounded_probe_error(error))
+        return _probe_failed(
+            domain_name,
+            ProbeFailure.VIRSH_NONZERO_EXIT,
+            stderr or f"virsh domstate exited {proc.returncode}",
+        )
     return _DomainExitProbe(False)
 
 

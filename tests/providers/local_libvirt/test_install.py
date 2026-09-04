@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import subprocess
 import sys
@@ -24,6 +25,8 @@ from kdive.artifacts.storage import FetchedArtifact, StreamedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
+from kdive.jobs.worker import _failure_context
+from kdive.mcp.responses import ToolResponse
 from kdive.providers.local_libvirt.lifecycle.boot import readiness as readiness_mod
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
@@ -36,6 +39,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleVerdict,
+    ProbeFailure,
     ReadinessResult,
     _verdict_to_result,
     classify_console,
@@ -43,6 +47,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 )
 from kdive.providers.local_libvirt.lifecycle.install import (
     Fetch,
+    LocalLibvirtBooter,
     LocalLibvirtInstall,
     _boot_window_polls,
     _stage_object,
@@ -51,6 +56,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.live_vm import require_live_vm_provisioned
 from tests.live_vm.console_actor import claim_console_inode
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
@@ -182,7 +188,7 @@ class _Readiness:
 
     answered: bool = True
     ok: bool = True
-    probe_error: str | None = None
+    probe_error: ProbeFailure | None = None
     calls: int = 0
 
     def readiness(self, system_id: UUID) -> ReadinessResult:
@@ -1131,14 +1137,14 @@ def test_boot_never_answered_is_boot_timeout(tmp_path: Path) -> None:
 def test_boot_timeout_includes_first_readiness_probe_error(tmp_path: Path) -> None:
     domain = _domain()
     conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
-    seam = _Readiness(answered=False, probe_error="virsh domstate timed out after 2s")
+    seam = _Readiness(answered=False, probe_error=ProbeFailure.VIRSH_TIMEOUT)
     inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
 
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
 
     assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
-    assert caught.value.details["probe_error"] == "virsh domstate timed out after 2s"
+    assert caught.value.details["probe_error"] == "virsh_timeout"
 
 
 def test_boot_answered_but_failed_is_readiness_failure(tmp_path: Path) -> None:
@@ -1676,14 +1682,14 @@ def test_real_readiness_running_guest_stays_unanswered_with_probe_error(
     monkeypatch.setattr(
         readiness_mod,
         "_domain_exit_probe",
-        lambda name: readiness_mod._DomainExitProbe(False, "virsh hiccup"),
+        lambda name: readiness_mod._DomainExitProbe(False, ProbeFailure.VIRSH_NONZERO_EXIT),
     )
 
     result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is False
     assert result.ok is False
-    assert result.probe_error == "virsh hiccup"
+    assert result.probe_error is ProbeFailure.VIRSH_NONZERO_EXIT
 
 
 def test_real_readiness_reread_after_exit_honors_late_marker(
@@ -1736,6 +1742,133 @@ def test_domain_exit_probe_uses_resolved_virsh_path(monkeypatch: pytest.MonkeyPa
 
     assert readiness_mod._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is False
     assert calls[0][0] == "/usr/bin/virsh"
+
+
+# The ordinary stderr `virsh` writes when the session daemon is unreachable. Every fragment is
+# host-derived and none of it is actionable for an agent (#2220, ADR-0594).
+_SOCKET_PATH = "/run/user/1000/libvirt/virtqemud-sock"
+_LEAKY_DOMSTATE_STDERR = (
+    "error: failed to connect to the hypervisor\n"
+    f"error: Failed to connect socket to '{_SOCKET_PATH}': No such file or directory"
+)
+_TRANSPORT_SUBSTRINGS = (_SOCKET_PATH, "/run/user", "virtqemud-sock")
+
+
+def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Absence, not difference: a transform returning a *different* leaky string passes a `!=`
+    # assertion and fails this one (#2220).
+    _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
+
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
+    error = CategorizedError(
+        "System did not become ready within the boot window",
+        category=ErrorCategory.BOOT_TIMEOUT,
+        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
+    )
+    payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})
+
+    assert payload["probe_error"] == "virsh_nonzero_exit"
+    rendered = repr(payload)
+    for substring in _TRANSPORT_SUBSTRINGS:
+        assert substring not in rendered
+
+
+def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The second agent-facing egress: the boot step runs as a worker job, `_failure_context` is
+    # persisted to the job row, and `ToolResponse.from_job` merges it into `data` on a FAILED job.
+    # `Redactor` is a secrets filter and leaves a host path untouched, so a fix at the MCP
+    # boundary renderer alone would have left this egress open (#2220, ADR-0594).
+    _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
+
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
+    error = CategorizedError(
+        "System did not become ready within the boot window",
+        category=ErrorCategory.BOOT_TIMEOUT,
+        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
+    )
+    context = _failure_context(error, SecretRegistry())
+
+    assert context["failure_detail_probe_error"] == "virsh_nonzero_exit"
+    rendered = repr(context)
+    for substring in _TRANSPORT_SUBSTRINGS:
+        assert substring not in rendered
+
+
+def test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # errno 13 constructs a PermissionError, which the `OSError` arm catches. errno 2 would
+    # construct a FileNotFoundError and be taken by the earlier arm, testing the wrong branch.
+    # An OSError renders `.filename` and `.strerror` in `str(exc)`, so the socket path reaches
+    # the payload through the exception rather than through stderr.
+    def domstate_oserror(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise OSError(13, "Permission denied", _SOCKET_PATH)
+
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_oserror)
+
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
+    error = CategorizedError(
+        "System booted but a run-readiness check failed",
+        category=ErrorCategory.READINESS_FAILURE,
+        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
+    )
+    payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})
+
+    assert payload["probe_error"] == "virsh_probe_failed"
+    rendered = repr(payload)
+    for substring in _TRANSPORT_SUBSTRINGS:
+        assert substring not in rendered
+
+
+def test_missing_virsh_classifies_as_virsh_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: None)
+
+    probe = readiness_mod._domain_exit_probe("kdive-abc")
+
+    assert probe.exited is False
+    assert probe.error is ProbeFailure.VIRSH_MISSING
+
+
+def test_enoent_from_the_exec_classifies_as_virsh_missing_and_logs_the_path(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Two distinct branches map to VIRSH_MISSING and member-level coverage hides the second:
+    # `OSError(2, ...)` IS a FileNotFoundError, so an ENOENT naming a transport socket path is
+    # taken by that arm, not the OSError arm. The member is unchanged; the log keeps the detail,
+    # which is the compensating control ADR-0594 relies on.
+    def domstate_enoent(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(2, "No such file or directory", _SOCKET_PATH)
+
+    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_enoent)
+
+    with caplog.at_level(logging.WARNING, logger=readiness_mod.__name__):
+        probe = readiness_mod._domain_exit_probe("kdive-abc")
+
+    assert probe.error is ProbeFailure.VIRSH_MISSING
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "virtqemud-sock" in logged
+
+
+def test_probe_failure_logs_the_raw_transport_text_for_the_operator(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The relocation proven rather than asserted: the operator keeps the full diagnostic, it just
+    # arrives in the worker's log instead of the agent-facing payload.
+    _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
+
+    with caplog.at_level(logging.WARNING, logger=readiness_mod.__name__):
+        readiness_mod._domain_exit_probe("kdive-abc")
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "virtqemud-sock" in logged
+    assert "kdive-abc" in logged
+    assert "virsh_nonzero_exit" in logged
 
 
 def _capture_domstate(
@@ -1861,7 +1994,7 @@ def test_domain_exit_probe_kdive_prefix_without_signature_is_not_exit(
     )
     probe = readiness_mod._domain_exit_probe("kdive-abc")
     assert probe.exited is False
-    assert probe.error == "error: connection refused"
+    assert probe.error is ProbeFailure.VIRSH_NONZERO_EXIT
 
 
 def test_domain_exit_probe_zero_exit_unknown_state_is_not_exit(
@@ -1889,7 +2022,7 @@ def test_real_readiness_reports_domstate_probe_timeout(
     result = readiness_mod._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is False
-    assert result.probe_error == "virsh domstate timed out after 2s"
+    assert result.probe_error is ProbeFailure.VIRSH_TIMEOUT
 
 
 def test_crash_fixture_classifies_crashed() -> None:
