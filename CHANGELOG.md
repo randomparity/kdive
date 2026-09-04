@@ -1961,6 +1961,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain cleanup receipt through authority
 - Renew recovery deadline after timeout
 - Reconstruct cleanup tombstones
+- Handle group-writable trees during setup manifest build
 
 ### Security
 
