@@ -223,6 +223,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Allocate and acknowledge external-boot authority in a runner
 - Add the six external-boot lifecycle operation handlers
 - Add the external-boot enqueue payload builder
+- Add the external-boot operation lane
+- Confine the external-boot artifact root
+- Remove the activation recovery archive on cleanup
+- Build the external-boot session mechanisms
 
 ### Changed
 
@@ -387,6 +391,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind external boot to activation
 - Name the lock-queue report once
 - Trim the docstring AGENTS.md already carries
+- Move shared boot doubles into support modules
 
 ### Documentation
 
@@ -1184,6 +1189,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ruff formatting Python in Markdown fences
 - Record assertions whose operands share one source
 - Record the ADR Accepted-flip commit ordering trap
+- Design the external-boot session mechanisms
+- Disposition the design review findings
+- Route the design residuals to #2212
+- Fix the no-leak contract and scope the reachability claim
+- Drop the readiness wrapper and close the review
+- Narrow the confinement claim to callers
+- Reconcile the mechanism spec and plan
+- Record that readiness is not bound here
+- Say the recovery root stages boot payloads
+- State the recovery root's operator preconditions
 
 ### Fixed
 
@@ -1922,6 +1937,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Classify probe failures as a closed vocabulary
 - Return the success carrier a marked job's commit dispatches on
 - Map uncommittable error categories and correct three claims
+- Validate the recovery directory before deleting
+- Leave the external-boot readiness probe unbound
+- Correct the mechanism count and the lane's claim
+- Refuse an absent or symlinked recovery root
+- Set the artifact directory mode after creating it
 
 ### Security
 
