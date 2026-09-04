@@ -46,10 +46,12 @@ the port is the trusted boundary through which core already receives live kernel
 ## Failure contract
 
 A command-line mismatch is a terminal-on-this-attempt `READINESS_FAILURE`, so the existing worker
-failure mapper records failure and follows the recovery path. Core puts the two rendered strings and
-zero-based first differing byte into the categorized error details. The authority runner recognizes
-only that closed detail shape, redacts both strings with its injected process `SecretRegistry`, and
-places an `external-boot-cmdline-mismatch-v1` diagnostic inside `failure_context`. The existing
+failure mapper records failure and follows the recovery path. Core puts the two bounded raw byte
+values and zero-based first differing byte into categorized error details under a closed mismatch
+discriminator. The exception is never logged before the authority runner suppresses it. The runner
+recognizes only that exact detail shape, surrogate-decodes and redacts both values with its injected
+process `SecretRegistry`, renders them safely, and places an
+`external-boot-cmdline-mismatch-v1` diagnostic inside `failure_context`. The existing
 outer `external-boot-authority-result-v1` remains unchanged.
 
 The diagnostic has exactly `schema`, `expected_cmdline`, `observed_cmdline`, and

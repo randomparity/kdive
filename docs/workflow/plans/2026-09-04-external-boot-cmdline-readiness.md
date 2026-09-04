@@ -68,9 +68,9 @@ Interfaces:
 
 - Consumes `context.activation.materialization.kernel_observation`, plus transient
   `RunningKernelObservation.identity`, `.cmdline`, and `.expected_cmdline`.
-- Produces a terminal `CategorizedError` with category `ErrorCategory.READINESS_FAILURE` carrying
-  bounded deterministically escaped expected/observed strings and
-  `first_differing_byte`.
+- Produces a terminal `CategorizedError` with category `ErrorCategory.READINESS_FAILURE` carrying a
+  closed mismatch discriminator, bounded raw expected/observed bytes, and
+  `first_differing_byte`; it performs no decoding or rendering.
 
 Verification:
 
@@ -82,11 +82,12 @@ Steps:
 
 1. Add parametrized lifecycle tests for exact and three mismatch shapes, including prefix offsets.
 2. Run the focused command and observe that mismatches lack command-line enforcement.
-3. Split kernel-identity comparison from command-line comparison and add one escaped diagnostic.
+3. Split kernel-identity comparison from command-line comparison and add the raw-byte mismatch
+   detail shape and offset calculation.
 4. Run the focused command green and confirm existing recovery-operation cases still pass.
 
 Acceptance: core alone decides exact equality and every mismatch is terminal readiness failure with
-both escaped strings and the first differing byte.
+both bounded raw byte values and the first differing byte; no raw exception is logged.
 
 ## Task 3: Carry a bounded redacted diagnostic through authority persistence
 
@@ -117,7 +118,8 @@ Verification:
   green command: `uv run python -m pytest tests/jobs/test_external_boot_authority_models.py -q`.
 - Mode: focused-test. Runner tests register a secret occurring in both values and prove the carrier
   contains only redacted bounded strings and the correct offset; NUL, another C0 byte, invalid UTF-8,
-  and a literal backslash remain distinct PostgreSQL-safe text. Green command:
+  a literal backslash, and a registered secret containing a literal backslash remain distinct
+  PostgreSQL-safe text without leaking the secret. Green command:
   `uv run python -m pytest tests/jobs/handlers/external_boot/test_runner.py -q`.
 - Mode: focused-test. Database tests prove migration `0130` accepts the closed v1 diagnostic,
   rejects malformed shapes, and preserves legacy commits; use the exact test file that already
