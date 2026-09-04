@@ -175,7 +175,11 @@ LIBVIRT_RECOVERY_ROOT = Setting(
     processes=frozenset({"worker"}),
     help=(
         "Provider-owned root holding one local external-boot recovery point per activation "
-        "(ADR-0586). Must be an existing owner-only directory — mode 0700, owned by the "
+        "(ADR-0586), and staging one activation's boot payloads beneath "
+        "<system_id>/<run_id>/ — a kernel, an initrd and a module tarball per concurrent "
+        "activation — so size it for those, not for JSON evidence alone. Those payload "
+        "directories are created on demand and are not reclaimed yet (#2212). Must be an "
+        "existing owner-only directory — mode 0700, owned by the "
         "running worker account — which the recovery stores re-check on every open. This is "
         "a PER-SLOT value, not a host-wide one: each fixed live-worker slot has its own "
         "root, so it belongs in that slot's environment and never in the shared "
