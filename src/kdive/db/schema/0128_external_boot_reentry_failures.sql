@@ -234,6 +234,86 @@ BEGIN
         RAISE EXCEPTION 'external boot failure validation source shape changed';
     END IF;
     v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$           OR NOT EXISTS (
+               SELECT 1 FROM public.external_boot_reservations AS reservation
+               WHERE reservation.activation_id = p_activation_id
+                 AND reservation.state = 'ready'
+                 AND reservation.store_identity = v_evidence #>> '{store_identity,ref}'
+                 AND reservation.owner_key = v_evidence #>> '{owner_key,ref}'
+                 AND reservation.reserved_bytes::text = v_evidence ->> 'reserved_bytes'
+           ) THEN
+            RAISE EXCEPTION 'external boot release evidence is invalid'
+                USING ERRCODE = '22023';
+        END IF;
+        INSERT INTO public.external_boot_reservation_releases ($old$;
+    v_new := $new$           THEN
+            RAISE EXCEPTION 'external boot release evidence is invalid'
+                USING ERRCODE = '22023';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM public.external_boot_reservations AS reservation
+            WHERE reservation.activation_id = p_activation_id
+              AND reservation.state = 'ready'
+              AND reservation.store_identity = v_evidence #>> '{store_identity,ref}'
+              AND reservation.owner_key = v_evidence #>> '{owner_key,ref}'
+              AND reservation.reserved_bytes::text = v_evidence ->> 'reserved_bytes'
+            FOR UPDATE
+        ) THEN
+            RETURN QUERY SELECT 'reservation_not_ready'::text, NULL::text;
+            RETURN;
+        END IF;
+        INSERT INTO public.external_boot_reservation_releases ($new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot release reservation classifier shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$    v_marker := v_job.payload -> 'external_boot_authority_v1';
+
+    IF v_incarnation IS NULL OR v_system.id IS NULL OR v_run.id IS NULL$old$;
+    v_new := $new$    v_marker := v_job.payload -> 'external_boot_authority_v1';
+
+    -- A lost job attempt is not an activation verdict.  Keep the historical status so the
+    -- worker drops a result whose lease was genuinely reclaimed.
+    IF v_incarnation IS NULL OR v_job.id IS NULL
+       OR v_job.state <> 'running' OR v_job.worker_id <> v_incarnation
+       OR v_job.attempt <> p_attempt THEN
+        RETURN QUERY SELECT 'superseded'::text, NULL::text;
+        RETURN;
+    END IF;
+
+    IF v_activation.id IS NULL OR v_system.id IS NULL OR v_run.id IS NULL
+       OR v_activation.system_id <> p_system_id OR v_activation.run_id <> p_run_id
+       OR v_activation.plan_identity <> p_plan_identity
+       OR v_system.id <> p_system_id
+       OR v_run.id <> p_run_id OR v_run.system_id <> p_system_id THEN
+        RETURN QUERY SELECT 'observed_identity_stale'::text, NULL::text;
+        RETURN;
+    END IF;
+
+    IF v_incarnation IS NULL OR v_system.id IS NULL OR v_run.id IS NULL$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot losing result classifier insertion shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$       ) THEN
+        RETURN QUERY SELECT 'superseded'::text, NULL::text;
+        RETURN;
+    END IF;
+
+    WITH RECURSIVE result_nodes(value) AS ($old$;
+    v_new := $new$       ) THEN
+        RETURN QUERY SELECT 'authority_superseded'::text, NULL::text;
+        RETURN;
+    END IF;
+
+    WITH RECURSIVE result_nodes(value) AS ($new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot losing result classifier return shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
     EXECUTE v_definition;
 END
 $$;

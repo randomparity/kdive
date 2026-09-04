@@ -29,7 +29,7 @@ __all__ = [
 class ExternalBootAuthorityAcknowledger(Protocol):
     """The worker's one call into the provider-authority host.
 
-    ``commit_external_boot_authority_result`` returns ``superseded`` unless an
+    ``commit_external_boot_authority_result`` rejects current authority unless an
     ``external_boot_authority_acknowledgements`` row exists for the allocated authority, and
     ``acknowledge_external_boot_authority`` is granted to ``kdive_provider_authority`` alone — a
     role no worker session holds, by ADR-0584's design. So a worker cannot acknowledge its own

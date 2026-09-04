@@ -12,7 +12,7 @@ import psycopg
 import pytest
 from pydantic import SecretStr
 
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
@@ -128,7 +128,7 @@ def test_activate_commits_deadline_before_provider_and_reuses_it(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert committed is not None and committed.state.value == "running"
+                assert isinstance(committed, Job) and committed.state.value == "running"
                 replay = await handler(worker, job, marker)
             assert replay.result.operation == "activate"
             assert replay.result.model_dump()["activation_readiness_deadline"] == now + timedelta(
@@ -180,7 +180,7 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert committed is not None and committed.state.value == "running"
+                assert isinstance(committed, Job) and committed.state.value == "running"
                 replay = await handler(worker, job, marker)
             assert replay.result.operation == "recover"
             assert len(executor.requests) == 1

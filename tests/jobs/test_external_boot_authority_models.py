@@ -236,7 +236,7 @@ def test_queue_serializes_schema_alias_and_canonical_utc_timestamp() -> None:
                 carrier,
                 incarnation_credential=SecretStr("credential"),
             )
-            is None
+            is queue.ExternalBootCommitStatus.SUPERSEDED
         )
         assert conn.recording_cursor.params is not None
         assert conn.recording_cursor.params[-2] == carrier.admitted_operation
