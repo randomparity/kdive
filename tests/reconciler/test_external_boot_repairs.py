@@ -116,6 +116,52 @@ def test_job_lookup_is_set_oriented_and_bounded() -> None:
     assert repair.count("_candidate_jobs(") == 2
 
 
+def test_commit_failure_is_not_counted_and_next_candidate_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = tuple(
+        external_boot._Candidate(
+            uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, "kernel-team", "activate"
+        )
+        for _index in range(2)
+    )
+
+    class Transaction:
+        def __init__(self, fail_commit: bool) -> None:
+            self.fail_commit = fail_commit
+
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_args: object) -> None:
+            if self.fail_commit:
+                raise RuntimeError("controlled commit failure")
+
+    class Connection:
+        transactions = 0
+
+        def transaction(self) -> Transaction:
+            self.transactions += 1
+            return Transaction(fail_commit=self.transactions == 1)
+
+    enqueue = AsyncMock(return_value=True)
+    monkeypatch.setattr(external_boot, "_candidates", AsyncMock(return_value=candidates))
+    monkeypatch.setattr(external_boot, "_candidate_jobs", AsyncMock(return_value=()))
+    monkeypatch.setattr(external_boot, "_enqueue_candidate", enqueue)
+
+    repaired = asyncio.run(
+        external_boot.repair_external_boot_lane(
+            cast(Any, Connection()),
+            lane="activation",
+            resolver=cast(Any, object()),
+            authority_instance="authority-current",
+        )
+    )
+
+    assert repaired == 1
+    assert enqueue.await_count == 2
+
+
 def test_cleanup_uses_release_purpose() -> None:
     assert external_boot._purpose("cleanup") == "release"
     assert external_boot._purpose("teardown") == "teardown"

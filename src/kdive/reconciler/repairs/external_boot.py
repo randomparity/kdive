@@ -308,7 +308,7 @@ async def repair_external_boot_lane(
     for candidate in candidates:
         try:
             async with conn.transaction():
-                repaired += await _enqueue_candidate(
+                inserted = await _enqueue_candidate(
                     conn,
                     candidate,
                     resolver=resolver,
@@ -316,6 +316,7 @@ async def repair_external_boot_lane(
                     source_jobs=source_jobs,
                     live_jobs=live_jobs,
                 )
+            repaired += inserted
         except Exception:
             # Provider and durable payload exceptions may contain host identifiers. The lane's
             # bounded operation label is enough for telemetry; raw diagnostics stay private.
