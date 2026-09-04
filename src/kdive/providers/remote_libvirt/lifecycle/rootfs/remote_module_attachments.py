@@ -168,6 +168,16 @@ def _volume_references(root: ET.Element) -> list[tuple[str, str]]:
     return references
 
 
+def _top_level_volume_references(root: ET.Element) -> list[tuple[str, str]]:
+    references = []
+    for source in root.findall("./devices/disk/source"):
+        pool = source.get("pool")
+        volume = source.get("volume")
+        if pool is not None and volume is not None:
+            references.append((pool, volume))
+    return references
+
+
 def _path_references(root: ET.Element) -> set[str]:
     """Return host paths from every source and legacy mirror in each disk graph."""
     paths = set()
@@ -238,7 +248,8 @@ def _inspect_definition(
         protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())
         if active:
             raise _conflict("owning System is active", domain=name)
-        if (expected.pool, expected.root_volume) not in sources:
+        owning_root = (expected.pool, expected.root_volume)
+        if _top_level_volume_references(root).count(owning_root) != 1:
             raise _conflict("owning System definition has a different root volume", domain=name)
         attempt_paths = {
             protected_paths[expected.source_volume],

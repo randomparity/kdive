@@ -390,3 +390,25 @@ def test_nested_protected_storage_source_is_rejected(disk: str, active: bool) ->
 
     with pytest.raises(CategorizedError, match="by path"):
         inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        "<backingStore type='volume'><source pool='systems' volume='root'/>"
+        "<format type='raw'/><backingStore/></backingStore>",
+        "<source file='/overlay'><dataStore><format type='raw'/>"
+        "<source pool='systems' volume='root'/></dataStore></source>",
+        "<mirror job='copy' type='volume'><source pool='systems' volume='root'/>"
+        "<format type='raw'/><backingStore/></mirror>",
+    ],
+)
+def test_nested_root_volume_does_not_satisfy_owning_root_identity(nested: str) -> None:
+    state = expected()
+    xml = system_xml(state.system_id).replace(
+        "<disk><source pool='systems' volume='root'/></disk>",
+        f"<disk type='file'><source file='/overlay'/>{nested}</disk>",
+    )
+
+    with pytest.raises(CategorizedError, match="different root volume"):
+        inspect_module_attachments(Conn([Domain(xml)]), state)
