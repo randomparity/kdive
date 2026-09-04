@@ -181,6 +181,11 @@ Steps, one action each:
    method for it. Named for what it checks: it does **not** show a lease cannot be minted —
    `LocalOperationLease` is a public dataclass any code can construct. What stops a forged
    identity is the factory's `binding_matches_expected` check, covered in `test_session.py`.
+8b. Write `test_closing_one_pin_twice_leaves_the_other_pin_holding`: `_Pin.close` documents
+   itself as idempotent, and the tests above close each pin exactly once, so a double decrement
+   goes undetected. Close one pin twice and assert the lease is still refused for release while
+   the other pin is outstanding. Added after fault injection reported NO BITE for a
+   non-idempotent close.
 8a. Write `test_a_second_pin_keeps_the_lease_held`: closing one pin must not release a lease a
    second pin still holds, so the counter — not the first close — decides.
 9. `just lint` then `just type`, both bare. Expect `All checks passed!` and a clean `ty` run.

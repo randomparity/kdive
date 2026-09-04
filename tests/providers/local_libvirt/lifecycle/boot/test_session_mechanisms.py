@@ -183,6 +183,25 @@ class TestOperationLane:
         # binding_matches_expected check, covered by test_session.py.
         assert not hasattr(LocalOperationLane, "issue")
 
+    def test_closing_one_pin_twice_leaves_the_other_pin_holding(self) -> None:
+        # `_Pin.close` documents itself as idempotent, because a session's cleanup path
+        # attempts every owned resource and may close a pin it already closed. Without the
+        # one-shot guard the second close decrements the count again and releases a lease the
+        # *other* pin still holds -- the count would reach zero with a live pin outstanding.
+        # Found by fault injection: the existing tests close each pin exactly once, so a
+        # double decrement went undetected.
+        lane, lease = LocalOperationLane(), _lease()
+        first, second = lane.pin(lease), lane.pin(lease)
+
+        first._pin.close()
+        first._pin.close()
+
+        with pytest.raises(RuntimeError, match="operation lease is pinned"):
+            lease.release()
+        second._pin.close()
+        lease.release()
+        assert lease.released is True
+
     def test_a_second_pin_keeps_the_lease_held(self) -> None:
         # Closing one pin must not release a lease another pin still holds.
         lane, lease = LocalOperationLane(), _lease()
