@@ -9,11 +9,11 @@ from typing import Any, Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.guest.agent import (
+from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected_strict
+from kdive.providers.shared.guest_agent import (
     AgentCommand,
     classify_agent_libvirt_error,
 )
-from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected_strict
 
 type Sleep = Callable[[float], None]
 type Monotonic = Callable[[], float]

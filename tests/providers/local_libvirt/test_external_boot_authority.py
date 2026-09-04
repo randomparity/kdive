@@ -52,6 +52,7 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
     ExternalBootActivationBinding,
+    KernelIdentity,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -126,7 +127,7 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         target_xml_sha256="sha256:"
         + hashlib.sha256(_SOURCE_XML.replace("/old", "/new").encode()).hexdigest(),
         target_xml=_SOURCE_XML.replace("/old", "/new"),
-        expected_running=RunningKernelObservation(
+        expected_running=KernelIdentity(
             architecture="x86_64", release="6.12.0", gnu_build_id="01020304"
         ),
         source_state=ProviderStateIdentity(definition=SOURCE_IDENTITY, modules=SOURCE_MODULES),
@@ -244,7 +245,11 @@ class _FakeIO:
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         self.actions.append("observe-running")
-        return metadata.expected_running
+        return RunningKernelObservation(
+            identity=metadata.expected_running,
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
+        )
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("recover-modules")

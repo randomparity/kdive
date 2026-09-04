@@ -32,7 +32,7 @@ from typing import NamedTuple, Protocol
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
+from kdive.providers.shared.guest_agent import AgentExecResult, GuestDomain
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

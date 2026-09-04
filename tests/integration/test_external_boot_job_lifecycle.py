@@ -113,6 +113,7 @@ def _registry(vehicle: Vehicle, dsns: Callable[[str], str]) -> HandlerRegistry:
         ExternalBootHandlerPorts(
             resolver=resolver_for(vehicle),
             incarnation_credential=CREDENTIAL,
+            secret_registry=SecretRegistry(),
             acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
             authority_executor=_VehicleExecutor(vehicle),
         )

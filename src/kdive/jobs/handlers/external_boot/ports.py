@@ -17,6 +17,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
@@ -66,6 +67,7 @@ class ExternalBootHandlerPorts:
 
     resolver: ProviderResolver
     incarnation_credential: SecretStr
+    secret_registry: SecretRegistry
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
     authority_executor: ExternalBootAuthorityExecutor | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)

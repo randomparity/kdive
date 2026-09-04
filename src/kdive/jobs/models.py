@@ -159,6 +159,22 @@ class _RecoveryAttemptResult(_ResultBase):
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
+class ExternalBootCmdlineMismatchV1(_ClosedModel):
+    schema_: Literal["external-boot-cmdline-mismatch-v1"] = Field(
+        "external-boot-cmdline-mismatch-v1", alias="schema"
+    )
+    expected_cmdline: str
+    observed_cmdline: str
+    first_differing_byte: Annotated[int, Field(ge=0, le=2048)]
+
+    @field_validator("expected_cmdline", "observed_cmdline")
+    @classmethod
+    def _bounded_text(cls, value: str) -> str:
+        if len(value.encode()) > 8192:
+            raise ValueError("rendered command line exceeds 8192 UTF-8 bytes")
+        return value
+
+
 class ExternalBootAuthorityFailureContext(_ClosedModel):
     phase: Literal["admission", "preparation", "provider-call", "observation", "commit"] | None = (
         None
@@ -167,6 +183,7 @@ class ExternalBootAuthorityFailureContext(_ClosedModel):
         Literal["observed_identity_stale", "reservation_not_ready", "authority_superseded"] | None
     ) = None
     next_action: Literal["systems.get", "jobs.wait", "jobs.get"] | None = None
+    cmdline_mismatch: ExternalBootCmdlineMismatchV1 | None = None
 
     @model_validator(mode="after")
     def _reason_action_pair_is_closed(self) -> ExternalBootAuthorityFailureContext:
@@ -195,10 +212,17 @@ class _FailureResult(_ResultBase):
     def _cas_failure_shape_is_closed(self) -> _FailureResult:
         reason = self.failure_context.reason
         if reason is None:
+            cmdline_mismatch = self.failure_context.cmdline_mismatch is not None
+            if cmdline_mismatch and self.recovery_readiness_deadline is None:
+                raise ValueError("command-line mismatch requires a recovery deadline")
             if self.recovery_readiness_deadline is not None and not (
-                self.error_category is ErrorCategory.BOOT_TIMEOUT and self.terminal
+                self.terminal
+                and (
+                    self.error_category is ErrorCategory.BOOT_TIMEOUT
+                    or (self.error_category is ErrorCategory.READINESS_FAILURE and cmdline_mismatch)
+                )
             ):
-                raise ValueError("only terminal boot timeout carries a recovery deadline")
+                raise ValueError("only a terminal recovery failure carries a recovery deadline")
             return self
         if self.recovery_readiness_deadline is not None:
             raise ValueError("classified CAS failure cannot carry a recovery deadline")
@@ -209,6 +233,14 @@ class _FailureResult(_ResultBase):
         }[reason]
         if (self.error_category, self.terminal) != expected:
             raise ValueError("failure reason, category, and terminal flag do not match")
+        return self
+
+    @model_validator(mode="after")
+    def _diagnostic_matches_failure(self) -> _FailureResult:
+        if self.failure_context.cmdline_mismatch is not None and (
+            self.error_category is not ErrorCategory.READINESS_FAILURE or not self.terminal
+        ):
+            raise ValueError("command-line mismatch requires terminal readiness failure")
         return self
 
 

@@ -38,6 +38,10 @@ class Domain:
         self.xml = xml or _xml()
         self.active = False
 
+    def name(self) -> str:
+        start = self.xml.index("<name>") + len("<name>")
+        return self.xml[start : self.xml.index("</name>", start)]
+
     def XMLDesc(self, flags: int) -> str:  # noqa: N802
         del flags
         self.events.append("domain.xml")

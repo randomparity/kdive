@@ -40,7 +40,6 @@ from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_libvirt_connections,
 )
-from kdive.providers.remote_libvirt.guest.agent import GuestDomain
 from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
 from kdive.providers.remote_libvirt.lifecycle.port_allocation import (
     DOMAIN_PREFIX,
@@ -76,6 +75,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool_strict as _disk_pool_strict,
 )
+from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue

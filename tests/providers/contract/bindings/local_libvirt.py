@@ -24,6 +24,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootMaterialization,
     ExternalBootPlan,
     ExternalBootPorts,
+    KernelIdentity,
     MaterializedArtifacts,
     OpaqueProviderRef,
     PresentComponentState,
@@ -38,8 +39,11 @@ _SOURCE_XML = "<domain type='kvm'><name>d</name><devices><disk src='/old'/></dev
 _TARGET_XML = _SOURCE_XML.replace("/old", "/new")
 _SOURCE_BOOT = "sha256:" + "b" * 64
 _TARGET_BOOT = "sha256:" + "c" * 64
+_IDENTITY = KernelIdentity(architecture="x86_64", release=RELEASE, gnu_build_id="01020304")
 _OBSERVATION = RunningKernelObservation(
-    architecture="x86_64", release=RELEASE, gnu_build_id="01020304"
+    identity=_IDENTITY,
+    cmdline=b"root=UUID=x",
+    expected_cmdline=b"root=UUID=x",
 )
 
 
@@ -57,7 +61,7 @@ def _materialization(plan: ExternalBootPlan) -> ExternalBootMaterialization:
         installed_module_tree="sha256:" + "3" * 64,
         verified_bundle_sha256=plan.bundle.sha256,
         verified_initrd_sha256=None,
-        kernel_observation=_OBSERVATION,
+        kernel_observation=_IDENTITY,
         artifacts=MaterializedArtifacts(
             kernel=OpaqueProviderRef(ref="artifacts/kernel"),
             modules=OpaqueProviderRef(ref="artifacts/modules"),
@@ -151,7 +155,7 @@ class _ContractIO:
         self.record_phase(metadata, "target-defined")
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
-        return metadata.expected_running
+        return _OBSERVATION
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.record_phase(metadata, "module-restored")

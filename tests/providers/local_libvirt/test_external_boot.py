@@ -67,6 +67,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     ExternalBootPreparationObservation,
     ExternalBootPreparationRequest,
+    KernelIdentity,
     MaterializedArtifacts,
     OpaqueProviderRef,
     PresentComponentState,
@@ -1449,7 +1450,13 @@ class _ExternalIO:
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         self.actions.append("observe-running")
         return RunningKernelObservation(
-            architecture="x86_64", release=metadata.release, gnu_build_id="01020304"
+            identity={
+                "architecture": "x86_64",
+                "release": metadata.release,
+                "gnu_build_id": "01020304",
+            },
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
         )
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
@@ -1662,9 +1669,13 @@ class _RealSession:
 
     def observe_running(self) -> RunningKernelObservation:
         return RunningKernelObservation(
-            architecture="x86_64",
-            release=self.preparation.metadata.release,
-            gnu_build_id="01020304",
+            identity={
+                "architecture": "x86_64",
+                "release": self.preparation.metadata.release,
+                "gnu_build_id": "01020304",
+            },
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
         )
 
     def define_xml(self, xml: str) -> None:
@@ -1820,9 +1831,13 @@ class _RestartSession(_RealSession):
         self.artifact = artifact
         self.readiness_result = ReadinessResult(True, True, None)
         self.running_observation = RunningKernelObservation(
-            architecture="x86_64",
-            release=preparation.metadata.release,
-            gnu_build_id="01020304",
+            identity={
+                "architecture": "x86_64",
+                "release": preparation.metadata.release,
+                "gnu_build_id": "01020304",
+            },
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
         )
 
     def inspect_closed(self) -> ClosedDomainInspection:
@@ -2846,9 +2861,21 @@ def test_activation_rejects_unexpected_xml_or_power_before_module_mutation(
 @pytest.mark.parametrize(
     "observation",
     [
-        RunningKernelObservation(architecture="ppc64le", release="6.12.0", gnu_build_id="01020304"),
-        RunningKernelObservation(architecture="x86_64", release="6.12.1", gnu_build_id="01020304"),
-        RunningKernelObservation(architecture="x86_64", release="6.12.0", gnu_build_id="deadbeef"),
+        RunningKernelObservation(
+            identity={"architecture": "ppc64le", "release": "6.12.0", "gnu_build_id": "01020304"},
+            cmdline=b"",
+            expected_cmdline=b"",
+        ),
+        RunningKernelObservation(
+            identity={"architecture": "x86_64", "release": "6.12.1", "gnu_build_id": "01020304"},
+            cmdline=b"",
+            expected_cmdline=b"",
+        ),
+        RunningKernelObservation(
+            identity={"architecture": "x86_64", "release": "6.12.0", "gnu_build_id": "deadbeef"},
+            cmdline=b"",
+            expected_cmdline=b"",
+        ),
     ],
 )
 def test_observe_rejects_running_kernel_mismatch(
@@ -2867,6 +2894,27 @@ def test_observe_rejects_running_kernel_mismatch(
 
     with pytest.raises(ValueError, match="running kernel"):
         ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+
+def test_observe_returns_command_line_mismatch_for_core_to_compare(tmp_path: Path) -> None:
+    metadata_template = _metadata("target-defined")
+    ports, metadata, session, _guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    observation = RunningKernelObservation(
+        identity=metadata.expected_running,
+        cmdline=b"root=observed",
+        expected_cmdline=b"root=expected",
+    )
+    session.running_observation = observation
+
+    assert (
+        ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current")) == observation
+    )
 
 
 @pytest.mark.parametrize(
@@ -3284,7 +3332,7 @@ def test_real_adapter_retry_rejects_substituted_expected_kernel_before_host_acce
     metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
     crossed = _pre_stop(metadata).model_copy(
         update={
-            "expected_running": RunningKernelObservation(
+            "expected_running": KernelIdentity(
                 architecture="x86_64",
                 release="6.12.0",
                 gnu_build_id="deadbeef",
@@ -3699,7 +3747,7 @@ def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
         "phase:target-defined",
     ]
     io.actions.clear()
-    assert ports.observe(point, authority).release == "6.12.0"
+    assert ports.observe(point, authority).identity.release == "6.12.0"
     assert io.actions == ["reopen", "observe-running"]
 
     io.actions.clear()

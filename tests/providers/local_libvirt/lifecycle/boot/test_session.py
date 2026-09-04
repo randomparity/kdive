@@ -2237,7 +2237,9 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     events: list[str] = []
     domain = Domain(events)
     observation = RunningKernelObservation(
-        architecture="x86_64", release="6.1.0", gnu_build_id="00112233"
+        identity={"architecture": "x86_64", "release": "6.1.0", "gnu_build_id": "00112233"},
+        cmdline=b"root=UUID=x",
+        expected_cmdline=b"root=UUID=x",
     )
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -2253,7 +2255,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         ),
         unlink_relative=lambda root, name: events.append(f"unlinkat:{root}:{name}"),
         readiness=lambda _system_id: ReadinessResult(True, True),
-        observe_running=lambda _system_id: observation,
+        observe_running=lambda _system_id, _domain: observation,
         cleanup_payloads=lambda root, binding: events.append(
             f"cleanup:{root}:{binding.activation_id}"
         ),
@@ -2299,10 +2301,16 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         readiness=lambda system_id: observed_ids.append(system_id) or ReadinessResult(True, True),
-        observe_running=lambda system_id: (
+        observe_running=lambda system_id, _domain: (
             observed_ids.append(system_id)
             or RunningKernelObservation(
-                architecture="x86_64", release="6.1.0", gnu_build_id="00112233"
+                identity={
+                    "architecture": "x86_64",
+                    "release": "6.1.0",
+                    "gnu_build_id": "00112233",
+                },
+                cmdline=b"root=UUID=x",
+                expected_cmdline=b"root=UUID=x",
             )
         ),
         cleanup_payloads=lambda _root, binding: cleaned.append(binding),

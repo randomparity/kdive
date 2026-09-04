@@ -71,7 +71,9 @@ def _stub_assembly() -> WorkerHandlerAssembly:
 
 def _ports() -> ExternalBootHandlerPorts:
     return ExternalBootHandlerPorts(
-        resolver=ProviderResolver({}), incarnation_credential=CREDENTIAL
+        resolver=ProviderResolver({}),
+        incarnation_credential=CREDENTIAL,
+        secret_registry=SecretRegistry(),
     )
 
 

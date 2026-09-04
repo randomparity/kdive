@@ -32,6 +32,8 @@ from kdive.jobs.handlers.external_boot.ports import (
 )
 from kdive.jobs.handlers.external_boot.runner import (
     OperationContext,
+    _CommandLineMismatch,
+    authority_ref,
     run_operation,
 )
 from kdive.jobs.models import (
@@ -43,7 +45,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     RecoveryObjectBindingV1,
 )
-from kdive.providers.ports.external_boot import RecoveryPoint
+from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 
 __all__ = [
     "activate_handler",
@@ -99,6 +101,34 @@ def _require_category(
         )
 
 
+def _require_observed_kernel_matches(
+    context: OperationContext, observation: RunningKernelObservation | None
+) -> None:
+    materialization = context.activation.materialization
+    if observation is None or materialization is None:
+        raise _refuse(
+            f"activation {context.marker.activation_id} produced no kernel observation to verify"
+        )
+    if observation.identity != materialization.kernel_observation:
+        raise _refuse(
+            f"the running kernel observed for activation {context.marker.activation_id} is not the "
+            "one its persisted materialization records"
+        )
+    if observation.cmdline != observation.expected_cmdline:
+        limit = min(len(observation.cmdline), len(observation.expected_cmdline))
+        offset = next(
+            (
+                index
+                for index in range(limit)
+                if observation.cmdline[index] != observation.expected_cmdline[index]
+            ),
+            limit,
+        )
+        raise _CommandLineMismatch(
+            observation.expected_cmdline[:2048], observation.cmdline[:2048], offset
+        )
+
+
 def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
     recovery = _recovery(context)
     attempt_id = context.activation.current_attempt_id or uuid5(
@@ -135,11 +165,19 @@ def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
     )
 
 
-async def _execute(context: OperationContext) -> AuthorityObservationV1:
+async def _execute(
+    context: OperationContext,
+) -> tuple[AuthorityObservationV1, RunningKernelObservation | None]:
     executor = context.prerequisites.get("authority_executor")
     if executor is None:
         raise _refuse("no external-boot authority executor is configured")
-    return await cast(ExternalBootAuthorityExecutor, executor).execute(_mutation_request(context))
+    authority_observation = await cast(ExternalBootAuthorityExecutor, executor).execute(
+        _mutation_request(context)
+    )
+    kernel_observation = None
+    if authority_observation.category == "target":
+        kernel_observation = context.port.observe(_recovery(context), authority_ref(context))
+    return authority_observation, kernel_observation
 
 
 async def _no_preconditions(
@@ -281,10 +319,14 @@ def _handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
     ) -> ExternalBootAuthoritySuccessV1:
         def checked_build(
-            context: OperationContext, observation: AuthorityObservationV1
+            context: OperationContext,
+            observations: tuple[AuthorityObservationV1, RunningKernelObservation | None],
         ) -> ExternalBootAuthoritySuccessV1:
-            _require_category(context, observation, expected_observation)
-            return build_result(context, observation)
+            authority_observation, kernel_observation = observations
+            _require_category(context, authority_observation, expected_observation)
+            if expected_observation == "target":
+                _require_observed_kernel_matches(context, kernel_observation)
+            return build_result(context, authority_observation)
 
         return await run_operation(
             conn,
@@ -576,12 +618,9 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     return _handler(
         ports,
         require_activation_state=_RECOVERY_STATES,
-        # `materialization` as well as `recovery_point`, because this operation observes: it admits
-        # `abandoned`, whose row is legal with `materialization` NULL, and the observation check
-        # reads `materialization.kernel_observation`. Without it the refusal lands in build_result,
-        # *after* allocation and the port call, and reports "produced no kernel observation to
-        # verify" — blaming the provider for a missing persisted column. Listing the column here
-        # moves the same refusal to step 2b, pre-allocation, with the accurate message.
+        # Require the complete persisted activation evidence pair before releasing its reservation.
+        # Only `recovery_point` feeds the source-authority observation, but the domain model binds
+        # it to `materialization`; checking both keeps a partial row from reaching allocation.
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_require_releasable,
         expected_observation="source",

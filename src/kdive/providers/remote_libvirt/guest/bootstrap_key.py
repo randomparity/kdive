@@ -13,7 +13,7 @@ re-runs it harmlessly. This is a bounded exception to ADR-0078's debug-target no
 from __future__ import annotations
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.guest.agent import (
+from kdive.providers.shared.guest_agent import (
     AgentCommand,
     GuestAgentExec,
     GuestDomain,
