@@ -8,12 +8,14 @@ rejects XML-illegal bytes before either renderer receives them.
 
 Tech stack: Python 3.14, Pydantic models, pytest, local and remote libvirt provider seams.
 
-Expected implementation size: 180–320 changed lines (M) — derived from one port-model change, one
-core comparator, two provider adjustments, fixture updates, and focused tests.
+Expected implementation size: 280–480 changed lines (M) — derived from a persistence-safe type
+split, one core comparator, two provider reads, local channel preparation, fixture updates, and
+focused tests.
 
 ## Global constraints
 
 - Support x86_64 and ppc64le contracts; this host is x86_64 and live ppc64le testing is excluded.
+- Keep `external-boot-materialization-v1` canonical JSON byte-identical; no persisted field changes.
 - Remove exactly one trailing newline from `/proc/cmdline`; perform no other normalization.
 - Compare the remaining bytes with `plan.cmdline.encode("utf-8")` byte-for-byte.
 - Use terminal `READINESS_FAILURE` for changed bytes and preserve retry behavior for unavailable
@@ -28,14 +30,19 @@ Files: `src/kdive/providers/ports/external_boot.py`,
 
 Interfaces:
 
-- Produces `RunningKernelObservation(..., cmdline: bytes)` for both providers and core.
+- Produces persisted `KernelIdentity(architecture, release, gnu_build_id)` and transient
+  `RunningKernelObservation(identity, cmdline, expected_cmdline)` for both providers and core.
+- Keeps `ExternalBootMaterialization.kernel_observation` and its canonical JSON shape unchanged,
+  changing only the Python value type to `KernelIdentity`.
 - Keeps `ExternalBootPorts.observe(...) -> RunningKernelObservation` unchanged.
 - Tightens `_validate_platform_argument(value: str) -> str` for XML 1.0 representability.
 
 Verification:
 
-- Mode: focused-test. Required command-line bytes fail existing constructors first; green command:
+- Mode: focused-test. Transient command-line bytes fail existing constructors first; green command:
   `uv run python -m pytest tests/providers/ports/test_external_boot.py tests/providers/contract/test_external_boot_contract.py -q`.
+- Mode: focused-test. A pre-change canonical materialization fixture must retain its exact bytes and
+  identity after the type split; the same focused command proves it.
 - Mode: focused-test. XML-illegal C0 arguments are accepted before the change; the same command
   rejects them after the validator change.
 
@@ -43,7 +50,8 @@ Steps:
 
 1. Add tests constructing and serializing an observation with exact bytes and rejecting C0 values.
 2. Run the focused command and observe missing-field and accepted-control failures.
-3. Add required `cmdline: bytes` and an XML 1.0 character predicate to the shared port model.
+3. Split persisted `KernelIdentity` from transient `RunningKernelObservation`, and add an XML 1.0
+   character predicate to the shared port model.
 4. Update contract fixtures and run the focused command green.
 
 Acceptance: every observation contains bytes and every XML-illegal platform token is rejected at
@@ -56,10 +64,11 @@ Files: `src/kdive/jobs/handlers/external_boot/lifecycle.py` and
 
 Interfaces:
 
-- Consumes `context.activation.materialization.kernel_observation.cmdline` (sourced from the plan
-  at materialization) and the live `RunningKernelObservation.cmdline`.
+- Consumes `context.activation.materialization.kernel_observation`, plus transient
+  `RunningKernelObservation.identity`, `.cmdline`, and `.expected_cmdline`.
 - Produces a terminal `CategorizedError` with category `ErrorCategory.READINESS_FAILURE` carrying
-  escaped expected/observed strings and `first_differing_byte`.
+  bounded UTF-8-with-backslash-replacement expected/observed strings and
+  `first_differing_byte`.
 
 Verification:
 
@@ -80,31 +89,42 @@ both escaped strings and the first differing byte.
 ## Task 3: Return exact guest bytes from both provider paths
 
 Files: `src/kdive/providers/remote_libvirt/lifecycle/external_boot.py`,
-`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`, relevant provider tests, and
-test bindings.
+`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py`,
+`src/kdive/providers/local_libvirt/lifecycle/boot/session.py`,
+`src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py`,
+`src/kdive/providers/local_libvirt/lifecycle/xml.py`, relevant provider tests, and test bindings.
 
 Interfaces:
 
-- Remote `observe_guest_identity(...) -> RemoteGuestIdentity` returns a
-  `RunningKernelObservation` containing the stripped bytes and no longer compares them locally.
-- Local `LocalExternalBootOperation.observe_running(...) -> RunningKernelObservation` preserves
-  the injected observer's bytes and compares only its kernel identity fields with metadata.
+- Remote `observe_guest_identity(...) -> RunningKernelObservation` returns live and plan-derived
+  expected bytes and no longer compares them locally.
+- Local `RunningObserver` receives the opened domain, performs bounded qemu-guest-agent reads, and
+  returns live and target-XML-derived expected bytes. The standard guest-agent channel is rendered
+  for newly provisioned local domains; absence names reprovisioning as recovery.
+- Local `LocalExternalBootOperation.observe_running(...) -> RunningKernelObservation` validates
+  only the returned kernel identity against metadata; core owns command-line comparison.
 
 Verification:
 
-- Mode: focused-test. Provider tests cover one newline, missing newline, two newlines, and exact
-  byte preservation; red is missing `cmdline` or provider-local mismatch, green command:
-  `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_external_boot.py tests/providers/local_libvirt/test_external_boot.py -q`.
+- Mode: focused-test. Provider tests cover one newline, missing newline, two newlines, invalid UTF-8,
+  the 2,048-byte content bound, exact preservation, local channel XML, and missing-channel recovery;
+  red is missing carriage or production observer, green command: `uv run python -m pytest
+  tests/providers/remote_libvirt/lifecycle/test_external_boot.py
+  tests/providers/local_libvirt/test_external_boot.py
+  tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py
+  tests/providers/local_libvirt/lifecycle/test_xml.py -q`.
 
 Steps:
 
 1. Add provider tests for exact byte carriage and newline behavior.
 2. Run the focused command and observe missing carriage or premature provider comparison.
-3. Populate the widened observation on remote reads and preserve the local observer's bytes.
+3. Populate the transient observation on remote reads; widen the local observer seam to receive the
+   domain, implement its bounded guest-agent reads, and render the standard channel.
 4. Update fixtures and run the focused command green.
 
-Acceptance: both provider implementations return exact bytes for the common core check; local
-production reachability remains an explicit #2212 dependency rather than hidden scope growth.
+Acceptance: both provider implementations perform the guest read and return exact bytes for the
+common core check. Existing local Systems without the newly rendered channel fail with a bounded,
+actionable reprovision diagnostic rather than producing false readiness.
 
 ## Final verification and rollback
 
