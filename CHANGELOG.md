@@ -218,6 +218,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the service-constructed authority commit context
 - Bind target_xml to its own digest on both records
 - Carry the anchored journal proof to the commit seam
+- Carry an external-boot authority marker on boot payloads
+- Route authority-marked jobs to an operations registry
+- Allocate and acknowledge external-boot authority in a runner
+- Add the six external-boot lifecycle operation handlers
+- Add the external-boot enqueue payload builder
 
 ### Changed
 
@@ -1166,6 +1171,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discharge the scope audit's CLI-clause checkpoint
 - Record that the probe_error fix is forward-only
 - Apply the security pass's four record corrections
+- Design the job payloads and lifecycle handlers
+- Renumber the external-boot handler ADR 0591 to 0593
+- Disposition the design review's thirteen findings
+- Disposition the second design-review round
+- Disposition the third design-review round
+- Resolve two bare deferral-record references
+- Disposition the scope audit, cutting one block of surface
+- State what the end-to-end test does not cover
+- Record the constraints only execution found
+- Record bite harnesses that never gated verdicts
+- Record ruff formatting Python in Markdown fences
+- Record assertions whose operands share one source
+- Record the ADR Accepted-flip commit ordering trap
 
 ### Fixed
 
@@ -1902,6 +1920,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Finalize only a tombstone the same commit published
 - Correct the provenance claims and pin the real outcome
 - Classify probe failures as a closed vocabulary
+- Return the success carrier a marked job's commit dispatches on
+- Map uncommittable error categories and correct three claims
 
 ### Security
 
@@ -1942,6 +1962,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adopt ruff 0.16 formatter output (ADR-0569)
 - Format the plan's fenced python to match the shipped test
 - Wrap the denial signature in the admission plan
+- Format the design set's fenced Python blocks
 
 ## [0.4.0] - 2026-07-23
 
