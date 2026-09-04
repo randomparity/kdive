@@ -148,7 +148,13 @@ loosening of the binding type cannot silently become a traversal.
 made those the definition of an acceptable directory, and a second definition would drift.
 
 **Errors.** Every failure — missing, non-directory, wrong-mode, wrong-owner or symlinked, at the
-root or at either child — is re-raised as `ValueError` with a fixed message and **no** host path.
+root or at either child — is re-raised as `ValueError` with a fixed message **plus the symbolic
+errno constant**, and **no** host path and no `strerror`.
+
+The errno is admitted deliberately. `errno.errorcode` values are symbolic names carrying nothing the
+`from None` suppression protects, and without one the most likely real failure of a path that now
+*writes* — a full or quota-exhausted recovery filesystem — reads to an operator as an ownership
+refusal, sending them to `stat` a root whose mode and owner are correct.
 
 This is not automatic and the first revision of this design got it wrong. `os.open` on the root
 raises `OSError` subclasses that carry `.strerror`, and — because the root is opened by path rather
@@ -366,12 +372,40 @@ trust that the recovery root is still what startup validated.
 
 | boundary | validation | authorization | bound | leaks on failure |
 | --- | --- | --- | --- | --- |
-| artifact-root walk (read) | `CanonicalUuid` on both names, re-asserted; `O_NOFOLLOW` per component | `_require_private_owned_directory` per component: directory, mode 0700, euid owner | exactly two components, both from the ownership | `ValueError`, no host path, no `strerror` |
+| artifact-root walk (read) | `CanonicalUuid` on both names, re-asserted; `O_NOFOLLOW` per component | `_require_private_owned_directory` per component: directory, mode 0700, euid owner | exactly two components, both from the ownership | `ValueError` + symbolic errno, no host path, no `strerror` |
 | artifact-root walk (create) | same `CanonicalUuid` re-assertion before any `mkdir` | `mkdir(0o700, dir_fd=)` then the same per-component check via `_open_private_directory` | at most two directories per distinct `(system_id, run_id)`; **count is not otherwise bounded** — see below | as above |
 | cleanup's recovery-**root** open | none needed — the path is the constructed value, never a call argument | `O_DIRECTORY\|O_NOFOLLOW` then `_require_private_owned_directory(fd, "recovery root")` | one open, closed in `finally` | `ValueError` re-raised `from None` |
 | recovery-**dir** open (child) | `CanonicalUuid` on both name halves, re-asserted; `O_NOFOLLOW` | `_open_private_directory`, same three checks | one component | as above |
 | payload deletion | fixed `PAYLOAD_NAMES` tuple, coupled by test to `TargetProjectionV1`'s `*_filename` fields | descriptor-relative, `dir_fd=root_fd` | three literal names | absence is success |
 | archive deletion | one literal name, `modules.tar` | descriptor-relative under the validated recovery dir | one literal name | absence is success |
+
+**Two preconditions these controls cannot supply for themselves, and provisioning must.** Both were
+surfaced by the threat scan of the implementation, and both are recorded here rather than fixed in
+code because the fix is operator configuration, not a check this mechanism could run.
+
+- **Ancestors.** `O_NOFOLLOW` constrains only the *final* component of an open; every ancestor of
+  the configured root is resolved normally, symlinks included, and nothing here or in the startup
+  parse validates them. A local user able to write to any ancestor can substitute a component
+  between two opens. The per-open `_require_private_owned_directory` bounds the damage — the
+  directory the walk lands on must still be a real directory, mode exactly 0700, owned by the worker
+  euid, so the substitute cannot be an arbitrary tree — but the confinement is to *a* qualifying
+  directory, not to *the* configured one. Every ancestor must therefore be owned by root or by the
+  worker account and must not be group- or world-writable. Resolving the root once at startup with
+  an `O_PATH` component walk and holding that descriptor would close it in code; that belongs with
+  the row that makes these mechanisms reachable (#2212), because a descriptor held from startup is a
+  lifecycle decision this change has no caller to make it for.
+- **Umask.** `_open_or_create_private_child` creates with `os.mkdir(name, 0o700, dir_fd=)`, and the
+  kernel applies `mode & ~umask`. Measured: under umasks `0o022`, `0o077` and `0o007` the result is
+  `0o700`, but under `0o177` it is `0o600` — the `O_NOFOLLOW` open still succeeds, and only the
+  exact-`0o700` comparison refuses. A worker started with `UMask=0177` therefore creates a directory
+  that fails the very guard it was created to satisfy, and every later activation for that
+  `(system_id, run_id)` hits `FileExistsError` and refuses again, leaving a wrong-mode directory
+  under the privileged root that nothing reclaims. The worker umask must not clear an owner bit.
+  Fixing it in code means an explicit `os.chmod` after the `mkdir` inside
+  `_open_or_create_private_child`, which lives in `external_boot.py` — declared unmodified here.
+
+Both are stated in `KDIVE_LIBVIRT_RECOVERY_ROOT`'s help and `suggest`, so they reach the operator
+who provisions the root rather than only the reader of this spec.
 
 TOCTOU between the setting's startup validation and an operation's open is handled by
 re-validating on every open rather than caching a verdict — which is what
@@ -510,7 +544,8 @@ no-op is the defect class this repository has shipped three times in this campai
 **The no-leak guarantee is scoped to the two directory mechanisms**, `LocalArtifactRoot` and
 `LocalPayloadCleanup`. Neither raises a message carrying a host path, a libvirt or libguestfs
 string, a guest byte, or a secret: every directory failure becomes a `ValueError` with a fixed
-message, re-raised `from None` so no chained `OSError` re-attaches `.filename` or `.strerror`.
+message plus the symbolic errno constant, re-raised `from None` so no chained `OSError`
+re-attaches `.filename` or `.strerror`.
 Descriptor cleanup runs on every failure path; a mechanism that fails partway closes what it opened
 before propagating.
 

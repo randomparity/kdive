@@ -211,8 +211,13 @@ def recovery_root(tmp_path: Path) -> Path:
 ```
 
 **The umask rule, stated accurately.** `mkdir(mode=...)` masks its argument with the process
-umask, but a mode of `0o700` carries only owner bits and no realistic umask clears those, so the
-one-step form would in fact produce `0o700` here. Measured on this host (Python 3.14.7, Linux
+umask. A mode of `0o700` carries only owner bits, and the umasks an operator normally sets do not
+clear those, so the one-step form would in fact produce `0o700` here.
+
+**"No realistic umask clears those" was an over-claim, and the threat scan caught it.** `UMask=0177`
+is a realistic systemd hardening value, and under it `mkdir(0o700)` yields `0o600` — measured. That
+does not change what these *fixtures* should do, but it does mean the production create path has an
+operator precondition, which the spec's threat model and the setting's help now state. Measured on this host (Python 3.14.7, Linux
 7.1.12-200.fc44, x86_64): `mkdir(mode=0o700)` yields `0o700` under umask `0o022`, `0o077` and
 `0o007` alike. The two-step form is used anyway because it is the repository's convention
 (`test_composition.py` states it) and because it *is* load-bearing the moment a directory needs

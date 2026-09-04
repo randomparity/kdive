@@ -57,8 +57,11 @@ def _refused(message: str, exc: OSError) -> str:
     and the right uid, and has nothing pointing at `ENOSPC`. `errno.errorcode` values are
     symbolic constants and carry no host path, so naming one costs nothing the `from None`
     suppression is protecting.
+
+    `OSError.errno` can be `None`, which would render as the bare word "None"; an
+    unnumbered error is reported as `EUNKNOWN` instead.
     """
-    return f"{message} ({errno.errorcode.get(exc.errno, exc.errno)})"
+    return f"{message} ({errno.errorcode.get(exc.errno, 'EUNKNOWN') if exc.errno else 'EUNKNOWN'})"
 
 
 @dataclass
