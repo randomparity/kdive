@@ -59,7 +59,8 @@ _BOOT_PROJECTION_PREFIX = b"kdive-libvirt-boot-projection-v1"
 # (`ports/external_boot.py:26,44` measures `len(data)` over bytes).
 MAX_DEFINITION_BYTES = 65_536
 MAX_ARTIFACT_PATH_BYTES = 1_024
-MAX_GUEST_READ_BYTES = 2_048
+MAX_GUEST_READ_BYTES = 65_536
+MAX_CMDLINE_BYTES = 2_048
 
 UNAME_PROGRAM = "/usr/bin/uname"
 CAT_PROGRAM = "/usr/bin/cat"
@@ -942,7 +943,7 @@ def observe_guest_identity(
         [CAT_PROGRAM, PROC_CMDLINE_PATH],
         what="the kernel command line",
         definition=definition,
-        max_bytes=MAX_GUEST_READ_BYTES + 1,
+        max_bytes=MAX_CMDLINE_BYTES + 1,
     )
     # ADR-0583 removes exactly one trailing newline and treats truncation as terminal. A
     # /proc/cmdline read that does not end in a newline is truncated, not merely unterminated.
@@ -953,7 +954,7 @@ def observe_guest_identity(
             mismatch="cmdline",
         )
     cmdline = cmdline[:-1]
-    if len(cmdline) > MAX_GUEST_READ_BYTES:
+    if len(cmdline) > MAX_CMDLINE_BYTES:
         raise _identity_failure(
             "the guest returned an oversized kernel command line capture",
             definition=definition,

@@ -244,35 +244,55 @@ def _failure(*, terminal: bool) -> ExternalBootAuthorityFailureV1:
     )
 
 
-def test_failure_context_accepts_only_closed_bounded_cmdline_diagnostic() -> None:
+@pytest.mark.parametrize(
+    ("mutation", "missing"),
+    [
+        ({"extra": True}, None),
+        ({"schema": "wrong"}, None),
+        ({"schema": None}, None),
+        ({"expected_cmdline": 1}, None),
+        ({"observed_cmdline": None}, None),
+        ({"first_differing_byte": None}, None),
+        ({"first_differing_byte": -1}, None),
+        ({"first_differing_byte": 2049}, None),
+        ({"first_differing_byte": 0.5}, None),
+        ({"expected_cmdline": "x" * 8193}, None),
+        ({"observed_cmdline": "é" * 4097}, None),
+        ({}, "expected_cmdline"),
+        ({}, "observed_cmdline"),
+        ({}, "first_differing_byte"),
+    ],
+)
+def test_failure_context_accepts_only_closed_bounded_cmdline_diagnostic(
+    mutation: dict[str, object], missing: str | None
+) -> None:
+    diagnostic: dict[str, object] = {
+        "schema": "external-boot-cmdline-mismatch-v1",
+        "expected_cmdline": "x" * 8192,
+        "observed_cmdline": "é" * 4096,
+        "first_differing_byte": 2048,
+    }
     result: dict[str, object] = {
         "schema": "external-boot-authority-result-v1",
         "operation": "fail",
         "error_category": "readiness_failure",
         "failure_context": {
             "phase": "commit",
-            "cmdline_mismatch": {
-                "schema": "external-boot-cmdline-mismatch-v1",
-                "expected_cmdline": "root=UUID=x",
-                "observed_cmdline": "root=UUID=y",
-                "first_differing_byte": 10,
-            },
+            "cmdline_mismatch": diagnostic,
         },
         "terminal": True,
     }
 
     carrier = ExternalBootAuthorityFailureV1.model_validate(_carrier(result))
     assert carrier.result.operation == "fail"
-    malformed: dict[str, object] = dict(result)
-    malformed["failure_context"] = {
-        **result["failure_context"],
-        "cmdline_mismatch": {
-            **result["failure_context"]["cmdline_mismatch"],
-            "extra": True,
-        },
-    }
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        ExternalBootAuthorityFailureV1.model_validate(_carrier(malformed))
+    assert carrier.result.model_dump(by_alias=True)["failure_context"]["cmdline_mismatch"] == (
+        diagnostic
+    )
+    diagnostic.update(mutation)
+    if missing is not None:
+        del diagnostic[missing]
+    with pytest.raises(ValidationError):
+        ExternalBootAuthorityFailureV1.model_validate(_carrier(result))
 
 
 def _worker() -> Worker:

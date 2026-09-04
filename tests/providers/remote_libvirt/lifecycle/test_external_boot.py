@@ -822,6 +822,28 @@ def test_observation_accepts_the_2048_byte_command_line_content_bound() -> None:
     assert observation.cmdline == content
 
 
+@pytest.mark.parametrize("size", [4136, 65536, 65540])
+def test_observation_bounds_kernel_notes_separately(size: int) -> None:
+    descriptor_size = size - len(_NOTES) - 16
+    notes = (
+        bytes.fromhex("04000000")
+        + descriptor_size.to_bytes(4, "little")
+        + bytes.fromhex("0100000054455354")
+        + b"x" * descriptor_size
+        + _NOTES
+    )
+    assert len(notes) == size
+    agent = _FakeAgentExec(_replies(notes=notes))
+    if size <= 65536:
+        observation = observe_guest_identity(agent, _guest(), _prepare())
+        assert observation.identity.gnu_build_id == "ab" * 8
+    else:
+        with pytest.raises(CategorizedError, match="oversized.*kernel notes") as caught:
+            observe_guest_identity(agent, _guest(), _prepare())
+        assert caught.value.category is ErrorCategory.READINESS_FAILURE
+        assert caught.value.terminal is True
+
+
 def test_observation_rejects_command_line_content_over_2048_bytes() -> None:
     with pytest.raises(CategorizedError) as caught:
         observe_guest_identity(

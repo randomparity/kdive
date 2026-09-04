@@ -623,7 +623,9 @@ def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: st
             final = await _final_state(migrated_url, job_id)
             assert final.state is JobState.FAILED
             assert final.error_category is ErrorCategory.CONFIGURATION_ERROR
-            assert final.failure_context["failure_message"].startswith("invalid install payload:")
+            message = final.failure_context["failure_message"]
+            assert isinstance(message, str)
+            assert message.startswith("invalid install payload:")
 
     asyncio.run(_run())
 

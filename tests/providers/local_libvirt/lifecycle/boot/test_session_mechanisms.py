@@ -832,6 +832,29 @@ def test_running_observer_accepts_2048_bytes_of_command_line_content() -> None:
     assert observation.cmdline == content
 
 
+@pytest.mark.parametrize("size", [4136, 65536, 65540])
+def test_running_observer_bounds_kernel_notes_separately(size: int) -> None:
+    descriptor_size = size - len(_NOTES) - 16
+    notes = (
+        bytes.fromhex("04000000")
+        + descriptor_size.to_bytes(4, "little")
+        + bytes.fromhex("0100000054455354")
+        + b"x" * descriptor_size
+        + _NOTES
+    )
+    assert len(notes) == size
+    agent = _ObservationAgent()
+    agent.outputs[(CAT_PROGRAM, KERNEL_NOTES_PATH)] = notes
+    if size <= 65536:
+        observation = LocalRunningObserver(agent_command=agent)(SYSTEM_ID, _ObserverDomain())
+        assert observation.identity.gnu_build_id == "01020304"
+    else:
+        with pytest.raises(CategorizedError, match="oversized kernel notes") as caught:
+            LocalRunningObserver(agent_command=agent)(SYSTEM_ID, _ObserverDomain())
+        assert caught.value.category is ErrorCategory.READINESS_FAILURE
+        assert caught.value.terminal is True
+
+
 def test_running_observer_names_reprovisioning_when_the_channel_is_missing() -> None:
     with pytest.raises(CategorizedError) as caught:
         LocalRunningObserver(agent_command=_ObservationAgent())(

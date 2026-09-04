@@ -2231,18 +2231,32 @@ def test_retry_failure_requeues_job_and_audits_in_one_commit(
 
 
 @pytest.mark.parametrize(
-    "mutation",
+    ("mutation", "missing"),
     [
-        {"schema": "wrong"},
-        {"extra": True},
-        {"first_differing_byte": 2049},
-        {"expected_cmdline": "x" * 8193},
+        ({"schema": "wrong"}, None),
+        ({"schema": None}, None),
+        ({"extra": True}, None),
+        ({"expected_cmdline": 1}, None),
+        ({"observed_cmdline": None}, None),
+        ({"first_differing_byte": "0"}, None),
+        ({"first_differing_byte": True}, None),
+        ({"first_differing_byte": None}, None),
+        ({"first_differing_byte": 0.5}, None),
+        ({"first_differing_byte": -1}, None),
+        ({"first_differing_byte": 2049}, None),
+        ({"expected_cmdline": "x" * 8193}, None),
+        ({"observed_cmdline": "é" * 4097}, None),
+        ({}, "schema"),
+        ({}, "expected_cmdline"),
+        ({}, "observed_cmdline"),
+        ({}, "first_differing_byte"),
     ],
 )
 def test_cmdline_failure_diagnostic_is_closed_and_bounded(
     migrated_url: str,
     authority_role_dsns: _RoleDsns,
     mutation: dict[str, object],
+    missing: str | None,
 ) -> None:
     with psycopg.connect(migrated_url) as conn:
         case = _seed_case(conn, operation="fail", worker_suffix="z")
@@ -2257,6 +2271,8 @@ def test_cmdline_failure_diagnostic_is_closed_and_bounded(
         "first_differing_byte": 10,
         **mutation,
     }
+    if missing is not None:
+        del diagnostic[missing]
     result = {
         "schema": "external-boot-authority-result-v1",
         "operation": "fail",
@@ -2271,8 +2287,9 @@ def test_cmdline_failure_diagnostic_is_closed_and_bounded(
         _commit(worker, case, authority, result)
 
 
+@pytest.mark.parametrize("offset", [0, 2048])
 def test_cmdline_failure_diagnostic_commits_and_legacy_context_remains_valid(
-    migrated_url: str, authority_role_dsns: _RoleDsns
+    migrated_url: str, authority_role_dsns: _RoleDsns, offset: int
 ) -> None:
     with psycopg.connect(migrated_url) as conn:
         case = _seed_case(conn, operation="fail", worker_suffix="y")
@@ -2284,9 +2301,9 @@ def test_cmdline_failure_diagnostic_commits_and_legacy_context_remains_valid(
         "phase": "commit",
         "cmdline_mismatch": {
             "schema": "external-boot-cmdline-mismatch-v1",
-            "expected_cmdline": "root=UUID=x",
-            "observed_cmdline": "root=UUID=y",
-            "first_differing_byte": 10,
+            "expected_cmdline": "x" * 8192,
+            "observed_cmdline": "é" * 4096,
+            "first_differing_byte": offset,
         },
     }
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:

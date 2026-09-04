@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import traceback
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, LiteralString
 
@@ -42,6 +44,7 @@ from kdive.jobs.models import (
     _FailureResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
+from kdive.mcp.responses import ToolResponse
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
@@ -117,9 +120,16 @@ def _ports(
 
 
 async def _run_operation(
-    dsns: Callable[[str], str], seed: AsyncConnection, case: SeededCase, operation: str
+    dsns: Callable[[str], str],
+    seed: AsyncConnection,
+    case: SeededCase,
+    operation: str,
+    *,
+    registry: SecretRegistry | None = None,
 ) -> ExternalBootAuthoritySuccessV1:
     ports = _ports(case, case.vehicle, dsns)
+    if registry is not None:
+        ports = replace(ports, secret_registry=registry)
     operations = build_operations(ports)
     handler = operations.get(operation)
     assert handler is not None
@@ -309,13 +319,16 @@ class _DisagreeingObserver:
 
 
 class _CmdlineObserver(_DisagreeingObserver):
-    def __init__(self, inner: Any, observed: bytes) -> None:
+    def __init__(self, inner: Any, observed: bytes, expected: bytes = b"abc") -> None:
         super().__init__(inner)
         self._observed = observed
+        self._expected = expected
 
     def observe(self, recovery: Any, authority: Any) -> RunningKernelObservation:
         real = self._inner._inner.observe(recovery, authority)
-        return real.model_copy(update={"cmdline": self._observed, "expected_cmdline": b"abc"})
+        return real.model_copy(
+            update={"cmdline": self._observed, "expected_cmdline": self._expected}
+        )
 
 
 @pytest.mark.parametrize("observed", [b"abc", b"ab", b"acb", b"abcd"])
@@ -337,6 +350,105 @@ def test_core_compares_exact_command_line_bytes(
         assert result.error_category.value == "readiness_failure"
         assert result.terminal is True
         assert result.failure_context.cmdline_mismatch is not None
+
+    _drive(migrated_url, authority_role_dsns, "activate", body)
+
+
+_SECRET_PREFIX = b"mist veil\\key \x00\x01\xff\\ \xc3\xa9 "
+_REDACTED_PREFIX = "[REDACTED] [REDACTED] \\x00\\x01\\xFF\\\\ é "
+
+
+@pytest.mark.parametrize(
+    ("expected", "observed", "rendered_expected", "rendered_observed", "offset"),
+    [
+        (_SECRET_PREFIX + b"ab", _SECRET_PREFIX + b"a", "ab", "a", len(_SECRET_PREFIX) + 1),
+        (_SECRET_PREFIX + b"a", _SECRET_PREFIX + b"ab", "a", "ab", len(_SECRET_PREFIX) + 1),
+        (
+            _SECRET_PREFIX + b"a=1 b=2",
+            _SECRET_PREFIX + b"b=2 a=1",
+            "a=1 b=2",
+            "b=2 a=1",
+            len(_SECRET_PREFIX),
+        ),
+        (
+            _SECRET_PREFIX + "é".encode(),
+            _SECRET_PREFIX + "ê".encode(),
+            "é",
+            "ê",
+            len(_SECRET_PREFIX) + 1,
+        ),
+        (
+            b"A " + b"Q" * 818 + b"\xff" + "é€🙂tail".encode(),
+            b"B " + b"Q" * 818 + b"\xff" + "é€🙂tail".encode(),
+            "A " + "[REDACTED]" * 818 + "\\xFFé€",
+            "B " + "[REDACTED]" * 818 + "\\xFFé€",
+            0,
+        ),
+    ],
+    ids=["truncated", "appended", "reordered", "utf8-byte-offset", "utf8-render-bound"],
+)
+def test_cmdline_failure_redacts_before_authority_persistence(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    expected: bytes,
+    observed: bytes,
+    rendered_expected: str,
+    rendered_observed: str,
+    offset: int,
+) -> None:
+    if expected.startswith(_SECRET_PREFIX):
+        rendered_expected = _REDACTED_PREFIX + rendered_expected
+        rendered_observed = _REDACTED_PREFIX + rendered_observed
+    context = {
+        "phase": "commit",
+        "cmdline_mismatch": {
+            "schema": "external-boot-cmdline-mismatch-v1",
+            "expected_cmdline": rendered_expected,
+            "observed_cmdline": rendered_observed,
+            "first_differing_byte": offset,
+        },
+    }
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        registry = SecretRegistry()
+        for secret in ("mist", "veil\\key", "Q"):
+            registry.register(secret, scope=None)
+        observer = _CmdlineObserver(case.vehicle.port, observed, expected)
+        case.vehicle.port.__dict__["observe"] = observer.observe
+        with pytest.raises(ExternalBootAuthorityFailure) as caught:
+            await _run_operation(authority_role_dsns, seed, case, "activate", registry=registry)
+        carrier = caught.value.result
+        assert carrier.result.model_dump(mode="json", by_alias=True, exclude_none=True) == {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "fail",
+            "error_category": "readiness_failure",
+            "failure_context": context,
+            "terminal": True,
+        }
+        assert _authority_binding_matches(
+            ExternalBootAuthorityMarkerV1.model_validate(case.marker), carrier
+        )
+        assert caught.value.__cause__ is None
+        assert caught.value.__suppress_context__ is True
+        chain = "".join(traceback.format_exception(caught.value))
+        for secret in registry.snapshot():
+            assert secret not in chain
+            assert secret not in carrier.model_dump_json(by_alias=True)
+        for text in (rendered_expected, rendered_observed):
+            assert len(text.encode()) <= 8192
+            assert not any(ord(character) < 0x20 for character in text)
+        if offset == 0:
+            assert len(rendered_expected.encode()) == len(rendered_observed.encode()) == 8191
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            committed = await queue.fail_external_boot(
+                worker, _job(case), carrier, incarnation_credential=SecretStr(case.credential)
+            )
+        assert committed is not None
+        assert ToolResponse.from_job(committed).data == {"kind": "boot", **context}
+        row = await _one(
+            seed, "SELECT state, failure_context FROM jobs WHERE id = %s", (case.job_id,)
+        )
+        assert row == {"state": "failed", "failure_context": context}
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
 

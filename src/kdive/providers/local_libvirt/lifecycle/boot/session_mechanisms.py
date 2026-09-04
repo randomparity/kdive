@@ -71,7 +71,8 @@ PROC_CMDLINE_PATH = "/proc/cmdline"
 KERNEL_NOTES_PATH = "/sys/kernel/notes"
 OBSERVATION_PROGRAMS = frozenset({UNAME_PROGRAM, CAT_PROGRAM})
 _GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"
-MAX_GUEST_CONTENT_BYTES = 2_048
+MAX_GUEST_READ_BYTES = 65_536
+MAX_CMDLINE_BYTES = 2_048
 MAX_GUEST_FIELD_CHARS = 64
 _ARCHITECTURES: tuple[Architecture, ...] = ("x86_64", "ppc64le")
 
@@ -223,7 +224,7 @@ class LocalRunningObserver:
         system_id: UUID,
         what: str,
         *,
-        max_bytes: int = MAX_GUEST_CONTENT_BYTES,
+        max_bytes: int = MAX_GUEST_READ_BYTES,
     ) -> bytes:
         result: AgentExecResult = self._agent.run(domain, argv)
         if result.exit_status != 0:
@@ -238,12 +239,12 @@ class LocalRunningObserver:
             [CAT_PROGRAM, PROC_CMDLINE_PATH],
             system_id,
             "kernel command-line evidence",
-            max_bytes=MAX_GUEST_CONTENT_BYTES + 1,
+            max_bytes=MAX_CMDLINE_BYTES + 1,
         )
         if not raw.endswith(b"\n"):
             raise _observation_failure(system_id, "the kernel command-line read was truncated")
         content = raw[:-1]
-        if len(content) > MAX_GUEST_CONTENT_BYTES:
+        if len(content) > MAX_CMDLINE_BYTES:
             raise _observation_failure(
                 system_id, "the guest returned oversized kernel command-line evidence"
             )
@@ -283,7 +284,7 @@ class LocalRunningObserver:
                 system_id, "the target domain XML has no expected command line"
             )
         encoded = expected.encode()
-        if len(encoded) > MAX_GUEST_CONTENT_BYTES:
+        if len(encoded) > MAX_CMDLINE_BYTES:
             raise _observation_failure(
                 system_id, "the target command line exceeds the observation bound"
             )
