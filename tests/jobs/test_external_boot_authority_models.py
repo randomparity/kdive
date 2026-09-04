@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import AbstractAsyncContextManager
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -13,15 +13,62 @@ from pydantic import SecretStr, ValidationError
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.ports import ExternalBootAuthorityExecutor
 from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
+    ExternalBootAuthorityFailureContext,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthoritySuccessV1,
 )
 from kdive.jobs.worker import Worker
 from kdive.jobs.worker_telemetry import JobSpan
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+)
 
 _DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("reason", "next_action", "terminal"),
+    [
+        ("observed_identity_stale", "systems.get", True),
+        ("reservation_not_ready", "jobs.wait", False),
+        ("authority_superseded", "jobs.get", True),
+    ],
+)
+def test_closed_cas_failure_combinations(reason: str, next_action: str, terminal: bool) -> None:
+    context = ExternalBootAuthorityFailureContext(
+        phase="commit", reason=cast(Any, reason), next_action=cast(Any, next_action)
+    )
+    result = _carrier(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "fail",
+            "error_category": (
+                "infrastructure_failure" if reason == "reservation_not_ready" else "stale_handle"
+            ),
+            "failure_context": context.model_dump(),
+            "terminal": terminal,
+        }
+    )
+    failure = ExternalBootAuthorityFailureV1.model_validate(result)
+    assert cast(Any, failure.result).terminal is terminal
+
+
+def test_closed_cas_failure_rejects_crossed_action_or_terminal() -> None:
+    with pytest.raises(ValidationError, match="reason"):
+        ExternalBootAuthorityFailureContext(
+            phase="commit", reason="reservation_not_ready", next_action="jobs.get"
+        )
+
+
+def test_authority_executor_protocol_has_mutation_contract() -> None:
+    assert get_type_hints(ExternalBootAuthorityExecutor.execute) == {
+        "request": AuthorityMutationRequestV1,
+        "return": AuthorityObservationV1,
+    }
 
 
 def _carrier(result: dict[str, object]) -> dict[str, object]:

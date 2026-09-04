@@ -11,12 +11,15 @@ from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
 )
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
     "ExternalBootAuthorityAcknowledger",
+    "ExternalBootAuthorityExecutor",
     "ExternalBootHandlerPorts",
 ]
 
@@ -42,6 +45,12 @@ class ExternalBootAuthorityAcknowledger(Protocol):
     ) -> AuthorityAcknowledgementV1: ...
 
 
+class ExternalBootAuthorityExecutor(Protocol):
+    """Execute one mutation through the provider authority receipt journal."""
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExternalBootHandlerPorts:
     """Ports one ``build_operations`` call binds into all six operation handlers.
@@ -56,3 +65,4 @@ class ExternalBootHandlerPorts:
     resolver: ProviderResolver
     incarnation_credential: SecretStr
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
+    authority_executor: ExternalBootAuthorityExecutor | None = None

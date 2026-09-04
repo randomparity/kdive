@@ -159,17 +159,48 @@ class _RecoveryAttemptResult(_ResultBase):
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
-class _FailureContext(_ClosedModel):
+class ExternalBootAuthorityFailureContext(_ClosedModel):
     phase: Literal["admission", "preparation", "provider-call", "observation", "commit"] | None = (
         None
     )
+    reason: (
+        Literal["observed_identity_stale", "reservation_not_ready", "authority_superseded"] | None
+    ) = None
+    next_action: Literal["systems.get", "jobs.wait", "jobs.get"] | None = None
+
+    @model_validator(mode="after")
+    def _reason_action_pair_is_closed(self) -> ExternalBootAuthorityFailureContext:
+        if self.reason is None and self.next_action is None:
+            return self
+        pairs = {
+            "observed_identity_stale": "systems.get",
+            "reservation_not_ready": "jobs.wait",
+            "authority_superseded": "jobs.get",
+        }
+        if self.reason is None or pairs[self.reason] != self.next_action:
+            raise ValueError("failure reason and next action do not match")
+        return self
 
 
 class _FailureResult(_ResultBase):
     operation: Literal["fail"]
     error_category: ErrorCategory
-    failure_context: _FailureContext
+    failure_context: ExternalBootAuthorityFailureContext
     terminal: bool
+
+    @model_validator(mode="after")
+    def _cas_failure_shape_is_closed(self) -> _FailureResult:
+        reason = self.failure_context.reason
+        if reason is None:
+            return self
+        expected = {
+            "observed_identity_stale": ("stale_handle", True),
+            "reservation_not_ready": ("infrastructure_failure", False),
+            "authority_superseded": ("stale_handle", True),
+        }[reason]
+        if (self.error_category, self.terminal) != expected:
+            raise ValueError("failure reason, category, and terminal flag do not match")
+        return self
 
 
 type ExternalBootResultPayload = Annotated[
