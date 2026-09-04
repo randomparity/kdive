@@ -65,6 +65,13 @@ def _refused(message: str, exc: OSError) -> str:
 class LocalOperationLease:
     """The provider-local nominal capability ADR-0587 requires.
 
+    **Not thread-safe, by contract.** `_pins` is incremented and decremented without
+    synchronisation, so one lease must not be pinned concurrently from more than one thread.
+    ADR-0587 issues a lease inside the per-System serialization-lane context, which already
+    serialises that System's operations, so the constraint is satisfied by construction rather
+    than by a lock here. #2212, which owns issuance, inherits the constraint — adding a lock
+    now would be machinery for a caller that does not exist.
+
     Nominal rather than structural on purpose: the lane accepts only this concrete type, so an
     arbitrary object carrying `system_id` and `binding` attributes is not a lease.
 
@@ -226,13 +233,17 @@ class LocalPayloadCleanup:
         what startup checked, which the read path explicitly refuses to do. Both controls are on
         the deleting path here.
 
-        `None` rather than an exception for an absent root or directory: an activation whose
-        recovery directory never existed has no archive, and cleanup must stay idempotent.
+        **Absence is success for the per-activation directory and a failure for the root.** An
+        activation whose recovery directory never existed has no archive, so cleanup stays
+        idempotent. An absent *root* is a misconfiguration, and it is exactly the shape the
+        #2212 divergence hazard takes: this mechanism resolves `KDIVE_LIBVIRT_RECOVERY_ROOT`
+        while `_RealLocalExternalBootOperation.cleanup` resolves the root its store was
+        constructed with. Treating that as success would delete the payloads, skip the archive,
+        let `publish_tombstone` run, and leave `finalize_tombstone` failing permanently — the
+        silent failure this mechanism exists to prevent. So it refuses instead.
         """
         try:
             root_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            return None
         except OSError as exc:
             raise ValueError(_refused(_RECOVERY_REFUSED, exc)) from None
         try:

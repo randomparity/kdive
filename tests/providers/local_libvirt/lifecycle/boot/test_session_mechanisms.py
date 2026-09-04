@@ -761,3 +761,59 @@ class TestFailClosedDefaults:
         assert factory._readiness is _unconfigured_readiness
         assert factory._observe_running is _unconfigured_observation
         assert factory._cleanup_payloads is _unconfigured_cleanup
+
+
+class TestConfiguredRootItself:
+    """The by-path opens of the configured root, which the component tests never reach.
+
+    Every other symlink test targets a *child*, and those go through `_open_private_directory`,
+    which carries its own `O_NOFOLLOW`. The two roots are opened by path in this module, and
+    removing `O_NOFOLLOW` from both left the whole suite green.
+    """
+
+    def test_artifact_root_refuses_a_symlinked_configured_root(self, tmp_path: Path) -> None:
+        elsewhere = _private_dir(tmp_path / "elsewhere")
+        root = tmp_path / "root"
+        os.symlink(elsewhere, root)
+
+        with pytest.raises(ValueError) as caught:
+            LocalArtifactRoot(root).open(OWNERSHIP)
+
+        _assert_refusal(caught.value, root, ARTIFACT_ROOT_WRAPPED)
+        _assert_context_suppressed(caught.value)
+        assert str(caught.value).endswith("(ENOTDIR)")
+        # `elsewhere` is a valid 0700 euid-owned directory, so the ownership re-check cannot be
+        # what fired: only `O_NOFOLLOW` distinguishes it from a real root.
+        assert os.listdir(elsewhere) == []
+
+    def test_cleanup_refuses_a_symlinked_configured_root(self, tmp_path: Path) -> None:
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+        elsewhere = _private_dir(tmp_path / "elsewhere")
+        recovery = _archive_directory(elsewhere)
+        root = tmp_path / "root"
+        os.symlink(elsewhere, root)
+
+        with pytest.raises(ValueError) as caught:
+            _cleanup(root, artifacts)
+
+        _assert_refusal(caught.value, root, RECOVERY_DIR_WRAPPED)
+        _assert_context_suppressed(caught.value)
+        assert str(caught.value).endswith("(ENOTDIR)")
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
+        assert (recovery / "modules.tar").exists()
+
+    def test_cleanup_refuses_an_absent_configured_root(self, tmp_path: Path) -> None:
+        # An absent root is a misconfiguration, not the idempotence case. Treating it as
+        # success deleted the payloads, skipped the archive, and left finalize_tombstone
+        # failing permanently — the #2212 divergence hazard, silently.
+        artifacts = _private_dir(tmp_path / "artifacts")
+        for name in PAYLOAD_NAMES:
+            (artifacts / name).write_bytes(b"payload")
+
+        with pytest.raises(ValueError) as caught:
+            _cleanup(tmp_path / "does-not-exist", artifacts)
+
+        assert str(caught.value).endswith("(ENOENT)")
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)

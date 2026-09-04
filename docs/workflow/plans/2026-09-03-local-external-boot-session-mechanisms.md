@@ -290,6 +290,21 @@ Steps:
    where that confusion comes from — `replace` works on the ownership, never on the binding.)
    Implement the explicit canonical-UUID check so the mechanism's own guard is exercised rather
    than pydantic's.
+9a. Write `TestConfiguredRootItself`, covering the two **by-path** opens of the configured root —
+   `LocalArtifactRoot.open` and `LocalPayloadCleanup._open_recovery_directory`. Every other
+   symlink test targets a *child*, and children go through `_open_private_directory`, which
+   carries its own `O_NOFOLLOW`; removing the flag from both by-path opens left the whole suite
+   green. Three tests: `test_artifact_root_refuses_a_symlinked_configured_root`,
+   `test_cleanup_refuses_a_symlinked_configured_root`, and
+   `test_cleanup_refuses_an_absent_configured_root`. Each symlink case points at a valid
+   mode-0700 euid-owned directory, so the ownership re-check cannot be what fired — only
+   `O_NOFOLLOW` distinguishes it from a real root.
+
+   The absent-root case is a behaviour fix, not just coverage. Absence is success for the
+   per-activation directory — that is what keeps cleanup idempotent — and a *failure* for the
+   root, because an absent root is a misconfiguration and is exactly the shape the #2212
+   divergence hazard takes. Treating it as success deleted the payloads, skipped the archive,
+   let `publish_tombstone` run, and left `finalize_tombstone` failing permanently.
 10. `just lint`; `just type`; commit `feat(local-libvirt): confine the external-boot artifact root`.
 
 **Acceptance.** Every component is re-validated; symlink, mode, owner, missing and non-canonical
