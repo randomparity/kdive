@@ -86,6 +86,9 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
     with_recovery_point: bool = True,
     cleanup_complete: bool = False,
     attempt_state: str = "recovering",
+    with_reservation: bool = False,
+    with_release: bool = False,
+    with_pre_recovery: bool = False,
     marker_overrides: dict[str, Any] | None = None,
 ) -> SeededCase:
     """Insert resource → allocation → system → investigation → run → activation → worker → job.
@@ -136,7 +139,12 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
         cleanup_complete=cleanup_complete,
         attempt_id=attempt_id,
         attempt_state=attempt_state,
+        with_pre_recovery=with_pre_recovery,
     )
+    if with_reservation or with_release:
+        await _seed_store_rows(
+            conn, vehicle, with_reservation=with_reservation, with_release=with_release
+        )
     await conn.execute(
         "INSERT INTO worker_incarnations "
         "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
@@ -172,11 +180,123 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
             job_kind,
             Jsonb(payload),
             worker_incarnation,
-            Jsonb({"principal": "p", "project": "proj"}),
+            # agent_session is required by the Job model, which queue.commit_external_boot_
+            # authority_result validates the row through after an applied commit; omitting it
+            # makes a successful commit surface as a pydantic ValidationError.
+            Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
             f"external-boot-{job_id}",
         ),
     )
     return case
+
+
+RESERVED_BYTES = 4096
+
+
+def store_identity(vehicle: Vehicle) -> str:
+    return f"store/{vehicle.activation_id}"
+
+
+def owner_key(vehicle: Vehicle) -> str:
+    return f"owner/{vehicle.activation_id}"
+
+
+def release_evidence(vehicle: Vehicle) -> dict[str, Any]:
+    """The evidence shape ``external_boot_release_evidence_ownership`` accepts for this row."""
+    return {
+        "schema": "external-boot-release-evidence-v1",
+        "activation_id": str(vehicle.activation_id),
+        "system_id": str(vehicle.system_id),
+        "store_identity": {"ref": store_identity(vehicle)},
+        "owner_key": {"ref": owner_key(vehicle)},
+        "reserved_bytes": RESERVED_BYTES,
+        "enumeration_complete": True,
+        "objects": [],
+        "verified_at": "2026-08-29T00:00:00Z",
+    }
+
+
+async def _seed_store_rows(
+    conn: AsyncConnection, vehicle: Vehicle, *, with_reservation: bool, with_release: bool
+) -> None:
+    """A ready reservation for ``release``, or the release row ``cleanup``/``teardown`` name.
+
+    Seeded directly rather than by running the ``release`` handler first: the commit compares the
+    cleanup evidence's ``release_identity`` against ``v_release.release_identity``
+    (``0122…sql:1398``), and the handler reads that value off this row, so the two agree by
+    construction either way — and a directly seeded row is the same real row the release commit
+    would have written.
+    """
+    if with_reservation:
+        await conn.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
+            "VALUES (%s, %s, %s, %s, 'ready', now())",
+            (vehicle.activation_id, store_identity(vehicle), owner_key(vehicle), RESERVED_BYTES),
+        )
+    if with_release:
+        evidence = release_evidence(vehicle)
+        await conn.execute(
+            "INSERT INTO external_boot_reservation_releases "
+            "(activation_id, store_identity, owner_key, reserved_bytes, release_identity, "
+            "release_evidence) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                vehicle.activation_id,
+                store_identity(vehicle),
+                owner_key(vehicle),
+                RESERVED_BYTES,
+                _digest(f"release/{vehicle.activation_id}"),
+                Jsonb(evidence),
+            ),
+        )
+
+
+def pre_recovery_evidence(vehicle: Vehicle) -> dict[str, Any]:
+    """What lets a recovery state hold a NULL ``recovery_point`` (``0121…sql:38-52``).
+
+    Carries the full ``ExternalBootPreRecoveryEvidenceV1`` shape, not the four-key stub
+    ``tests/db/external_boot_authority_support.py`` uses. That stub satisfies the table CHECK but
+    not the domain model — it omits ``recovery_object``, ``source_composite_state`` and
+    ``observed_at`` — so a row seeded with it fails at ``ExternalBootActivation.model_validate``
+    the moment a handler reads the activation back, which is a decode failure standing in front of
+    the behaviour under test rather than the behaviour itself. ``recovery_object`` names the
+    vehicle's real recovery ref so it stays inside the commit's ``known_refs`` set.
+    """
+    return {
+        "schema": "external-boot-pre-recovery-evidence-v1",
+        "activation_id": str(vehicle.activation_id),
+        "system_id": str(vehicle.system_id),
+        "run_id": str(vehicle.run_id),
+        "plan_identity": vehicle.plan_identity,
+        "recovery_object": {"ref": vehicle.recovery_point.recovery_ref.ref},
+        "source_composite_state": _digest(f"pre-recovery/{vehicle.activation_id}"),
+        "observed_at": "2026-08-29T00:00:00Z",
+    }
+
+
+def _attempt_conflict_evidence(vehicle: Vehicle) -> dict[str, Any]:
+    return {
+        "schema": "external-boot-conflict-evidence-v1",
+        "activation_id": str(vehicle.activation_id),
+        "system_id": str(vehicle.system_id),
+        "observed_state": _digest(f"observed/{vehicle.activation_id}"),
+        "expected_state": _digest(f"expected/{vehicle.activation_id}"),
+        "objects": [],
+        "observed_at": "2026-08-29T00:00:00Z",
+    }
+
+
+def _attempt_terminal_evidence(vehicle: Vehicle, attempt_state: str) -> dict[str, Any]:
+    outcome = "recovery_failed" if attempt_state == "failed" else "recovered"
+    return {
+        "schema": "external-boot-terminal-evidence-v1",
+        "activation_id": str(vehicle.activation_id),
+        "system_id": str(vehicle.system_id),
+        "outcome": outcome,
+        "composite_state": _digest(f"attempt/{vehicle.activation_id}/{outcome}"),
+        "objects": [],
+        "observed_at": "2026-08-29T00:00:00Z",
+    }
 
 
 async def _insert_activation(
@@ -189,6 +309,7 @@ async def _insert_activation(
     cleanup_complete: bool,
     attempt_id: UUID | None,
     attempt_state: str,
+    with_pre_recovery: bool = False,
 ) -> None:
     if attempt_id is not None:
         # Inserted before the activation row so the FK/CHECK pair is satisfiable, then pointed at.
@@ -208,28 +329,41 @@ async def _insert_activation(
             ),
         )
         await conn.execute(
-            # recovery_readiness_deadline is required for state 'recovering'
-            # (external_boot_attempt_deadline, 0121…sql:232-233) and forbidden nowhere else.
+            # Three attempt-row constraints decide what an attempt state needs, and all three
+            # bite at INSERT time rather than at the handler:
+            #  - external_boot_attempt_deadline (0121…sql:232-233): 'recovering' requires
+            #    recovery_readiness_deadline;
+            #  - external_boot_attempt_evidence (:241-246): 'conflict' requires conflict_evidence,
+            #    and 'failed'/'recovered' require terminal_evidence — each iff;
+            #  - external_boot_attempt_evidence_ownership (:253-262): that evidence's
+            #    activation_id must match, and its outcome must be 'recovery_failed' for 'failed'
+            #    and 'recovered' for 'recovered'.
             "INSERT INTO external_boot_recovery_attempts "
             "(activation_id, attempt_number, attempt_id, authority_generation, recovery_basis, "
-            "state, recovery_readiness_deadline) "
-            "VALUES (%s, 1, %s, 1, 'recovery_point', %s, %s)",
+            "state, recovery_readiness_deadline, conflict_evidence, terminal_evidence) "
+            "VALUES (%s, 1, %s, 1, 'recovery_point', %s, %s, %s, %s)",
             (
                 vehicle.activation_id,
                 attempt_id,
                 attempt_state,
                 "2027-01-01T00:00:00Z" if attempt_state == "recovering" else None,
+                Jsonb(_attempt_conflict_evidence(vehicle)) if attempt_state == "conflict" else None,
+                Jsonb(_attempt_terminal_evidence(vehicle, attempt_state))
+                if attempt_state in {"failed", "recovered"}
+                else None,
             ),
         )
         await conn.execute(
             "UPDATE external_boot_activations SET state = %s, current_attempt_id = %s, "
-            "cleanup_complete = %s, materialization = %s, recovery_point = %s WHERE id = %s",
+            "cleanup_complete = %s, materialization = %s, recovery_point = %s, "
+            "pre_recovery_evidence = %s WHERE id = %s",
             (
                 activation_state,
                 attempt_id,
                 cleanup_complete,
                 Jsonb(vehicle.materialization_json) if with_materialization else None,
                 Jsonb(vehicle.recovery_point_json) if with_recovery_point else None,
+                Jsonb(pre_recovery_evidence(vehicle)) if with_pre_recovery else None,
                 vehicle.activation_id,
             ),
         )

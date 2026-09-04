@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 from psycopg import AsyncConnection
 
@@ -63,6 +64,15 @@ class OperationContext:
     port: ExternalBootPorts
     authority: AllocatedAuthority
     acknowledgement: AuthorityAcknowledgementV1
+    prerequisites: Mapping[str, Any] = field(default_factory=dict)
+    """Whatever ``require_preconditions`` read, so ``build_result`` need not read it again.
+
+    ``build_result`` is synchronous and holds no connection, and the rows an operation's evidence
+    must copy verbatim — the ready reservation for ``release``, the recorded release for
+    ``cleanup``/``teardown`` — are exactly the rows its precondition already had to read. Carrying
+    them forward is one query rather than two, and removes the window in which the second read
+    could see a different row than the check approved.
+    """
 
 
 def _refuse(message: str) -> CategorizedError:
@@ -225,7 +235,8 @@ async def run_operation(
     require_activation_state: frozenset[ExternalBootActivationState],
     require_activation_evidence: frozenset[str],
     require_preconditions: Callable[
-        [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1], Awaitable[None]
+        [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1],
+        Awaitable[Mapping[str, Any]],
     ],
     call_port: Callable[[OperationContext], RunningKernelObservation | None],
     build_result: Callable[
@@ -252,7 +263,7 @@ async def run_operation(
         require_activation_state=require_activation_state,
         require_activation_evidence=require_activation_evidence,
     )
-    await require_preconditions(conn, activation, marker)
+    prerequisites = await require_preconditions(conn, activation, marker)
 
     authority = await allocate_authority(
         conn, job, marker, incarnation_credential=ports.incarnation_credential
@@ -276,6 +287,7 @@ async def run_operation(
         port=port,
         authority=authority,
         acknowledgement=acknowledgement,
+        prerequisites=prerequisites,
     )
     try:
         # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.

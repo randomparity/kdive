@@ -10,7 +10,7 @@ attempt, and eventually wedges ``running``. An exception-only assertion would pa
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 from uuid import uuid4
 
@@ -49,8 +49,8 @@ async def _no_preconditions(
     _conn: AsyncConnection,
     _activation: ExternalBootActivation,
     _marker: ExternalBootAuthorityMarkerV1,
-) -> None:
-    return None
+) -> Mapping[str, Any]:
+    return {}
 
 
 def _marker(case: SeededCase, **overrides: Any) -> ExternalBootAuthorityMarkerV1:
@@ -107,7 +107,7 @@ async def _run(
     marker: ExternalBootAuthorityMarkerV1 | None = None,
     require_activation_state: frozenset[ExternalBootActivationState] = ACTIVATING,
     require_activation_evidence: frozenset[str] = NO_EVIDENCE,
-    require_preconditions: Callable[..., Awaitable[None]] = _no_preconditions,
+    require_preconditions: Callable[..., Awaitable[Mapping[str, Any]]] = _no_preconditions,
     call_port: Callable[[OperationContext], RunningKernelObservation | None] = _observe,
 ) -> tuple[OperationContext, RunningKernelObservation | None]:
     """Drive one operation and hand back what ``build_result`` was given.
@@ -325,7 +325,7 @@ def test_unmet_precondition_is_refused_before_allocation(
         _conn: AsyncConnection,
         _activation: ExternalBootActivation,
         _marker: ExternalBootAuthorityMarkerV1,
-    ) -> None:
+    ) -> Mapping[str, Any]:
         raise CategorizedError(
             "the operation's prerequisite is unmet",
             category=ErrorCategory.CONFIGURATION_ERROR,

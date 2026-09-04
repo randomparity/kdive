@@ -17,6 +17,52 @@ from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 
 DIGEST = "sha256:" + "a" * 64
 
+# operation -> (purpose, activation state, port calls, seeding, activation state after the commit)
+CASES: dict[str, dict[str, Any]] = {
+    "activate": {
+        "purpose": "activate",
+        "activation_state": "activating",
+        "port_calls": ["activate", "observe"],
+        "seed": {},
+        "after": "active",
+    },
+    "recover": {
+        "purpose": "recover",
+        "activation_state": "recovering",
+        "port_calls": ["recover", "observe"],
+        "seed": {"attempt_state": "recovering", "system_state": "crashed"},
+        "after": "recovered",
+    },
+    "resolve-conflict": {
+        "purpose": "resolve-conflict",
+        "activation_state": "recovery_conflict",
+        "port_calls": ["recover", "observe"],
+        "seed": {"attempt_state": "conflict", "system_state": "crashed"},
+        "after": "recovered",
+    },
+    "release": {
+        "purpose": "release",
+        "activation_state": "active",
+        "port_calls": ["observe"],
+        "seed": {"with_reservation": True},
+        "after": "active",
+    },
+    "cleanup": {
+        "purpose": "release",
+        "activation_state": "recovered",
+        "port_calls": ["cleanup"],
+        "seed": {"attempt_state": "recovered", "with_release": True},
+        "after": "recovered",
+    },
+    "teardown": {
+        "purpose": "teardown",
+        "activation_state": "recovery_failed",
+        "port_calls": ["cleanup"],
+        "seed": {"attempt_state": "failed", "with_release": True},
+        "after": "recovery_failed",
+    },
+}
+
 
 def marker_fields(
     *,

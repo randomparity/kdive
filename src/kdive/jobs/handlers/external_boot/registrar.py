@@ -2,38 +2,32 @@
 
 from __future__ import annotations
 
-from psycopg import AsyncConnection
-
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import Job
+from kdive.jobs.handlers.external_boot.lifecycle import (
+    activate_handler,
+    cleanup_handler,
+    recover_handler,
+    release_handler,
+    resolve_conflict_handler,
+    teardown_handler,
+)
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthorityResultV1
 
 __all__ = ["build_operations"]
 
-_OPERATIONS = ("activate", "recover", "resolve-conflict", "release", "cleanup", "teardown")
-
-
-def _unimplemented(operation: str):  # noqa: ANN202 - returns ExternalBootOperationHandler
-    """Placeholder binding: the operation is registered but its body is not written yet."""
-
-    async def handler(
-        _conn: AsyncConnection, _job: Job, _marker: ExternalBootAuthorityMarkerV1
-    ) -> ExternalBootAuthorityResultV1:
-        raise CategorizedError(
-            f"the {operation!r} external-boot handler is not implemented",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            terminal=True,
-        )
-
-    return handler
-
 
 def build_operations(ports: ExternalBootHandlerPorts) -> ExternalBootOperations:
-    """Build the operations registry, raising on a duplicate or non-enqueueable binding."""
-    del ports
+    """Build the operations registry, raising on a duplicate or non-enqueueable binding.
+
+    The mapping is written out rather than derived from a naming convention, so adding a seventh
+    operation is a visible edit here and a registry that stopped binding one is a red test rather
+    than a job that dispatches nowhere.
+    """
     operations = ExternalBootOperations()
-    for operation in _OPERATIONS:
-        operations.register(operation, _unimplemented(operation))
+    operations.register("activate", activate_handler(ports))
+    operations.register("recover", recover_handler(ports))
+    operations.register("resolve-conflict", resolve_conflict_handler(ports))
+    operations.register("release", release_handler(ports))
+    operations.register("cleanup", cleanup_handler(ports))
+    operations.register("teardown", teardown_handler(ports))
     return operations
