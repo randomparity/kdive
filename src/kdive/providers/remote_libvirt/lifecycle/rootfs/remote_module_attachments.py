@@ -157,23 +157,29 @@ def inspect_module_attachments(
 
 
 def _volume_references(root: ET.Element) -> list[tuple[str, str]]:
-    """Return only the pool/volume pairs, which exist solely on `<disk type='volume'>`."""
+    """Return pool/volume pairs from every storage source in each disk graph."""
     references = []
-    for source in root.findall("./devices/disk/source"):
-        pool = source.get("pool")
-        volume = source.get("volume")
-        if pool is not None and volume is not None:
-            references.append((pool, volume))
+    for disk in root.findall("./devices/disk"):
+        for source in disk.iter("source"):
+            pool = source.get("pool")
+            volume = source.get("volume")
+            if pool is not None and volume is not None:
+                references.append((pool, volume))
     return references
 
 
 def _path_references(root: ET.Element) -> set[str]:
-    """Return the host paths named directly by file- and block-backed disks."""
+    """Return host paths from every source and legacy mirror in each disk graph."""
     paths = set()
-    for source in root.findall("./devices/disk/source"):
-        path = source.get("file") or source.get("dev")
-        if path is not None:
-            paths.add(path)
+    for disk in root.findall("./devices/disk"):
+        for source in disk.iter("source"):
+            path = source.get("file") or source.get("dev")
+            if path is not None:
+                paths.add(path)
+        for mirror in disk.iter("mirror"):
+            path = mirror.get("file") or mirror.get("dev")
+            if path is not None:
+                paths.add(path)
     return paths
 
 

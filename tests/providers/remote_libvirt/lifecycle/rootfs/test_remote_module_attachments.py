@@ -368,3 +368,25 @@ def test_owning_system_path_reference_to_attempt_volume_is_rejected(
 
     with pytest.raises(CategorizedError, match="attempt-scoped"):
         inspect_module_attachments(Conn([Domain(xml)]), state)
+
+
+@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize(
+    "disk",
+    [
+        "<disk type='file'><source file='/overlay'/>"
+        "<backingStore type='file'><source file='/pool/root'/><format type='raw'/>"
+        "<backingStore/></backingStore></disk>",
+        "<disk type='file'><source file='/overlay'><dataStore>"
+        "<format type='raw'/><source file='/pool/root'/></dataStore></source></disk>",
+        "<disk type='file'><source file='/overlay'/><mirror job='copy' type='file'>"
+        "<source file='/pool/root'/><format type='raw'/><backingStore/></mirror></disk>",
+        "<disk type='file'><source file='/overlay'/><mirror file='/pool/root' job='copy'/></disk>",
+    ],
+)
+def test_nested_protected_storage_source_is_rejected(disk: str, active: bool) -> None:
+    state = expected()
+    tenant = foreign_xml("tenant", disk, active=active)
+
+    with pytest.raises(CategorizedError, match="by path"):
+        inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
