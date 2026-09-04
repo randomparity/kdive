@@ -63,8 +63,12 @@ activation repository mutator, or imports a provider adapter. Integration covera
 lanes as `kdive_reconciler`, for which migration 0121 grants SELECT alone.
 
 Each lane reads at most 100 activation candidates per pass and considers at most the newest 100
-authority-marked source jobs per activation. Stable identifier ordering makes the remainder
-eligible on later passes while bounding database work driven by durable tenant history.
+authority-marked source jobs per activation after the complete activation/System/Run/plan/project
+tuple, and current operation/authority for successor detection, have matched. One set-oriented
+query serves every candidate in the lane, and a two-second transaction-local statement timeout
+bounds work when unindexed historical JSON still makes that query expensive. Stable identifier
+ordering makes the remainder eligible on later passes; a timed-out lane fails in isolation and
+retries on the next reconciler pass.
 
 Concurrent passes may identify the same candidate, but the deterministic job deduplication key
 makes enqueue idempotent. The worker rechecks activation, Allocation, System, Run, authority, and
