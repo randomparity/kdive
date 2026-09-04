@@ -8,6 +8,7 @@ running guest, and the factory keeps its fail-closed `_unconfigured_observation`
 
 from __future__ import annotations
 
+import errno
 import os
 from contextlib import suppress
 from dataclasses import dataclass
@@ -37,6 +38,19 @@ _NOT_CANONICAL = "external-boot path component is not a canonical identifier"
 _RECOVERY_REFUSED = "recovery directory is not an owner-only service-owned directory"
 
 PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
+
+
+def _refused(message: str, exc: OSError) -> str:
+    """Append the symbolic errno to a fixed refusal message.
+
+    Without it, every `OSError` in these walks reads as an ownership refusal — including the
+    most likely real failure of a path that now *writes*: a full or quota-exhausted recovery
+    filesystem. An operator told the root's mode or owner is wrong checks `stat`, finds 0700
+    and the right uid, and has nothing pointing at `ENOSPC`. `errno.errorcode` values are
+    symbolic constants and carry no host path, so naming one costs nothing the `from None`
+    suppression is protecting.
+    """
+    return f"{message} ({errno.errorcode.get(exc.errno, exc.errno)})"
 
 
 @dataclass
@@ -148,13 +162,13 @@ class LocalArtifactRoot:
                 return _open_or_create_private_child(system_fd, run)
             finally:
                 os.close(system_fd)
-        except OSError:
+        except OSError as exc:
             # `from None`, not `from exc`: the root is opened by path, so its `OSError` holds
             # the host path in `.filename`, and chaining would re-attach it to the traceback
-            # that reaches a log. Only `OSError` is wrapped —
-            # `_require_private_owned_directory` raises a `ValueError` that already carries no
-            # path and names the failing check more precisely than this message could.
-            raise ValueError(_ARTIFACT_ROOT_REFUSED) from None
+            # that reaches a log. Only the symbolic errno is carried across. Only `OSError` is
+            # wrapped — `_require_private_owned_directory` raises a `ValueError` that already
+            # carries no path and names the failing check more precisely than this message.
+            raise ValueError(_refused(_ARTIFACT_ROOT_REFUSED, exc)) from None
 
 
 class LocalPayloadCleanup:
@@ -164,46 +178,58 @@ class LocalPayloadCleanup:
         self._root = recovery_root
 
     def cleanup(self, root_fd: int, binding: ExternalBootActivationBinding) -> None:
-        # Composed before anything is removed, so a non-canonical binding refuses without
-        # having already deleted the payloads.
+        """Remove the activation's payloads and its published archive, validating first.
+
+        **Every check runs before the first unlink.** Deleting the payloads and only then
+        refusing on the recovery directory strands the activation: `_LocalSessionExternalBootIO
+        .cleanup` never reaches `publish_tombstone`, `cleanup_complete` stays `False`, and every
+        retry re-raises the same refusal with the payloads it would have needed already gone —
+        and if the directory was a symlink an attacker planted, the payloads are destroyed while
+        the archive `finalize_tombstone` blocks on is untouched. Nothing required that ordering.
+        """
+        # Composed first, so a non-canonical binding refuses before anything is opened.
         directory = f"{_canonical_name(binding.system_id)}.{_canonical_name(binding.activation_id)}"
-        for name in PAYLOAD_NAMES:
-            with suppress(FileNotFoundError):
-                os.unlink(name, dir_fd=root_fd)
-        self._remove_archive(directory)
+        recovery_fd = self._open_recovery_directory(directory)
+        try:
+            for name in PAYLOAD_NAMES:
+                with suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=root_fd)
+            if recovery_fd is not None:
+                with suppress(FileNotFoundError):
+                    os.unlink(_ARCHIVE_NAME, dir_fd=recovery_fd)
+        finally:
+            if recovery_fd is not None:
+                os.close(recovery_fd)
 
-    def _remove_archive(self, directory: str) -> None:
-        """Remove the activation's published archive from its own recovery directory.
+    def _open_recovery_directory(self, directory: str) -> int | None:
+        """Open and validate the activation's recovery directory, or `None` when it is absent.
 
-        `RecoveryArchiveSink.publish` writes the archive during prepare and
-        `publish_tombstone` unlinks only `intent.json`, so a cleanup confined to `root_fd`
-        leaves it behind — and `finalize_tombstone`, which requires the directory to hold
-        exactly `tombstone.json`, then fails permanently for every activation that captured
-        one. The mechanism holds a `Path`, so it must open the root itself: without
-        `O_NOFOLLOW` that open would follow a substituted symlink, and without re-validating
-        it would trust that the root is still what startup checked, which the read path
-        explicitly refuses to do. Both controls are on the deleting path here.
+        `RecoveryArchiveSink.publish` writes the archive during prepare and `publish_tombstone`
+        unlinks only `intent.json`, so a cleanup confined to `root_fd` leaves it behind — and
+        `finalize_tombstone`, which requires the directory to hold exactly `tombstone.json`,
+        then fails permanently for every activation that captured one. The mechanism holds a
+        `Path`, so it must open the root itself: without `O_NOFOLLOW` that open would follow a
+        substituted symlink, and without re-validating it would trust that the root is still
+        what startup checked, which the read path explicitly refuses to do. Both controls are on
+        the deleting path here.
+
+        `None` rather than an exception for an absent root or directory: an activation whose
+        recovery directory never existed has no archive, and cleanup must stay idempotent.
         """
         try:
             root_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except FileNotFoundError:
-            return
-        except OSError:
-            raise ValueError(_RECOVERY_REFUSED) from None
+            return None
+        except OSError as exc:
+            raise ValueError(_refused(_RECOVERY_REFUSED, exc)) from None
         try:
             _require_private_owned_directory(root_fd, "recovery root")
             try:
-                recovery_fd = _open_private_directory(root_fd, directory)
+                return _open_private_directory(root_fd, directory)
             except FileNotFoundError:
-                # An activation whose recovery directory never existed has no archive.
-                return
-            except OSError:
-                raise ValueError(_RECOVERY_REFUSED) from None
-            try:
-                with suppress(FileNotFoundError):
-                    os.unlink(_ARCHIVE_NAME, dir_fd=recovery_fd)
-            finally:
-                os.close(recovery_fd)
+                return None
+            except OSError as exc:
+                raise ValueError(_refused(_RECOVERY_REFUSED, exc)) from None
         finally:
             os.close(root_fd)
 

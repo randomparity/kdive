@@ -101,8 +101,24 @@ def _cleanup(
         os.close(descriptor)
 
 
-def _assert_no_host_path(error: BaseException, root: Path) -> None:
-    assert "owner-only service-owned directory" in str(error)
+ARTIFACT_ROOT_WRAPPED = "artifact root is not an owner-only service-owned directory"
+ARTIFACT_ROOT_MODE = "artifact root must be an owner-only service-owned directory"
+RECOVERY_ROOT_MODE = "recovery root must be an owner-only service-owned directory"
+RECOVERY_DIR_WRAPPED = "recovery directory is not an owner-only service-owned directory"
+# `_open_private_directory` hard-codes this label for *every* component it opens, including
+# the artifact root's own children -- a known limitation the spec records, since fixing it
+# would mean editing `external_boot.py`, which this change declares unmodified.
+COMPONENT_MODE = "recovery directory must be an owner-only service-owned directory"
+
+
+def _assert_refusal(error: BaseException, root: Path, expected: str) -> None:
+    """Assert the refusal names the fence that actually fired, and leaks no host path.
+
+    The label is load-bearing for the assertion, not just for the operator: every message here
+    ends in the same "owner-only service-owned directory" suffix, so a test matching only that
+    substring passes whichever fence fired and cannot tell a correct label from a wrong one.
+    """
+    assert str(error).startswith(expected), str(error)
     assert str(root) not in str(error)
 
 
@@ -211,8 +227,10 @@ class TestArtifactRoot:
 
         with pytest.raises(ValueError) as caught:
             LocalArtifactRoot(recovery_root).open(OWNERSHIP)
-        _assert_no_host_path(caught.value, recovery_root)
+        _assert_refusal(caught.value, recovery_root, ARTIFACT_ROOT_WRAPPED)
         _assert_context_suppressed(caught.value)
+        # The symbolic errno rides along; the host path does not.
+        assert str(caught.value).endswith("(ENOTDIR)")
 
         # `O_NOFOLLOW` is what refuses the symlink, asserted against the syscall because the
         # mechanism's contract deliberately replaces the errno with a fixed `ValueError`.
@@ -229,8 +247,13 @@ class TestArtifactRoot:
         finally:
             os.close(parent_fd)
 
-    @pytest.mark.parametrize("component", ["root", "system"])
-    def test_open_refuses_a_wide_mode_component(self, recovery_root: Path, component: str) -> None:
+    @pytest.mark.parametrize(
+        ("component", "expected"),
+        [("root", ARTIFACT_ROOT_MODE), ("system", COMPONENT_MODE)],
+    )
+    def test_open_refuses_a_wide_mode_component(
+        self, recovery_root: Path, component: str, expected: str
+    ) -> None:
         if component == "root":
             recovery_root.chmod(0o755)
         else:
@@ -239,23 +262,28 @@ class TestArtifactRoot:
         with pytest.raises(ValueError) as caught:
             LocalArtifactRoot(recovery_root).open(OWNERSHIP)
         # Raised by `_require_private_owned_directory` itself, which already carries no path,
-        # so it is not re-wrapped and its context is not suppressed.
-        _assert_no_host_path(caught.value, recovery_root)
+        # so it is not re-wrapped and its context is not suppressed. The two parameters expect
+        # *different* labels: only the root's own check says "artifact root", because the
+        # component walk goes through `_open_private_directory`'s fixed label.
+        _assert_refusal(caught.value, recovery_root, expected)
 
     def test_open_refuses_a_root_that_is_not_a_directory(self, tmp_path: Path) -> None:
         root = tmp_path / "regular-file"
         root.write_bytes(b"")
         with pytest.raises(ValueError) as caught:
             LocalArtifactRoot(root).open(OWNERSHIP)
-        _assert_no_host_path(caught.value, root)
+        _assert_refusal(caught.value, root, ARTIFACT_ROOT_WRAPPED)
         _assert_context_suppressed(caught.value)
+        # ENOTDIR, not a generic ownership complaint: a full filesystem must not read as one.
+        assert str(caught.value).endswith("(ENOTDIR)")
 
     def test_open_refuses_a_missing_root(self, tmp_path: Path) -> None:
         root = tmp_path / "absent"
         with pytest.raises(ValueError) as caught:
             LocalArtifactRoot(root).open(OWNERSHIP)
-        _assert_no_host_path(caught.value, root)
+        _assert_refusal(caught.value, root, ARTIFACT_ROOT_WRAPPED)
         _assert_context_suppressed(caught.value)
+        assert str(caught.value).endswith("(ENOENT)")
 
     def test_open_leaks_no_descriptor_on_failure(self, recovery_root: Path, tmp_path: Path) -> None:
         # Fail at the *second* component, so the root and system descriptors are both open
@@ -347,9 +375,11 @@ class TestPayloadCleanup:
         with pytest.raises(ValueError) as caught:
             _cleanup(recovery_root, artifacts)
 
-        _assert_no_host_path(caught.value, recovery_root)
-        # Scoped to the second removal: the first already ran, and the archive is untouched.
-        assert os.listdir(artifacts) == []
+        _assert_refusal(caught.value, recovery_root, COMPONENT_MODE)
+        # Nothing was deleted. Refusing *after* unlinking the payloads would strand the
+        # activation: publish_tombstone is never reached, so every retry re-raises with the
+        # payloads it would have needed already gone.
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
         assert (recovery / "modules.tar").exists()
 
     def test_cleanup_refuses_a_wide_mode_recovery_root(
@@ -367,8 +397,8 @@ class TestPayloadCleanup:
         with pytest.raises(ValueError) as caught:
             _cleanup(recovery_root, artifacts)
 
-        _assert_no_host_path(caught.value, recovery_root)
-        assert os.listdir(artifacts) == []
+        _assert_refusal(caught.value, recovery_root, RECOVERY_ROOT_MODE)
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
         assert (recovery / "modules.tar").exists()
 
     def test_cleanup_refuses_a_symlinked_recovery_directory(
@@ -383,9 +413,12 @@ class TestPayloadCleanup:
         with pytest.raises(ValueError) as caught:
             _cleanup(recovery_root, artifacts)
 
-        _assert_no_host_path(caught.value, recovery_root)
+        _assert_refusal(caught.value, recovery_root, RECOVERY_DIR_WRAPPED)
         _assert_context_suppressed(caught.value)
-        assert os.listdir(artifacts) == []
+        assert str(caught.value).endswith("(ENOTDIR)")
+        # Nothing deleted: had the payloads gone first, an attacker-planted symlink would
+        # destroy them while leaving untouched the archive `finalize_tombstone` blocks on.
+        assert sorted(os.listdir(artifacts)) == sorted(PAYLOAD_NAMES)
         assert (elsewhere / "modules.tar").exists()
 
     def test_cleanup_refuses_a_non_canonical_binding(
