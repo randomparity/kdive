@@ -18,6 +18,10 @@ from kdive.security.authz.rbac import Role
 
 # Re-export the disposable-Postgres fixtures so the integration tests can request them.
 from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url  # noqa: F401
+
+# The only route to real LOGIN principals for the migration's non-login roles; everything
+# else connects as the backend superuser, for whom pg_has_role is true against every role.
+from tests.db.external_boot_authority_support import authority_role_dsns  # noqa: F401
 from tests.store.conftest import minio_store  # noqa: F401
 
 

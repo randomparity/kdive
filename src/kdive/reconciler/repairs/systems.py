@@ -15,7 +15,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import SystemPayload
+from kdive.jobs.payloads import TeardownPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
@@ -66,7 +66,7 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
             await queue.enqueue(
                 conn,
                 _TEARDOWN_JOB_KIND,
-                SystemPayload(system_id=str(system_id)),
+                TeardownPayload(system_id=str(system_id)),
                 {
                     "principal": SYSTEM_RECONCILER_PRINCIPAL,
                     "agent_session": None,

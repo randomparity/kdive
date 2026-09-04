@@ -20,7 +20,7 @@ from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
+from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -428,7 +428,7 @@ async def _teardown_locked(
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
-            SystemPayload(system_id=str(uid)),
+            TeardownPayload(system_id=str(uid)),
             job_authorizing(ctx, system.project),
             _teardown_dedup_key(uid),
         )

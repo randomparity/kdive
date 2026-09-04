@@ -18,7 +18,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs import boot_evidence
 from kdive.jobs.handlers.runs.common import abandon_run_step_best_effort
-from kdive.jobs.payloads import RunPayload, load_payload
+from kdive.jobs.payloads import BootPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
@@ -145,7 +145,7 @@ async def boot_handler(
     artifact_store: ObjectStore,
 ) -> str | None:
     """Boot the installed kernel and confirm run-readiness, recording the `boot` step."""
-    run_id = UUID(load_payload(job, RunPayload).run_id)
+    run_id = UUID(load_payload(job, BootPayload).run_id)
     run = await RUNS.get(conn, run_id)
     if run is None:
         raise CategorizedError(

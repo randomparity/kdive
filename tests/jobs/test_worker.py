@@ -27,6 +27,7 @@ from kdive.jobs import worker as worker_module
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     Authorizing,
+    BootPayload,
     InstallPayload,
     RunPayload,
     SystemPayload,
@@ -517,7 +518,9 @@ def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kin
             reg.register(kind, raises_uncategorized)
             worker = await _registered_worker(pool, reg, worker_id="w1")
             payload: RunPayload = (
-                RunPayload(run_id=run_id) if kind is JobKind.BOOT else InstallPayload(run_id=run_id)
+                BootPayload(run_id=run_id)
+                if kind is JobKind.BOOT
+                else InstallPayload(run_id=run_id)
             )
             async with pool.connection() as conn:
                 job = await queue.enqueue(
