@@ -22,6 +22,12 @@ Two renderers carry `details` to an agent, and both are type filters rather than
   (`mcp/responses.py:321`) — which is what `jobs.get`/`jobs.wait` return. The boot step runs as a
   worker job (`jobs/handlers/runs/boot.py:63`).
 
+A third renderer of `failure_context` exists and is worth naming so a later reader does not think
+the enumeration missed it: `_failed_system_retry_failure` (`services/systems/admission.py:540-556`)
+copies every `failure_detail_*` key into an agent-facing `AdmissionFailure`. It is not a third
+egress *for `probe_error`*, because it reads the `{alloc.id}:provision` job (`:544`) and
+`probe_error` is written by the boot job. The distinction is the dedup key, not the renderer.
+
 Measured at `811538fb2` on x86_64 with the project venv, driving the real probe with the ordinary
 daemon-unreachable stderr: the MCP payload renders the transport socket path verbatim, and
 `Redactor.redact_text` returns that same stderr byte for byte — it filters secrets (URL userinfo,
@@ -53,6 +59,12 @@ cannot be assigned to `probe_error` at any call site in `src/` or `tests/`, so t
 representable. No renderer changes: `safe_error_details` stays a type filter and `Redactor` stays a
 secrets filter, because after this there is nothing at either boundary to filter.
 
+Be precise about where that closure lives. `ProbeFailure("arbitrary")` raises `ValueError` at
+runtime, so free text cannot be seated through the enum. The carriers are `NamedTuple`s, which
+validate no annotated field at runtime, so their closure is the whole-tree `ty` gate rather than
+CPython. That is the right trade here — `install.py`'s `.value` read fails closed if the gate is
+ever bypassed, and a runtime guard would cost more than the residual it removes.
+
 `VIRSH_MISSING` is deliberately wider than its name suggests. Python maps errno to an `OSError`
 subclass at construction, so `except FileNotFoundError` precedes the `OSError` arm and absorbs
 **every** ENOENT raised by the exec — including an ENOENT on a socket path, a transport fault
@@ -81,8 +93,13 @@ is identical.
   remote-capable, which puts it on the client side of the boundary this record defends. Recovering
   the raw text requires host access to the worker log, and an operator without host access is
   precisely the actor the payload must not carry a host path to.
-- Log volume, worst case: the poll count is `_boot_window_polls` scaled by
-  `tcg_deadline_multiplier(accel)` (`install.py:209`), 1.0 only for `accel == "kvm"` and otherwise
+- Log volume, worst case, across **both** probe call sites. `_domain_exit_probe` has two production
+  callers, not one: the boot path, and `customization_boot.py:171`, which wires it as the
+  `domain_settled` seam and reads only `.exited`. The second opens no egress — it discards
+  `.error` — but it does now emit a bounded `WARNING` per failing poll where it previously dropped
+  the string silently, on its own `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` budget. On the boot
+  path the poll count is `_boot_window_polls` scaled by `tcg_deadline_multiplier(accel)`
+  (`install.py:209`), 1.0 only for `accel == "kvm"` and otherwise
   `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, default 10.0 — so up to 180 `WARNING` lines on KVM and
   1800 on the TCG tier or an unknown accelerator, at the same 12 lines a minute over a window that
   stretches from 15 minutes to 150. First-failure-only logging was not taken: it needs per-boot

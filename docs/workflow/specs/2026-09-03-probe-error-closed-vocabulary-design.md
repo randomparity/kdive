@@ -81,7 +81,10 @@ assumed discreet with what it is handed. The probe *runs* only in the worker —
 worker job (`jobs/handlers/runs/boot.py:63`) — and the worker is host-trust with host access
 already, so host paths in its log disclose nothing its operator cannot read directly. That is where
 the design places its trust, and why the log is an acceptable destination for text the payload may
-not carry.
+not carry. Qualified once: where `observability/facade.py` bridges the root logger, the bounded
+text also reaches the operator's OTLP collector. That is still host-trust infrastructure and
+outside the agent's reach either way, and `RedactingLogProcessor` is not asked to become a
+host-path filter, for the reason ADR-0594 gives about `Redactor`.
 
 **`kdivectl` is a client, not a host-trust operator, and it does lose the raw text.** Separate
 *invocation* from *rendering*: no CLI invokes the probe, but `kdivectl` is an MCP client
