@@ -1,11 +1,18 @@
 """Charter criterion 9: an authority-marked job, end to end, through a real ``Worker`` claim.
 
 Not a direct handler call. The job is enqueued through ``queue.enqueue``, counted by
-``count_claimable_worker_jobs``, claimed by a real worker, dispatched through the production
-handler registry, and committed by the worker's own ``_finalize_handler``. Both kinds are
-exercised — ``boot`` for ``activate`` and ``teardown`` for ``teardown`` — because proving the
-production wiring for one kind and assuming it for the other is exactly the gap the required
-``external_boot`` keyword exists to close.
+``count_claimable_worker_jobs``, claimed by a real worker, dispatched through ``route_marked`` to
+the real operations registry, and committed by the worker's own ``_finalize_handler``. Both kinds
+are exercised — ``boot`` for ``activate`` and ``teardown`` for ``teardown``.
+
+**What this does not cover, stated because a bite proof showed it.** The registry here is built by
+this module, not by ``register_all_handlers``, so un-wrapping the ``JobKind.BOOT`` binding in
+``kdive.jobs.handlers.runs.registrar`` leaves these tests green. That wiring is covered by
+``tests/jobs/handlers/external_boot/test_operations.py::
+test_production_registry_resolves_every_operation_to_one_handler``, which drives
+``build_production_handler_registry`` and does turn red for that fault, in both registrars. The
+division is deliberate — this test owns the claim-to-commit path, that one owns the registration
+path — but it is written down rather than left for a reader to assume this test covers both.
 
 The claimability assertion is not decoration: ``0122_external_boot_authority.sql:293-303``
 excluded every marked payload from ``claim_worker_job`` and ``count_claimable_worker_jobs`` until
