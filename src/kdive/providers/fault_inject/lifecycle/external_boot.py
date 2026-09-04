@@ -81,7 +81,11 @@ class FaultInjectExternalBoot:
                 modules=PresentComponentState(manifest=materialization.installed_module_tree),
             ),
         )
-        self._observations[recovery_ref.ref] = materialization.kernel_observation
+        self._observations[recovery_ref.ref] = RunningKernelObservation(
+            identity=materialization.kernel_observation,
+            cmdline=b"",
+            expected_cmdline=b"",
+        )
         return point
 
     def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:

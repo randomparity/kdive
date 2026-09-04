@@ -13,6 +13,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    KernelIdentity,
     OpaqueProviderRef,
     RecoveryPoint,
     RootSpecV1,
@@ -241,7 +242,30 @@ def test_release_values_reject_noncanonical_or_traversal_like_text(release: str)
     with pytest.raises(ValidationError, match="release"):
         ExternalBootPlan.model_validate(plan_data)
     with pytest.raises(ValidationError, match="release"):
-        RunningKernelObservation(architecture="x86_64", release=release, gnu_build_id="00" * 20)
+        KernelIdentity(architecture="x86_64", release=release, gnu_build_id="00" * 20)
+
+
+def test_running_observation_carries_exact_command_line_bytes() -> None:
+    observation = RunningKernelObservation(
+        identity={"architecture": "x86_64", "release": "6.1.0", "gnu_build_id": "00" * 20},
+        cmdline=b"root=UUID=x\xff",
+        expected_cmdline=b"root=UUID=x",
+    )
+
+    assert observation.identity.architecture == "x86_64"
+    assert observation.cmdline == b"root=UUID=x\xff"
+    assert observation.expected_cmdline == b"root=UUID=x"
+
+
+@pytest.mark.parametrize("control", ["\x01", "\x08", "\x0b", "\x0c", "\x1f"])
+def test_plan_rejects_xml_illegal_platform_argument_controls(control: str) -> None:
+    data = _plan_data()
+    argument = f"debug={control}value"
+    data["platform_arguments"] = ["root=UUID=x", argument]
+    data["cmdline"] = f"root=UUID=x {argument}"
+
+    with pytest.raises(ValidationError, match="XML 1.0"):
+        ExternalBootPlan.model_validate(data)
 
 
 @pytest.mark.parametrize("value", ["", "/tmp/kernel", "https://host/k", "user:secret@host"])

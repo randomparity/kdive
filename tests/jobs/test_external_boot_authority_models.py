@@ -244,6 +244,37 @@ def _failure(*, terminal: bool) -> ExternalBootAuthorityFailureV1:
     )
 
 
+def test_failure_context_accepts_only_closed_bounded_cmdline_diagnostic() -> None:
+    result: dict[str, object] = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "fail",
+        "error_category": "readiness_failure",
+        "failure_context": {
+            "phase": "commit",
+            "cmdline_mismatch": {
+                "schema": "external-boot-cmdline-mismatch-v1",
+                "expected_cmdline": "root=UUID=x",
+                "observed_cmdline": "root=UUID=y",
+                "first_differing_byte": 10,
+            },
+        },
+        "terminal": True,
+    }
+
+    carrier = ExternalBootAuthorityFailureV1.model_validate(_carrier(result))
+    assert carrier.result.operation == "fail"
+    malformed: dict[str, object] = dict(result)
+    malformed["failure_context"] = {
+        **result["failure_context"],
+        "cmdline_mismatch": {
+            **result["failure_context"]["cmdline_mismatch"],
+            "extra": True,
+        },
+    }
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ExternalBootAuthorityFailureV1.model_validate(_carrier(malformed))
+
+
 def _worker() -> Worker:
     worker = object.__new__(Worker)
     worker._pool = _Pool()  # type: ignore[invalid-assignment]

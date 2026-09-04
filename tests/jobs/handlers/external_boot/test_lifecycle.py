@@ -43,6 +43,7 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -110,6 +111,7 @@ def _ports(
     return ExternalBootHandlerPorts(
         resolver=resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
+        secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
     )
 
@@ -301,7 +303,42 @@ class _DisagreeingObserver:
         self.calls.append("observe")
         self.recoveries.append(recovery)
         real = self._inner._inner.observe(recovery, authority)
-        return real.model_copy(update={"release": "6.9.0-imposter"})
+        return real.model_copy(
+            update={"identity": real.identity.model_copy(update={"release": "6.9.0-imposter"})}
+        )
+
+
+class _CmdlineObserver(_DisagreeingObserver):
+    def __init__(self, inner: Any, observed: bytes) -> None:
+        super().__init__(inner)
+        self._observed = observed
+
+    def observe(self, recovery: Any, authority: Any) -> RunningKernelObservation:
+        real = self._inner._inner.observe(recovery, authority)
+        return real.model_copy(update={"cmdline": self._observed, "expected_cmdline": b"abc"})
+
+
+@pytest.mark.parametrize("observed", [b"abc", b"ab", b"acb", b"abcd"])
+def test_core_compares_exact_command_line_bytes(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    observed: bytes,
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        observer = _CmdlineObserver(case.vehicle.port, observed)
+        case.vehicle.port.__dict__["observe"] = observer.observe
+        if observed == b"abc":
+            await _run_operation(authority_role_dsns, seed, case, "activate")
+            return
+        with pytest.raises(ExternalBootAuthorityFailure) as caught:
+            await _run_operation(authority_role_dsns, seed, case, "activate")
+        result = caught.value.result.result
+        assert isinstance(result, _FailureResult)
+        assert result.error_category.value == "readiness_failure"
+        assert result.terminal is True
+        assert result.failure_context.cmdline_mismatch is not None
+
+    _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
 @pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict", "release"])

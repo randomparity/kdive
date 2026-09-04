@@ -52,6 +52,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    KernelIdentity,
     KernelRelease,
     OpaqueProviderRef,
     PresentComponentState,
@@ -119,7 +120,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     target_projection_sha256: Digest
     target_xml_sha256: Digest
     target_xml: str
-    expected_running: RunningKernelObservation
+    expected_running: KernelIdentity
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
     prior_power: Literal["running", "inactive"]
@@ -163,7 +164,7 @@ class LocalPreStopIntentV1(_ClosedValue):
     target_projection_sha256: Digest
     target_xml_sha256: Digest
     target_xml: str
-    expected_running: RunningKernelObservation
+    expected_running: KernelIdentity
     prior_power: Literal["running", "inactive"]
 
     @model_validator(mode="after")
@@ -1006,7 +1007,7 @@ class _RealLocalExternalBootOperation:
         if self._host_state(metadata) != ("target", True):
             raise ValueError("external-boot observation requires exact running target XML/power")
         observed = self._session.observe_running()
-        if observed != metadata.expected_running:
+        if observed.identity != metadata.expected_running:
             raise ValueError("external-boot running kernel does not match recovery metadata")
         return observed
 

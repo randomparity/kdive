@@ -991,7 +991,9 @@ def observe_guest_identity(
         )
     try:
         running = RunningKernelObservation(
-            architecture=machine, release=release, gnu_build_id=build_id
+            identity={"architecture": machine, "release": release, "gnu_build_id": build_id},
+            cmdline=cmdline,
+            expected_cmdline=definition.expected_cmdline.encode(),
         )
     except ValidationError:
         # Deliberately not chained: pydantic's message embeds the rejected guest value verbatim,
@@ -999,11 +1001,11 @@ def observe_guest_identity(
         raise _identity_failure(
             "the guest reported an out-of-contract kernel identity", definition=definition
         ) from None
-    if running != definition.expected_running:
+    if running.identity != definition.expected_running:
         mismatch = next(
             field
             for field in ("architecture", "release", "gnu_build_id")
-            if getattr(running, field) != getattr(definition.expected_running, field)
+            if getattr(running.identity, field) != getattr(definition.expected_running, field)
         )
         raise _identity_failure(
             "the running kernel is not the materialized kernel",

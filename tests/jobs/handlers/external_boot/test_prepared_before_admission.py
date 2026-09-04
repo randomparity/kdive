@@ -28,6 +28,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -71,6 +72,7 @@ async def _dispatch(
     ports = ExternalBootHandlerPorts(
         resolver=resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
+        secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
     )
     handler = build_operations(ports).get(operation)

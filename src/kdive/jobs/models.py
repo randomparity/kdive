@@ -159,10 +159,27 @@ class _RecoveryAttemptResult(_ResultBase):
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
+class ExternalBootCmdlineMismatchV1(_ClosedModel):
+    schema_: Literal["external-boot-cmdline-mismatch-v1"] = Field(
+        "external-boot-cmdline-mismatch-v1", alias="schema"
+    )
+    expected_cmdline: str
+    observed_cmdline: str
+    first_differing_byte: Annotated[int, Field(ge=0, le=2048)]
+
+    @field_validator("expected_cmdline", "observed_cmdline")
+    @classmethod
+    def _bounded_text(cls, value: str) -> str:
+        if len(value.encode()) > 8192:
+            raise ValueError("rendered command line exceeds 8192 UTF-8 bytes")
+        return value
+
+
 class _FailureContext(_ClosedModel):
     phase: Literal["admission", "preparation", "provider-call", "observation", "commit"] | None = (
         None
     )
+    cmdline_mismatch: ExternalBootCmdlineMismatchV1 | None = None
 
 
 class _FailureResult(_ResultBase):

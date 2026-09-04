@@ -28,6 +28,7 @@ from kdive.jobs.handlers.external_boot.operations import ExternalBootOperationHa
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     OperationContext,
+    _CommandLineMismatch,
     authority_ref,
     run_operation,
 )
@@ -103,10 +104,23 @@ def _require_observed_kernel_matches(
         raise _refuse(
             f"activation {context.marker.activation_id} produced no kernel observation to verify"
         )
-    if observation != materialization.kernel_observation:
+    if observation.identity != materialization.kernel_observation:
         raise _refuse(
             f"the running kernel observed for activation {context.marker.activation_id} is not the "
             "one its persisted materialization records"
+        )
+    if observation.cmdline != observation.expected_cmdline:
+        limit = min(len(observation.cmdline), len(observation.expected_cmdline))
+        offset = next(
+            (
+                index
+                for index in range(limit)
+                if observation.cmdline[index] != observation.expected_cmdline[index]
+            ),
+            limit,
+        )
+        raise _CommandLineMismatch(
+            observation.expected_cmdline[:2048], observation.cmdline[:2048], offset
         )
 
 

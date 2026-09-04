@@ -13,6 +13,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityTakeoverRequestV1,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
@@ -55,4 +56,5 @@ class ExternalBootHandlerPorts:
 
     resolver: ProviderResolver
     incarnation_credential: SecretStr
+    secret_registry: SecretRegistry
     acknowledger: ExternalBootAuthorityAcknowledger | None = None

@@ -245,7 +245,9 @@ _INITRD_PATH = "/var/lib/kdive/boot/initrd.img"
 
 def _observation() -> RunningKernelObservation:
     return RunningKernelObservation(
-        architecture="x86_64", release="6.9.0-kdive", gnu_build_id="ab" * 8
+        identity={"architecture": "x86_64", "release": "6.9.0-kdive", "gnu_build_id": "ab" * 8},
+        cmdline=b"root=/dev/vda1 console=ttyS0",
+        expected_cmdline=b"root=/dev/vda1 console=ttyS0",
     )
 
 

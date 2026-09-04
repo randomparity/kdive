@@ -116,6 +116,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         external_boot.ExternalBootHandlerPorts(
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
+            secret_registry=assembly.secret_registry,
         )
     )
     systems.register_handlers(

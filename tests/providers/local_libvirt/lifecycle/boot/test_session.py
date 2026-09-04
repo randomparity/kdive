@@ -2237,7 +2237,9 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     events: list[str] = []
     domain = Domain(events)
     observation = RunningKernelObservation(
-        architecture="x86_64", release="6.1.0", gnu_build_id="00112233"
+        identity={"architecture": "x86_64", "release": "6.1.0", "gnu_build_id": "00112233"},
+        cmdline=b"root=UUID=x",
+        expected_cmdline=b"root=UUID=x",
     )
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -2302,7 +2304,13 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         observe_running=lambda system_id: (
             observed_ids.append(system_id)
             or RunningKernelObservation(
-                architecture="x86_64", release="6.1.0", gnu_build_id="00112233"
+                identity={
+                    "architecture": "x86_64",
+                    "release": "6.1.0",
+                    "gnu_build_id": "00112233",
+                },
+                cmdline=b"root=UUID=x",
+                expected_cmdline=b"root=UUID=x",
             )
         ),
         cleanup_payloads=lambda _root, binding: cleaned.append(binding),
