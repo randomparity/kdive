@@ -77,10 +77,11 @@ the same kind: provider-minted error text crossing from host-trust to agent-trus
 
 **Actor model.** The untrusted party is the MCP-connected agent and everything downstream of it:
 transcripts, logs it writes, issues it files. It is authenticated and project-scoped, and not
-assumed discreet with what it is handed. The operator running `python -m kdive`, and the worker
-process, are host-trust and already have host access, so host paths in their logs disclose nothing
-they cannot read directly. That is where the design places its trust, and why the log is an
-acceptable destination for text the payload may not carry.
+assumed discreet with what it is handed. The probe runs only in the **worker** — the boot step is a
+worker job (`jobs/handlers/runs/boot.py:63`), and no CLI path reaches it — and the worker is
+host-trust with host access already, so host paths in its log disclose nothing its operator cannot
+read directly. That is where the design places its trust, and why the log is an acceptable
+destination for text the payload may not carry.
 
 **Control per boundary.** One control, upstream of both: the value is a member of a vocabulary
 fixed at compile time, so no host-derived substring can occupy it. On failure it discloses the

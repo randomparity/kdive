@@ -15,8 +15,10 @@ return of `_domain_exit_probe` logs the bounded raw text at `WARNING` and return
 
 Expected implementation size: 165–205 changed lines (M) — from the file map below: ~46 in
 `readiness.py` (the enum, the helper, two annotations, five rewritten returns), ~12 in
-`install.py`, ~113 in `test_install.py` (three amended assertions, five new tests, five imports),
-2 in `test_external_boot.py`, and 1 in the ADR status line.
+`install.py`, ~113 in `test_install.py` (three amended assertions, six new tests, five imports),
+2 in `test_external_boot.py`, and 1 in the ADR status line. The range is unchanged from the
+previous revision: test 2.5b adds roughly ten lines and the two shipped docstrings cut in Steps
+1.3 and 1.5 remove roughly the same.
 
 Spec: [`docs/workflow/specs/2026-09-03-probe-error-closed-vocabulary-design.md`](../specs/2026-09-03-probe-error-closed-vocabulary-design.md).
 Decision: [ADR-0594](../../adr/0594-readiness-probe-failures-leave-the-probe-as-a-closed-vocabulary.md).
@@ -77,8 +79,10 @@ field and needs no change — including `tests/adversarial/test_provider_xml.py:
 - `jobs/worker.py`: `_failure_context(exc, registry)` (768).
   `security/secrets/secret_registry.py`: `SecretRegistry` (15), no-argument constructible.
 
-The system UUID is written inline as `UUID("22222222-2222-2222-2222-222222222222")`; that literal
-already appears inline 11 times in the test file and no module constant exists for it.
+`_SYS` (`11111111-…`) and `_RUN` (`22222222-…`) are module constants at `test_install.py:58-59`.
+The new tests use **`_SYS`** as the System id, matching every existing boot test in the file
+(`inst.boot(_SYS)` at :1138, `details["system_id"] == str(_SYS)` at :1128). Do not inline a UUID
+literal, and do not use `_RUN` — it is a Run id.
 
 **One Python semantic this plan turns on:** `OSError` dispatches to a subclass on errno at
 construction, so `OSError(2, …)` **is** a `FileNotFoundError` and never reaches the
@@ -121,15 +125,14 @@ def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
     # Absence, not difference: a transform returning a *different* leaky string passes a `!=`
     # assertion and fails this one (#2220).
     _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
-    system_id = UUID("22222222-2222-2222-2222-222222222222")
 
     probe = readiness_mod._domain_exit_probe("kdive-abc")
     error = CategorizedError(
         "System did not become ready within the boot window",
         category=ErrorCategory.BOOT_TIMEOUT,
-        details=LocalLibvirtBooter._boot_failure_details(system_id, probe.error),
+        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
     )
-    payload = dict(ToolResponse.failure_from_error(str(system_id), error).data or {})
+    payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})
 
     assert payload["probe_error"] == "virsh_nonzero_exit"
     rendered = repr(payload)
@@ -156,11 +159,7 @@ Add `import logging` and `_log = logging.getLogger(__name__)`. After `ConsoleVer
 
 ```python
 class ProbeFailure(StrEnum):
-    """Why a ``virsh domstate`` probe failed, as a closed agent-facing vocabulary (ADR-0594).
-
-    The two agent-facing egresses, the type-not-filter enforcement, and ``VIRSH_MISSING``'s
-    overlap with every ENOENT raised by the exec are recorded in ADR-0594.
-    """
+    """Why a ``virsh domstate`` probe failed, as a closed agent-facing vocabulary (ADR-0594)."""
 
     VIRSH_MISSING = "virsh_missing"
     VIRSH_TIMEOUT = "virsh_timeout"
@@ -168,16 +167,10 @@ class ProbeFailure(StrEnum):
     VIRSH_NONZERO_EXIT = "virsh_nonzero_exit"
 ```
 
-After `_bounded_probe_error`, add:
+After `_bounded_probe_error`, add `_probe_failed` — a one-line docstring citing ADR-0594, then:
 
 ```python
 def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _DomainExitProbe:
-    """Log the bounded diagnostic for the operator and return the classified failure.
-
-    The raw text goes to the host log, not into the returned value — the same split
-    ``_install_failure`` and ``_libvirt_transport_failure`` already make on this module's raise
-    path, where the error carries only the domain name.
-    """
     _log.warning(
         "domstate probe failed for %s (%s): %s",
         domain_name,
@@ -217,16 +210,13 @@ untouched. `_bounded_probe_error` keeps its name and body; it now bounds the log
 Add `ProbeFailure` to the `...boot.readiness` import block, alphabetically ordered. In
 `LocalLibvirtBooter._await_ready`, annotate `first_probe_error: ProbeFailure | None = None`. Then:
 
+Keep its one-line docstring, noting `.value` keeps the detail a JSON scalar (ADR-0594):
+
 ```python
     @staticmethod
     def _boot_failure_details(
         system_id: UUID, first_probe_error: ProbeFailure | None
     ) -> dict[str, object]:
-        """The agent-facing details for a failed boot: the System and a closed probe reason.
-
-        Rendered as ``.value`` so the detail is a JSON scalar rather than an enum member
-        (ADR-0594).
-        """
         details: dict[str, object] = {"system_id": str(system_id)}
         if first_probe_error is not None:
             details["probe_error"] = first_probe_error.value
@@ -241,8 +231,10 @@ commit**, flip its `## Status` to `Accepted (2026-09-03)`. That is `docs/adr/REA
 ratification rule, not a workaround: the PR that adds the citations is the PR that ratifies.
 
 Re-run the Step 1.2 command; expect `1 passed`. Then `just type` — expect diagnostics from exactly
-two sites, both retyped in Task 2: `test_install.py:185` and `test_external_boot.py:2666`. Then
-`just adr-status-check`, expecting exit 0.
+**three** sites, all repaired in Task 2: `test_install.py:190` (the `ReadinessResult(...)` call
+inside `_Readiness.readiness`; ty anchors it at the call, but the fix is the annotation on 185),
+`test_install.py:1679` (a `_DomainExitProbe(False, "virsh hiccup")` lambda, cleared by Step 2.2's
+second bullet), and `test_external_boot.py:2666`. Then `just adr-status-check`, expecting exit 0.
 
 **Acceptance criteria.** `ProbeFailure` has exactly the four members above. `_domain_exit_probe`
 returns a member or `None`, never caller text. Every failing branch logs the bounded text once, and
@@ -251,7 +243,7 @@ vocabulary.
 
 ## Task 2 — Prove absence at both egresses; amend the pinned tests
 
-### Step 2.1 — Retype the two sites `ty` flagged
+### Step 2.1 — Retype the sites `ty` flagged
 
 `test_install.py:185` becomes `probe_error: ProbeFailure | None = None`; add `ProbeFailure` to the
 `...boot.readiness` import block (37-43), alphabetically ordered.
@@ -277,10 +269,10 @@ would silently stop pinning what the test exists to pin.
   `result.probe_error is ProbeFailure.VIRSH_TIMEOUT`. This is the real `TimeoutExpired` arm, and it
   is what covers `VIRSH_TIMEOUT`.
 
-### Steps 2.3-2.6 — Four more tests
+### Steps 2.3-2.6 — Five more tests
 
 Each follows Step 1.1's shape — arrange the probe, build the `CategorizedError` from
-`LocalLibvirtBooter._boot_failure_details(system_id, probe.error)`, render, assert the member and
+`LocalLibvirtBooter._boot_failure_details(_SYS, probe.error)`, render, assert the member and
 then the absence of every `_TRANSPORT_SUBSTRINGS` entry from `repr(...)`. Only the arrangement and
 the expected member differ:
 
@@ -289,6 +281,7 @@ the expected member differ:
 | 2.3 `…_out_of_the_worker_payload` | same `_capture_domstate` as 1.1; render with `_failure_context(error, SecretRegistry())` instead of `ToolResponse` | `context["failure_detail_probe_error"] == "virsh_nonzero_exit"`, then absence |
 | 2.4 `test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload` | patch `shutil.which` to `f"/usr/bin/{tool}"` and `subprocess.run` to raise `OSError(13, "Permission denied", "/run/user/1000/libvirt/virtqemud-sock")`; category `READINESS_FAILURE` | `payload["probe_error"] == "virsh_probe_failed"`, then absence |
 | 2.5 `test_missing_virsh_classifies_as_virsh_missing` | patch `shutil.which` to `lambda tool: None`; no rendering | `probe.exited is False` and `probe.error is readiness_mod.ProbeFailure.VIRSH_MISSING` |
+| 2.5b `test_enoent_from_the_exec_classifies_as_virsh_missing_and_logs_the_path` | patch `shutil.which` to a path and `subprocess.run` to raise `FileNotFoundError(2, "No such file or directory", "<socket path>")`, inside `caplog.at_level(...)` | `probe.error is ProbeFailure.VIRSH_MISSING` **and** the `caplog` record contains the socket basename |
 | 2.6 `test_probe_failure_logs_the_raw_transport_text_for_the_operator` | same `_capture_domstate` as 1.1, inside `caplog.at_level(logging.WARNING, logger=readiness_mod.__name__)` | the joined `record.getMessage()` contains `virtqemud-sock`, `kdive-abc`, and `virsh_nonzero_exit` |
 
 Step 2.3 carries a comment saying why it exists: the boot step runs as a worker job,
@@ -298,8 +291,12 @@ host path untouched — so a boundary-only fix would leave this egress open.
 Step 2.4 carries a comment saying why errno 13: errno 2 would construct a `FileNotFoundError` and
 be taken by the earlier arm, testing the wrong branch entirely.
 
-All four members are now reached: `VIRSH_NONZERO_EXIT` (2.3, 2.6), `VIRSH_PROBE_FAILED` (2.4),
-`VIRSH_TIMEOUT` (2.2's third test), `VIRSH_MISSING` (2.5).
+All four members are reached — `VIRSH_NONZERO_EXIT` (2.3, 2.6), `VIRSH_PROBE_FAILED` (2.4),
+`VIRSH_TIMEOUT` (2.2's third test), `VIRSH_MISSING` (2.5, 2.5b) — and so are **both**
+`VIRSH_MISSING` branches. Member coverage alone would hide the second: `shutil.which` returning
+`None` and an ENOENT from the exec are different arms mapping to one member, and only 2.5b
+exercises the arm whose `str(exc)` log is the compensating control ADR-0594 relies on. That arm is
+invisible to coverage tooling too — `_domain_exit_probe` carries `# pragma: no cover - live_vm`.
 
 ### Step 2.7 — Verify
 
@@ -332,6 +329,7 @@ Make the smallest edit that should break each test, run only that test, and reco
 | worker-egress absence | the same two-sided fault |
 | `OSError` absence | the same two-sided fault |
 | `virsh_missing` classification | return `VIRSH_PROBE_FAILED` from the `shutil.which is None` arm |
+| ENOENT-from-exec (2.5b) | revert the `FileNotFoundError` arm's detail to the fixed literal `"virsh executable not found"` |
 | operator-log proof | delete the `_log.warning(...)` call from `_probe_failed` |
 
 **The leak fault must span both source files.** Restoring only the producer half leaves

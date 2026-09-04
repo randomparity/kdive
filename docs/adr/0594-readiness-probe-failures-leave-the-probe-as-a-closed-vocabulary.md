@@ -70,16 +70,16 @@ is identical.
 - `virsh_missing` does not mean only "the binary is absent". An agent acting on it as a host
   provisioning fault will be right for `shutil.which` returning `None` and wrong for an ENOENT
   transport fault. The distinction survives only in the log.
-- The operator's diagnostic moves from the CLI `details` line to the host log. It is not lost —
-  worker and CLI are both host-trust — but an operator reading only stderr now sees a token.
+- The diagnostic crosses a process boundary rather than moving within one. The boot step runs as a
+  worker job (`jobs/handlers/runs/boot.py:63` is the only production caller), so the raw text lands
+  in the **worker's** log, not the caller's. An operator reading `jobs.wait` sees the token and
+  recovers the detail from the worker log, joining on the domain name the `WARNING` carries.
 - Log volume, worst case: the poll count is `_boot_window_polls` scaled by
-  `tcg_deadline_multiplier(accel)` (`install.py:209`), which returns 1.0 only for `accel == "kvm"`
-  and otherwise `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, default 10.0. A daemon down for a whole
-  default window emits up to 180 `WARNING` lines on KVM and up to 1800 on the TCG tier or any
-  System whose accelerator is unknown. The *rate* is the same 12 lines a minute either way — the
-  window stretches from 15 minutes to 150 — and the lines are filterable by logger name.
-  First-failure-only logging was not taken: it needs per-boot state in a function that holds none,
-  and it hides a probe failure whose classification changes mid-window.
+  `tcg_deadline_multiplier(accel)` (`install.py:209`), 1.0 only for `accel == "kvm"` and otherwise
+  `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, default 10.0 — so up to 180 `WARNING` lines on KVM and
+  1800 on the TCG tier or an unknown accelerator, at the same 12 lines a minute over a window that
+  stretches from 15 minutes to 150. First-failure-only logging was not taken: it needs per-boot
+  state in a function that holds none, and hides a failure whose classification changes mid-window.
 - The probe returns rather than raises, so no `raise … from None` site exists. Moving
   classification onto a raise path later would re-attach the raw text through the chained
   traceback, so the return-valued shape is now load-bearing.
