@@ -234,6 +234,41 @@ class TestArtifactRoot:
         finally:
             os.close(descriptor)
 
+    def test_open_creates_0700_under_a_restrictive_umask(self, recovery_root: Path) -> None:
+        """The create path sets the mode explicitly, because `mkdir` masks it.
+
+        Driven through the production walk rather than by calling `os.mkdir` directly, so it
+        is the shipped create path that is under test. Under `UMask=0177` a masked `mkdir`
+        yields 0600; the `O_NOFOLLOW` open still succeeds, so only the exact-0700 check
+        refuses — and it refuses forever, because every later activation for the same pair
+        finds the directory and takes the `FileExistsError` arm.
+        """
+        previous = os.umask(0o177)
+        try:
+            descriptor = LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+        finally:
+            os.umask(previous)
+        try:
+            system = recovery_root / str(SYSTEM_ID)
+            assert stat.S_IMODE(system.stat().st_mode) == 0o700
+            assert stat.S_IMODE((system / BINDING.run_id).stat().st_mode) == 0o700
+        finally:
+            os.close(descriptor)
+
+    def test_open_still_refuses_a_wide_mode_directory_it_did_not_create(
+        self, recovery_root: Path
+    ) -> None:
+        # The mode is set only on the creating arm. A directory already present with the
+        # wrong mode is foreign or damaged state, and setting its mode on the FileExistsError
+        # arm would launder exactly what the guard exists to refuse.
+        _private_dir(recovery_root / str(SYSTEM_ID)).chmod(0o755)
+
+        with pytest.raises(ValueError) as caught:
+            LocalArtifactRoot(recovery_root).open(OWNERSHIP)
+
+        _assert_refusal(caught.value, recovery_root, COMPONENT_MODE)
+        assert stat.S_IMODE((recovery_root / str(SYSTEM_ID)).stat().st_mode) == 0o755
+
     @pytest.mark.parametrize("component", ["system", "run"])
     def test_open_refuses_a_symlinked_component(
         self, recovery_root: Path, tmp_path: Path, component: str

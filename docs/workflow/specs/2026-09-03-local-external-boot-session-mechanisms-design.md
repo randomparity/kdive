@@ -394,15 +394,21 @@ code because the fix is operator configuration, not a check this mechanism could
   an `O_PATH` component walk and holding that descriptor would close it in code; that belongs with
   the row that makes these mechanisms reachable (#2212), because a descriptor held from startup is a
   lifecycle decision this change has no caller to make it for.
-- **Umask.** `_open_or_create_private_child` creates with `os.mkdir(name, 0o700, dir_fd=)`, and the
+- **Umask — now fixed in code (amendment 8), and recorded here because the reasoning still
+  binds.** `_open_or_create_private_child` creates with `os.mkdir(name, 0o700, dir_fd=)`, and the
   kernel applies `mode & ~umask`. Measured: under umasks `0o022`, `0o077` and `0o007` the result is
   `0o700`, but under `0o177` it is `0o600` — the `O_NOFOLLOW` open still succeeds, and only the
   exact-`0o700` comparison refuses. A worker started with `UMask=0177` therefore creates a directory
   that fails the very guard it was created to satisfy, and every later activation for that
   `(system_id, run_id)` hits `FileExistsError` and refuses again, leaving a wrong-mode directory
   under the privileged root that nothing reclaims. The worker umask must not clear an owner bit.
-  Fixing it in code means an explicit `os.chmod` after the `mkdir` inside
-  `_open_or_create_private_child`, which lives in `external_boot.py` — declared unmodified here.
+  The fix is an explicit `os.chmod` after a successful `mkdir` inside
+  `_open_or_create_private_child`. It is set **only on the creating arm, never on the
+  `FileExistsError` arm**: a directory already present with the wrong mode is foreign or damaged
+  state, which is exactly what `_require_private_owned_directory` exists to refuse, so setting its
+  mode there would launder bad state into good while reading like a fix. The operator obligation
+  stays stated regardless, because a worker umask that clears an owner bit is worth knowing about
+  for every other file this worker writes.
 
 Both are stated in `KDIVE_LIBVIRT_RECOVERY_ROOT`'s help and `suggest`, so they reach the operator
 who provisions the root rather than only the reader of this spec.

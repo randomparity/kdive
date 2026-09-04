@@ -57,7 +57,10 @@ Transcribed from `AGENTS.md` and the spec, values included:
 | `tests/providers/local_libvirt/test_composition.py` | modify | the production caller, and `external_boot is None` |
 | `docs/adr/0591-local-external-boot-session-mechanisms-bind-to-the-recovery-root.md` | modify | the `Proposed` → `Accepted` flip, in Task 1's commit (step 0) |
 
-`session.py` is **not** modified. `external_boot.py` is **not** modified — its helpers are imported.
+`session.py` is **not** modified. `external_boot.py` changes in exactly one place, authorized by
+charter amendment 8: `_open_or_create_private_child` sets the mode explicitly after a successful
+`mkdir`, because `mkdir`'s mode argument is umask-masked. Nothing else in that file moves, and its
+other helpers are imported rather than changed.
 
 ## Interfaces
 
@@ -279,6 +282,17 @@ Steps:
    therefore **not claimed as covered** — the spec says so explicitly, and no test may imply
    otherwise by skipping. A `pytest.mark.skipif(os.geteuid() != 0)` test is worse than none here:
    it never runs in CI while reading, in the file, as though the case were covered.
+6a. Write `test_open_creates_0700_under_a_restrictive_umask` and
+   `test_open_still_refuses_a_wide_mode_directory_it_did_not_create` (charter amendment 8).
+   `mkdir`'s mode argument is umask-masked, so under `UMask=0177` the walk creates 0600 and the
+   directory then fails the exact-0700 check it was created to satisfy — permanently, since every
+   later activation for the same pair takes the `FileExistsError` arm. `_open_or_create_private_
+   child` now sets the mode explicitly after a successful `mkdir`.
+
+   The second test is the constraint, not a duplicate: the mode is set **only on the creating
+   arm**. A directory already present with the wrong mode is foreign or damaged state, so setting
+   its mode on the `FileExistsError` arm would launder exactly what the guard exists to refuse.
+   Drive both through the production walk, never by calling `os.mkdir` directly.
 7. Write `test_open_refuses_a_root_that_is_not_a_directory` and
    `test_open_refuses_a_missing_root` → the same fixed `ValueError`, with the same redaction triple
    as step 5. These two are the cases that motivated the wrapping: both are by-path opens, so both
