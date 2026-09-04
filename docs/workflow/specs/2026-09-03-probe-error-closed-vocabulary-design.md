@@ -11,7 +11,7 @@ bounded raw text goes to the operator log and never crosses the function boundar
 renderer changes, because afterwards there is nothing for one to filter.
 
 **ADR-0594 is the record**: the verified leak (both egresses, with the commands that reproduce
-them), the decision, its consequences, and the seven rejected alternatives all live there and are
+them), the decision, its consequences, and the eight rejected alternatives all live there and are
 not repeated here. This spec covers only what the implementation must satisfy that the record does
 not fix: the vocabulary contract, the threat model, and the proof obligations.
 
@@ -54,6 +54,10 @@ The raw text is unreachable from the classified branch. `ty` runs whole-tree und
 so once `probe_error` is typed `ProbeFailure | None` a free-form `str` cannot be assigned to it at
 any call site in `src/` **or** `tests/`.
 
+`probe_error`'s only production reader is `install.py:249-250`. `external_boot.py:1218-1219`
+compares the whole `ReadinessResult` against `ReadinessResult(True, True, None)`, so it discards
+the field rather than reading it — the retype costs no existing consumer anything.
+
 ## Error handling
 
 `_domain_exit_probe` returns values and raises nothing, so this change introduces no re-raise and
@@ -84,12 +88,14 @@ vocabulary itself — four tokens naming the probe condition — which is the di
 exists to make. The boundary controls are unchanged: `safe_error_details` stays a type filter,
 `Redactor` stays a secrets filter, and neither is asked to become a content filter.
 
-**Out of scope, stated rather than left silent.** Other `details` keys on other categories, which
-may carry host-derived text by the same mechanism — this fixes `probe_error` and does not audit the
-corpus. `_libvirt_transport_failure`'s `from exc` chaining, which puts libvirt text in the
-traceback but not in `details` or the message, so it reaches neither egress. `Redactor`'s inability
-to strip host paths, which is a property of a secrets filter rather than a defect of one. The
-remote-libvirt provider's own readiness module, which is separate code with its own probe.
+**Out of scope, stated rather than left silent.** The issue's three exclusions carry unchanged —
+`safe_error_details`' general contract, the `Redactor` implementation, and the remote-libvirt
+provider, whose readiness module is separate code with its own probe. `Redactor`'s inability to
+strip host paths is a property of a secrets filter, not a defect of one. Two threats are also
+excluded: other `details` keys on other categories, which may carry host-derived text by the same
+mechanism (this fixes `probe_error` and does not audit the corpus); and
+`_libvirt_transport_failure`'s `from exc` chaining, which puts libvirt text in the traceback but
+not in `details` or the message, so it reaches neither egress.
 
 ## Proof obligations
 
@@ -104,12 +110,3 @@ Every new test is bite-proved: committed, faulted, observed failing cleanly, rev
 byte-verified by `sha256sum`. Two conditions make a bite evidence rather than noise — the recorded
 failure text must name the behaviour the fault changed, and every test must pass under a no-fault
 control. A test that fails either is defective, not proven.
-
-Three existing tests pin the old free-text values and change with the contract —
-`test_install.py:1141`, `:1686`, `:1892`. Intended breakage; each keeps asserting the same
-behaviour against the new vocabulary.
-
-## Out of scope
-
-Carried unchanged from the issue: `safe_error_details`' general contract, the `Redactor`
-implementation, and the remote-libvirt provider.

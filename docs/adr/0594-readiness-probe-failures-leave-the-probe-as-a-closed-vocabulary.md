@@ -22,12 +22,13 @@ Two renderers carry `details` to an agent, and both are type filters rather than
   (`jobs/handlers/runs/boot.py`).
 
 Measured at `811538fb2` on x86_64 with the project venv, driving the real probe with the ordinary
-daemon-unreachable stderr: the MCP payload renders
-`'/run/user/1000/libvirt/virtqemud-sock'` verbatim, and `Redactor.redact_text` returns that same
-stderr byte for byte — it filters secrets (URL userinfo, secret-named keys, registered values), and
-a host path is not a secret by its rules. So both egresses leak, and the second was not identified
-when #2220 was filed. `BootAttempt.as_data()` (`services/runs/steps.py:286-292`) is fixed-key, so
-`data.boot_readiness` is not a third egress.
+daemon-unreachable stderr: the MCP payload renders the transport socket path verbatim, and
+`Redactor.redact_text` returns that same stderr byte for byte — it filters secrets (URL userinfo,
+secret-named keys, registered values), and a host path is not a secret by its rules. So both
+egresses leak, and the second was not identified when #2220 was filed.
+`BootAttempt.as_data()` (`services/runs/steps.py:286-292`) is fixed-key, so `data.boot_readiness`
+is not a third. `probe_error`'s only production reader is `install.py:249-250`;
+`external_boot.py:1218-1219` compares the whole `ReadinessResult` and discards the field.
 
 `probe_error` also has real value: `virsh domstate timed out after 2s` tells an operator something
 actionable. What this record settles is not whether to keep the signal but where to constrain it.
@@ -53,12 +54,11 @@ secrets filter, because after this there is nothing at either boundary to filter
 
 `VIRSH_MISSING` is deliberately wider than its name suggests. Python maps errno to an `OSError`
 subclass at construction, so `except FileNotFoundError` precedes the `OSError` arm and absorbs
-**every** ENOENT raised by the exec — including an ENOENT on a socket path, which is a transport
-fault rather than a missing binary. That arm keeps the fixed literal it has today as its
-agent-facing meaning, and gains `str(exc)` as its *logged* detail so the operator keeps the errno
-and path. Reordering the arms to separate the two cases is real code in a change whose purpose is
-to shrink what crosses the boundary, and the pre-fix behaviour is identical, so the record states
-the overlap rather than engineering around it.
+**every** ENOENT raised by the exec — including an ENOENT on a socket path, a transport fault
+rather than a missing binary. That arm keeps its agent-facing meaning and gains `str(exc)` as its
+*logged* detail, so the operator keeps the errno and path. The arms are not reordered: that is real
+control-flow change in a change meant to shrink what crosses a boundary, and the pre-fix behaviour
+is identical.
 
 ## Consequences
 

@@ -25,8 +25,11 @@ Decision: [ADR-0594](../../adr/0594-readiness-probe-failures-leave-the-probe-as-
 
 - Branch `feat/probe-error-closed-vocabulary-2220`; `BASE_BRANCH` `main`; base commit `811538fb2`.
 - Guardrails: `just lint`, `just type`, `just test-changed` while iterating; `just ci` as the
-  pre-push gate. Run gates **bare** — no pipe to `tail`/`head`, no trailing `; echo $?` (both
-  replace the recipe's exit status). Capture with `just ci > <file> 2>&1 < /dev/null`.
+  pre-push gate. Run gates **bare** — a pipe or a trailing `; echo $?` replaces the recipe's exit
+  status. Capture with `just ci > <file> 2>&1 < /dev/null`.
+- **`just lint` covers this plan and the spec**: `ruff format` formats fenced Python blocks in
+  Markdown, and `pyproject.toml:66` excludes only `docs/adr`. Run it after editing them, not only
+  after editing code.
 - Ruff line length 100, lint set `E,F,I,UP,B,SIM`; `ty` whole-tree. Run `just format` before
   committing, and accept its PEP 758 rewrite of `except (A, B):` to `except A, B:` if it makes one.
 - Prose rule (project-wide): plain and factual; avoid "critical", "robust", "comprehensive".
@@ -54,9 +57,10 @@ field and needs no change — including `tests/adversarial/test_provider_xml.py:
 
 ## Names this plan borrows, confirmed at base `811538fb2`
 
-- `readiness.py`: `_bounded_probe_error(message: str) -> str` (58); `_DOMSTATE_PROBE_TIMEOUT` (19);
-  `_TERMINAL_DOMSTATES` (20); `_VIRSH` (21); `StrEnum` imported from `enum` (9);
-  `from __future__ import annotations` (3), so forward references resolve.
+- `readiness.py`: `_bounded_probe_error(message: str) -> str` (58); `StrEnum` already imported from
+  `enum` (9); `from __future__ import annotations` (3), so forward references resolve. The
+  constants the unchanged body uses (`_DOMSTATE_PROBE_TIMEOUT`, `_TERMINAL_DOMSTATES`, `_VIRSH`)
+  are at 19-21 and are not touched.
 - `install.py`: **`_boot_failure_details` is a `@staticmethod` of `LocalLibvirtBooter`** (class 170,
   method 266) — *not* of `LocalLibvirtInstall`, a separate composing class at 582 exposing only
   `install`, `boot`, `from_env`. The `...boot.readiness` import block (53-57) already pulls
@@ -84,22 +88,17 @@ construction, so `OSError(2, …)` **is** a `FileNotFoundError` and never reache
 
 One task: `just type` is red between the two edits, so no reviewer could accept half of it.
 
-**Interfaces.** Defines, for Task 2:
+**Interfaces.** Defines, for Task 2 (bodies in Steps 1.3-1.5; the four member values are in the
+spec's vocabulary contract):
 
 ```python
 # readiness.py
-class ProbeFailure(StrEnum):
-    VIRSH_MISSING = "virsh_missing"
-    VIRSH_TIMEOUT = "virsh_timeout"
-    VIRSH_PROBE_FAILED = "virsh_probe_failed"
-    VIRSH_NONZERO_EXIT = "virsh_nonzero_exit"
-
+class ProbeFailure(StrEnum): ...                      # four members, snake_case values
 def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _DomainExitProbe
 class _DomainExitProbe(NamedTuple): exited: bool; error: ProbeFailure | None = None
 class ReadinessResult(NamedTuple): answered: bool; ok: bool; probe_error: ProbeFailure | None = None
 
-# install.py — on LocalLibvirtBooter
-@staticmethod
+# install.py — @staticmethod on LocalLibvirtBooter
 def _boot_failure_details(system_id: UUID, first_probe_error: ProbeFailure | None) -> dict[str, object]
 ```
 
@@ -318,13 +317,14 @@ amended tests pin the behaviour they pinned before.
 ### Step 3.1 — Commit first, then guard the tree
 
 Commit Tasks 1-2 before injecting anything. The harness refuses a dirty tree
-(`test -z "$(git status --porcelain)"`). Copy the three target files to a backup **outside** the
-repo and record `sha256sum` for each. Restore from that copy — **never `git checkout --`**.
+(`test -z "$(git status --porcelain)"`). Copy the **four** modified source and test files to a
+backup **outside** the repo and record `sha256sum` for each. Restore from that copy — **never
+`git checkout --`**.
 
 ### Step 3.2 — One controlled fault per test
 
-Make the smallest edit that should break each test, run only that test, record the outcome **and
-the failing assertion or exception text**:
+Make the smallest edit that should break each test, run only that test, and record the outcome
+**and the failing assertion or exception text**:
 
 | Test | Fault |
 |---|---|
@@ -334,40 +334,35 @@ the failing assertion or exception text**:
 | `virsh_missing` classification | return `VIRSH_PROBE_FAILED` from the `shutil.which is None` arm |
 | operator-log proof | delete the `_log.warning(...)` call from `_probe_failed` |
 
-**The leak fault spans both source files, and it has to.** Restoring only the producer half —
-`_probe_failed` returning `_DomainExitProbe(False, detail)` — makes `probe.error` a plain `str`,
-and `_boot_failure_details`'s `first_probe_error.value` then raises
-`AttributeError: 'str' object has no attribute 'value'` in the test's *arrange* line, before any
-assertion runs. That message names an attribute, not the leak, so this plan's own rule below would
-correctly call it a defective test, and #2220's criterion 4 asks for a clean assertion failure.
+**The leak fault must span both source files.** Restoring only the producer half leaves
+`probe.error` a plain `str`, so `_boot_failure_details`'s `.value` raises `AttributeError` in the
+test's *arrange* line before any assertion runs — a message naming an attribute, not the leak, which
+the rule below correctly calls a defective test. So inject both halves: `_probe_failed` returns
+`_DomainExitProbe(False, detail)` **and** `_boot_failure_details` renders
+`details["probe_error"] = str(first_probe_error)`. The three absence tests then fail on the payload
+assertion with the raw stderr as the actual value — the pre-fix behaviour, and the clean assertion
+failure criterion 4 asks for.
 
-So inject both halves together: `_probe_failed` returns `_DomainExitProbe(False, detail)` **and**
-`_boot_failure_details` renders `details["probe_error"] = str(first_probe_error)` instead of
-`.value`. The three absence tests then fail on the payload assertion with the raw stderr as the
-actual value — the pre-fix behaviour reproduced, and the bite the criterion asks for.
-
-Classify each as exactly one of three, and report which:
-
-- **assertion bite** — pytest `FAILED` with an `AssertionError` from the test body;
-- **exception bite** — pytest `FAILED` with an exception raised from the code under test. This
-  counts; a classifier recognising only assertion shapes reports a false NO BITE.
-- **no bite** — the test passed, or the run produced a collection, import, or fixture error. The
-  latter proves nothing and must be fixed first.
+Classify each result as exactly one of three, and report which: an **assertion bite** (`FAILED` with
+an `AssertionError` from the test body); an **exception bite** (`FAILED` with an exception from the
+code under test — this counts, and a classifier recognising only assertion shapes reports a false
+NO BITE); or **no bite** (passed, or a collection/import/fixture error, which proves nothing and
+must be fixed first).
 
 **The recorded failure text must name the behaviour the fault changed.** A bite whose message is
 about something else — a missing attribute, a wrong class, an unrelated branch — is a defective
-test, not a proof. This is the check that would have caught a test calling a method on the wrong
-class, or aimed at an arm the fault never reaches.
+test. This is the check that catches a test calling a method on the wrong class, or aimed at an arm
+the fault never reaches.
 
 ### Step 3.3 — Prove the gate does not fire spuriously
 
-A fault tests one direction only. With the tree restored and **no fault injected**, run all five
-tests: every one must pass. Any test that fails here is defective and must be fixed before its
-Step 3.2 bite counts for anything — this is a stop condition, not an observation.
+With the tree restored and **no fault injected**, run all five tests: every one must pass. Any test
+failing here is defective and must be fixed before its Step 3.2 bite counts — a stop condition, not
+an observation.
 
 ### Step 3.4 — Restore and verify byte identity
 
-Restore from the backup, then `sha256sum` the three files and `git status --porcelain`. Every
+Restore from the backup, then `sha256sum` the four files and check `git status --porcelain`. Every
 digest must match the pre-injection digest and the status must be empty.
 
 **Acceptance criteria.** Every new test recorded an assertion or exception bite, with the shape
