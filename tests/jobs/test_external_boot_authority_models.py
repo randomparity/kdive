@@ -328,6 +328,7 @@ def test_failure_context_accepts_only_closed_bounded_cmdline_diagnostic(
             "cmdline_mismatch": diagnostic,
         },
         "terminal": True,
+        "recovery_readiness_deadline": "2026-09-04T00:05:00Z",
     }
 
     carrier = ExternalBootAuthorityFailureV1.model_validate(_carrier(result))

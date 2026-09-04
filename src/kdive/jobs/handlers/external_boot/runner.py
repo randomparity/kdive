@@ -345,6 +345,8 @@ def _render_cmdline(value: bytes, redactor: Redactor) -> str:
 
 
 def _recovery_deadline(ports: ExternalBootHandlerPorts, exc: Exception) -> datetime | None:
+    if isinstance(exc, _CommandLineMismatch):
+        return ports.clock() + ports.recovery_readiness_timeout
     if (
         isinstance(exc, CategorizedError)
         and exc.category is ErrorCategory.BOOT_TIMEOUT

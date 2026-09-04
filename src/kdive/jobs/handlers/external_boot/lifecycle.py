@@ -175,7 +175,7 @@ async def _execute(
         _mutation_request(context)
     )
     kernel_observation = None
-    if authority_observation.category != "absent":
+    if authority_observation.category == "target":
         kernel_observation = context.port.observe(_recovery(context), authority_ref(context))
     return authority_observation, kernel_observation
 
@@ -324,7 +324,7 @@ def _handler(
         ) -> ExternalBootAuthoritySuccessV1:
             authority_observation, kernel_observation = observations
             _require_category(context, authority_observation, expected_observation)
-            if expected_observation != "absent":
+            if expected_observation == "target":
                 _require_observed_kernel_matches(context, kernel_observation)
             return build_result(context, authority_observation)
 

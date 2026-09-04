@@ -212,10 +212,17 @@ class _FailureResult(_ResultBase):
     def _cas_failure_shape_is_closed(self) -> _FailureResult:
         reason = self.failure_context.reason
         if reason is None:
+            cmdline_mismatch = self.failure_context.cmdline_mismatch is not None
+            if cmdline_mismatch and self.recovery_readiness_deadline is None:
+                raise ValueError("command-line mismatch requires a recovery deadline")
             if self.recovery_readiness_deadline is not None and not (
-                self.error_category is ErrorCategory.BOOT_TIMEOUT and self.terminal
+                self.terminal
+                and (
+                    self.error_category is ErrorCategory.BOOT_TIMEOUT
+                    or (self.error_category is ErrorCategory.READINESS_FAILURE and cmdline_mismatch)
+                )
             ):
-                raise ValueError("only terminal boot timeout carries a recovery deadline")
+                raise ValueError("only a terminal recovery failure carries a recovery deadline")
             return self
         if self.recovery_readiness_deadline is not None:
             raise ValueError("classified CAS failure cannot carry a recovery deadline")

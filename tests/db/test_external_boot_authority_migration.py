@@ -2318,6 +2318,7 @@ def test_cmdline_failure_diagnostic_is_closed_and_bounded(
         "error_category": "readiness_failure",
         "failure_context": {"phase": "commit", "cmdline_mismatch": diagnostic},
         "terminal": True,
+        "recovery_readiness_deadline": "2026-09-04T00:05:00Z",
     }
     with (
         psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
@@ -2332,6 +2333,11 @@ def test_cmdline_failure_diagnostic_commits_and_legacy_context_remains_valid(
 ) -> None:
     with psycopg.connect(migrated_url) as conn:
         case = _seed_case(conn, operation="fail", worker_suffix="y")
+        conn.execute(
+            "UPDATE external_boot_activations SET state='activating', "
+            "activation_readiness_deadline='2026-09-04T00:01:00Z' WHERE id=%s",
+            (case.activation_id,),
+        )
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         authority = _allocate(worker, case)
     with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
@@ -2356,6 +2362,7 @@ def test_cmdline_failure_diagnostic_commits_and_legacy_context_remains_valid(
                 "error_category": "readiness_failure",
                 "failure_context": context,
                 "terminal": True,
+                "recovery_readiness_deadline": "2026-09-04T00:05:00Z",
             },
         ) == ("applied", "failed")
     with psycopg.connect(migrated_url) as conn:

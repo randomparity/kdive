@@ -225,7 +225,7 @@ def test_post_provider_interruption_replays_without_a_second_mutation(
             expected_mutations = 0 if operation == "release" else 1
             assert executor.mutations == expected_mutations
             assert len(executor.observations) == 1
-            readiness_reads = [] if operation == "cleanup" else ["observe", "observe"]
+            readiness_reads = ["observe", "observe"] if operation == "activate" else []
             assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
 
             committed = await queue.complete_external_boot(
@@ -271,7 +271,11 @@ async def _run_operation(
 ) -> ExternalBootAuthoritySuccessV1:
     ports = _ports(case, case.vehicle, dsns)
     if registry is not None:
-        ports = replace(ports, secret_registry=registry)
+        ports = replace(
+            ports,
+            secret_registry=registry,
+            clock=lambda: datetime(2026, 9, 4, tzinfo=UTC),
+        )
     operations = build_operations(ports)
     handler = operations.get(operation)
     assert handler is not None
@@ -330,7 +334,7 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         result = await _run_operation(authority_role_dsns, seed, case, operation)
 
         # 1. the §7 port call, against the row's recovery point rather than the test's object
-        readiness_reads = [] if operation in {"cleanup", "teardown"} else ["observe"]
+        readiness_reads = ["observe"] if operation == "activate" else []
         assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
         assert case.vehicle.port.recoveries[0] == persisted
 
@@ -568,6 +572,7 @@ def test_cmdline_failure_redacts_before_authority_persistence(
             "error_category": "readiness_failure",
             "failure_context": context,
             "terminal": True,
+            "recovery_readiness_deadline": "2026-09-04T00:05:00Z",
         }
         assert _authority_binding_matches(
             ExternalBootAuthorityMarkerV1.model_validate(case.marker), carrier
@@ -593,6 +598,35 @@ def test_cmdline_failure_redacts_before_authority_persistence(
             seed, "SELECT state, failure_context FROM jobs WHERE id = %s", (case.job_id,)
         )
         assert row == {"state": "failed", "failure_context": context}
+        activation = await _one(
+            seed,
+            "SELECT state, current_attempt_id FROM external_boot_activations WHERE id = %s",
+            (case.vehicle.activation_id,),
+        )
+        assert activation == {"state": "recovering", "current_attempt_id": carrier.authority_id}
+        attempt = await _one(
+            seed,
+            "SELECT count(*) AS count, min(state) AS state, "
+            "min(recovery_readiness_deadline) AS deadline "
+            "FROM external_boot_recovery_attempts WHERE activation_id = %s",
+            (case.vehicle.activation_id,),
+        )
+        assert attempt == {
+            "count": 1,
+            "state": "recovering",
+            "deadline": datetime(2026, 9, 4, 0, 5, tzinfo=UTC),
+        }
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            await queue.fail_external_boot(
+                worker, _job(case), carrier, incarnation_credential=SecretStr(case.credential)
+            )
+        repeated = await _one(
+            seed,
+            "SELECT count(*) AS count FROM external_boot_recovery_attempts "
+            "WHERE activation_id = %s",
+            (case.vehicle.activation_id,),
+        )
+        assert repeated["count"] == 1
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
 

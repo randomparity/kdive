@@ -115,3 +115,87 @@ BEGIN
     EXECUTE v_definition;
 END
 $$;
+
+-- A command-line mismatch is activation-readiness failure, not a boot timeout, but it enters the
+-- same durable recovery attempt with its own bounded diagnostic preserved above.
+DO $$
+DECLARE
+    v_function constant regprocedure :=
+        'public.commit_external_boot_authority_result(bytea,uuid,integer,uuid,bigint,uuid,uuid,uuid,text,text,text,text,text,text,bigint,text,text,jsonb)'::regprocedure;
+    v_definition text := pg_get_functiondef(v_function);
+    v_old text;
+    v_new text;
+BEGIN
+    v_old := $old$           OR (
+               p_result ->> 'error_category' = 'boot_timeout'
+               AND (p_result ->> 'terminal')::boolean
+               AND (
+                   NOT (p_result ? 'recovery_readiness_deadline')
+                   OR jsonb_typeof(p_result -> 'recovery_readiness_deadline')
+                      IS DISTINCT FROM 'string'
+               )
+           )
+           OR (
+               NOT (p_result ->> 'error_category' = 'boot_timeout'
+                   AND (p_result ->> 'terminal')::boolean)
+               AND p_result ? 'recovery_readiness_deadline'
+           )
+           OR NOT (p_result ? 'failure_context')$old$;
+    v_new := $new$           OR (
+               (
+                   p_result ->> 'error_category' = 'boot_timeout'
+                   OR (
+                       p_result ->> 'error_category' = 'readiness_failure'
+                       AND p_result #>> '{failure_context,cmdline_mismatch,schema}'
+                           = 'external-boot-cmdline-mismatch-v1'
+                   )
+               )
+               AND (p_result ->> 'terminal')::boolean
+               AND (
+                   NOT (p_result ? 'recovery_readiness_deadline')
+                   OR jsonb_typeof(p_result -> 'recovery_readiness_deadline')
+                      IS DISTINCT FROM 'string'
+               )
+           )
+           OR (
+               NOT (
+                   (
+                       p_result ->> 'error_category' = 'boot_timeout'
+                       OR (
+                           p_result ->> 'error_category' = 'readiness_failure'
+                           AND p_result #>> '{failure_context,cmdline_mismatch,schema}'
+                               = 'external-boot-cmdline-mismatch-v1'
+                       )
+                   )
+                   AND (p_result ->> 'terminal')::boolean
+               )
+               AND p_result ? 'recovery_readiness_deadline'
+           )
+           OR NOT (p_result ? 'failure_context')$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION
+            'external-boot command-line recovery deadline migration has an unexpected source shape';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$        IF p_purpose = 'activate'
+           AND p_result ->> 'error_category' = 'boot_timeout'
+           AND (p_result ->> 'terminal')::boolean THEN$old$;
+    v_new := $new$        IF p_purpose = 'activate'
+           AND (
+               p_result ->> 'error_category' = 'boot_timeout'
+               OR (
+                   p_result ->> 'error_category' = 'readiness_failure'
+                   AND p_result #>> '{failure_context,cmdline_mismatch,schema}'
+                       = 'external-boot-cmdline-mismatch-v1'
+               )
+           )
+           AND (p_result ->> 'terminal')::boolean THEN$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION
+            'external-boot command-line recovery transition migration has an unexpected source shape';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+    EXECUTE v_definition;
+END
+$$;

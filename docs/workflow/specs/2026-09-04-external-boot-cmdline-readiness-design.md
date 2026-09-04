@@ -38,8 +38,10 @@ observer rather than inventing one.
 
 The provider's durable recovery definition already holds the plan-derived target XML or explicit
 expected command line, tied to the recovery point's plan identity. Each provider returns those
-expected bytes beside the live bytes. After `activate` or `recover`, core compares the live identity
-with `materialization.kernel_observation` and compares `cmdline` with `expected_cmdline`. Providers
+expected bytes beside the live bytes. After `activate`, core compares the live identity with
+`materialization.kernel_observation` and compares `cmdline` with `expected_cmdline`. Recovery,
+conflict resolution, and release retain ADR-0595's source-receipt criteria and do not require a
+running target. Providers
 validate that their expected bytes come from the exact recovery definition before returning them;
 the port is the trusted boundary through which core already receives live kernel identity.
 
