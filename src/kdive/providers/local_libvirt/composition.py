@@ -45,7 +45,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import _real_readiness
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     Connect,
@@ -192,11 +191,11 @@ def build_external_boot_session_factory(
     pin_lease: PinOperationLease,
     open_artifact_root: OpenArtifactRoot,
     open_guest: OpenGuest,
-    readiness: ReadinessProbe,
-    # Widened to `| None` and deliberately left REQUIRED, with no default. The factory's own
-    # `or _unconfigured_observation` fallback selects the fail-closed default. Giving this a
-    # default would make every mechanism omittable, so a caller that forgot `readiness` or
+    # Both widened to `| None` and deliberately left REQUIRED, with no default. The factory's own
+    # `or _unconfigured_*` fallbacks then select the fail-closed defaults. Giving either a
+    # default would make every mechanism omittable, so a caller that forgot `open_guest` or
     # `cleanup_payloads` would get a factory that looks built and fails only mid-operation.
+    readiness: ReadinessProbe | None,
     observe_running: RunningObserver | None,
     cleanup_payloads: CleanupPayloads,
 ) -> LocalExternalBootSessionFactory:
@@ -239,10 +238,21 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
         pin_lease=LocalOperationLane().pin,
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=open_libguestfs_guest,
-        readiness=_real_readiness,
-        # Local domains render no qemu-guest-agent channel, so there is no host-reachable read
-        # of a running guest. Passed explicitly so the omission is visible at the call site;
-        # the factory keeps its fail-closed `_unconfigured_observation`. Owner #2212.
+        # Neither probe is bound, and both omissions are explicit at the call site so the
+        # factory's fail-closed defaults are selected on purpose rather than by oversight.
+        #
+        # `readiness` (amendment 7): `_real_readiness` reads a console log whose only
+        # truncation happens in `LocalLibvirtInstall`'s prepare, and `_ConcreteSession.start()`
+        # truncates nothing. On the `prior_power == "running"` arm that reaches it, the source
+        # boot's `kdive-ready` marker is still in the file, and `classify_console` scans only
+        # the bytes *before* the marker — so a target-boot panic is invisible and the gate
+        # reports success. A correct probe must anchor its window at `start()`, which is in
+        # `session.py`. Owner #2212, which cannot ship a live port without one because
+        # `_unconfigured_readiness` raises on first call.
+        #
+        # `observe_running` (amendment 2): local domains render no qemu-guest-agent channel,
+        # so there is no host-reachable read of a running guest. Owner #2212.
+        readiness=None,
         observe_running=None,
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
     )

@@ -6,6 +6,7 @@ import inspect
 import re
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
@@ -22,7 +23,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import _real_readiness
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     LocalExternalBootSessionFactory,
@@ -32,6 +32,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ReadinessProbe,
     RunningObserver,
     _unconfigured_observation,
+    _unconfigured_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     open_libguestfs_guest,
@@ -399,22 +400,43 @@ def test_mechanisms_share_one_recovery_root(seam: Path) -> None:
     assert mechanisms.factory._open_artifact_root.__self__._root is mechanisms.recovery_root  # ty: ignore[unresolved-attribute]
 
 
-def test_production_builder_binds_readiness_and_open_guest(seam: Path) -> None:
-    # By identity. Without this, dropping either argument leaves the class falling back to
-    # `_unconfigured_readiness` and nothing goes red.
+def test_production_builder_binds_open_guest(seam: Path) -> None:
+    # By identity. Without this, dropping the argument leaves the class falling back to a
+    # fail-closed default and nothing goes red.
     factory = composition.build_external_boot_session_mechanisms().factory
 
-    assert factory._readiness is _real_readiness
     assert factory._open_guest is open_libguestfs_guest
 
 
-def test_production_builder_leaves_observe_running_unconfigured(seam: Path) -> None:
-    # The deferral's guard: it fails the moment someone binds an observer without doing the
-    # domain-XML work (#2212). The message this default raises is asserted at the session
-    # level in test_session_mechanisms.py; here the claim is that the builder selects it.
-    factory = composition.build_external_boot_session_mechanisms().factory
+@pytest.mark.parametrize(
+    ("mechanism", "default", "message"),
+    [
+        ("_readiness", _unconfigured_readiness, "local external-boot readiness is not configured"),
+        (
+            "_observe_running",
+            _unconfigured_observation,
+            "local external-boot running observation is not configured",
+        ),
+    ],
+)
+def test_production_builder_leaves_the_probes_unconfigured(
+    seam: Path, mechanism: str, default: object, message: str
+) -> None:
+    """Both deferrals' guard: identity, and the raise actually executed.
 
-    assert factory._observe_running is _unconfigured_observation
+    Identity alone would pass against a binding that returns something harmless. Amendment 7
+    requires an amendment that removes a binding to leave behind a test that fails if the
+    binding silently returns, so the bound callable is invoked here rather than only compared.
+
+    `readiness` is unbound by amendment 7 (`_real_readiness` reads the previous boot's console);
+    `observe_running` by amendment 2 (no host-reachable qemu-guest-agent channel on local).
+    """
+    factory = composition.build_external_boot_session_mechanisms().factory
+    bound = getattr(factory, mechanism)
+
+    assert bound is default
+    with pytest.raises(RuntimeError, match=message):
+        bound(UUID("11111111-1111-1111-1111-111111111111"))
 
 
 def test_mechanisms_builder_does_not_advertise_external_boot(
