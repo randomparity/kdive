@@ -10,11 +10,9 @@ def _sql() -> str:
     return migration.sql
 
 
-def test_0128_is_latest_migration() -> None:
-    assert (
-        migrate.discover_migrations()[-1].version,
-        migrate.discover_migrations()[-1].filename,
-    ) == ("0128", "0128_external_boot_reentry_failures.sql")
+def test_0128_is_discovered_at_expected_version() -> None:
+    migration = next(item for item in migrate.discover_migrations() if item.version == "0128")
+    assert migration.filename == "0128_external_boot_reentry_failures.sql"
 
 
 def test_0128_preserves_commit_signature_and_worker_privilege() -> None:
