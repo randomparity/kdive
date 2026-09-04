@@ -31,14 +31,16 @@ from kdive.jobs.handlers.external_boot.lifecycle import ACTIVATION_READINESS_WIN
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
+    ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
     _ActivateResult,
+    _FailureResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
-from kdive.providers.ports.external_boot import RecoveryPoint
+from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -267,6 +269,56 @@ def _other(field: str, result: ExternalBootAuthorityResultV1) -> Any:
     if field == "operation_identity":
         return f"not-{result.operation_identity}"
     return uuid4()
+
+
+class _DisagreeingObserver:
+    """Delegates everything but returns a kernel observation the materialization does not record."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls = inner.calls
+        self.recoveries = inner.recoveries
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def observe(self, recovery: Any, authority: Any) -> RunningKernelObservation:
+        self.calls.append("observe")
+        self.recoveries.append(recovery)
+        real = self._inner._inner.observe(recovery, authority)
+        return real.model_copy(update={"release": "6.9.0-imposter"})
+
+
+@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict", "release"])
+def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+) -> None:
+    """The threat model's control for the provider-call boundary, asserted rather than described.
+
+    ``observe``'s return is not consumed by the evidence — ``composite_state`` is the
+    acknowledgement's digest. Its whole contribution is this post-mutation liveness precondition:
+    the running kernel must be the one the activation's persisted
+    ``materialization.kernel_observation`` records, and terminal evidence must not be emitted when
+    it is not. ``cleanup`` and ``teardown`` have no such control because their port call is
+    ``cleanup`` and ``ExternalBootPorts`` offers nothing to observe a deletion with, so they are
+    not parametrized here.
+    """
+    spec = CASES[operation]
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        case.vehicle.port.__dict__["observe"] = _DisagreeingObserver(case.vehicle.port).observe
+
+        with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
+            await _run_operation(authority_role_dsns, seed, case, operation)
+
+        payload = excinfo.value.result.result
+        assert isinstance(payload, _FailureResult)
+        assert payload.failure_context.phase == "commit"
+        # The mutation happened; what is refused is *recording* it as a good terminal state.
+        row = await _activation_row(seed, case.vehicle.activation_id)
+        assert row["state"] == spec["activation_state"]
+
+    _drive(migrated_url, authority_role_dsns, operation, body)
 
 
 def test_a_terminal_failure_result_leaves_the_job_failed(
