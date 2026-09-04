@@ -21,13 +21,14 @@ class FaultInjectExternalBoot:
 
     def __init__(self) -> None:
         self._observations: dict[str, RunningKernelObservation] = {}
+        self._cmdlines: dict[str, bytes] = {}
 
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
     ) -> ExternalBootMaterialization:
         del authority
         suffix = plan.identity.removeprefix("sha256:")
-        return ExternalBootMaterialization(
+        materialization = ExternalBootMaterialization(
             architecture=plan.architecture,
             provider_kind="fault-inject",
             ownership={
@@ -51,6 +52,8 @@ class FaultInjectExternalBoot:
                 initrd=OpaqueProviderRef(ref=f"initrd/{suffix}") if plan.initrd else None,
             ),
         )
+        self._cmdlines[materialization.identity] = plan.cmdline.encode()
+        return materialization
 
     def prepare(
         self,
@@ -81,10 +84,11 @@ class FaultInjectExternalBoot:
                 modules=PresentComponentState(manifest=materialization.installed_module_tree),
             ),
         )
+        cmdline = self._cmdlines[materialization.identity]
         self._observations[recovery_ref.ref] = RunningKernelObservation(
             identity=materialization.kernel_observation,
-            cmdline=b"",
-            expected_cmdline=b"",
+            cmdline=cmdline,
+            expected_cmdline=cmdline,
         )
         return point
 
@@ -103,3 +107,4 @@ class FaultInjectExternalBoot:
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         del authority
         self._observations.pop(recovery.recovery_ref.ref, None)
+        self._cmdlines.pop(recovery.materialization_identity, None)
