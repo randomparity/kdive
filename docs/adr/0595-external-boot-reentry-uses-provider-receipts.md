@@ -4,6 +4,11 @@
 
 Accepted (2026-09-04)
 
+This decision supersedes ADR-0592's cleanup-retry and tombstone reconstruction conclusion:
+the request-bound cleanup tombstone now carries the authenticated recovery point needed to
+reconstruct positive evidence after an authority-process restart. ADR-0592's anchored journal
+proof and finalization rules remain in force.
+
 ## Context
 
 ADR-0593 assigns materialize and prepare to server preparation and the remaining lifecycle
