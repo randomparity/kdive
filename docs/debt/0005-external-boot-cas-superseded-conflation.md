@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved (2026-09-04)
+> **Resolved by PR #2229** (2026-09-04)
 
 ## Concern
 

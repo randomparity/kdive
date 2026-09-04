@@ -56,7 +56,7 @@ one component of activation readiness; it is not the recovery or cleanup receipt
 - ADR-0593's prepared-before-admission ownership remains unchanged. This decision supplies its
   missing restart contract rather than moving materialize or prepare into worker jobs.
 
-## Considered and rejected
+## Considered & rejected
 
 - **Repeat every provider method and require it to be internally idempotent.** This may prevent a
   duplicate effect but cannot satisfy at-most-once mutation or distinguish a completed operation
