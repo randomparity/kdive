@@ -1157,6 +1157,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Weight the cleanup guarantees as the audit found them
 - Fix both pre-provider refusal arms, not just the new one
 - Withdraw N4a, which the journal's own ordering forbids
+- Spec and plan for a closed probe-failure vocabulary
+- Carry the decision record in the spec, cut for proportionality
+- Fix review findings; record the decision as ADR-0594
+- Fix iteration-2 review findings
+- Cut the design set to 3.00x and fix a stale file count
+- Disposition the five confirming-pass notes
+- Discharge the scope audit's CLI-clause checkpoint
+- Record that the probe_error fix is forward-only
+- Apply the security pass's four record corrections
 
 ### Fixed
 
@@ -1892,6 +1901,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report an unresolvable recovery-root owner
 - Finalize only a tombstone the same commit published
 - Correct the provenance claims and pin the real outcome
+- Classify probe failures as a closed vocabulary
 
 ### Security
 
