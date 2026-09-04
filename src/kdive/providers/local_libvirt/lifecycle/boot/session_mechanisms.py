@@ -1,9 +1,17 @@
 """Host mechanisms for the local external-boot session factory (ADR-0591).
 
 ADR-0587 defined `LocalExternalBootSessionFactory` and its six injected host mechanisms and
-deferred binding them. This module supplies five of the six. `RunningObserver` is deliberately
-absent: local domains render no qemu-guest-agent channel, so there is no host-reachable read of a
-running guest, and the factory keeps its fail-closed `_unconfigured_observation` default (#2212).
+deferred binding them. This module supplies **four** of the six, and two are deliberately absent:
+
+- `RunningObserver` (amendment 2) — local domains render no qemu-guest-agent channel, so there is
+  no host-reachable read of a running guest.
+- `ReadinessProbe` (amendment 7) — `_real_readiness` reads a console log that only
+  `LocalLibvirtInstall`'s prepare truncates, and `_ConcreteSession.start()` truncates nothing, so
+  on the arm that reaches it the previous boot's `kdive-ready` marker makes the gate pass for a
+  panicked target. A correct probe must anchor its window at `start()`, which is in `session.py`.
+
+The factory keeps its fail-closed `_unconfigured_observation` and `_unconfigured_readiness`
+defaults for both; each raises at first call, so #2212 cannot ship a live port without them.
 """
 
 from __future__ import annotations
@@ -58,9 +66,14 @@ class LocalOperationLease:
     """The provider-local nominal capability ADR-0587 requires.
 
     Nominal rather than structural on purpose: the lane accepts only this concrete type, so an
-    arbitrary object carrying `system_id` and `binding` attributes is not a lease. Issuance stays
-    with the serialization-lane context (#2212); this type carries no way to mint itself behind a
-    lock it does not hold.
+    arbitrary object carrying `system_id` and `binding` attributes is not a lease.
+
+    That is the whole of the claim. This is a public, unfrozen dataclass, so any code in the
+    process can construct one — the nominal type bounds *what shape* the lane accepts, never *who
+    may build it*. What stops a forged identity reaching host resources is the factory's
+    `binding_matches_expected` comparison against the caller's `ExpectedOperationOwnership`, which
+    `test_session.py` already covers. Issuing a lease behind the per-System lane lock is #2212's
+    (ADR-0587), and the lane deliberately exposes no method for it.
     """
 
     system_id: UUID
@@ -181,8 +194,8 @@ class LocalPayloadCleanup:
         """Remove the activation's payloads and its published archive, validating first.
 
         **Every check runs before the first unlink.** Deleting the payloads and only then
-        refusing on the recovery directory strands the activation: `_LocalSessionExternalBootIO
-        .cleanup` never reaches `publish_tombstone`, `cleanup_complete` stays `False`, and every
+        refusing on the recovery directory strands the activation:
+        `_RealLocalExternalBootOperation.cleanup` never reaches `publish_tombstone`, so every
         retry re-raises the same refusal with the payloads it would have needed already gone —
         and if the directory was a symlink an attacker planted, the payloads are destroyed while
         the archive `finalize_tombstone` blocks on is untouched. Nothing required that ordering.

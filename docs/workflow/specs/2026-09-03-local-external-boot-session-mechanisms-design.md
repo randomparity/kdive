@@ -25,7 +25,8 @@ ADR-0584's advertisement precondition; the authenticated authority boundary is t
 
 ## What is built
 
-Five of the six mechanism aliases gain implementations. The sixth does not, deliberately.
+Four of the six mechanism aliases gain implementations. Two do not, deliberately —
+`RunningObserver` (amendment 2) and `ReadinessProbe` (amendment 7).
 
 | alias | implementation | source of configuration |
 | --- | --- | --- |
@@ -67,8 +68,7 @@ it does not retrofit already-provisioned domains.
 Four public classes — `LocalOperationLease`, `LocalOperationLane`, `LocalArtifactRoot`,
 `LocalPayloadCleanup` — plus one private pin and one module-level function
 (`open_libguestfs_guest`), all in `local_libvirt/lifecycle/boot/session_mechanisms.py`, and one new
-builder in `composition.py` returning a `LocalExternalBootMechanisms`. `_real_readiness` is
-imported and passed through, not redefined here.
+builder in `composition.py` returning a `LocalExternalBootMechanisms`.
 
 The mechanisms live in a **new module**, not in `session.py`. `session.py` is already 1301 lines and
 owns the session's own machinery; the mechanisms are its injected collaborators, resolve
@@ -84,7 +84,6 @@ composition.build_external_boot_session_mechanisms()   # new production caller
   ├── LocalPayloadCleanup(recovery_root)    -> .cleanup : CleanupPayloads
   ├── LocalOperationLane()                  -> .pin     : PinOperationLease
   ├── open_libguestfs_guest                              : OpenGuest
-  └── _real_readiness                        (reused)    : ReadinessProbe
         │
         └── build_external_boot_session_factory(...)  # existing, unchanged signature
 ```
@@ -515,6 +514,7 @@ message, re-raised `from None` so no chained `OSError` re-attaches `.filename` o
 Descriptor cleanup runs on every failure path; a mechanism that fails partway closes what it opened
 before propagating.
 
-It is explicitly **not** a claim about readiness. `_real_readiness` is passed through unchanged and
-still returns raw libvirt stderr, including host paths, in `probe_error` — for both its callers.
-That exposure is #2220's, and this design neither fixes it nor pretends to.
+It is explicitly **not** a claim about readiness. `_real_readiness` is not bound by this change at
+all (amendment 7), and it still returns raw libvirt stderr, including host paths, in `probe_error`
+for the caller it does have. That exposure is #2220's, and this design neither fixes it nor
+pretends to.

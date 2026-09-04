@@ -175,10 +175,12 @@ class TestOperationLane:
         # satisfy the equality above while losing the identity the lease actually issued.
         assert pinned.ownership.binding is lease.binding
 
-    def test_lane_cannot_mint_its_own_lease(self) -> None:
-        # ADR-0587 assigns lease issuance to the serialization-lane context (#2212). A lane
-        # that could issue one would be the synthetic identity the rejected #2126 attempt
-        # reached for, so the absence of an issuing method is part of the contract.
+    def test_lane_exposes_no_issuance_method(self) -> None:
+        # ADR-0587 assigns lease issuance to the serialization-lane context (#2212), and the
+        # lane exposes no method for it. Named for what it checks: this does NOT show a lease
+        # cannot be minted -- LocalOperationLease is a public dataclass any code can construct.
+        # What stops a forged identity reaching host resources is the factory's
+        # binding_matches_expected check, covered by test_session.py.
         assert not hasattr(LocalOperationLane, "issue")
 
     def test_a_second_pin_keeps_the_lease_held(self) -> None:
@@ -341,15 +343,25 @@ class TestPayloadCleanup:
         assert sorted(os.listdir(artifacts)) == ["keep-me"]
 
     def test_cleanup_is_idempotent(self, recovery_root: Path, tmp_path: Path) -> None:
+        """Both removals converge on a second run, not just the descriptor-scoped one.
+
+        The recovery directory must exist here. Against the bare `recovery_root` fixture
+        `_open_recovery_directory` returns `None` on both runs, so the archive branch is never
+        entered and the test proves idempotence of only half the mechanism -- verified: with
+        the archive unlink's `suppress(FileNotFoundError)` removed, that version stayed green.
+        """
         artifacts = _private_dir(tmp_path / "artifacts")
         for name in (*PAYLOAD_NAMES, "keep-me"):
             (artifacts / name).write_bytes(b"payload")
+        recovery = _archive_directory(recovery_root)
+        (recovery / "foreign.json").write_bytes(b"{}")
 
         _cleanup(recovery_root, artifacts)
-        after_first = sorted(os.listdir(artifacts))
+        after_first = sorted(os.listdir(artifacts)), sorted(os.listdir(recovery))
         _cleanup(recovery_root, artifacts)
 
-        assert sorted(os.listdir(artifacts)) == after_first
+        assert (sorted(os.listdir(artifacts)), sorted(os.listdir(recovery))) == after_first
+        assert after_first == (["keep-me"], ["foreign.json"])
 
     def test_cleanup_leaves_foreign_files_in_the_recovery_directory(
         self, recovery_root: Path, tmp_path: Path

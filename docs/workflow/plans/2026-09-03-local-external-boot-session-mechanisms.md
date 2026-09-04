@@ -17,7 +17,7 @@ Design: [spec](../specs/2026-09-03-local-external-boot-session-mechanisms-design
 [ADR-0591](../../adr/0591-local-external-boot-session-mechanisms-bind-to-the-recovery-root.md).
 
 Expected implementation size: 700–950 changed lines (L) — derived from the file map and task list
-below: ~260 lines of new production module (five mechanisms, the canonical-UUID guard, and the
+below: ~260 lines of new production module (four mechanisms, the canonical-UUID guard, and the
 `ValueError`-wrapping walks for both the artifact root and cleanup's own root open), ~45 lines in
 `composition.py` (the builder plus the `LocalExternalBootMechanisms` result), ~520 lines of new
 tests across Tasks 1–5, and ~65 lines added to `test_composition.py`. Revised three times: 600–850
@@ -51,7 +51,7 @@ Transcribed from `AGENTS.md` and the spec, values included:
 
 | file | disposition | answerable for |
 | --- | --- | --- |
-| `src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py` | **new** | the five mechanisms and their confinement |
+| `src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py` | **new** | the four mechanisms and their confinement |
 | `src/kdive/providers/local_libvirt/composition.py` | modify | resolving settings and assembling the mechanisms |
 | `tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py` | **new** | per-mechanism behaviour, confinement, bite proofs |
 | `tests/providers/local_libvirt/test_composition.py` | modify | the production caller, and `external_boot is None` |
@@ -176,8 +176,11 @@ Steps, one action each:
 7. Write `test_pin_returns_the_exact_lease_identity`: the returned
    `PinnedOperationOwnership.ownership` equals `OperationOwnership(lease.system_id, lease.binding)`
    **by value**, and `ownership.binding is lease.binding`. Implement; re-run.
-8. Write `test_lane_cannot_mint_its_own_lease`: `not hasattr(LocalOperationLane, "issue")`.
-   This guards ADR-0591's refusal to let a mechanism mint its own lease. Re-run.
+8. Write `test_lane_exposes_no_issuance_method`: `not hasattr(LocalOperationLane, "issue")`.
+   ADR-0587 assigns issuance to the serialization-lane context (#2212), and the lane exposes no
+   method for it. Named for what it checks: it does **not** show a lease cannot be minted —
+   `LocalOperationLease` is a public dataclass any code can construct. What stops a forged
+   identity is the factory's `binding_matches_expected` check, covered in `test_session.py`.
 8a. Write `test_a_second_pin_keeps_the_lease_held`: closing one pin must not release a lease a
    second pin still holds, so the counter — not the first close — decides.
 9. `just lint` then `just type`, both bare. Expect `All checks passed!` and a clean `ty` run.

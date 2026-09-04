@@ -215,9 +215,10 @@ record relies on when it argues the null option is unacceptable, and when it rou
 to #2212 on the ground that neither can manifest while `ProviderRuntime.external_boot` is `None`.
 Stating it here keeps the record from claiming, by omission, more liveness than it delivers.
 
-Five of the six mechanisms gain production implementations and the sixth does not, so a factory
-built by this change still raises from `_unconfigured_observation` the first time anything asks
-it to observe a running kernel. That is the designed behaviour of a partially wired factory, and
+Four of the six mechanisms gain production implementations and two do not, so a factory built by
+this change raises from `_unconfigured_readiness` the first time anything asks whether the target
+booted, and from `_unconfigured_observation` the first time anything asks it to observe a running
+kernel. That is the designed behaviour of a partially wired factory, and
 it is visible rather than silent. It also means the local external-boot activation path cannot
 complete until the domain-XML channel work lands, which is a prerequisite worth being blocked by
 explicitly rather than discovering at first live run.
