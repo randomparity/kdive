@@ -42,7 +42,8 @@ deadline is not abandoned work. A queued job, or a running job whose lease is li
 budget allows the ordinary claim path to reclaim it, suppresses another enqueue.
 
 The source tuple comes from the activation's newest validated authority-marked job: provider kind,
-authority instance, authorizing principal/project, and the prior job identifier. The lane passes
+source authority instance, authorizing principal/project, and the prior job identifier. The lane
+passes
 that tuple through `build_external_boot_payload`, so provider binding and activation ownership are
 checked by the same helper used by live admission. Missing or malformed source evidence is a
 candidate-local failure: it is logged without raw payload data, left unchanged, and retried next
@@ -71,14 +72,20 @@ Each lane is a separate `_REPAIR_CATALOG` entry and has a scalar `ReconcileRepor
 `_enqueued`. The existing `repair_counts` mirror and `ALL_REPAIR_KINDS` derive from the catalog, so
 telemetry remains bounded and total. `ReconcileConfig` gains only the provider resolver needed by
 `build_external_boot_payload`; the authority instance is read from the already-required process
-setting when production composition builds the configuration.
+setting when production composition builds the configuration. The successor marker always uses
+that current configured authority instance so the live authority process can acknowledge it. A
+differing source authority instance is accepted as restart provenance only and is not copied into
+the successor marker. The remaining source identity must validate; otherwise the candidate fails
+locally and no job is enqueued.
 
 The catalog runner continues to isolate a raising lane on its own pooled connection. Candidate
 errors within a lane are isolated individually.
 
 ## Allocation release
 
-ADR-0596 adds `ALLOCATION_RELEASE` to the matrix. The release service keeps the existing terminal
+ADR-0596 adds `ALLOCATION_RELEASE` to the matrix. Both release implementations share one locked
+external-boot precondition: the project release path and the reconciler's orphaned-active
+`reclaim_under_lock` path. The release service keeps the existing terminal
 fast paths, then under `PROJECT -> ALLOCATION` discovers every System for a releasable Allocation,
 takes their System locks in stable UUID order, and checks the matrix for each. Any restricting
 activation returns `conflict` without a transition, accounting credit, or audit transition. This
@@ -100,8 +107,12 @@ Tests cover:
 7. import-closure exclusion of local-libvirt, remote-libvirt, and `libvirt`;
 8. the reservation foreign key preventing a row without an activation;
 9. allocation release denied under the System lock for every restricting activation, then admitted
-   after cleanup; and
-10. unchanged catalog cardinality shape plus repository lint, type, record, and test guardrails.
+   after cleanup;
+10. the orphaned-active reaper likewise retaining an Allocation whose terminal historical System
+    has incomplete external-boot cleanup;
+11. a source from authority instance A producing one successor for current instance B, which B
+    acknowledges and converges; and
+12. unchanged catalog cardinality shape plus repository lint, type, record, and test guardrails.
 
 ## Security model
 
@@ -113,8 +124,9 @@ authority instance.
 
 An authenticated tenant can influence the original job only through existing MCP validation and
 authorization. The reconciler does not act on arbitrary unmarked jobs, cannot widen roles, and
-cannot write lifecycle truth. Stable deduplication bounds repeated passes to one live repair job per
-candidate/source pair. Provider mutation remains behind worker incarnation credentials and the
+cannot write lifecycle truth. It uses only the configured current authority instance, never a
+payload-controlled replacement. Stable deduplication bounds repeated passes to one live repair job
+per candidate/source pair. Provider mutation remains behind worker incarnation credentials and the
 provider-authority acknowledgement and journal fences.
 
 Private host identifiers, credentials, provider diagnostics, and raw payloads are excluded from

@@ -50,14 +50,16 @@ failure is absent catalog kinds/config fields. Green commands:
 ## Task 3 — Guard allocation release and resolve debt 0007
 
 Implement ADR-0596. Add `ALLOCATION_RELEASE` to `ExternalBootOperation` and keep it absent from every
-restricted-state admitted set. In `_release_locked`, retain terminal/requested fast paths; for a
+restricted-state admitted set. Extract one locked release precondition used by both
+`_release_locked` and `reclaim_under_lock`, retaining terminal/requested fast paths; for a
 releasable Allocation discover all owned Systems, acquire their locks in stable order after the
 Allocation lock, and run the matrix guard before the first transition. Map the existing denial
 through `ReleaseOutcome` without changing durable state. Update the guarded-tool registry and debt
 0007 to its resolved form.
 
 Verification (`focused-test`): extend allocation release and external-boot admission tests. The red
-failure is release succeeding with an uncleaned activation. Green commands:
+failure is either direct release or the orphaned-active reaper releasing an Allocation with an
+uncleaned activation. Green commands:
 `uv run python -m pytest tests/services/external_boot/test_admission.py tests/services/test_allocation_release.py -q`
 using the actual allocation-release test path discovered in the tree, and `just type`.
 

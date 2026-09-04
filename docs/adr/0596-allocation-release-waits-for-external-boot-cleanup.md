@@ -24,7 +24,9 @@ service discovers those Systems while holding the Allocation lock, takes their S
 stable identifier order, and runs the ordinary matrix guard before changing Allocation state.
 
 An outstanding activation therefore returns the matrix's existing `conflict` denial and leaves the
-Allocation active. The caller first completes the external-boot release or teardown path; a retry
+Allocation active. The shared precondition covers the project-facing release and the reconciler's
+orphaned-active `reclaim_under_lock` path. The caller first completes the external-boot release or
+teardown path; a retry
 after cleanup is the ordinary idempotent allocation release.
 
 Requested Allocations have no System and retain their direct cancellation path. Already-terminal
