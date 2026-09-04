@@ -11,6 +11,37 @@ DECLARE
     v_old text;
     v_new text;
 BEGIN
+    v_old := $old$               'schema', 'operation', 'error_category', 'failure_context', 'terminal'
+           ])$old$;
+    v_new := $new$               'schema', 'operation', 'error_category', 'failure_context', 'terminal',
+               'recovery_readiness_deadline'
+           ])$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot failure result field shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$           OR NOT (p_result ? 'failure_context')$old$;
+    v_new := $new$           OR (
+               p_result ->> 'error_category' = 'boot_timeout'
+               AND (p_result ->> 'terminal')::boolean
+               AND (
+                   NOT (p_result ? 'recovery_readiness_deadline')
+                   OR jsonb_typeof(p_result -> 'recovery_readiness_deadline')
+                      IS DISTINCT FROM 'string'
+               )
+           )
+           OR (
+               NOT (p_result ->> 'error_category' = 'boot_timeout'
+                   AND (p_result ->> 'terminal')::boolean)
+               AND p_result ? 'recovery_readiness_deadline'
+           )
+           OR NOT (p_result ? 'failure_context')$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot failure recovery deadline shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
     v_old := $old$IF v_operation <> 'fail' AND v_operation <> p_admitted_operation THEN$old$;
     v_new := $new$IF v_operation <> 'fail' AND v_operation <> p_admitted_operation
        AND NOT (
@@ -64,7 +95,7 @@ BEGIN
                     WHERE ra.activation_id = p_activation_id
                 ), 1),
                 p_authority_id, p_generation, 'recovery_point',
-                v_activation.activation_readiness_deadline, 'recovering'
+                (p_result ->> 'recovery_readiness_deadline')::timestamptz, 'recovering'
             ) ON CONFLICT (attempt_id) DO NOTHING;
             UPDATE public.external_boot_activations
             SET state = 'recovering', current_attempt_id = p_authority_id

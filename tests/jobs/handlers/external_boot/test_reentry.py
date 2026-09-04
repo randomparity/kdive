@@ -260,15 +260,20 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
                 )
                 assert committed is not None
             row = await seed.execute(
-                "SELECT state, recovery_point, pre_recovery_evidence "
-                "FROM external_boot_activations WHERE id = %s",
+                "SELECT e.state, e.recovery_point, e.pre_recovery_evidence, "
+                "ra.recovery_readiness_deadline "
+                "FROM external_boot_activations AS e "
+                "LEFT JOIN external_boot_recovery_attempts AS ra "
+                "ON ra.attempt_id=e.current_attempt_id WHERE e.id = %s",
                 (vehicle.activation_id,),
             )
             activation_row = await row.fetchone()
             assert activation_row is not None
-            state, recovery_point, pre_recovery = activation_row
+            state, recovery_point, pre_recovery, recovery_deadline = activation_row
             assert state == ("recovering" if operation == "activate" else "recovery_failed")
             assert recovery_point is not None
+            if operation == "activate":
+                assert recovery_deadline == now + ports.recovery_readiness_timeout
             if operation == "recover":
                 assert pre_recovery is not None
 

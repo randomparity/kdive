@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Final
 
 from psycopg import AsyncConnection
@@ -222,7 +223,11 @@ async def _acknowledge(
 
 
 def _bound_failure(
-    context: OperationContext, exc: Exception, *, phase: str
+    context: OperationContext,
+    exc: Exception,
+    *,
+    phase: str,
+    recovery_readiness_deadline: datetime | None = None,
 ) -> ExternalBootAuthorityFailure:
     """Wrap a raise as a failure bound to the same allocation and acknowledgement.
 
@@ -268,10 +273,25 @@ def _bound_failure(
                     "error_category": category,
                     "failure_context": {"phase": phase},
                     "terminal": terminal,
+                    **(
+                        {"recovery_readiness_deadline": recovery_readiness_deadline.isoformat()}
+                        if recovery_readiness_deadline is not None
+                        else {}
+                    ),
                 },
             }
         )
     )
+
+
+def _recovery_deadline(ports: ExternalBootHandlerPorts, exc: Exception) -> datetime | None:
+    if (
+        isinstance(exc, CategorizedError)
+        and exc.category is ErrorCategory.BOOT_TIMEOUT
+        and exc.terminal
+    ):
+        return ports.clock() + ports.recovery_readiness_timeout
+    return None
 
 
 async def run_operation[R: ExternalBootAuthorityResultV1](
@@ -351,14 +371,29 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         if before_port is not None and (intermediate := before_port(context)) is not None:
             return intermediate
     except Exception as exc:
-        raise _bound_failure(context, exc, phase=_COMMIT) from None
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_COMMIT,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+        ) from None
     try:
         # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
         called = call_port(context)
         observation = await called if inspect.isawaitable(called) else called
     except Exception as exc:
-        raise _bound_failure(context, exc, phase=_PROVIDER_CALL) from None
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_PROVIDER_CALL,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+        ) from None
     try:
         return build_result(context, observation)
     except Exception as exc:
-        raise _bound_failure(context, exc, phase=_COMMIT) from None
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_COMMIT,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+        ) from None

@@ -187,12 +187,21 @@ class _FailureResult(_ResultBase):
     error_category: ErrorCategory
     failure_context: ExternalBootAuthorityFailureContext
     terminal: bool
+    recovery_readiness_deadline: datetime | None = None
+
+    _normalize_timestamp = field_validator("recovery_readiness_deadline")(_utc_datetime)
 
     @model_validator(mode="after")
     def _cas_failure_shape_is_closed(self) -> _FailureResult:
         reason = self.failure_context.reason
         if reason is None:
+            if self.recovery_readiness_deadline is not None and not (
+                self.error_category is ErrorCategory.BOOT_TIMEOUT and self.terminal
+            ):
+                raise ValueError("only terminal boot timeout carries a recovery deadline")
             return self
+        if self.recovery_readiness_deadline is not None:
+            raise ValueError("classified CAS failure cannot carry a recovery deadline")
         expected = {
             "observed_identity_stale": ("stale_handle", True),
             "reservation_not_ready": ("infrastructure_failure", False),
