@@ -2230,6 +2230,84 @@ def test_retry_failure_requeues_job_and_audits_in_one_commit(
         ).fetchone() == ("result_requeued",)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"schema": "wrong"},
+        {"extra": True},
+        {"first_differing_byte": 2049},
+        {"expected_cmdline": "x" * 8193},
+    ],
+)
+def test_cmdline_failure_diagnostic_is_closed_and_bounded(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    mutation: dict[str, object],
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, operation="fail", worker_suffix="z")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    diagnostic: dict[str, object] = {
+        "schema": "external-boot-cmdline-mismatch-v1",
+        "expected_cmdline": "root=UUID=x",
+        "observed_cmdline": "root=UUID=y",
+        "first_differing_byte": 10,
+        **mutation,
+    }
+    result = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "fail",
+        "error_category": "readiness_failure",
+        "failure_context": {"phase": "commit", "cmdline_mismatch": diagnostic},
+        "terminal": True,
+    }
+    with (
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+        pytest.raises(psycopg.errors.InvalidParameterValue),
+    ):
+        _commit(worker, case, authority, result)
+
+
+def test_cmdline_failure_diagnostic_commits_and_legacy_context_remains_valid(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        case = _seed_case(conn, operation="fail", worker_suffix="y")
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
+        assert _acknowledge(host, case, authority) == "applied"
+    context = {
+        "phase": "commit",
+        "cmdline_mismatch": {
+            "schema": "external-boot-cmdline-mismatch-v1",
+            "expected_cmdline": "root=UUID=x",
+            "observed_cmdline": "root=UUID=y",
+            "first_differing_byte": 10,
+        },
+    }
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(
+            worker,
+            case,
+            authority,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "fail",
+                "error_category": "readiness_failure",
+                "failure_context": context,
+                "terminal": True,
+            },
+        ) == ("applied", "failed")
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT failure_context FROM jobs WHERE id=%s", (case.job_id,)
+        ).fetchone() == (context,)
+
+
 def test_failure_authenticates_admitted_operation_separately_from_fail_result(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:

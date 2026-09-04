@@ -29,6 +29,9 @@ DECLARE
            OR (
                v_failure_context ? 'cmdline_mismatch'
                AND (
+                   p_result ->> 'error_category' IS DISTINCT FROM 'readiness_failure'
+                   OR p_result -> 'terminal' IS DISTINCT FROM 'true'::jsonb
+                   OR
                    jsonb_typeof(v_failure_context -> 'cmdline_mismatch')
                        IS DISTINCT FROM 'object'
                    OR EXISTS (

@@ -188,6 +188,14 @@ class _FailureResult(_ResultBase):
     failure_context: _FailureContext
     terminal: bool
 
+    @model_validator(mode="after")
+    def _diagnostic_matches_failure(self) -> _FailureResult:
+        if self.failure_context.cmdline_mismatch is not None and (
+            self.error_category is not ErrorCategory.READINESS_FAILURE or not self.terminal
+        ):
+            raise ValueError("command-line mismatch requires terminal readiness failure")
+        return self
+
 
 type ExternalBootResultPayload = Annotated[
     _ActivateResult
