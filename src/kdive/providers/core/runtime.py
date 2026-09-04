@@ -22,7 +22,7 @@ from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiEngine,
 )
-from kdive.providers.ports.external_boot import ExternalBootPorts
+from kdive.providers.ports.external_boot import ExternalBootPorts, ExternalBootPreparationPorts
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
@@ -178,6 +178,9 @@ class ProviderRuntime:
     # Provider-neutral external Run-boot operations (ADR-0583). Existing providers leave this
     # absent until their adapter issues land; legacy install and boot remain unchanged.
     external_boot: ExternalBootPorts | None = None
+    # Server-owned materialize/prepare receipt seam (ADR-0595). Kept separate from worker
+    # lifecycle mutation ports so composition can fail closed for providers without receipts.
+    external_boot_preparation: ExternalBootPreparationPorts | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(

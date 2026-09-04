@@ -67,11 +67,8 @@ def test_0128_has_equal_replay_and_conflicting_replay_paths() -> None:
 
 def test_0128_classifies_losing_commits_from_locked_rows() -> None:
     sql = _sql()
-    for status in (
-        "observed_identity_stale",
-        "reservation_not_ready",
-        "authority_superseded",
-    ):
-        assert f"RETURN QUERY SELECT '{status}'::text, NULL::text" in sql
+    for status in ("observed_identity_stale", "authority_superseded"):
+        assert f"RETURN QUERY SELECT '{status}'::text, 'failed'::text" in sql
+    assert "RETURN QUERY SELECT 'reservation_not_ready'::text, NULL::text" in sql
     assert "v_activation.system_id <> p_system_id" in sql
     assert "reservation.state = 'ready'" in sql

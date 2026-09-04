@@ -490,14 +490,10 @@ def test_a_terminal_failure_result_leaves_the_job_failed(
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-def test_an_authority_superseded_commit_is_classified_and_leaves_the_job_running(
+def test_an_authority_superseded_commit_terminalizes_once_in_the_classifying_transaction(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """The persistence seam classifies authority loss for the worker finalizer.
-
-    The queue layer deliberately leaves consumption to the worker, so this direct persistence test
-    also observes the unchanged running row.
-    """
+    """Authority loss is classified and finalized without replaying the same stale carrier."""
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
         result = await _run_operation(authority_role_dsns, seed, case, "activate")
@@ -511,8 +507,42 @@ def test_an_authority_superseded_commit_is_classified_and_leaves_the_job_running
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert committed is queue.ExternalBootCommitStatus.AUTHORITY_SUPERSEDED
-        assert await _job_state(seed, case.job_id) == "running"
+        assert isinstance(committed, Job)
+        assert committed.state.value == "failed"
+        assert committed.error_category == "stale_handle"
+        assert await _job_state(seed, case.job_id) == "failed"
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            replay = await queue.complete_external_boot(
+                worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
+            )
+        assert replay is queue.ExternalBootCommitStatus.SUPERSEDED
+
+    _drive(migrated_url, authority_role_dsns, "activate", body)
+
+
+def test_observed_identity_stale_terminalizes_once_in_the_classifying_transaction(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        result = await _run_operation(authority_role_dsns, seed, case, "activate")
+        stale = ExternalBootAuthoritySuccessV1.model_validate(
+            result.model_dump(by_alias=True) | {"plan_identity": "sha256:" + "f" * 64}
+        )
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            committed = await queue.complete_external_boot(
+                worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
+            )
+
+        assert isinstance(committed, Job)
+        assert committed.state.value == "failed"
+        assert committed.error_category == "stale_handle"
+        assert await _job_state(seed, case.job_id) == "failed"
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            replay = await queue.complete_external_boot(
+                worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
+            )
+        assert replay is queue.ExternalBootCommitStatus.SUPERSEDED
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
 

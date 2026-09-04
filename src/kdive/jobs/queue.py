@@ -310,6 +310,11 @@ async def commit_external_boot_authority_result(
         status_row = await cur.fetchone()
         if status_row is None:
             return ExternalBootCommitStatus.SUPERSEDED
+        if status_row["job_state"] in {JobState.FAILED.value, JobState.QUEUED.value}:
+            await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
+            classified_row = await cur.fetchone()
+            if classified_row is not None:
+                return Job.model_validate(classified_row)
         if status_row["status"] != "applied":
             return ExternalBootCommitStatus(status_row["status"])
         await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))

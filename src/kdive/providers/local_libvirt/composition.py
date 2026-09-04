@@ -339,6 +339,7 @@ def build_runtime(
         secret_registry=secret_registry, store=store
     )
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
+    external_boot = build_external_boot(external_boot_io)
     return ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=provisioner,
@@ -350,7 +351,8 @@ def build_runtime(
         crash_postmortem=retrieve,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
-        external_boot=build_external_boot(external_boot_io),
+        external_boot=external_boot,
+        external_boot_preparation=external_boot,
         # ADR-0208: advertise the core-producing capture methods local can actually fetch a vmcore
         # for — KDUMP (host-side overlay harvest, #115/ADR-0203), FADUMP (the pseries firmware-
         # assisted variant sharing that harvest, ADR-0349; host support is gated at admission), and

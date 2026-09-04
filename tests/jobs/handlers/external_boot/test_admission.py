@@ -19,10 +19,12 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, TeardownPayload, dump_payload, load_payload
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from tests.jobs.handlers.external_boot.conftest import resolver_for
 from tests.jobs.handlers.external_boot.seeding import AUTHORITY_INSTANCE, seed_case
 from tests.jobs.handlers.external_boot.support import build_job
@@ -45,6 +47,72 @@ async def _authority_count(conn: AsyncConnection) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row["n"])
+
+
+def test_preparing_activation_is_prepared_through_production_admission_boundary(
+    migrated_url: str,
+) -> None:
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+            with_reservation=True,
+        )
+        provider = FaultInjectExternalBoot()
+        resolver = provider_resolver(
+            external_boot=provider,
+            external_boot_preparation=provider,
+        )
+
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="activate",
+            operation="activate",
+            provider_kind="local-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="activate-after-preparation",
+            resolver=resolver,
+            preparation_plan=vehicle.plan,
+        )
+
+        activation = await conn.execute(
+            "SELECT state, materialization, recovery_point "
+            "FROM external_boot_activations WHERE id = %s",
+            (vehicle.activation_id,),
+        )
+        row = await activation.fetchone()
+        assert row is not None
+        assert row[0] == ExternalBootActivationState.PREPARED.value
+        assert row[1] is not None and row[2] is not None
+        assert kind is JobKind.BOOT
+        assert payload.external_boot_authority_v1 is not None
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
+
+        # Re-entry uses identities derived only from the durable activation ownership tuple.
+        await conn.execute(
+            "UPDATE external_boot_activations SET state = 'preparing', "
+            "materialization = NULL, recovery_point = NULL WHERE id = %s",
+            (vehicle.activation_id,),
+        )
+        await build_external_boot_payload(
+            conn,
+            activation_id=vehicle.activation_id,
+            purpose="activate",
+            operation="activate",
+            provider_kind="local-libvirt",
+            authority_instance=AUTHORITY_INSTANCE,
+            operation_identity="activate-after-preparation",
+            resolver=resolver,
+            preparation_plan=vehicle.plan,
+        )
+        assert provider.preparation_mutations == {"materialize": 1, "prepare": 1}
+
+    _drive(migrated_url, body)
 
 
 def test_identity_is_sourced_from_the_activation_row(migrated_url: str) -> None:

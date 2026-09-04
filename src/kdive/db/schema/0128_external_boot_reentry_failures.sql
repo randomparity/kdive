@@ -288,7 +288,35 @@ BEGIN
        OR v_activation.plan_identity <> p_plan_identity
        OR v_system.id <> p_system_id
        OR v_run.id <> p_run_id OR v_run.system_id <> p_system_id THEN
-        RETURN QUERY SELECT 'observed_identity_stale'::text, NULL::text;
+        UPDATE public.jobs
+        SET state = 'failed', error_category = 'stale_handle',
+            failure_context = jsonb_build_object(
+                'phase', 'commit', 'reason', 'observed_identity_stale',
+                'next_action', 'systems.get'
+            )
+        WHERE id = p_job_id AND state = 'running';
+        UPDATE public.runs
+        SET state = 'failed', failure_category = 'stale_handle'
+        WHERE id = p_run_id AND state IN ('created', 'running');
+        UPDATE public.external_boot_authorities
+        SET state = 'retired', retired_at = clock_timestamp()
+        WHERE id = p_authority_id AND state = 'current';
+        IF v_activation.id IS NOT NULL AND v_system.id IS NOT NULL
+           AND v_run.id IS NOT NULL THEN
+        INSERT INTO public.external_boot_authority_audit (
+            authority_id, system_id, allocation_id, activation_id, run_id, plan_identity,
+            job_id, job_attempt, worker_incarnation, generation, purpose, provider_kind,
+            authority_instance, operation, operation_identity, operation_digest,
+            journal_sequence, journal_digest, outcome
+        ) VALUES (
+            p_authority_id, p_system_id, v_authority.allocation_id, p_activation_id,
+            p_run_id, v_activation.plan_identity, p_job_id, p_attempt, v_incarnation, p_generation,
+            p_purpose, p_provider_kind, p_authority_instance, 'fail', p_operation_identity,
+            p_operation_digest, p_journal_sequence, p_journal_digest,
+            'result_failed'
+        );
+        END IF;
+        RETURN QUERY SELECT 'observed_identity_stale'::text, 'failed'::text;
         RETURN;
     END IF;
 
@@ -305,7 +333,32 @@ BEGIN
 
     WITH RECURSIVE result_nodes(value) AS ($old$;
     v_new := $new$       ) THEN
-        RETURN QUERY SELECT 'authority_superseded'::text, NULL::text;
+        UPDATE public.jobs
+        SET state = 'failed', error_category = 'stale_handle',
+            failure_context = jsonb_build_object(
+                'phase', 'commit', 'reason', 'authority_superseded',
+                'next_action', 'jobs.get'
+            )
+        WHERE id = p_job_id AND state = 'running';
+        UPDATE public.runs
+        SET state = 'failed', failure_category = 'stale_handle'
+        WHERE id = p_run_id AND state IN ('created', 'running');
+        UPDATE public.external_boot_authorities
+        SET state = 'retired', retired_at = clock_timestamp()
+        WHERE id = p_authority_id AND state = 'current';
+        INSERT INTO public.external_boot_authority_audit (
+            authority_id, system_id, allocation_id, activation_id, run_id, plan_identity,
+            job_id, job_attempt, worker_incarnation, generation, purpose, provider_kind,
+            authority_instance, operation, operation_identity, operation_digest,
+            journal_sequence, journal_digest, outcome
+        ) VALUES (
+            p_authority_id, p_system_id, v_authority.allocation_id, p_activation_id,
+            p_run_id, p_plan_identity, p_job_id, p_attempt, v_incarnation, p_generation,
+            p_purpose, p_provider_kind, p_authority_instance, 'fail', p_operation_identity,
+            p_operation_digest, p_journal_sequence, p_journal_digest,
+            'result_failed'
+        );
+        RETURN QUERY SELECT 'authority_superseded'::text, 'failed'::text;
         RETURN;
     END IF;
 
