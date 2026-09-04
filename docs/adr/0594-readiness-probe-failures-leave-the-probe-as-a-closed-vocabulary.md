@@ -92,6 +92,14 @@ is identical.
   traceback, so the return-valued shape is now load-bearing.
 - Other `details` keys on other categories may leak by the same mechanism. This record fixes
   `probe_error` and does not audit the corpus.
+- **The fix is forward-only.** It changes what future probes produce and rewrites nothing already
+  stored. A boot job that failed before this change keeps the raw transport text in its persisted
+  `failure_context`, and `ToolResponse.from_job` still merges that row into the agent-facing
+  envelope, so `jobs.get`/`jobs.wait` on that job id returns it. No migration accompanies this
+  change and none is warranted at 0.4.1, which is pre-release with no deployment holding real job
+  history. Should one exist, the remediation is a single `UPDATE` blanking
+  `failure_context->>'failure_detail_probe_error'` on failed boot jobs — not retention or backfill
+  machinery, which would cost more than the exposure it clears.
 
 ## Considered & rejected
 
