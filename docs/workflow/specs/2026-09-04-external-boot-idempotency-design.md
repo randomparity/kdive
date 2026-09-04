@@ -55,9 +55,10 @@ recovery point. It is written only after the corresponding host operation has re
 durable phase. Observation rejects malformed, foreign, or mismatched records. Cleanup removes the
 receipt with the activation's other owned objects only after its result is durably accounted.
 
-Remote-libvirt implements the same provider-neutral seam over its recovery record. The adapter is
-kept fail-closed until its existing offline-module and authority-host composition prerequisites are
-present; adding this receipt does not advertise an unavailable runtime capability.
+Remote-libvirt does not implement the preparation seam in this issue. Its external-boot authority
+adapter, composition, and provider semantics are owned by #2200, and that provider remains
+unadvertised. The provider-neutral contract is available for that owner to adopt without reserving
+or pre-building remote implementation here.
 
 ## Re-entry and CAS classification
 

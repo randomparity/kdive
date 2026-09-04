@@ -46,8 +46,8 @@ one component of activation readiness; it is not the recovery or cleanup receipt
 - Fault-inject implements the same receipt state and can prove all six interruption boundaries
   without a hypervisor.
 - Local-libvirt persists the receipt using its existing descriptor-relative atomic store rules.
-- Remote-libvirt stays unadvertised until its existing prerequisites are composed; implementing the
-  receipt surface does not claim runtime availability.
+- Remote-libvirt stays unadvertised and unchanged here. Issue #2200 owns its authority adapter,
+  composition, and adoption of this provider-neutral receipt contract.
 - ADR-0593's prepared-before-admission ownership remains unchanged. This decision supplies its
   missing restart contract rather than moving materialize or prepare into worker jobs.
 

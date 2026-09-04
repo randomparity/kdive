@@ -54,16 +54,16 @@ tests/jobs/handlers/external_boot/test_lifecycle.py -q`.
 
 Commit: `feat(external-boot): make worker lifecycle reentrant`.
 
-## Task 4 — Local and remote adapter contracts
+## Task 4 — Local adapter contract
 
 Add local-libvirt atomic preparation receipts and bind them to the existing recovery metadata.
-Exercise authority-journal replay and cleanup absence. Add the fail-closed remote receipt adapter
-surface without advertising unavailable composition. Run focused local-libvirt contract tests;
-run the applicable live local-libvirt proof on this host after unit gates are green.
+Exercise authority-journal replay and cleanup absence. Run focused local-libvirt contract tests;
+run the applicable live local-libvirt proof on this host after unit gates are green. Remote-libvirt
+implementation stays with #2200; this change supplies only the provider-neutral contract it may
+adopt.
 
 Verification: `uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py
-tests/providers/local_libvirt/test_external_boot_authority.py
-tests/providers/remote_libvirt/test_external_boot.py -q`.
+tests/providers/local_libvirt/test_external_boot_authority.py -q`.
 
 Commit: `feat(providers): persist external boot operation receipts`.
 
@@ -88,4 +88,5 @@ The prior four findings are accepted by this revised design:
 3. Worker recovery uses full authority observations rather than running-kernel identity alone.
 4. CAS reasons now define terminal/requeue and deadline behavior explicitly.
 
-No deferrals or rejected findings are carried from the prior review.
+The scope-audit finding about remote-libvirt was accepted as a cut. Issue #2200 remains the owner
+of remote adoption. No rejected findings are carried from the design review.
