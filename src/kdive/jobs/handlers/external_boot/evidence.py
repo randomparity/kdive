@@ -31,7 +31,7 @@ from kdive.jobs.models import ExternalBootAuthoritySuccessV1
 __all__ = [
     "authority_result",
     "known_object_refs",
-    "release_identity",
+    "evidence_digest",
     "terminal_evidence",
 ]
 
@@ -72,8 +72,14 @@ def terminal_evidence(context: OperationContext, outcome: str) -> dict[str, Any]
     }
 
 
-def release_identity(evidence: dict[str, Any]) -> str:
-    """``sha256`` over the canonical release evidence, so the identity names that exact evidence."""
+def evidence_digest(evidence: dict[str, Any]) -> str:
+    """``sha256`` over an evidence document's canonical JSON, so the digest names that document.
+
+    Used for both ``release_identity`` and ``teardown_identity``. The input must be the document
+    the result actually carries and the commit actually persists — a digest over anything else is
+    a value no auditor can recompute, and the schema only checks its shape, so nothing would catch
+    the substitution.
+    """
     canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 

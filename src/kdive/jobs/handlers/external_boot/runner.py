@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from psycopg import AsyncConnection
 
@@ -33,7 +33,12 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 
-__all__ = ["OperationContext", "authority_ref", "run_operation"]
+__all__ = [
+    "COMMITTABLE_ERROR_CATEGORIES",
+    "OperationContext",
+    "authority_ref",
+    "run_operation",
+]
 
 _ACTIVATIONS = ExternalBootActivationRepository()
 
@@ -51,6 +56,49 @@ _ACTIVATIONS = ExternalBootActivationRepository()
 # looks committable, is refused as `superseded`, and writes no `jobs` row either way.
 _PROVIDER_CALL = "provider-call"
 _COMMIT = "commit"
+
+
+COMMITTABLE_ERROR_CATEGORIES: Final[frozenset[ErrorCategory]] = frozenset(
+    {
+        ErrorCategory.CONFIGURATION_ERROR,
+        ErrorCategory.MISSING_DEPENDENCY,
+        ErrorCategory.BUILD_FAILURE,
+        ErrorCategory.BOOT_TIMEOUT,
+        ErrorCategory.READINESS_FAILURE,
+        ErrorCategory.DEBUG_ATTACH_FAILURE,
+        ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ErrorCategory.STALE_HANDLE,
+        ErrorCategory.TRANSPORT_CONFLICT,
+        ErrorCategory.NOT_IMPLEMENTED,
+        ErrorCategory.ALLOCATION_DENIED,
+        ErrorCategory.LEASE_EXPIRED,
+        ErrorCategory.PROVISIONING_FAILURE,
+        ErrorCategory.INSTALL_FAILURE,
+        ErrorCategory.TRANSPORT_FAILURE,
+        ErrorCategory.CONTROL_FAILURE,
+        ErrorCategory.AUTHORIZATION_DENIED,
+    }
+)
+"""The 17 categories ``commit_external_boot_authority_result`` accepts on a ``fail`` result.
+
+Mirrors the ``NOT IN`` list at ``0122_external_boot_authority.sql:1628-1634``. Duplicating a SQL
+constant in Python is normally drift surface worth avoiding — the scope audit cut a block of
+mirrored state checks for exactly that reason — and it is warranted here for one reason the state
+checks did not have: **nothing else performs this check before the value reaches SQL.** A category
+outside the set raises SQLSTATE ``22023`` from inside the commit, and that call sits *outside*
+``_finalize_handler``'s ``try/except``, so it escapes to ``_claim_loop`` and surfaces as
+``run_once failed on lane %s`` with no job id at all. The drift risk is real but gated:
+``test_runner.py`` parses the migration and asserts this set equals the SQL's.
+
+``ErrorCategory`` has 24 members, so seven are **not** committable: ``conflict``, ``not_found``,
+``capacity_exhausted``, ``queue_timeout``, ``quota_exceeded``, ``restore_incomplete`` and
+``symbol_not_found``. That is not hypothetical for long — ``providers/remote_libvirt/lifecycle/
+external_boot.py`` already raises ``CONFLICT`` and ``NOT_FOUND``, and it is the module #2199/#2200
+compose.
+"""
+
+_UNCOMMITTABLE_SUBSTITUTE: Final = ErrorCategory.INFRASTRUCTURE_FAILURE
+"""What an uncommittable category becomes: honest about the failure, and actually committable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,9 +240,10 @@ def _bound_failure(
     holds and one that looks like it holds.
     """
     marker, authority = context.marker, context.authority
-    category = (
+    raised = (
         exc.category if isinstance(exc, CategorizedError) else ErrorCategory.INFRASTRUCTURE_FAILURE
     )
+    category = raised if raised in COMMITTABLE_ERROR_CATEGORIES else _UNCOMMITTABLE_SUBSTITUTE
     terminal = exc.terminal if isinstance(exc, CategorizedError) else False
     return ExternalBootAuthorityFailure(
         ExternalBootAuthorityFailureV1.model_validate(
@@ -244,11 +293,17 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     """Run one authority-bound operation and return its result for the worker to commit.
 
     Steps 1, 2, 2a, 2b and 2c all run **before** allocation, so every refusal happens while there
-    is still no authority. That matters beyond tidiness: a refusal *after* allocation, and a
-    ``superseded`` allocation, cannot be committed as a failure at all — the commit's ``fail``
-    branch needs a binding — so the job keeps its lease, is re-claimed when it lapses, burns an
-    attempt, and eventually wedges ``running``. Refusing before allocation costs one database read
-    and avoids that.
+    is still no authority.
+
+    **That does not avoid the wedge, and an earlier version of this docstring wrongly claimed it
+    did.** ``_finalize_handler`` short-circuits on marker **presence**, not on whether authority
+    was allocated, so a pre-allocation refusal writes no ``jobs`` row either and wedges exactly
+    like a post-allocation one. ADR-0593's consequences section enumerates every pre-allocation
+    refusal that reaches it, and the specification's §8 agrees; reaping is #2203's.
+
+    What refusing early actually buys is narrower and real: **no authority row, no generation
+    consumed, no acknowledgement, and no provider mutation.** A refusal after allocation has
+    already burned a generation and may have already mutated a live System.
 
     The handler does **not** call the commit. It returns its result and the worker's
     ``_finalize_handler`` commits it, gated on ``_authority_binding_matches`` — the one check

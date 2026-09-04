@@ -15,9 +15,11 @@ Charter criteria 5, 6 and 7. Every operation asserts the same four things:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, LiteralString
 
 import psycopg
 import pytest
@@ -73,6 +75,14 @@ async def _activation_row(conn: AsyncConnection, activation_id: Any) -> dict[str
             "SELECT state, cleanup_complete FROM external_boot_activations WHERE id = %s",
             (activation_id,),
         )
+        row = await cur.fetchone()
+    assert row is not None
+    return dict(row)
+
+
+async def _one(conn: AsyncConnection, sql: LiteralString, args: tuple[Any, ...]) -> dict[str, Any]:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(sql, args)
         row = await cur.fetchone()
     assert row is not None
     return dict(row)
@@ -392,3 +402,45 @@ def test_a_superseded_commit_leaves_the_job_running(
         assert await _job_state(seed, case.job_id) == "running"
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
+
+
+def test_the_persisted_teardown_identity_digests_the_persisted_teardown_evidence(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """``teardown_identity`` must name a document an auditor can recompute from the stored row.
+
+    The commit persists ``teardown_evidence`` verbatim (``0122…sql:1454-1458``) and checks only
+    that ``teardown_identity`` *looks like* a sha256 — it never recomputes it. So a handler
+    digesting a different document produces an identity that names nothing, and no schema check
+    would ever catch it. An earlier version of this handler digested
+    ``{schema, system_id, system_state, generation}`` while emitting
+    ``{schema, system_id, system_state, observed_at}``.
+
+    This reads both columns back out of Postgres and recomputes the digest exactly as an auditor
+    would, rather than comparing two values the handler produced.
+    """
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        result = await _run_operation(authority_role_dsns, seed, case, "teardown")
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            committed = await queue.complete_external_boot(
+                worker, _job(case), result, incarnation_credential=SecretStr(case.credential)
+            )
+        assert committed is not None
+
+        row = await _one(
+            seed,
+            "SELECT teardown_evidence, cleanup_evidence FROM external_boot_activations "
+            "WHERE id = %s",
+            (case.vehicle.activation_id,),
+        )
+        recomputed = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(row["teardown_evidence"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        )
+
+        assert row["cleanup_evidence"]["teardown_identity"] == recomputed
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)

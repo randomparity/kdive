@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.jobs.handlers.external_boot.evidence import (
+    evidence_digest,
     known_object_refs,
-    release_identity,
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.runner import OperationContext
@@ -93,12 +93,12 @@ def test_terminal_evidence_takes_composite_state_from_the_acknowledgement() -> N
     assert evidence["schema"] == "external-boot-terminal-evidence-v1"
 
 
-def test_release_identity_is_canonical_and_key_order_independent() -> None:
+def test_evidence_digest_is_canonical_and_key_order_independent() -> None:
     """The identity must name the evidence's *content*, not a dict's incidental key order."""
     one = {"b": 2, "a": 1}
     other = {"a": 1, "b": 2}
 
-    assert release_identity(one) == release_identity(other)
-    assert release_identity(one).startswith("sha256:")
-    assert len(release_identity(one)) == 71
-    assert release_identity({"a": 1}) != release_identity({"a": 2})
+    assert evidence_digest(one) == evidence_digest(other)
+    assert evidence_digest(one).startswith("sha256:")
+    assert len(evidence_digest(one)) == 71
+    assert evidence_digest({"a": 1}) != evidence_digest({"a": 2})

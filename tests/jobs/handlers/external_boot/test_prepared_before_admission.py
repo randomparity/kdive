@@ -21,7 +21,7 @@ import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
@@ -180,5 +180,50 @@ def test_no_handler_calls_materialize_or_prepare_on_any_path(
         assert observed, "no operation ran, so this asserts nothing"
         assert "materialize" not in observed
         assert "prepare" not in observed
+
+    _drive(migrated_url, body)
+
+
+def test_a_recovery_point_without_a_materialization_cannot_decode_at_all(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """Why ``release`` can never reach its observation check with a NULL ``materialization``.
+
+    The branch review expected this shape: ``release`` admits ``abandoned``, whose row the table
+    CHECK permits with ``materialization`` NULL, so a row carrying ``recovery_point`` without
+    ``materialization`` would pass step 2b and then be refused inside ``build_result`` —
+    post-allocation, post-port-call, reporting "produced no kernel observation to verify" and
+    blaming the provider for a missing column.
+
+    **That row is not constructible, one layer above the CHECK.**
+    ``ExternalBootActivation``'s own validator (`domain/external_boot_activation.py:303-311`) lists
+    ``self.materialization is None`` among the disjuncts that raise
+    ``recovery point ownership does not match activation``, so the repository cannot decode it and
+    no handler ever sees it. The misleading refusal is therefore unreachable rather than merely
+    unproduced.
+
+    ``release`` still names ``materialization`` in its required evidence, which is accurate — it
+    does read ``materialization.kernel_observation`` — and costs one word. This test is what says
+    the requirement is defence in depth rather than a live bug fix, and what would turn red if the
+    model rule were ever relaxed and the reviewer's path became real.
+    """
+
+    async def body(seed: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="release",
+            operation="release",
+            activation_state="abandoned",
+            with_materialization=False,
+            with_reservation=True,
+        )
+
+        with pytest.raises(ValidationError, match="recovery point ownership"):
+            await _dispatch(authority_role_dsns, case, "release", vehicle)
+
+        assert vehicle.port.calls == []
+        assert await _authority_count(seed) == 0
 
     _drive(migrated_url, body)

@@ -1,16 +1,25 @@
 """The shared runner's admission order, against a real Postgres (spec §6).
 
 Every refusal these tests assert happens **before** allocation, and each asserts that positively —
-by counting ``external_boot_authorities`` rows afterwards — rather than by the exception alone. The
-distinction is load-bearing, not pedantry: a refusal after allocation, like a ``superseded``
-allocation, cannot be committed as a failure, so the job keeps its lease, is re-claimed, burns an
-attempt, and eventually wedges ``running``. An exception-only assertion would pass either way.
+by counting ``external_boot_authorities`` rows afterwards — rather than by the exception alone. An
+exception-only assertion would pass whether or not allocation had already run.
+
+**What the row count proves, stated precisely, because an earlier version of this docstring
+over-claimed it.** Refusing early does *not* avoid the ``running`` wedge:
+``_finalize_handler`` short-circuits on marker **presence**, not on whether authority exists, so a
+pre-allocation refusal writes no ``jobs`` row either and wedges identically. Reaping that is
+#2203's. What the count proves is narrower and real — **no authority row, no generation consumed,
+no acknowledgement, no provider mutation.** A refusal after allocation has already burned a
+generation and may already have mutated a live System. The assertions below are unchanged; only
+the claim about what they mean is corrected.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
@@ -24,8 +33,14 @@ from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.runner import OperationContext, authority_ref, run_operation
+from kdive.jobs.handlers.external_boot.runner import (
+    COMMITTABLE_ERROR_CATEGORIES,
+    OperationContext,
+    authority_ref,
+    run_operation,
+)
 from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
@@ -438,3 +453,81 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         assert secret not in repr(failure.result.model_dump())
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_committable_categories_match_the_migration_exactly() -> None:
+    """Gate the one SQL constant this package mirrors in Python.
+
+    ``_bound_failure`` has to decide before the value reaches SQL, and there is no way to ask the
+    database for the list — so the set is duplicated, and duplication without a gate is drift
+    waiting to happen. This parses the migration's ``NOT IN`` list and compares, so adding a
+    category to the schema without adding it here is a red test rather than a job that wedges with
+    no attribution.
+    """
+    sql = Path("src/kdive/db/schema/0122_external_boot_authority.sql").read_text()
+    block = sql.split("p_result ->> 'error_category' NOT IN (", 1)[1].split(")", 1)[0]
+    accepted = frozenset(re.findall(r"'([a-z_]+)'", block))
+
+    assert accepted, "the migration's accepted-category list was not found"
+    assert {category.value for category in COMMITTABLE_ERROR_CATEGORIES} == accepted
+
+
+@pytest.mark.parametrize(
+    "category",
+    [ErrorCategory.CONFLICT, ErrorCategory.NOT_FOUND, ErrorCategory.CAPACITY_EXHAUSTED],
+)
+def test_an_uncommittable_provider_category_is_mapped_and_the_commit_applies(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    vehicle: Vehicle,
+    category: ErrorCategory,
+) -> None:
+    """A provider category the commit does not accept must not reach it.
+
+    ``ErrorCategory`` has 24 members and the commit accepts 17. Copying an unaccepted one through
+    raises SQLSTATE ``22023`` from inside the commit — and that call sits **outside**
+    ``_finalize_handler``'s ``try/except``, so it escapes to ``_claim_loop`` and surfaces as
+    ``run_once failed on lane %s`` with no job id. Nothing else catches it:
+    ``_FailureResult.error_category`` is typed as the whole enum so pydantic passes it, and
+    ``_authority_binding_matches`` never looks at it.
+
+    Not constructible through a composed adapter today, which is exactly why it is worth pinning:
+    ``providers/remote_libvirt/lifecycle/external_boot.py`` already raises ``CONFLICT`` at ``:496``
+    and ``:928`` and ``NOT_FOUND`` at ``:536``, and that is the module #2199/#2200 compose. The
+    assertion is that the commit **applies**, not merely that the category changed — the point is a
+    committable result, not a tidier field.
+    """
+
+    def explode(_context: OperationContext) -> RunningKernelObservation:
+        raise CategorizedError("provider says no", category=category, terminal=True)
+
+    async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
+        case = await seed_case(seed, vehicle, purpose="activate")
+        ports = _ports(
+            case,
+            resolver=resolver_for(vehicle),
+            acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+        )
+
+        with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
+            await _run(conn, case, ports=ports, call_port=explode)
+
+        result = excinfo.value.result.result
+        assert isinstance(result, _FailureResult)
+        assert result.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        committed = await queue.fail_external_boot(
+            conn,
+            _job(case),
+            excinfo.value.result,
+            incarnation_credential=SecretStr(case.credential),
+        )
+        assert committed is not None
+        assert (await _job_row(seed, case.job_id))["state"] == "failed"
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_a_committable_provider_category_is_passed_through_unchanged() -> None:
+    """The mapping must not flatten every category; only the uncommittable ones move."""
+    assert ErrorCategory.BOOT_TIMEOUT in COMMITTABLE_ERROR_CATEGORIES
+    assert ErrorCategory.CONFLICT not in COMMITTABLE_ERROR_CATEGORIES

@@ -21,7 +21,7 @@ from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
-    release_identity,
+    evidence_digest,
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperationHandler
@@ -394,7 +394,7 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
                 "schema": "external-boot-authority-result-v1",
                 "operation": "release",
                 "result_ref": None,
-                "release_identity": release_identity(evidence),
+                "release_identity": evidence_digest(evidence),
                 "evidence": evidence,
             },
         )
@@ -402,7 +402,13 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     return _handler(
         ports,
         require_activation_state=_RECOVERY_STATES,
-        require_activation_evidence=frozenset({"recovery_point"}),
+        # `materialization` as well as `recovery_point`, because this operation observes: it admits
+        # `abandoned`, whose row is legal with `materialization` NULL, and the observation check
+        # reads `materialization.kernel_observation`. Without it the refusal lands in build_result,
+        # *after* allocation and the port call, and reports "produced no kernel observation to
+        # verify" — blaming the provider for a missing persisted column. Listing the column here
+        # moves the same refusal to step 2b, pre-allocation, with the accurate message.
+        require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_require_releasable,
         call_port=call,
         build_result=build,
@@ -454,7 +460,9 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
                 "result_ref": None,
                 "evidence": _cleanup_evidence(
                     context,
-                    teardown_identity=None if ordinary else _teardown_identity(context),
+                    teardown_identity=(
+                        None if ordinary else evidence_digest(_teardown_evidence(context))
+                    ),
                 ),
             },
         )
@@ -469,15 +477,13 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     )
 
 
-def _teardown_identity(context: OperationContext) -> str:
-    return release_identity(
-        {
-            "schema": "external-boot-teardown-evidence-v1",
-            "system_id": str(context.marker.system_id),
-            "system_state": "torn_down",
-            "generation": context.authority.generation,
-        }
-    )
+def _teardown_evidence(context: OperationContext) -> dict[str, Any]:
+    return {
+        "schema": "external-boot-teardown-evidence-v1",
+        "system_id": str(context.marker.system_id),
+        "system_state": "torn_down",
+        "observed_at": _now(),
+    }
 
 
 def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
@@ -490,20 +496,24 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
     def build(
         context: OperationContext, _observation: RunningKernelObservation | None
     ) -> ExternalBootAuthoritySuccessV1:
-        identity = _teardown_identity(context)
+        # Built once and digested, so `teardown_identity` names the exact document this result
+        # carries. The commit persists that document verbatim
+        # (`0122…sql:1454-1458`), so an auditor holding the stored row can recompute the digest
+        # and check it. Digesting a *different* document — an earlier version of this handler
+        # digested `{schema, system_id, system_state, generation}`, which is not what it emits —
+        # produces an identity that names nothing recoverable, and nothing in the schema would
+        # ever catch it: the commit only checks the digest's shape.
+        teardown_evidence = _teardown_evidence(context)
         return authority_result(
             context,
             {
                 "schema": "external-boot-authority-result-v1",
                 "operation": "teardown",
                 "result_ref": None,
-                "teardown_evidence": {
-                    "schema": "external-boot-teardown-evidence-v1",
-                    "system_id": str(context.marker.system_id),
-                    "system_state": "torn_down",
-                    "observed_at": _now(),
-                },
-                "cleanup_evidence": _cleanup_evidence(context, teardown_identity=identity),
+                "teardown_evidence": teardown_evidence,
+                "cleanup_evidence": _cleanup_evidence(
+                    context, teardown_identity=evidence_digest(teardown_evidence)
+                ),
             },
         )
 
