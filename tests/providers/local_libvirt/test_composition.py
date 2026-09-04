@@ -31,10 +31,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     PinOperationLease,
     ReadinessProbe,
     RunningObserver,
-    _unconfigured_observation,
     _unconfigured_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalRunningObserver,
     open_libguestfs_guest,
 )
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
@@ -79,7 +79,9 @@ def test_external_boot_session_factory_builder_is_lazy_and_unadvertised(
     open_artifact_root = cast(OpenArtifactRoot, lambda _ownership: opened.append("artifact") or 41)
     open_guest = cast(OpenGuest, lambda: opened.append("guest"))
     readiness = cast(ReadinessProbe, lambda _system_id: opened.append("readiness"))
-    observe_running = cast(RunningObserver, lambda _system_id: opened.append("observation"))
+    observe_running = cast(
+        RunningObserver, lambda _system_id, _domain: opened.append("observation")
+    )
     cleanup_payloads = cast(CleanupPayloads, lambda _descriptor, _binding: opened.append("cleanup"))
 
     factory = composition.build_external_boot_session_factory(
@@ -408,35 +410,17 @@ def test_production_builder_binds_open_guest(seam: Path) -> None:
     assert factory._open_guest is open_libguestfs_guest
 
 
-@pytest.mark.parametrize(
-    ("mechanism", "default", "message"),
-    [
-        ("_readiness", _unconfigured_readiness, "local external-boot readiness is not configured"),
-        (
-            "_observe_running",
-            _unconfigured_observation,
-            "local external-boot running observation is not configured",
-        ),
-    ],
-)
-def test_production_builder_leaves_the_probes_unconfigured(
-    seam: Path, mechanism: str, default: object, message: str
-) -> None:
-    """Both deferrals' guard: identity, and the raise actually executed.
-
-    Identity alone would pass against a binding that returns something harmless. Amendment 7
-    requires an amendment that removes a binding to leave behind a test that fails if the
-    binding silently returns, so the bound callable is invoked here rather than only compared.
-
-    `readiness` is unbound by amendment 7 (`_real_readiness` reads the previous boot's console);
-    `observe_running` by amendment 2 (no host-reachable qemu-guest-agent channel on local).
-    """
+def test_production_builder_leaves_readiness_unconfigured(seam: Path) -> None:
     factory = composition.build_external_boot_session_mechanisms().factory
-    bound = getattr(factory, mechanism)
+    assert factory._readiness is _unconfigured_readiness
+    with pytest.raises(RuntimeError, match="local external-boot readiness is not configured"):
+        factory._readiness(UUID("11111111-1111-1111-1111-111111111111"))
 
-    assert bound is default
-    with pytest.raises(RuntimeError, match=message):
-        bound(UUID("11111111-1111-1111-1111-111111111111"))
+
+def test_production_builder_binds_running_observer(seam: Path) -> None:
+    factory = composition.build_external_boot_session_mechanisms().factory
+
+    assert isinstance(factory._observe_running, LocalRunningObserver)
 
 
 def test_mechanisms_builder_does_not_advertise_external_boot(

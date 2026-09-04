@@ -37,12 +37,12 @@ from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_connection,
 )
-from kdive.providers.remote_libvirt.guest.agent import (
+from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
+from kdive.providers.shared.guest_agent import (
     AgentCommand,
     GuestAgentExec,
     qemu_agent_command,
 )
-from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

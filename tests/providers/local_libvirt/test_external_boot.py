@@ -2852,6 +2852,27 @@ def test_observe_rejects_running_kernel_mismatch(
         ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current"))
 
 
+def test_observe_returns_command_line_mismatch_for_core_to_compare(tmp_path: Path) -> None:
+    metadata_template = _metadata("target-defined")
+    ports, metadata, session, _guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    observation = RunningKernelObservation(
+        identity=metadata.expected_running,
+        cmdline=b"root=observed",
+        expected_cmdline=b"root=expected",
+    )
+    session.running_observation = observation
+
+    assert (
+        ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current")) == observation
+    )
+
+
 @pytest.mark.parametrize(
     ("xml", "active"),
     [

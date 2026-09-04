@@ -27,8 +27,8 @@ import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
+from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env

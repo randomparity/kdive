@@ -34,6 +34,9 @@ def test_customization_domain_pseries_tcg() -> None:
     assert root.findtext("on_reboot") == "destroy"
     assert root.find("cpu") is None  # TCG: no <cpu>
     assert root.findtext("devices/emulator") == "/usr/bin/qemu-system-ppc64"
+    channel = root.find("./devices/channel/target[@name='org.qemu.guest_agent.0']")
+    assert channel is not None
+    assert channel.get("type") == "virtio"
     assert "root=/dev/vda console=hvc0 rw" in (root.findtext("os/cmdline") or "")
     # egress NIC present with restrict=off (namespaced qemu:arg)
     assert any("restrict=off" in (a.get("value") or "") for a in root.iter())
@@ -52,6 +55,9 @@ def test_customization_domain_x86_kvm_has_no_emulator_and_egress_on() -> None:
     root = ET.fromstring(xml)
     assert root.get("type") == "kvm"
     assert root.find("devices/emulator") is None
+    channel = root.find("./devices/channel/target[@name='org.qemu.guest_agent.0']")
+    assert channel is not None
+    assert channel.get("type") == "virtio"
     vals = [a.get("value") or "" for a in root.iter()]
     assert any("restrict=off" in v for v in vals)
     assert any("virtio-net-pci" in v and "addr=0x10" in v for v in vals)  # q35 slot pin

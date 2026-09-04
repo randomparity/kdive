@@ -21,7 +21,7 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
     RemoteLibvirtVmcoreIntrospect,
 )
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
+from kdive.providers.shared.guest_agent import AgentExecResult
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 

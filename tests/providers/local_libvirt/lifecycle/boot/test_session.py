@@ -2255,7 +2255,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         ),
         unlink_relative=lambda root, name: events.append(f"unlinkat:{root}:{name}"),
         readiness=lambda _system_id: ReadinessResult(True, True),
-        observe_running=lambda _system_id: observation,
+        observe_running=lambda _system_id, _domain: observation,
         cleanup_payloads=lambda root, binding: events.append(
             f"cleanup:{root}:{binding.activation_id}"
         ),
@@ -2301,7 +2301,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
         readiness=lambda system_id: observed_ids.append(system_id) or ReadinessResult(True, True),
-        observe_running=lambda system_id: (
+        observe_running=lambda system_id, _domain: (
             observed_ids.append(system_id)
             or RunningKernelObservation(
                 identity={

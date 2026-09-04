@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import errno
 import io
+import json
 import os
 import stat
 import sys
@@ -12,8 +14,10 @@ from pathlib import Path
 from typing import get_args
 from uuid import UUID
 
+import libvirt
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
@@ -31,11 +35,16 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     _unconfigured_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    CAT_PROGRAM,
+    KERNEL_NOTES_PATH,
     PAYLOAD_NAMES,
+    PROC_CMDLINE_PATH,
+    UNAME_PROGRAM,
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLease,
     LocalPayloadCleanup,
+    LocalRunningObserver,
     open_libguestfs_guest,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
@@ -60,6 +69,7 @@ BINDING = ExternalBootActivationBinding(
     activation_id="33333333-3333-3333-3333-333333333333",
 )
 OWNERSHIP = OperationOwnership(SYSTEM_ID, BINDING)
+_NOTES = bytes.fromhex("040000000400000003000000474e5500") + bytes.fromhex("01020304")
 
 
 def _lease() -> LocalOperationLease:
@@ -726,7 +736,137 @@ def _noop_readiness(_system_id: UUID) -> object:
     raise AssertionError("readiness must not be reached in these tests")
 
 
-def _noop_observation(_system_id: UUID) -> object:
+class _ObserverDomain:
+    def __init__(self, expected_cmdline: str = "root=target", *, channel: bool = True) -> None:
+        self.expected_cmdline = expected_cmdline
+        self.channel = channel
+
+    def name(self) -> str:
+        return f"kdive-{SYSTEM_ID}"
+
+    def XMLDesc(self, flags: int) -> str:  # noqa: N802
+        assert flags == 0
+        channel = (
+            "<devices><channel type='unix'><target type='virtio' "
+            "name='org.qemu.guest_agent.0'/></channel></devices>"
+            if self.channel
+            else ""
+        )
+        return (
+            f"<domain><name>kdive-{SYSTEM_ID}</name><os>"
+            f"<cmdline>{self.expected_cmdline}</cmdline></os>{channel}</domain>"
+        )
+
+
+class _ObservationAgent:
+    def __init__(self, cmdline: bytes = b"root=live\n") -> None:
+        self.outputs = {
+            (UNAME_PROGRAM, "-r"): b"6.12.0\n",
+            (UNAME_PROGRAM, "-m"): b"x86_64\n",
+            (CAT_PROGRAM, PROC_CMDLINE_PATH): cmdline,
+            (CAT_PROGRAM, KERNEL_NOTES_PATH): _NOTES,
+        }
+        self.argvs: list[tuple[str, ...]] = []
+        self._output_by_pid: dict[int, bytes] = {}
+
+    def __call__(self, domain: object, command: str, timeout: int, flags: int) -> str:
+        assert domain.name() == f"kdive-{SYSTEM_ID}"  # ty: ignore[unresolved-attribute]
+        assert timeout > 0
+        assert flags == 0
+        payload = json.loads(command)
+        if payload["execute"] == "guest-exec":
+            arguments = payload["arguments"]
+            argv = (arguments["path"], *arguments["arg"])
+            self.argvs.append(argv)
+            pid = len(self.argvs)
+            self._output_by_pid[pid] = self.outputs[argv]
+            return json.dumps({"return": {"pid": pid}})
+        pid = payload["arguments"]["pid"]
+        return json.dumps(
+            {
+                "return": {
+                    "exited": True,
+                    "exitcode": 0,
+                    "out-data": base64.b64encode(self._output_by_pid[pid]).decode(),
+                }
+            }
+        )
+
+
+def test_running_observer_uses_only_the_fixed_programs_and_returns_exact_bytes() -> None:
+    agent = _ObservationAgent(cmdline=b"root=live value=\xff\n\n")
+
+    observation = LocalRunningObserver(agent_command=agent)(SYSTEM_ID, _ObserverDomain())
+
+    assert observation.identity.release == "6.12.0"
+    assert observation.cmdline == b"root=live value=\xff\n"
+    assert observation.expected_cmdline == b"root=target"
+    assert agent.argvs == [
+        (UNAME_PROGRAM, "-r"),
+        (UNAME_PROGRAM, "-m"),
+        (CAT_PROGRAM, PROC_CMDLINE_PATH),
+        (CAT_PROGRAM, KERNEL_NOTES_PATH),
+    ]
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    [b"root=live", b"x" * 2049 + b"\n"],
+    ids=["missing-newline", "content-over-2048-bytes"],
+)
+def test_running_observer_rejects_malformed_command_line_evidence(cmdline: bytes) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        LocalRunningObserver(agent_command=_ObservationAgent(cmdline))(SYSTEM_ID, _ObserverDomain())
+
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+
+
+def test_running_observer_accepts_2048_bytes_of_command_line_content() -> None:
+    content = b"x" * 2048
+
+    observation = LocalRunningObserver(agent_command=_ObservationAgent(content + b"\n"))(
+        SYSTEM_ID, _ObserverDomain()
+    )
+
+    assert observation.cmdline == content
+
+
+def test_running_observer_names_reprovisioning_when_the_channel_is_missing() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        LocalRunningObserver(agent_command=_ObservationAgent())(
+            SYSTEM_ID, _ObserverDomain(channel=False)
+        )
+
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+    assert "reprovision" in str(caught.value).lower()
+
+
+def test_running_observer_preserves_guest_agent_denial_classification() -> None:
+    error = libvirt.libvirtError("permission denied")
+    error.err = (
+        libvirt.VIR_ERR_ACCESS_DENIED,
+        0,
+        "permission denied",
+        0,
+        "",
+        None,
+        None,
+        0,
+        0,
+    )
+
+    def denied(_domain: object, _command: str, _timeout: int, _flags: int) -> str:
+        raise error
+
+    with pytest.raises(CategorizedError) as caught:
+        LocalRunningObserver(agent_command=denied)(SYSTEM_ID, _ObserverDomain())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def _noop_observation(_system_id: UUID, _domain: object) -> object:
     raise AssertionError("observation must not be reached in these tests")
 
 
