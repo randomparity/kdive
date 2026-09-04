@@ -107,6 +107,10 @@ def test_job_lookup_is_set_oriented_and_bounded() -> None:
     source = inspect.getsource(external_boot._candidate_jobs)
     assert "row_number() OVER" in source
     assert "candidate_rank <= %s" in source
+    assert "statement_timeout" in source
+    assert "PARTITION BY candidate.activation_id" in source
+    assert "system_id}'" in source
+    assert "authorizing ->> 'project'" in source
     repair = inspect.getsource(external_boot.repair_external_boot_lane)
     assert repair.count("_candidate_jobs(") == 2
 
@@ -147,6 +151,13 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
                 "'queued', max_attempts, jsonb_set(authorizing, '{project}', %s), "
                 "'foreign-suppressor' FROM jobs WHERE id = %s",
                 (Jsonb("authority-current"), Jsonb("other"), case.job_id),
+            )
+            await admin.execute(
+                "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+                "SELECT kind, jsonb_set(payload, '{external_boot_authority_v1,run_id}', %s), "
+                "'failed', max_attempts, authorizing, 'quota-poison-' || n "
+                "FROM jobs CROSS JOIN generate_series(1, 100) AS n WHERE id = %s",
+                (Jsonb(str(uuid4())), case.job_id),
             )
         async with await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_reconciler"), autocommit=True

@@ -44,6 +44,7 @@ class _Candidate:
 
 _REPAIR_BATCH = 100
 _SOURCE_JOB_SCAN_LIMIT = 100
+_JOB_LOOKUP_TIMEOUT_MS = 2_000
 
 
 _CANDIDATE_SQL = {
@@ -113,35 +114,65 @@ async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...
 
 
 async def _candidate_jobs(
-    conn: AsyncConnection, candidates: tuple[_Candidate, ...], *, live_only: bool
+    conn: AsyncConnection,
+    candidates: tuple[_Candidate, ...],
+    *,
+    live_only: bool,
+    authority_instance: str,
 ) -> tuple[Job, ...]:
     if not candidates:
         return ()
+    candidate_values = ", ".join(
+        "(%s::uuid, %s::uuid, %s::uuid, %s::text, %s::text, %s::text, %s::text)"
+        for _candidate in candidates
+    )
+    parameters: list[object] = []
+    for candidate in candidates:
+        parameters.extend(
+            (
+                candidate.activation_id,
+                candidate.system_id,
+                candidate.run_id,
+                candidate.plan_identity,
+                candidate.project,
+                candidate.operation,
+                authority_instance,
+            )
+        )
     live_predicate = (
-        "AND (state = 'queued' OR (state = 'running' AND "
-        "(lease_expires_at >= now() OR attempt < max_attempts))) "
+        "AND j.payload #>> '{external_boot_authority_v1,operation}' = candidate.operation "
+        "AND j.payload #>> '{external_boot_authority_v1,authority_instance}' "
+        "    = candidate.authority_instance "
+        "AND (j.state = 'queued' OR (j.state = 'running' AND "
+        "(j.lease_expires_at >= now() OR j.attempt < j.max_attempts))) "
         if live_only
         else ""
     )
-    async with conn.cursor(row_factory=dict_row) as cur:
+    parameters.extend(([JobKind.BOOT.value, JobKind.TEARDOWN.value], _SOURCE_JOB_SCAN_LIMIT))
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            cast(
-                LiteralString,
-                "WITH ranked AS ("
-                "SELECT id, row_number() OVER ("
-                "PARTITION BY payload #>> '{external_boot_authority_v1,activation_id}' "
-                "ORDER BY created_at DESC, id DESC) AS candidate_rank "
-                "FROM jobs WHERE kind = ANY(%s) "
-                "AND payload #>> '{external_boot_authority_v1,activation_id}' = ANY(%s) "
-                + live_predicate
-                + ") SELECT jobs.* FROM ranked JOIN jobs USING (id) "
-                "WHERE candidate_rank <= %s ORDER BY jobs.created_at DESC, jobs.id DESC",
-            ),
-            (
-                [JobKind.BOOT.value, JobKind.TEARDOWN.value],
-                [str(candidate.activation_id) for candidate in candidates],
-                _SOURCE_JOB_SCAN_LIMIT,
-            ),
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(_JOB_LOOKUP_TIMEOUT_MS),),
+        )
+        await cur.execute(
+            "WITH candidate (activation_id, system_id, run_id, plan_identity, project, "
+            "operation, authority_instance) AS (VALUES " + candidate_values + "), ranked AS ("
+            "SELECT j.id, row_number() OVER (PARTITION BY candidate.activation_id "
+            "ORDER BY j.created_at DESC, j.id DESC) AS candidate_rank "
+            "FROM candidate JOIN jobs j ON "
+            "j.payload #>> '{external_boot_authority_v1,activation_id}' "
+            "    = candidate.activation_id::text "
+            "AND j.payload #>> '{external_boot_authority_v1,system_id}' "
+            "    = candidate.system_id::text "
+            "AND j.payload #>> '{external_boot_authority_v1,run_id}' = candidate.run_id::text "
+            "AND j.payload #>> '{external_boot_authority_v1,plan_identity}' "
+            "    = candidate.plan_identity "
+            "AND j.authorizing ->> 'project' = candidate.project "
+            "WHERE j.kind = ANY(%s) "
+            + live_predicate
+            + ") SELECT jobs.* FROM ranked JOIN jobs USING (id) "
+            "WHERE candidate_rank <= %s ORDER BY jobs.created_at DESC, jobs.id DESC",
+            parameters,
         )
         rows = await cur.fetchall()
     jobs: list[Job] = []
@@ -268,8 +299,12 @@ async def repair_external_boot_lane(
     """Enqueue deterministic successors for one post-prepared repair lane."""
     repaired = 0
     candidates = await _candidates(conn, lane)
-    source_jobs = await _candidate_jobs(conn, candidates, live_only=False)
-    live_jobs = await _candidate_jobs(conn, candidates, live_only=True)
+    source_jobs = await _candidate_jobs(
+        conn, candidates, live_only=False, authority_instance=authority_instance
+    )
+    live_jobs = await _candidate_jobs(
+        conn, candidates, live_only=True, authority_instance=authority_instance
+    )
     for candidate in candidates:
         try:
             repaired += await _enqueue_candidate(
