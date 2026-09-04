@@ -20,6 +20,7 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, LiteralString
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -29,7 +30,6 @@ from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.lifecycle import ACTIVATION_READINESS_WINDOW
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
@@ -42,7 +42,14 @@ from kdive.jobs.models import (
     _FailureResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
-from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+)
+from kdive.providers.ports.external_boot import (
+    OpaqueProviderRef,
+    RecoveryPoint,
+)
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -104,6 +111,35 @@ async def _system_state(conn: AsyncConnection, system_id: Any) -> str:
     return str(row["state"])
 
 
+class _VehicleExecutor:
+    def __init__(self, vehicle: Vehicle) -> None:
+        self.vehicle = vehicle
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        authority = OpaqueProviderRef(
+            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+        )
+        operation = request.operation.value
+        if operation == "activate":
+            self.vehicle.port.activate(self.vehicle.recovery_point, authority)
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "target"
+        elif operation in {"recover", "resolve-conflict"}:
+            self.vehicle.port.recover(self.vehicle.recovery_point, authority)
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "source"
+        elif operation == "release":
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "source"
+        else:
+            self.vehicle.port.cleanup(self.vehicle.recovery_point, authority)
+            category = "absent"
+        category = getattr(self.vehicle.port, "authority_category", category)
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
+        )
+
+
 def _ports(
     case: SeededCase, vehicle: Vehicle, dsns: Callable[[str], str]
 ) -> ExternalBootHandlerPorts:
@@ -111,6 +147,7 @@ def _ports(
         resolver=resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+        authority_executor=_VehicleExecutor(vehicle),
     )
 
 
@@ -194,28 +231,17 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
     _drive(migrated_url, authority_role_dsns, operation, body)
 
 
-def test_activate_emits_a_readiness_deadline_one_window_ahead(
+def test_activate_reuses_the_persisted_readiness_deadline(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """``_ActivateResult.activation_readiness_deadline`` is required, so a value must be emitted.
-
-    Nothing reads it today — the commit stores it after a parse check only and no reader exists in
-    ``src/`` outside the model definition — so this asserts the unit and reference clock the
-    docstring claims (``now(UTC)`` plus ``ACTIVATION_READINESS_WINDOW``) and nothing more.
-    Enforcing the deadline is #2202's.
-    """
+    """Retries carry forward the row's absolute deadline instead of extending it."""
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        before = datetime.now(UTC)
-
         result = await _run_operation(authority_role_dsns, seed, case, "activate")
 
         payload = result.result
         assert isinstance(payload, _ActivateResult)
-        assert before + ACTIVATION_READINESS_WINDOW <= payload.activation_readiness_deadline
-        assert payload.activation_readiness_deadline <= (
-            datetime.now(UTC) + ACTIVATION_READINESS_WINDOW
-        )
+        assert payload.activation_readiness_deadline == datetime(2027, 1, 1, tzinfo=UTC)
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
@@ -286,42 +312,15 @@ def _other(field: str, result: ExternalBootAuthorityResultV1) -> Any:
     return uuid4()
 
 
-class _DisagreeingObserver:
-    """Delegates everything but returns a kernel observation the materialization does not record."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.calls = inner.calls
-        self.recoveries = inner.recoveries
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-    def observe(self, recovery: Any, authority: Any) -> RunningKernelObservation:
-        self.calls.append("observe")
-        self.recoveries.append(recovery)
-        real = self._inner._inner.observe(recovery, authority)
-        return real.model_copy(update={"release": "6.9.0-imposter"})
-
-
 @pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict", "release"])
 def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
     migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
 ) -> None:
-    """The threat model's control for the provider-call boundary, asserted rather than described.
-
-    ``observe``'s return is not consumed by the evidence — ``composite_state`` is the
-    acknowledgement's digest. Its whole contribution is this post-mutation liveness precondition:
-    the running kernel must be the one the activation's persisted
-    ``materialization.kernel_observation`` records, and terminal evidence must not be emitted when
-    it is not. ``cleanup`` and ``teardown`` have no such control because their port call is
-    ``cleanup`` and ``ExternalBootPorts`` offers nothing to observe a deletion with, so they are
-    not parametrized here.
-    """
+    """A non-terminal authority category cannot be promoted to lifecycle evidence."""
     spec = CASES[operation]
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        case.vehicle.port.__dict__["observe"] = _DisagreeingObserver(case.vehicle.port).observe
+        case.vehicle.port.__dict__["authority_category"] = "conflict"
 
         with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
             await _run_operation(authority_role_dsns, seed, case, operation)

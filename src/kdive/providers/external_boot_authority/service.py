@@ -960,7 +960,7 @@ class ExternalBootAuthorityService:
                     )
                     outcome = (
                         observation.category
-                        if observation.category in {"source", "target", "conflict"}
+                        if observation.category in {"absent", "source", "target", "conflict"}
                         else "conflict"
                     )
                     await self._anchor(

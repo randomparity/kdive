@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -30,7 +30,6 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import (
     ExternalBootPorts,
     OpaqueProviderRef,
-    RunningKernelObservation,
 )
 
 __all__ = [
@@ -287,8 +286,8 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1],
         Awaitable[Mapping[str, Any]],
     ],
-    call_port: Callable[[OperationContext], RunningKernelObservation | None],
-    build_result: Callable[[OperationContext, RunningKernelObservation | None], R],
+    call_port: Callable[[OperationContext], Any],
+    build_result: Callable[[OperationContext, Any], R],
 ) -> R:
     """Run one authority-bound operation and return its result for the worker to commit.
 
@@ -349,7 +348,8 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     )
     try:
         # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
-        observation = await asyncio.to_thread(call_port, context)
+        called = call_port(context)
+        observation = await called if inspect.isawaitable(called) else called
     except Exception as exc:
         raise _bound_failure(context, exc, phase=_PROVIDER_CALL) from None
     try:
