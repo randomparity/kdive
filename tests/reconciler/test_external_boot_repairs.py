@@ -10,7 +10,8 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg.errors import InsufficientPrivilege
+from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege
+from psycopg.types.json import Jsonb
 
 from kdive.jobs.payloads import BootPayload
 from kdive.reconciler.repairs import external_boot
@@ -124,6 +125,14 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
                 "WHERE id = %s",
                 (case.job_id,),
             )
+            await admin.execute(
+                "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+                "SELECT kind, jsonb_set(payload, "
+                "'{external_boot_authority_v1,authority_instance}', %s), "
+                "'queued', max_attempts, jsonb_set(authorizing, '{project}', %s), "
+                "'foreign-suppressor' FROM jobs WHERE id = %s",
+                (Jsonb("authority-current"), Jsonb("other"), case.job_id),
+            )
         async with await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_reconciler"), autocommit=True
         ) as reconciler:
@@ -150,6 +159,80 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
                 await reconciler.execute(
                     "UPDATE external_boot_activations SET cleanup_complete = true WHERE id = %s",
                     (vehicle.activation_id,),
+                )
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize(
+    ("lane", "purpose", "activation_state", "seed_options", "expected_operation"),
+    [
+        ("recovery", "recover", "recovering", {}, "recover"),
+        ("release", "release", "recovered", {"with_reservation": True}, "release"),
+        ("cleanup", "release", "recovered", {"with_release": True}, "cleanup"),
+    ],
+)
+def test_each_post_prepared_lane_enqueues_its_existing_worker_operation(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    lane: str,
+    purpose: str,
+    activation_state: str,
+    seed_options: dict[str, Any],
+    expected_operation: str,
+) -> None:
+    async def body() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as admin:
+            case = await seed_case(
+                admin,
+                vehicle,
+                purpose=purpose,
+                operation=expected_operation,
+                activation_state=activation_state,
+                **seed_options,
+            )
+            await admin.execute(
+                "UPDATE jobs SET attempt = max_attempts, lease_expires_at = now() - interval '1s' "
+                "WHERE id = %s",
+                (case.job_id,),
+            )
+            if lane == "recovery":
+                await admin.execute(
+                    "UPDATE external_boot_recovery_attempts "
+                    "SET recovery_readiness_deadline = now() - interval '1s' "
+                    "WHERE activation_id = %s",
+                    (vehicle.activation_id,),
+                )
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_reconciler"), autocommit=True
+        ) as reconciler:
+            count = await external_boot.repair_external_boot_lane(
+                reconciler,
+                lane=cast(Any, lane),
+                resolver=resolver_for(vehicle),
+                authority_instance="authority-current",
+            )
+            assert count == 1
+            cursor = await reconciler.execute(
+                "SELECT payload #>> '{external_boot_authority_v1,operation}' "
+                "FROM jobs WHERE dedup_key LIKE 'external-boot:repair:%'"
+            )
+            row = await cursor.fetchone()
+            assert row == (expected_operation,)
+
+    asyncio.run(body())
+
+
+def test_reservation_cannot_exist_without_an_activation(migrated_url: str) -> None:
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            with pytest.raises(ForeignKeyViolation):
+                await conn.execute(
+                    "INSERT INTO external_boot_reservations "
+                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                    "VALUES (%s, 'store', 'owner', 1, 'pending')",
+                    (uuid4(),),
                 )
 
     asyncio.run(body())

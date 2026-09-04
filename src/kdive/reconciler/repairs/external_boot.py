@@ -115,10 +115,22 @@ async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...
 async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT * FROM jobs WHERE payload ? 'external_boot_authority_v1' "
+            "SELECT * FROM jobs WHERE kind = ANY(%s) "
             "AND payload #>> '{external_boot_authority_v1,activation_id}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,system_id}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,run_id}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,plan_identity}' = %s "
+            "AND authorizing ->> 'project' = %s "
             "ORDER BY created_at DESC, id DESC LIMIT %s",
-            (str(candidate.activation_id), _SOURCE_JOB_SCAN_LIMIT),
+            (
+                [JobKind.BOOT.value, JobKind.TEARDOWN.value],
+                str(candidate.activation_id),
+                str(candidate.system_id),
+                str(candidate.run_id),
+                candidate.plan_identity,
+                candidate.project,
+                _SOURCE_JOB_SCAN_LIMIT,
+            ),
         )
         rows = await cur.fetchall()
     for row in rows:
@@ -151,19 +163,45 @@ async def _source_job(conn: AsyncConnection, candidate: _Candidate) -> Job | Non
     return None
 
 
-async def _live_successor_exists(conn: AsyncConnection, candidate: _Candidate) -> bool:
-    async with conn.cursor() as cur:
+async def _live_successor_exists(
+    conn: AsyncConnection, candidate: _Candidate, *, authority_instance: str
+) -> bool:
+    async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM jobs "
-            "WHERE payload ? 'external_boot_authority_v1' "
+            "SELECT * FROM jobs WHERE kind = ANY(%s) "
             "AND payload #>> '{external_boot_authority_v1,activation_id}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,system_id}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,run_id}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,plan_identity}' = %s "
             "AND payload #>> '{external_boot_authority_v1,operation}' = %s "
+            "AND payload #>> '{external_boot_authority_v1,authority_instance}' = %s "
+            "AND authorizing ->> 'project' = %s "
             "AND (state = 'queued' OR (state = 'running' AND "
-            "(lease_expires_at IS NULL OR lease_expires_at >= now() OR attempt < max_attempts))))",
-            (str(candidate.activation_id), candidate.operation),
+            "(lease_expires_at >= now() OR attempt < max_attempts))) "
+            "ORDER BY created_at DESC, id DESC LIMIT %s",
+            (
+                [JobKind.BOOT.value, JobKind.TEARDOWN.value],
+                str(candidate.activation_id),
+                str(candidate.system_id),
+                str(candidate.run_id),
+                candidate.plan_identity,
+                candidate.operation,
+                authority_instance,
+                candidate.project,
+                _SOURCE_JOB_SCAN_LIMIT,
+            ),
         )
-        row = await cur.fetchone()
-    return bool(row and row[0])
+        rows = await cur.fetchall()
+    for row in rows:
+        job = Job.model_validate(row)
+        try:
+            model = load_payload(job, BootPayload if job.kind is JobKind.BOOT else TeardownPayload)
+        except PayloadValidationError:
+            continue
+        marker = model.external_boot_authority_v1
+        if marker is not None and marker.operation == candidate.operation:
+            return True
+    return False
 
 
 def _purpose(operation: RepairOperation) -> Purpose:
@@ -179,7 +217,7 @@ async def _enqueue_candidate(
     resolver: ProviderResolver,
     authority_instance: str,
 ) -> bool:
-    if await _live_successor_exists(conn, candidate):
+    if await _live_successor_exists(conn, candidate, authority_instance=authority_instance):
         return False
     source = await _source_job(conn, candidate)
     if source is None:
