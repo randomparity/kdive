@@ -17,9 +17,10 @@ Two renderers carry `details` to an agent, and both are type filters rather than
 - `safe_error_details` (`serialization.py:96-120`) reduces values to JSON scalars and drops
   non-scalars, so a `str` passes verbatim to `data.probe_error`;
 - the worker's `_failure_context` (`jobs/worker.py:768-777`) is persisted as the job's
-  `failure_context` (`worker.py:527`) and read back on `jobs.get`/`jobs.wait`
-  (`jobs/handlers/connectivity/ssh_authorize.py:179-180`), and the boot step runs as a worker job
-  (`jobs/handlers/runs/boot.py`).
+  `failure_context` (`worker.py:527`) and merged into the agent-facing envelope by
+  `ToolResponse.from_job` — `data.update(job.failure_context)` on a `FAILED` job
+  (`mcp/responses.py:321`) — which is what `jobs.get`/`jobs.wait` return. The boot step runs as a
+  worker job (`jobs/handlers/runs/boot.py:63`).
 
 Measured at `811538fb2` on x86_64 with the project venv, driving the real probe with the ordinary
 daemon-unreachable stderr: the MCP payload renders the transport socket path verbatim, and
@@ -74,6 +75,12 @@ is identical.
   worker job (`jobs/handlers/runs/boot.py:63` is the only production caller), so the raw text lands
   in the **worker's** log, not the caller's. An operator reading `jobs.wait` sees the token and
   recovers the detail from the worker log, joining on the domain name the `WARNING` carries.
+- `kdivectl` operators lose the raw text, and that is the intended reduction rather than a cost.
+  `flatten_envelope` (`cli/render.py:50-64`) lifts every envelope `data` key into the operator's
+  row, so `kdivectl` shows `probe_error` — but it is an MCP client (`pyproject.toml:58`) and
+  remote-capable, which puts it on the client side of the boundary this record defends. Recovering
+  the raw text requires host access to the worker log, and an operator without host access is
+  precisely the actor the payload must not carry a host path to.
 - Log volume, worst case: the poll count is `_boot_window_polls` scaled by
   `tcg_deadline_multiplier(accel)` (`install.py:209`), 1.0 only for `accel == "kvm"` and otherwise
   `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER`, default 10.0 — so up to 180 `WARNING` lines on KVM and

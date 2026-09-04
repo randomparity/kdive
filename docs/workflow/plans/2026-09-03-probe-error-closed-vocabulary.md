@@ -84,10 +84,6 @@ The new tests use **`_SYS`** as the System id, matching every existing boot test
 (`inst.boot(_SYS)` at :1138, `details["system_id"] == str(_SYS)` at :1128). Do not inline a UUID
 literal, and do not use `_RUN` — it is a Run id.
 
-**One Python semantic this plan turns on:** `OSError` dispatches to a subclass on errno at
-construction, so `OSError(2, …)` **is** a `FileNotFoundError` and never reaches the
-`except (subprocess.SubprocessError, OSError)` arm. See the spec's vocabulary contract.
-
 ## Task 1 — Classify at the probe and render the member
 
 One task: `just type` is red between the two edits, so no reviewer could accept half of it.
@@ -108,6 +104,8 @@ def _boot_failure_details(system_id: UUID, first_probe_error: ProbeFailure | Non
 
 ### Step 1.1 — Write the failing test
 
+Two module constants, verbatim:
+
 ```python
 # The ordinary stderr `virsh` writes when the session daemon is unreachable. Every fragment is
 # host-derived and none of it is actionable for an agent.
@@ -117,28 +115,18 @@ _LEAKY_DOMSTATE_STDERR = (
     "No such file or directory"
 )
 _TRANSPORT_SUBSTRINGS = ("/run/user/1000/libvirt/virtqemud-sock", "/run/user", "virtqemud-sock")
-
-
-def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Absence, not difference: a transform returning a *different* leaky string passes a `!=`
-    # assertion and fails this one (#2220).
-    _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
-
-    probe = readiness_mod._domain_exit_probe("kdive-abc")
-    error = CategorizedError(
-        "System did not become ready within the boot window",
-        category=ErrorCategory.BOOT_TIMEOUT,
-        details=LocalLibvirtBooter._boot_failure_details(_SYS, probe.error),
-    )
-    payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})
-
-    assert payload["probe_error"] == "virsh_nonzero_exit"
-    rendered = repr(payload)
-    for substring in _TRANSPORT_SUBSTRINGS:
-        assert substring not in rendered
 ```
+
+Then `test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(monkeypatch)`, the
+shape every later absence test follows: `_capture_domstate(monkeypatch, returncode=1, stdout="",
+stderr=_LEAKY_DOMSTATE_STDERR)`; `probe = readiness_mod._domain_exit_probe("kdive-abc")`; a
+`CategorizedError("System did not become ready within the boot window",
+category=ErrorCategory.BOOT_TIMEOUT, details=LocalLibvirtBooter._boot_failure_details(_SYS,
+probe.error))`; `payload = dict(ToolResponse.failure_from_error(str(_SYS), error).data or {})`;
+then `assert payload["probe_error"] == "virsh_nonzero_exit"` followed by
+`assert substring not in repr(payload)` for every `_TRANSPORT_SUBSTRINGS` entry. Carry a comment
+saying why absence rather than difference: a transform returning a *different* leaky string passes
+a `!=` assertion and fails this one (#2220).
 
 Add `from kdive.mcp.responses import ToolResponse` and `LocalLibvirtBooter` to the existing
 `...lifecycle.install` import.
@@ -313,10 +301,9 @@ amended tests pin the behaviour they pinned before.
 
 ### Step 3.1 — Commit first, then guard the tree
 
-Commit Tasks 1-2 before injecting anything. The harness refuses a dirty tree
-(`test -z "$(git status --porcelain)"`). Copy the **four** modified source and test files to a
-backup **outside** the repo and record `sha256sum` for each. Restore from that copy — **never
-`git checkout --`**.
+Commit Tasks 1-2 first. The harness refuses a dirty tree (`test -z "$(git status --porcelain)"`).
+Copy the **four** modified source and test files to a backup **outside** the repo with a
+`sha256sum` for each, and restore from that copy — **never `git checkout --`**.
 
 ### Step 3.2 — One controlled fault per test
 

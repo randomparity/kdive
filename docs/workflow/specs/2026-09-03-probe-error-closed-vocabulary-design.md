@@ -77,11 +77,21 @@ the same kind: provider-minted error text crossing from host-trust to agent-trus
 
 **Actor model.** The untrusted party is the MCP-connected agent and everything downstream of it:
 transcripts, logs it writes, issues it files. It is authenticated and project-scoped, and not
-assumed discreet with what it is handed. The probe runs only in the **worker** — the boot step is a
-worker job (`jobs/handlers/runs/boot.py:63`), and no CLI path reaches it — and the worker is
-host-trust with host access already, so host paths in its log disclose nothing its operator cannot
-read directly. That is where the design places its trust, and why the log is an acceptable
-destination for text the payload may not carry.
+assumed discreet with what it is handed. The probe *runs* only in the worker — the boot step is a
+worker job (`jobs/handlers/runs/boot.py:63`) — and the worker is host-trust with host access
+already, so host paths in its log disclose nothing its operator cannot read directly. That is where
+the design places its trust, and why the log is an acceptable destination for text the payload may
+not carry.
+
+**`kdivectl` is a client, not a host-trust operator, and it does lose the raw text.** Separate
+*invocation* from *rendering*: no CLI invokes the probe, but `kdivectl` is an MCP client
+(`pyproject.toml:58`) whose `flatten_envelope` (`cli/render.py:50-64`) lifts every envelope `data`
+key into the operator's row, so it shows `probe_error` today and the token after this change. That
+is a reduction; criterion 2 permits one that is stated and justified, and ADR-0594 records the
+justification — a remote-capable client sits on the far side of the boundary this change defends,
+so recovering the raw text should require the host access an operator on the near side already has.
+`src/kdive/__main__.py`, the CLI the charter's surface names, is the host-side daemon entrypoint and
+the probe path does not reach it.
 
 **Control per boundary.** One control, upstream of both: the value is a member of a vocabulary
 fixed at compile time, so no host-derived substring can occupy it. On failure it discloses the
@@ -103,11 +113,11 @@ not in `details` or the message, so it reaches neither egress.
 The deciding tests assert **absence** of the transport substrings from the rendered payload, not
 inequality against the raw stderr, so a transform returning a *different* leaky string fails them.
 Both egresses get their own absence test — the worker one is what a boundary-only fix would have
-missed. The `OSError` arm is covered separately, with a non-ENOENT errno for the reason above.
-Every vocabulary member is reached, and a `caplog` assertion proves the raw text still reaches the
-operator.
+missed. The `OSError` arm is covered separately with a non-ENOENT errno, both `VIRSH_MISSING`
+branches are reached (member coverage alone hides the ENOENT-from-exec one), and a `caplog`
+assertion proves the raw text still reaches the operator.
 
 Every new test is bite-proved: committed, faulted, observed failing cleanly, reverted, and
 byte-verified by `sha256sum`. Two conditions make a bite evidence rather than noise — the recorded
 failure text must name the behaviour the fault changed, and every test must pass under a no-fault
-control. A test that fails either is defective, not proven.
+control.
