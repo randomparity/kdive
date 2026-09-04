@@ -21,12 +21,6 @@ from kdive.providers.ports.retrieve import (
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.connection.transport import remote_connection
-from kdive.providers.remote_libvirt.guest.agent import (
-    AgentCommand,
-    AgentExecResult,
-    GuestAgentExec,
-    qemu_agent_command,
-)
 from kdive.providers.shared.debug_common.drgn_program import (
     open_vmcore_program,
     read_vmcoreinfo_build_id,
@@ -35,6 +29,12 @@ from kdive.providers.shared.debug_common.drgn_program import (
 from kdive.providers.shared.debug_common.introspect import (
     assemble_report,
     assemble_script_output,
+)
+from kdive.providers.shared.guest_agent import (
+    AgentCommand,
+    AgentExecResult,
+    GuestAgentExec,
+    qemu_agent_command,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

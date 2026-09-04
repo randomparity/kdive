@@ -19,11 +19,6 @@ from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.connection.endpoint_preflight import (
     validate_guest_routable_endpoint,
 )
-from kdive.providers.remote_libvirt.guest.agent import (
-    AgentCommand,
-    AgentExecResult,
-    GuestAgentExec,
-)
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.providers.remote_libvirt.retrieve.common import (
     HELPER,
@@ -43,6 +38,11 @@ from kdive.providers.remote_libvirt.retrieve.common import (
     readiness_failure,
 )
 from kdive.providers.shared.debug_common.core_file import MAX_CORE_BYTES
+from kdive.providers.shared.guest_agent import (
+    AgentCommand,
+    AgentExecResult,
+    GuestAgentExec,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend

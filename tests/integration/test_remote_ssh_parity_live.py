@@ -29,8 +29,8 @@ from uuid import uuid4
 import libvirt
 import pytest
 
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
+from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
 
 pytestmark = pytest.mark.live_vm
 

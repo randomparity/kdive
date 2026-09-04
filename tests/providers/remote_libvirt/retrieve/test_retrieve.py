@@ -22,13 +22,13 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, qemu_agent_command
 from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_PUT_EXPIRY_S,
     DEFAULT_READINESS_POLL_S,
     KdumpCapturer,
 )
 from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
+from kdive.providers.shared.guest_agent import AgentExecResult, qemu_agent_command
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import STORE_MTIME

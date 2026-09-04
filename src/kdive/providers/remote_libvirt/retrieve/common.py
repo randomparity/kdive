@@ -26,7 +26,7 @@ from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_connection,
 )
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
+from kdive.providers.shared.guest_agent import AgentExecResult, GuestDomain
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend

@@ -29,6 +29,7 @@ _LOOPBACK_HOST = "127.0.0.1"
 # capture path (ADR-0385) attaches a filter-dump to the same netdev without re-hardcoding the
 # literal — a rename here moves both in lockstep.
 SYSTEM_SSH_NETDEV_ID = "kdivessh"
+_GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()
 # The bare-fs rootfs roots on the lone virtio disk (`/dev/vda`); the serial `console=` (ttyS0 on
 # x86, hvc0 on pseries — see kdive.domain.platform) makes the readiness tail and SSH/drgn path
@@ -183,6 +184,7 @@ def _build_baseline_domain(
         _append_emulator(devices, emulator)
     _append_root_disk(devices, disk_path)
     _append_serial_console(devices, system_id)
+    _append_guest_agent_channel(devices)
     _append_metadata(domain, system_id)
     return domain, devices
 
@@ -290,6 +292,12 @@ def _append_serial_console(devices: ET.Element, system_id: UUID) -> None:
     ET.SubElement(serial, "target", port="0")
     console = ET.SubElement(devices, "console", type="pty")
     ET.SubElement(console, "target", type="serial", port="0")
+
+
+def _append_guest_agent_channel(devices: ET.Element) -> None:
+    """Append libvirt's standard virtio channel for qemu-guest-agent."""
+    channel = ET.SubElement(devices, "channel", type="unix")
+    ET.SubElement(channel, "target", type="virtio", name=_GUEST_AGENT_CHANNEL)
 
 
 def _append_metadata(domain: ET.Element, system_id: UUID) -> None:
@@ -474,6 +482,7 @@ def render_customization_domain_xml(
         _append_emulator(devices, emulator)
     _append_root_disk(devices, disk_path)
     _append_serial_console(devices, build_id)
+    _append_guest_agent_channel(devices)
     _append_egress_nic(domain, pin_nic_slot=traits.pin_nic_slot)
     return ET.tostring(domain, encoding="unicode")
 

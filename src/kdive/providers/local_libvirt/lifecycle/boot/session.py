@@ -101,8 +101,12 @@ type PinOperationLease = Callable[[LocalExternalBootOperationLease], PinnedOpera
 type OpenArtifactRoot = Callable[[OperationOwnership], int]
 
 
-class _Domain(Protocol):
+class RunningDomain(Protocol):
+    def name(self) -> str: ...
     def XMLDesc(self, flags: int) -> str: ...  # noqa: N802
+
+
+class _Domain(RunningDomain, Protocol):
     def isActive(self) -> int: ...  # noqa: N802
     def destroy(self) -> int: ...
     def create(self) -> int: ...
@@ -148,7 +152,7 @@ class _Guest(Protocol):
 
 type OpenGuest = Callable[[], _Guest]
 type ReadinessProbe = Callable[[UUID], ReadinessResult]
-type RunningObserver = Callable[[UUID], RunningKernelObservation]
+type RunningObserver = Callable[[UUID, RunningDomain], RunningKernelObservation]
 type CleanupPayloads = Callable[[int, ExternalBootActivationBinding], None]
 
 
@@ -836,8 +840,8 @@ class _ConcreteSession:
         return self._readiness(self._system_id)
 
     def observe_running(self) -> RunningKernelObservation:
-        self._require_open_domain()
-        return self._observe_running(self._system_id)
+        domain = self._require_open_domain()
+        return self._observe_running(self._system_id, domain)
 
     def restore_power(self, prior: Literal["running", "inactive"]) -> None:
         domain = self._require_open_domain()
@@ -1211,7 +1215,7 @@ def _unconfigured_readiness(_system_id: UUID) -> ReadinessResult:
     raise RuntimeError("local external-boot readiness is not configured")
 
 
-def _unconfigured_observation(_system_id: UUID) -> RunningKernelObservation:
+def _unconfigured_observation(_system_id: UUID, _domain: RunningDomain) -> RunningKernelObservation:
     raise RuntimeError("local external-boot running observation is not configured")
 
 

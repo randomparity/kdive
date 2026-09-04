@@ -149,6 +149,8 @@ class ModuleObligation(_ClosedValue):
 def _validate_platform_argument(value: str) -> str:
     if not value or not value.isascii() or len(value.encode()) > _PLATFORM_ARGUMENT_MAX_BYTES:
         raise ValueError("platform argument must be 1 through 256 ASCII bytes")
+    if any(ord(character) < 0x20 and character not in "\t\n\r" for character in value):
+        raise ValueError("platform argument must contain only XML 1.0 characters")
     if "\0" in value or any(character.isspace() for character in value):
         raise ValueError("platform argument must not contain whitespace or NUL")
     if value.startswith("="):
@@ -239,10 +241,16 @@ class MaterializedArtifacts(_ClosedValue):
     initrd: OpaqueProviderRef | None
 
 
-class RunningKernelObservation(_ClosedValue):
+class KernelIdentity(_ClosedValue):
     architecture: Architecture
     release: KernelRelease
     gnu_build_id: Annotated[str, Field(pattern=r"^(?:[0-9a-f]{2}){4,64}$")]
+
+
+class RunningKernelObservation(_ClosedValue):
+    identity: KernelIdentity
+    cmdline: bytes
+    expected_cmdline: bytes
 
 
 class ExternalBootMaterialization(_ClosedValue):
@@ -258,7 +266,7 @@ class ExternalBootMaterialization(_ClosedValue):
     installed_module_tree: Digest
     verified_bundle_sha256: Digest
     verified_initrd_sha256: Digest | None
-    kernel_observation: RunningKernelObservation
+    kernel_observation: KernelIdentity
     artifacts: MaterializedArtifacts
 
     _canonical_provider = field_validator("provider_kind")(_nfc)

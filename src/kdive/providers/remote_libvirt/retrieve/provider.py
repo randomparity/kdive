@@ -15,9 +15,6 @@ from kdive.providers.ports.retrieve import (
     CaptureOutput,
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
-from kdive.providers.remote_libvirt.guest.agent import (
-    qemu_agent_command,
-)
 from kdive.providers.remote_libvirt.retrieve.common import (
     OpenRetrieveConnection,
     StorePort,
@@ -37,6 +34,9 @@ from kdive.providers.shared.debug_common.core_file import (
     MAX_CORE_BYTES,
     read_core_build_id_from_file,
     read_core_dmesg_from_file,
+)
+from kdive.providers.shared.guest_agent import (
+    qemu_agent_command,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

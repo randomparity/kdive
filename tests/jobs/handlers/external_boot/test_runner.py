@@ -39,6 +39,7 @@ from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     COMMITTABLE_ERROR_CATEGORIES,
     OperationContext,
+    _render_cmdline,
     authority_ref,
     run_operation,
 )
@@ -51,6 +52,8 @@ from kdive.jobs.models import (
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.external_boot import RunningKernelObservation
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import build_job
@@ -59,6 +62,16 @@ from tests.mcp.systems_support import provider_resolver
 
 ACTIVATING = frozenset({ExternalBootActivationState.ACTIVATING})
 NO_EVIDENCE: frozenset[str] = frozenset()
+
+
+def test_cmdline_rendering_redacts_before_distinct_bounded_escaping() -> None:
+    registry = SecretRegistry()
+    registry.register("secret\\value", scope=None)
+    rendered = _render_cmdline(b"secret\\value \\ literal\x00\x01\xff", Redactor(registry=registry))
+
+    assert "secret" not in rendered
+    assert rendered == "[REDACTED] \\\\ literal\\x00\\x01\\xFF"
+    assert len(_render_cmdline(b"a" * 9000, Redactor(registry=registry)).encode()) == 8192
 
 
 async def _no_preconditions(
@@ -111,6 +124,7 @@ def _ports(
     return ExternalBootHandlerPorts(
         resolver=resolver,
         incarnation_credential=SecretStr(case.credential),
+        secret_registry=SecretRegistry(),
         acknowledger=cast(Any, acknowledger),
     )
 
@@ -412,7 +426,8 @@ def test_a_successful_run_reaches_the_port_and_returns_the_built_result(
 
         assert vehicle.port.calls == ["observe"]
         assert vehicle.port.recoveries == [vehicle.recovery_point]
-        assert observation == vehicle.materialization.kernel_observation
+        assert observation is not None
+        assert observation.identity == vehicle.materialization.kernel_observation
         assert context.acknowledgement.generation == context.authority.generation
         assert await _authority_count(seed) == 1
 

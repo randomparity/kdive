@@ -27,6 +27,7 @@ class FaultInjectExternalBoot:
 
     def __init__(self) -> None:
         self._observations: dict[str, RunningKernelObservation] = {}
+        self._cmdlines: dict[str, bytes] = {}
         self._preparation_receipts: dict[tuple[str, str], ExternalBootPreparationObservation] = {}
         self._interrupt_after_receipt: set[str] = set()
         self.preparation_mutations = {"materialize": 0, "prepare": 0}
@@ -98,7 +99,7 @@ class FaultInjectExternalBoot:
     ) -> ExternalBootMaterialization:
         del authority
         suffix = plan.identity.removeprefix("sha256:")
-        return ExternalBootMaterialization(
+        materialization = ExternalBootMaterialization(
             architecture=plan.architecture,
             provider_kind="fault-inject",
             ownership={
@@ -122,6 +123,8 @@ class FaultInjectExternalBoot:
                 initrd=OpaqueProviderRef(ref=f"initrd/{suffix}") if plan.initrd else None,
             ),
         )
+        self._cmdlines[materialization.identity] = plan.cmdline.encode()
+        return materialization
 
     def prepare(
         self,
@@ -152,7 +155,12 @@ class FaultInjectExternalBoot:
                 modules=PresentComponentState(manifest=materialization.installed_module_tree),
             ),
         )
-        self._observations[recovery_ref.ref] = materialization.kernel_observation
+        cmdline = self._cmdlines[materialization.identity]
+        self._observations[recovery_ref.ref] = RunningKernelObservation(
+            identity=materialization.kernel_observation,
+            cmdline=cmdline,
+            expected_cmdline=cmdline,
+        )
         return point
 
     def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
@@ -170,3 +178,4 @@ class FaultInjectExternalBoot:
     def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
         del authority
         self._observations.pop(recovery.recovery_ref.ref, None)
+        self._cmdlines.pop(recovery.materialization_identity, None)

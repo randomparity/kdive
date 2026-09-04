@@ -1,29 +1,35 @@
 """Host mechanisms for the local external-boot session factory (ADR-0591).
 
 ADR-0587 defined `LocalExternalBootSessionFactory` and its six injected host mechanisms and
-deferred binding them. This module supplies **four** of the six, and two are deliberately absent:
+deferred binding them. This module supplies five of the six; one remains deliberately absent:
 
-- `RunningObserver` (amendment 2) — local domains render no qemu-guest-agent channel, so there is
-  no host-reachable read of a running guest.
 - `ReadinessProbe` (amendment 7) — `_real_readiness` reads a console log that only
   `LocalLibvirtInstall`'s prepare truncates, and `_ConcreteSession.start()` truncates nothing, so
   on the arm that reaches it the previous boot's `kdive-ready` marker makes the gate pass for a
   panicked target. A correct probe must anchor its window at `start()`, which is in `session.py`.
 
-The factory keeps its fail-closed `_unconfigured_observation` and `_unconfigured_readiness`
-defaults for both; each raises at first call, so #2212 cannot ship a live port without them.
+The factory keeps its fail-closed `_unconfigured_readiness` default, so #2212 cannot ship a live
+port without that final mechanism.
 """
 
 from __future__ import annotations
 
 import errno
 import os
+import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+import libvirt
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as _safe_fromstring
+from pydantic import ValidationError
+
+from kdive.build_artifacts.validation import parse_gnu_build_id
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     _open_or_create_private_child,
     _open_private_directory,
@@ -37,15 +43,38 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     OperationOwnership,
     PinnedOperationOwnership,
+    RunningDomain,
     _Guest,
 )
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+from kdive.providers.ports.external_boot import (
+    Architecture,
+    ExternalBootActivationBinding,
+    RunningKernelObservation,
+)
+from kdive.providers.shared.guest_agent import (
+    AgentCommand,
+    AgentExecResult,
+    GuestAgentExec,
+    GuestDomain,
+    qemu_agent_command,
+)
 
 _ARTIFACT_ROOT_REFUSED = "artifact root is not an owner-only service-owned directory"
 _NOT_CANONICAL = "external-boot path component is not a canonical identifier"
 _RECOVERY_REFUSED = "recovery directory is not an owner-only service-owned directory"
 
 PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
+
+UNAME_PROGRAM = "/usr/bin/uname"
+CAT_PROGRAM = "/usr/bin/cat"
+PROC_CMDLINE_PATH = "/proc/cmdline"
+KERNEL_NOTES_PATH = "/sys/kernel/notes"
+OBSERVATION_PROGRAMS = frozenset({UNAME_PROGRAM, CAT_PROGRAM})
+_GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"
+MAX_GUEST_READ_BYTES = 65_536
+MAX_CMDLINE_BYTES = 2_048
+MAX_GUEST_FIELD_CHARS = 64
+_ARCHITECTURES: tuple[Architecture, ...] = ("x86_64", "ppc64le")
 
 
 def _refused(message: str, exc: OSError) -> str:
@@ -134,6 +163,141 @@ class LocalOperationLane:
             OperationOwnership(lease.system_id, lease.binding),
             _Pin(lease),
         )
+
+
+class LocalRunningObserver:
+    """Read one running local guest through the constrained guest-agent executor."""
+
+    def __init__(self, *, agent_command: AgentCommand = qemu_agent_command) -> None:
+        self._agent = GuestAgentExec(
+            agent_command=agent_command,
+            allowed_programs=OBSERVATION_PROGRAMS,
+        )
+
+    def __call__(self, system_id: UUID, domain: RunningDomain) -> RunningKernelObservation:
+        guest_domain = cast(GuestDomain, domain)
+        expected_cmdline = self._expected_cmdline(domain, system_id)
+        release = self._single_field(
+            self._read(guest_domain, [UNAME_PROGRAM, "-r"], system_id, "release"),
+            system_id,
+            "release",
+        )
+        machine = self._single_field(
+            self._read(guest_domain, [UNAME_PROGRAM, "-m"], system_id, "architecture"),
+            system_id,
+            "architecture",
+        )
+        cmdline = self._read_cmdline(guest_domain, system_id)
+        notes = self._read(
+            guest_domain,
+            [CAT_PROGRAM, KERNEL_NOTES_PATH],
+            system_id,
+            "kernel notes",
+        )
+        try:
+            build_id = parse_gnu_build_id(notes)
+        except CategorizedError as exc:
+            raise _observation_failure(
+                system_id, "the running kernel has no readable GNU build id"
+            ) from exc
+        if machine not in _ARCHITECTURES:
+            raise _observation_failure(system_id, "the guest reported an unsupported architecture")
+        try:
+            return RunningKernelObservation(
+                identity={
+                    "architecture": machine,
+                    "release": release,
+                    "gnu_build_id": build_id,
+                },
+                cmdline=cmdline,
+                expected_cmdline=expected_cmdline,
+            )
+        except ValidationError:
+            raise _observation_failure(
+                system_id, "the guest returned an out-of-contract running observation"
+            ) from None
+
+    def _read(
+        self,
+        domain: GuestDomain,
+        argv: list[str],
+        system_id: UUID,
+        what: str,
+        *,
+        max_bytes: int = MAX_GUEST_READ_BYTES,
+    ) -> bytes:
+        result: AgentExecResult = self._agent.run(domain, argv)
+        if result.exit_status != 0:
+            raise _observation_failure(system_id, f"the guest could not read {what}")
+        if len(result.stdout) > max_bytes:
+            raise _observation_failure(system_id, f"the guest returned oversized {what}")
+        return result.stdout
+
+    def _read_cmdline(self, domain: GuestDomain, system_id: UUID) -> bytes:
+        raw = self._read(
+            domain,
+            [CAT_PROGRAM, PROC_CMDLINE_PATH],
+            system_id,
+            "kernel command-line evidence",
+            max_bytes=MAX_CMDLINE_BYTES + 1,
+        )
+        if not raw.endswith(b"\n"):
+            raise _observation_failure(system_id, "the kernel command-line read was truncated")
+        content = raw[:-1]
+        if len(content) > MAX_CMDLINE_BYTES:
+            raise _observation_failure(
+                system_id, "the guest returned oversized kernel command-line evidence"
+            )
+        return content
+
+    @staticmethod
+    def _single_field(raw: bytes, system_id: UUID, what: str) -> str:
+        text = raw.decode("utf-8", errors="replace")
+        if text.endswith("\n"):
+            text = text[:-1]
+        if (
+            not text
+            or len(text) > MAX_GUEST_FIELD_CHARS
+            or "\n" in text
+            or any(character.isspace() for character in text)
+        ):
+            raise _observation_failure(system_id, f"the guest returned malformed {what}")
+        return text
+
+    @staticmethod
+    def _expected_cmdline(domain: RunningDomain, system_id: UUID) -> bytes:
+        try:
+            root = _safe_fromstring(domain.XMLDesc(0))
+        except (libvirt.libvirtError, ET.ParseError, DefusedXmlException) as exc:
+            raise _observation_failure(
+                system_id, "the target domain XML could not be read"
+            ) from exc
+        expected = root.findtext("./os/cmdline")
+        channel = root.find(f"./devices/channel/target[@name='{_GUEST_AGENT_CHANNEL}']")
+        if channel is None or channel.get("type") != "virtio":
+            raise _observation_failure(
+                system_id,
+                "the qemu-guest-agent channel is absent; reprovision this System",
+            )
+        if expected is None:
+            raise _observation_failure(
+                system_id, "the target domain XML has no expected command line"
+            )
+        encoded = expected.encode()
+        if len(encoded) > MAX_CMDLINE_BYTES:
+            raise _observation_failure(
+                system_id, "the target command line exceeds the observation bound"
+            )
+        return encoded
+
+
+def _observation_failure(system_id: UUID, reason: str) -> CategorizedError:
+    return CategorizedError(
+        f"local-libvirt external-boot observation failed: {reason}",
+        category=ErrorCategory.READINESS_FAILURE,
+        details={"system_id": str(system_id)},
+        terminal=True,
+    )
 
 
 def _canonical_name(value: str) -> str:

@@ -33,7 +33,7 @@ import libvirt
 import pytest
 from defusedxml.ElementTree import fromstring as safe_fromstring
 
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
+from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
 
 pytestmark = pytest.mark.live_vm
 

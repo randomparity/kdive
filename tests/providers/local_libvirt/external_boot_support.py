@@ -20,8 +20,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
+    KernelIdentity,
     OpaqueProviderRef,
-    RunningKernelObservation,
 )
 
 _SOURCE_XML = """<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
@@ -67,7 +67,7 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         target_xml_sha256="sha256:"
         + hashlib.sha256(_SOURCE_XML.replace("/old", "/new").encode()).hexdigest(),
         target_xml=_SOURCE_XML.replace("/old", "/new"),
-        expected_running=RunningKernelObservation(
+        expected_running=KernelIdentity(
             architecture="x86_64",
             release="6.12.0",
             gnu_build_id="01020304",

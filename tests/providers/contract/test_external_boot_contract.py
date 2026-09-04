@@ -102,7 +102,9 @@ def test_activate_then_observe_reports_the_materialized_kernel(
 
     observation = provider.observe(recovery, binding.authority())
 
-    assert observation == materialization.kernel_observation
+    assert observation.identity == materialization.kernel_observation
+    assert observation.cmdline == observation.expected_cmdline
+    assert observation.expected_cmdline == binding.plan().cmdline.encode()
 
 
 def test_recover_then_cleanup_completes_the_activation(binding: ProviderBinding) -> None:

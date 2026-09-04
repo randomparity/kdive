@@ -25,6 +25,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -47,9 +48,15 @@ class RecordingExecutor:
 
 @pytest.mark.parametrize(
     ("operation", "category"),
-    [("activate", "target"), ("recover", "source"), ("cleanup", "absent")],
+    [
+        ("activate", "target"),
+        ("recover", "source"),
+        ("resolve-conflict", "source"),
+        ("release", "source"),
+        ("cleanup", "absent"),
+    ],
 )
-def test_worker_uses_authority_observation_without_direct_provider_mutation(
+def test_worker_uses_authority_observation_with_only_the_readiness_read(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     operation: str,
@@ -71,6 +78,7 @@ def test_worker_uses_authority_observation_without_direct_provider_mutation(
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
                 acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
                 authority_executor=executor,
             )
@@ -85,11 +93,19 @@ def test_worker_uses_authority_observation_without_direct_provider_mutation(
             handler = build_operations(ports).get(operation)
             assert handler is not None
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
-                await handler(worker, job, marker)
+                result = await handler(worker, job, marker)
+                if result.result.operation == "recovery-attempt":
+                    await queue.complete_external_boot(
+                        worker,
+                        job,
+                        result,
+                        incarnation_credential=SecretStr(case.credential),
+                    )
+                    await handler(worker, job, marker)
 
         assert len(executor.requests) == 1
         assert executor.requests[0].operation.value == operation
-        assert vehicle.port.calls == []
+        assert vehicle.port.calls == (["observe"] if category == "target" else [])
 
     asyncio.run(main())
 
@@ -106,6 +122,7 @@ def test_activate_commits_deadline_before_provider_and_reuses_it(
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
                 acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
                 authority_executor=executor,
                 clock=lambda: now,
@@ -158,6 +175,7 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
                 acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
                 authority_executor=executor,
                 clock=lambda: now,
@@ -237,6 +255,7 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
                 acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
                 authority_executor=executor,
                 clock=lambda: now,
@@ -305,6 +324,7 @@ def test_resolve_conflict_starts_a_fresh_attempt_from_its_own_clock(
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
                 acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
                 authority_executor=executor,
                 clock=lambda: now,
