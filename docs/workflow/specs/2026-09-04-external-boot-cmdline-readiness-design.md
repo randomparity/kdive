@@ -25,12 +25,15 @@ remains data. Content is bounded at 2,048 bytes, one byte above the maximum vali
 appended byte is observable while an oversized capture fails as malformed evidence. The remote
 provider keeps using its bounded qemu-guest-agent reads.
 
-The local provider adds the same bounded qemu-guest-agent commands to its production
-`RunningObserver`. The local domain renderer adds the standard virtio guest-agent channel for newly
-provisioned Systems, and the observer fails with an actionable readiness error when an older System
-lacks it; reprovisioning that System is the recovery action. This is a server-preparation/provider
-port prerequisite authorized for #2175. #2212 still owns assembling and advertising the completed
-local external-boot port, but it consumes this concrete observer rather than inventing one.
+The existing remote `GuestAgentExec` moves behavior-preservingly to a shared libvirt module, with its
+allowlist, two-phase polling, per-call and whole-command timeouts, base64 decoding, output bounds,
+and libvirt error classification unchanged. Both providers consume that seam. The local
+`RunningObserver` receives its session's already opened domain and executes only fixed absolute
+`uname` and `cat` arguments. The local domain renderer adds the standard virtio guest-agent channel
+for newly provisioned Systems, and the observer fails with an actionable readiness error when an
+older System lacks it; reprovisioning that System is the recovery action. #2212 still owns
+assembling and advertising the completed local external-boot port, but consumes this concrete
+observer rather than inventing one.
 
 The provider's durable recovery definition already holds the plan-derived target XML or explicit
 expected command line, tied to the recovery point's plan identity. Each provider returns those
@@ -42,13 +45,25 @@ the port is the trusted boundary through which core already receives live kernel
 ## Failure contract
 
 A command-line mismatch is a terminal-on-this-attempt `READINESS_FAILURE`, so the existing worker
-failure mapper records failure and follows the recovery path. Its details include
-`expected_cmdline`, `observed_cmdline`, and the zero-based `first_differing_byte`. Bytes decode as
-UTF-8 with `backslashreplace`; JSON encoding then escapes control characters. This keeps invalid
-UTF-8 and byte offsets distinguishable without terminal-control injection. Values are bounded by
-the provider's 2,048-byte content limit. The offset is the shorter length when one byte sequence is
-a strict prefix. These fields deliberately report the two strings required by #2175; callers must
-continue applying the repository redaction registry before persistence or response output.
+failure mapper records failure and follows the recovery path. Core puts the two rendered strings and
+zero-based first differing byte into the categorized error details. The authority runner recognizes
+only that closed detail shape, redacts both strings with its injected process `SecretRegistry`, and
+places an `external-boot-cmdline-mismatch-v1` diagnostic inside `failure_context`. The existing
+outer `external-boot-authority-result-v1` remains unchanged.
+
+The diagnostic has exactly `schema`, `expected_cmdline`, `observed_cmdline`, and
+`first_differing_byte`. Bytes decode as UTF-8 with `backslashreplace`; JSON encoding then escapes
+control characters. Each rendered string is capped at 8,192 UTF-8 bytes after redaction, and the
+offset is an integer from 0 through 2,048. The offset is the shorter byte length when one sequence is
+a strict prefix. These bounds retain every admitted 2,048-byte observation even when each byte
+expands to a four-character escape.
+
+Migration `0130` changes only `commit_external_boot_authority_result`'s validation of a `fail`
+result. It admits the optional versioned diagnostic beside `phase`, checks exact keys, types,
+schemas, byte bounds, and offset range, then persists it in the existing `jobs.failure_context`
+JSONB column. Old phase-only failures and readers remain valid. The runner receives the same
+process-owned `SecretRegistry` already present in `WorkerHandlerAssembly`; it never persists raw
+values and never relies on response-time redaction.
 
 Unavailable provider evidence retains the provider seam's existing retry behavior until the
 activation readiness deadline. Malformed, oversized, unterminated, or mismatched live evidence is
@@ -63,6 +78,28 @@ ASCII and already reject whitespace and NUL, the added rule rejects C0 controls 
 line feed, and carriage return; those three are already rejected as whitespace. Provider renderers
 may retain defensive parsing checks, but the shared port is the trust-boundary control.
 
+## Threat model
+
+The design adds no anonymous or tenant-facing entry point. It widens three existing boundaries:
+
+- A running guest controls qemu-agent replies. The shared executor admits only fixed absolute
+  programs, bounds time and decoded output, validates the reply protocol, and classifies transport
+  failures. Provider observation additionally bounds and validates every identity field and command
+  line before returning it.
+- Plan-derived and guest-derived command lines cross into failure persistence. Core renders bytes
+  deterministically, the authority runner redacts with the process registry before constructing the
+  closed diagnostic, Pydantic applies byte/range bounds, and migration `0130` independently repeats
+  exact-key and bound validation before storing JSONB.
+- Newly provisioned local guests receive a standard virtio channel. The channel reaches only the
+  guest agent already installed by the image role; the executor's program allowlist remains the
+  operation boundary, and no user-supplied program or shell text reaches it.
+
+Trusted actors are the worker process, provider implementations, authority commit function, and
+operator-managed image/provisioning configuration. An authenticated tenant can influence
+`debug_cmdline` but cannot select an executable or bypass redaction. Out of scope are compromise of
+the worker, libvirt daemon, or guest-agent package and retrofitting existing Systems in place;
+reprovisioning is the explicit recovery for a System without the channel.
+
 ## Testing
 
 Port tests prove the transient byte fields, byte-identical legacy materialization serialization,
@@ -71,4 +108,8 @@ exact acceptance plus truncated, reordered, and appended command-line failures, 
 and diagnostic values and terminal readiness classification. Remote tests prove exactly-one-newline
 handling and that the provider returns bytes without performing the core comparison. Local tests
 prove the production guest-agent observer, missing-channel recovery diagnostic, channel rendering,
-and exact byte preservation. Provider contract bindings gain transient expected and observed bytes.
+and exact byte preservation. Authority model, runner, and database tests prove raw registered
+secrets never reach the versioned diagnostic, malformed or oversized diagnostics are refused, and
+old phase-only failures still commit. A native x86_64 `live_vm` case provisions a compatible local
+System and proves the real channel plus exact `/proc/cmdline` observation. Provider contract bindings
+gain transient expected and observed bytes.
