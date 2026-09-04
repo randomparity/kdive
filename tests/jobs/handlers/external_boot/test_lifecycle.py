@@ -159,9 +159,21 @@ async def _run_operation(
     handler = operations.get(operation)
     assert handler is not None
     async with await role_connection(dsns("kdive_worker")) as worker:
-        return await handler(
+        result = await handler(
             worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
         )
+        if result.result.operation == "recovery-attempt":
+            committed = await queue.complete_external_boot(
+                worker,
+                _job(case),
+                result,
+                incarnation_credential=SecretStr(case.credential),
+            )
+            assert committed is not None
+            return await handler(
+                worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            )
+        return result
     del seed
 
 
@@ -330,7 +342,10 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
         assert payload.failure_context.phase == "commit"
         # The mutation happened; what is refused is *recording* it as a good terminal state.
         row = await _activation_row(seed, case.vehicle.activation_id)
-        assert row["state"] == spec["activation_state"]
+        expected_state = (
+            "recovering" if operation == "resolve-conflict" else spec["activation_state"]
+        )
+        assert row["state"] == expected_state
 
     _drive(migrated_url, authority_role_dsns, operation, body)
 

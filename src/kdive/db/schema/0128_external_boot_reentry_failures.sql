@@ -17,14 +17,63 @@ BEGIN
            (p_admitted_operation = 'activate' AND v_operation = 'deadline')
            OR (p_admitted_operation = 'recover'
                AND v_operation IN ('deadline', 'recovery-attempt'))
+           OR (p_admitted_operation = 'resolve-conflict'
+               AND v_operation = 'recovery-attempt')
        ) THEN$new$;
     IF position(v_old in v_definition) = 0 THEN
         RAISE EXCEPTION 'external boot intermediate operation shape changed';
     END IF;
     v_definition := replace(v_definition, v_old, v_new);
 
+    v_old := $old$           OR v_attempt.authority_generation <> p_generation$old$;
+    v_new := $new$           OR v_attempt.authority_generation > p_generation$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot recovery attempt generation shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$OR (v_operation = 'resolve-conflict' AND (
+           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state IS DISTINCT FROM 'succeeded'
+           OR v_activation.state IS DISTINCT FROM 'recovery_conflict'
+           OR v_attempt.state IS DISTINCT FROM 'conflict'
+       ))$old$;
+    v_new := $new$OR (v_operation = 'resolve-conflict' AND (
+           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state IS DISTINCT FROM 'succeeded'
+           OR v_activation.state IS DISTINCT FROM 'recovering'
+           OR v_attempt.state IS DISTINCT FROM 'recovering'
+       ))$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot resolve-conflict commit shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
     v_old := $old$        v_terminal := (p_result ->> 'terminal')::boolean OR v_job.attempt >= v_job.max_attempts;$old$;
-    v_new := $new$        IF p_purpose = 'recover'
+    v_new := $new$        IF p_purpose = 'activate'
+           AND p_result ->> 'error_category' = 'boot_timeout'
+           AND (p_result ->> 'terminal')::boolean THEN
+            INSERT INTO public.external_boot_recovery_attempts (
+                activation_id, attempt_number, attempt_id, authority_generation,
+                recovery_basis, recovery_readiness_deadline, state
+            ) VALUES (
+                p_activation_id,
+                coalesce((
+                    SELECT max(ra.attempt_number) + 1
+                    FROM public.external_boot_recovery_attempts AS ra
+                    WHERE ra.activation_id = p_activation_id
+                ), 1),
+                p_authority_id, p_generation, 'recovery_point',
+                v_activation.activation_readiness_deadline, 'recovering'
+            ) ON CONFLICT (attempt_id) DO NOTHING;
+            UPDATE public.external_boot_activations
+            SET state = 'recovering', current_attempt_id = p_authority_id
+            WHERE id = p_activation_id AND state = 'activating';
+            IF NOT FOUND THEN
+                RETURN QUERY SELECT 'superseded'::text, NULL::text;
+                RETURN;
+            END IF;
+        ELSIF p_purpose = 'recover'
            AND p_result ->> 'error_category' = 'readiness_failure'
            AND (p_result ->> 'terminal')::boolean THEN
             v_evidence := jsonb_build_object(
@@ -136,6 +185,25 @@ BEGIN
     END IF;
     v_definition := replace(v_definition, v_old, v_new);
 
+    v_old := $old$OR (v_operation = 'recovery-attempt' AND (
+           v_system.state NOT IN ('ready', 'crashed')
+           OR v_run.state IS DISTINCT FROM 'succeeded'
+           OR v_activation.state IS DISTINCT FROM 'active'
+       ))$old$;
+    v_new := $new$OR (v_operation = 'recovery-attempt' AND (
+           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state IS DISTINCT FROM 'succeeded'
+           OR (p_purpose = 'recover' AND v_activation.state IS DISTINCT FROM 'active')
+           OR (p_purpose = 'resolve-conflict' AND (
+               v_activation.state IS DISTINCT FROM 'recovery_conflict'
+               OR v_attempt.state IS DISTINCT FROM 'conflict'
+           ))
+       ))$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot recovery-attempt admission shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
     v_old := $old$WHERE field <> 'phase'$old$;
     v_new := $new$WHERE field NOT IN ('phase', 'reason', 'next_action')$new$;
     IF position(v_old in v_definition) = 0 THEN
@@ -167,6 +235,40 @@ BEGIN
     END IF;
     v_definition := replace(v_definition, v_old, v_new);
     EXECUTE v_definition;
+END
+$$;
+
+DO $$
+DECLARE
+    v_function constant regprocedure :=
+        'public.allocate_external_boot_authority(bytea,uuid,integer,uuid,uuid,uuid,text,text,text,text,text)'::regprocedure;
+    v_definition text := pg_get_functiondef(v_function);
+    v_old text;
+    v_new text;
+BEGIN
+    v_old := $old$OR (p_purpose = 'resolve-conflict'
+           AND v_operation NOT IN ('resolve-conflict', 'fail'))$old$;
+    v_new := $new$OR (p_purpose = 'resolve-conflict'
+           AND v_operation NOT IN ('resolve-conflict', 'recovery-attempt', 'fail'))$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot resolve-conflict allocation operation shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+
+    v_old := $old$OR (p_purpose = 'resolve-conflict' AND (
+           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state <> 'succeeded'
+           OR v_activation.state <> 'recovery_conflict'
+       ))$old$;
+    v_new := $new$OR (p_purpose = 'resolve-conflict' AND (
+           v_system.state NOT IN ('ready', 'crashed', 'failed')
+           OR v_run.state <> 'succeeded'
+           OR v_activation.state NOT IN ('recovery_conflict', 'recovering')
+       ))$new$;
+    IF position(v_old in v_definition) = 0 THEN
+        RAISE EXCEPTION 'external boot resolve-conflict allocation state shape changed';
+    END IF;
+    EXECUTE replace(v_definition, v_old, v_new);
 END
 $$;
 

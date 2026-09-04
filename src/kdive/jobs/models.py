@@ -300,7 +300,7 @@ class ExternalBootAuthorityResultV1(BaseModel):
         allowed = {
             "activate": {"activate", "deadline", "fail"},
             "recover": {"recover", "deadline", "recovery-attempt", "fail"},
-            "resolve-conflict": {"resolve-conflict", "fail"},
+            "resolve-conflict": {"resolve-conflict", "recovery-attempt", "fail"},
             "release": {"release", "cleanup", "fail"},
             "teardown": {"teardown", "fail"},
         }

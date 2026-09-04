@@ -468,12 +468,64 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
 
 def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
-    """The same recovery, from ``recovery_conflict`` under an attempt row in ``conflict``."""
-    return _recovering_handler(
+    """Start a new recovery window before resolving a parked conflict."""
+
+    def build(
+        context: OperationContext, _observation: AuthorityObservationV1
+    ) -> ExternalBootAuthoritySuccessV1:
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "resolve-conflict",
+                "result_ref": None,
+                "evidence": terminal_evidence(context, "recovered"),
+            },
+        )
+
+    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+        if context.activation.state is State.RECOVERING:
+            deadline = context.prerequisites.get("attempt_deadline")
+            if deadline is not None and ports.clock() >= deadline:
+                raise CategorizedError(
+                    "recovery readiness deadline expired",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    terminal=True,
+                )
+            return None
+        deadline = ports.clock() + ports.recovery_readiness_timeout
+        attempt_id = uuid5(
+            NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
+        )
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recovery-attempt",
+                "attempt_id": str(attempt_id),
+                "recovery_basis": "pre_recovery",
+                "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    async def require_attempt(
+        conn: AsyncConnection,
+        activation: ExternalBootActivation,
+        marker: ExternalBootAuthorityMarkerV1,
+    ) -> Mapping[str, Any]:
+        if activation.state is State.RECOVERY_CONFLICT:
+            await _require_attempt_state("conflict")(conn, activation, marker)
+            return {}
+        return await _require_attempt_state("recovering")(conn, activation, marker)
+
+    return _handler(
         ports,
-        operation="resolve-conflict",
-        state=State.RECOVERY_CONFLICT,
-        attempt_state="conflict",
+        require_activation_state=frozenset({State.RECOVERY_CONFLICT, State.RECOVERING}),
+        require_activation_evidence=_ACTIVATION_EVIDENCE,
+        require_preconditions=require_attempt,
+        expected_observation="source",
+        build_result=build,
+        before_port=before_port,
     )
 
 
