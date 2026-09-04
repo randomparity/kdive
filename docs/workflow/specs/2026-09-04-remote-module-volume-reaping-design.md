@@ -20,12 +20,17 @@ storage referenced by an active or inactive domain definition.
 - Mutation retention protects `source.ext4` and `scratch.ext4`; reap retention independently
   protects `reaping.journal` and `reaped.journal`.
 - The domain-reference set is resolved after retained owners and before deletion. File and device
-  sources contribute their direct paths. A volume-backed source contributes the path returned by
-  its named pool and volume. Any unresolved volume-backed source aborts the host sweep before the
-  first delete.
-- A referenced candidate is reported as a conflict and left intact. Foreign and retained volumes
-  are silent skips. Any libvirt error is categorized as infrastructure failure with details
-  limited to `pool` and, when known, `volume`.
+  sources are normalized lexically with POSIX path rules on both sides of the comparison; local
+  `realpath` is forbidden because the paths belong to the remote host. The connection also attempts
+  `storageVolLookupByPath` so a libvirt-managed alias resolves to the volume's canonical path. An
+  unmanaged direct path falls back only on lexical normalization; an operational lookup error
+  aborts the preflight. A volume-backed source contributes the canonical path returned by its named
+  pool and volume. Any unresolved volume-backed source aborts the host sweep before the first
+  delete.
+- A referenced candidate is reported with bounded conflict telemetry and left intact while
+  independent candidates continue. Foreign and retained volumes are silent skips. Any libvirt
+  error that prevents a complete reference set is categorized as infrastructure failure with
+  details limited to `pool` and, when known, `volume`.
 - `VIR_ERR_NO_STORAGE_VOL` during delete is an achieved post-state and counts as removed. Repeating
   the sweep converges.
 
@@ -41,9 +46,12 @@ worker thread through the existing remote-reaper connection bundle. The low-leve
 synchronous retained-owner callback bridges back to the reconciler event loop with
 `asyncio.run_coroutine_threadsafe`; the event loop remains free while awaiting the worker thread,
 so the callback can query Postgres at the exact point required by ADR-0588. This avoids a pre-read,
-a second enumeration, and a new synchronous database connection. A reachable-host operation error
-aborts the lane; connection-open failures retain the existing fleet behavior of logging and
-skipping only that unreachable host.
+a second enumeration, and a new synchronous database connection. Once started, the adapter shields
+the worker task from cancellation and drains it to a terminal result before propagating
+`CancelledError`; repeated cancellation requests remain recorded but cannot orphan the destructive
+thread or its retained-owner future. A reachable-host operation error aborts the lane;
+connection-open failures retain the existing fleet behavior of logging and skipping only that
+unreachable host.
 
 The provider-neutral `ModuleVolumeReaper` port accepts an async callback returning immutable
 `ModuleVolumeKey` values. The remote adapter converts those values to its provider-specific
@@ -67,9 +75,9 @@ volume-path lookup, and deletion errors raise a categorized error, so the reconc
 an error, although deletions completed before a later delete failure remain effective and the next
 pass re-derives state.
 
-An attached candidate raises a conflict before any candidate is deleted. This all-or-nothing
-preflight avoids an ordering-dependent partial sweep when several candidates share a domain
-definition and provides a visible signal rather than silently retaining operator-attached storage.
+The reference set is built completely before any candidate is deleted. A referenced candidate is
+then skipped with one warning carrying only pool and volume; an independent orphan remains
+reclaimable in the same pass. An incomplete reference set still aborts before every delete.
 Unreachable remote hosts use the established per-host warning and are retried next pass.
 
 ## Threat model
@@ -91,6 +99,8 @@ Unreachable remote hosts use the established per-host warning and are retried ne
   reach deletion.
 - Domain XML is parsed with `defusedxml`, and only the three specified source forms are read.
   Volume references must resolve through libvirt or the entire deletion preflight fails closed.
+  Direct paths are normalized as remote POSIX paths; managed aliases resolve through libvirt, and
+  operational lookup failures fail closed. No local filesystem resolution participates.
 - Durable retention is read after enumeration and expanded by the kind-specific obligation flags.
 - Candidate paths are compared only to libvirt-returned paths; they are never opened, executed, or
   interpolated into a shell command.
@@ -110,8 +120,9 @@ campaign run.
 
 The provider tests cover the eleven named Task 5 behaviors, including foreign-name exclusion,
 both obligation classes, the enumeration/read interleaving, unresolved references, attachment
-conflicts, and idempotent disappearance. Fleet-adapter tests prove the callback crosses from the
-worker thread at the required point and that unreachable-host handling remains inherited. Lane
-tests prove obligation expansion, catalog registration, reporting, failure isolation, and disabled
-composition. Focused lint and whole-tree typing cover the protocol boundary; `just ci` is the
-pre-push gate.
+conflicts, mixed attached/orphan pools, active and inactive lexical aliases, managed direct-path
+aliases, and idempotent disappearance. Fleet-adapter tests prove the callback crosses from the
+worker thread at the required point, cancellation waits for the worker and callback to finish, and
+unreachable-host handling remains inherited. Lane tests prove obligation expansion, catalog
+registration, reporting, failure isolation, and disabled composition. Focused lint and whole-tree
+typing cover the protocol boundary; `just ci` is the pre-push gate.

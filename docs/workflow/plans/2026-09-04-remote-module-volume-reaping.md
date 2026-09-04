@@ -71,19 +71,22 @@ def reap_orphaned_module_volumes(
 
 ### Steps
 
-1. Add the eleven tests with fakes that record refresh, enumeration, retention-read, path lookup,
-   and delete order; run the focused command and observe the missing-module failure.
-2. Implement protocols and safe domain XML parsing with `defusedxml`; direct file/device paths are
-   collected, volume references resolve through their named pool and volume, and any missing or
-   malformed required attribute raises infrastructure failure.
+1. Add the eleven named tests plus mixed-pool and active/inactive lexical-alias regressions, with
+   fakes that record refresh, enumeration, retention-read, path lookup, and delete order; run the
+   focused command and observe the missing-module failure.
+2. Implement protocols and safe domain XML parsing with `defusedxml`; direct file/device paths and
+   candidate paths use remote POSIX lexical normalization, managed direct aliases resolve through
+   `storageVolLookupByPath`, volume references resolve through their named pool and volume, and any
+   missing required volume attribute or operational resolution error raises infrastructure failure.
 3. Implement one complete enumeration, retention filtering, a complete reference/conflict
    preflight, then deletion. Translate libvirt errors with bounded details and count
    `VIR_ERR_NO_STORAGE_VOL` as removed.
 4. Run the focused command and expect eleven passing tests. Commit the task.
 
 Acceptance: only whole-name matches can reach `delete`; `retained_owners` is first invoked after
-`listAllVolumes` returns; all conflicts are found before the first delete; no volume content API is
-called.
+`listAllVolumes` returns; the complete protected set exists before the first delete; attached
+candidates are warned and skipped without starving independent candidates; direct-path lexical and
+managed aliases cannot bypass protection; no volume content API is called.
 
 ## Task 2 — Async fleet port and provider composition
 
@@ -113,7 +116,7 @@ bridges each synchronous retention read to the owning asyncio loop.
 ### Verification
 
 - Mode: focused-test. Contract: worker-thread execution, per-host pool binding, post-enumeration
-  async callback, count aggregation, and disabled null behavior. Tests:
+  async callback, cancellation draining, count aggregation, and disabled null behavior. Tests:
   `tests/providers/remote_libvirt/reaping/test_module_volume_fleet.py` and provider-composition
   cases. Red: imports/descriptor field fail. Green:
   `uv run python -m pytest tests/providers/remote_libvirt/reaping/test_module_volume_fleet.py tests/providers/test_composition.py -q`.
@@ -125,14 +128,17 @@ bridges each synchronous retention read to the owning asyncio loop.
 2. Implement the provider-neutral key/port and null port.
 3. Implement the remote fleet adapter using `asyncio.to_thread` and
    `asyncio.run_coroutine_threadsafe`; convert immutable keys to `ModuleVolumeOwner` inside the
-   provider boundary and aggregate per-host removal counts.
+   provider boundary and aggregate per-host removal counts. Hold a task for the offload, shield it
+   from cancellation, and on cancellation continue awaiting shielded completion before re-raising;
+   add a controlled worker/callback test that proves cancellation cannot return first.
 4. Add the remote factory to the provider descriptor and expose
    `ProviderComposition.build_reconciler_module_volume_reaper`, returning the null port when remote
    libvirt is disabled.
 5. Run the focused command and expect all selected tests to pass. Commit the task.
 
 Acceptance: provider construction opens no connection; one unreachable host does not block later
-hosts; a reachable-host operation error propagates; no callback is invoked when no host is reached.
+hosts; a reachable-host operation error propagates; no callback is invoked when no host is reached;
+cancellation does not outlive or abandon the worker thread or retained-owner future.
 
 ## Task 3 — Durable-obligation lane and reconciler registration
 
