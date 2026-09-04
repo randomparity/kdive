@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import MappingProxyType
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -36,6 +36,7 @@ from kdive.config.core_settings import (
 )
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.reaping import (
     CaptureReaper,
@@ -107,6 +108,7 @@ from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.reconciler.repairs import console_rotation as console_rotation_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
+from kdive.reconciler.repairs import external_boot as external_boot_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs import systems as system_repairs
 from kdive.services.allocation import promotion as allocation_promotion
@@ -275,6 +277,10 @@ class ReconcileReport:
     investigation_rootfs_reclaims_enqueued: int = 0
     expired_investigation_rootfs_reclaims_enqueued: int = 0
     unowned_investigation_rootfs_staging_drains_enqueued: int = 0
+    external_boot_activations_enqueued: int = 0
+    external_boot_recoveries_enqueued: int = 0
+    external_boot_releases_enqueued: int = 0
+    external_boot_cleanups_enqueued: int = 0
     #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
     #: fields above feed callers that read named categories; this dict feeds the repairs
     #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
@@ -330,6 +336,8 @@ class ReconcileConfig:
 
     upload_store: ReconcileUploadStore
     image_store: ImageSweepStore
+    provider_resolver: ProviderResolver | None = None
+    external_boot_authority_instance: str | None = None
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
     resource_probe: ResourceProbe | None = None
@@ -501,6 +509,26 @@ def _remote_system_object_versions_repair(
     return lambda conn: sweep_remote_system_object_versions(conn, config.upload_store, gate)
 
 
+def _external_boot_repair(
+    lane: Literal["activation", "recovery", "release", "cleanup"],
+) -> Callable[[InfraReaper, ReconcileConfig, timedelta], _AnyRepairFn | None]:
+    def factory(
+        _reaper: InfraReaper, config: ReconcileConfig, _grace: timedelta
+    ) -> _AnyRepairFn | None:
+        resolver = config.provider_resolver
+        authority_instance = config.external_boot_authority_instance
+        if resolver is None or authority_instance is None:
+            return None
+        return lambda conn: external_boot_repairs.repair_external_boot_lane(
+            conn,
+            lane=lane,
+            resolver=resolver,
+            authority_instance=authority_instance,
+        )
+
+    return factory
+
+
 _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry(
         "expired_allocations",
@@ -535,6 +563,26 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "abandoned_jobs",
         lambda _r, _c, _g: _repair_abandoned_jobs,
         report_field="abandoned_jobs",
+    ),
+    _RepairCatalogEntry(
+        "external_boot_activations_enqueued",
+        _external_boot_repair("activation"),
+        report_field="external_boot_activations_enqueued",
+    ),
+    _RepairCatalogEntry(
+        "external_boot_recoveries_enqueued",
+        _external_boot_repair("recovery"),
+        report_field="external_boot_recoveries_enqueued",
+    ),
+    _RepairCatalogEntry(
+        "external_boot_releases_enqueued",
+        _external_boot_repair("release"),
+        report_field="external_boot_releases_enqueued",
+    ),
+    _RepairCatalogEntry(
+        "external_boot_cleanups_enqueued",
+        _external_boot_repair("cleanup"),
+        report_field="external_boot_cleanups_enqueued",
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted force_crash job.
     _RepairCatalogEntry(

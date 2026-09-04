@@ -989,6 +989,7 @@ _JOB_TOOLS: dict[str, _JobTool] = {
 # Guarded tools that enqueue nothing, so there is no dedup replay for a guard to preempt. Each
 # reason is the mechanism, not a restatement: a tool that grows a job path belongs above.
 _NO_JOB_PATH: dict[str, str] = {
+    "allocations.release": "transitions Allocation state and enqueues no job",
     "debug.end_session": "transitions a DebugSession row; enqueues no job",
     "debug.start_session": "inserts a DebugSession row; enqueues no job",
     "runs.bind": "writes runs.system_id; enqueues no job",
