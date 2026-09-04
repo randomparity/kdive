@@ -202,14 +202,14 @@ async def _enqueue_candidate(
         operation_identity=operation_identity,
         resolver=resolver,
     )
-    await queue.enqueue(
+    _job, inserted = await queue.enqueue_with_status(
         conn,
         kind,
         payload,
         source.authorizing,
         f"external-boot:{operation_identity}",
     )
-    return True
+    return inserted
 
 
 async def repair_external_boot_lane(

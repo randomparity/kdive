@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import ErrorCategory
 from kdive.security import audit
-from kdive.services.allocation.release import release_with_backstops
+from kdive.services.allocation.release import reclaim_under_lock, release_with_backstops
 from tests.services.external_boot.conftest import SeedActivation
 
 
@@ -50,5 +50,27 @@ def test_release_refuses_an_uncleaned_activation(
             state_row = await state.fetchone()
             assert state_row is not None
             assert state_row[0] == "granted"
+
+    asyncio.run(body())
+
+
+def test_reconciler_reclaim_retains_an_uncleaned_activation(
+    migrated_url: str, seeded_activation: SeedActivation
+) -> None:
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            seeded = await seeded_activation(
+                conn,
+                state=ExternalBootActivationState.ABANDONED,
+                ready_reservation=True,
+            )
+            cursor = await conn.execute(
+                "SELECT allocation_id FROM systems WHERE id = %s", (seeded.system_id,)
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            outcome = await reclaim_under_lock(conn, _noop_audit, row[0], project="proj")
+            assert outcome.released is False
+            assert outcome.category is ErrorCategory.CONFLICT
 
     asyncio.run(body())

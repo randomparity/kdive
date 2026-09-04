@@ -8,11 +8,17 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import psycopg
 import pytest
+from psycopg.errors import InsufficientPrivilege
 
 from kdive.jobs.payloads import BootPayload
 from kdive.reconciler.repairs import external_boot
+from tests.db.external_boot_authority_support import _RoleDsns
+from tests.jobs.handlers.external_boot.conftest import resolver_for
+from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.support import marked_job
+from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 
 @pytest.mark.parametrize(
@@ -45,11 +51,11 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
     )
     payload = BootPayload.model_validate(source.payload)
     build = AsyncMock(return_value=(source.kind, payload))
-    enqueue = AsyncMock()
+    enqueue = AsyncMock(return_value=(source, True))
     monkeypatch.setattr(external_boot, "_live_successor_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(external_boot, "_source_job", AsyncMock(return_value=source))
     monkeypatch.setattr(external_boot, "build_external_boot_payload", build)
-    monkeypatch.setattr(external_boot.queue, "enqueue", enqueue)
+    monkeypatch.setattr(external_boot.queue, "enqueue_with_status", enqueue)
 
     repaired = asyncio.run(
         external_boot._enqueue_candidate(
@@ -99,3 +105,51 @@ def test_repair_module_has_no_provider_adapter_imports() -> None:
     assert "providers.local_libvirt" not in source
     assert "providers.remote_libvirt" not in source
     assert "import libvirt" not in source
+
+
+def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as admin:
+            case = await seed_case(
+                admin,
+                vehicle,
+                purpose="activate",
+                activation_state="prepared",
+            )
+            await admin.execute(
+                "UPDATE jobs SET attempt = max_attempts, lease_expires_at = now() - interval '1s' "
+                "WHERE id = %s",
+                (case.job_id,),
+            )
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_reconciler"), autocommit=True
+        ) as reconciler:
+            first = await external_boot.repair_external_boot_lane(
+                reconciler,
+                lane="activation",
+                resolver=resolver_for(vehicle),
+                authority_instance="authority-current",
+            )
+            second = await external_boot.repair_external_boot_lane(
+                reconciler,
+                lane="activation",
+                resolver=resolver_for(vehicle),
+                authority_instance="authority-current",
+            )
+            assert (first, second) == (1, 0)
+            row = await reconciler.execute(
+                "SELECT payload #>> '{external_boot_authority_v1,authority_instance}', state "
+                "FROM jobs WHERE dedup_key LIKE 'external-boot:repair:%'"
+            )
+            successor = await row.fetchone()
+            assert successor == ("authority-current", "queued")
+            with pytest.raises(InsufficientPrivilege):
+                await reconciler.execute(
+                    "UPDATE external_boot_activations SET cleanup_complete = true WHERE id = %s",
+                    (vehicle.activation_id,),
+                )
+
+    asyncio.run(body())
