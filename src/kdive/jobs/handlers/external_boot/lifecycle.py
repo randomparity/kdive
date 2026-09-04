@@ -618,12 +618,9 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     return _handler(
         ports,
         require_activation_state=_RECOVERY_STATES,
-        # `materialization` as well as `recovery_point`, because this operation observes: it admits
-        # `abandoned`, whose row is legal with `materialization` NULL, and the observation check
-        # reads `materialization.kernel_observation`. Without it the refusal lands in build_result,
-        # *after* allocation and the port call, and reports "produced no kernel observation to
-        # verify" — blaming the provider for a missing persisted column. Listing the column here
-        # moves the same refusal to step 2b, pre-allocation, with the accurate message.
+        # Require the complete persisted activation evidence pair before releasing its reservation.
+        # Only `recovery_point` feeds the source-authority observation, but the domain model binds
+        # it to `materialization`; checking both keeps a partial row from reaching allocation.
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_require_releasable,
         expected_observation="source",
