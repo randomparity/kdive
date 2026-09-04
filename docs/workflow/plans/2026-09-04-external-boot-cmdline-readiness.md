@@ -56,7 +56,8 @@ Files: `src/kdive/jobs/handlers/external_boot/lifecycle.py` and
 
 Interfaces:
 
-- Consumes `context.activation.plan.cmdline` and `RunningKernelObservation.cmdline`.
+- Consumes `context.activation.materialization.kernel_observation.cmdline` (sourced from the plan
+  at materialization) and the live `RunningKernelObservation.cmdline`.
 - Produces a terminal `CategorizedError` with category `ErrorCategory.READINESS_FAILURE` carrying
   escaped expected/observed strings and `first_differing_byte`.
 

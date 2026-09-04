@@ -22,11 +22,12 @@ provider supplies the same observation through its injected `RunningObserver`; p
 and guest-agent channel reachability remain owned by #2212, which is the issue that makes the local
 port live.
 
-The core lifecycle receives the observation after `activate` or `recover`. It first requires a
-materialization and observation, then compares kernel identity fields with the persisted expected
-observation and command-line bytes with `activation.plan.cmdline.encode("utf-8")`. The plan is the
-authority for the command line: materialization captures the build-time kernel identity, not a
-second copy of the requested boot arguments.
+The materializer builds its expected `kernel_observation` from the inspected kernel identity and
+the exact `plan.cmdline.encode("utf-8")`. That observation is persisted on the activation through
+the materialization; the activation row retains only `plan_identity`, not the plan itself. After
+`activate` or `recover`, the core lifecycle compares the provider's live observation with that
+persisted expected observation. Thus command-line equality still traces to the plan without adding
+a second persisted plan shape or a database migration.
 
 ## Failure contract
 
