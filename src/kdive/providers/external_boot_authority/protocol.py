@@ -26,7 +26,7 @@ GENESIS_DIGEST = "sha256:" + "0" * 64
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
 type Purpose = Literal["activate", "recover", "resolve-conflict", "release", "teardown"]
-type ObservationCategory = Literal["source", "target", "mixed", "unreadable", "conflict"]
+type ObservationCategory = Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
 
 
 def _bounded_text(value: str, *, maximum: int = 255) -> str:
@@ -268,7 +268,7 @@ class JournalRecordV1(_AuthorityBinding):
         tuple[RecoveryObjectBindingV1, ...], Field(max_length=MAX_RECOVERY_OBJECTS)
     ] = ()
     observation: AuthorityObservationV1 | None = None
-    outcome: Literal["never-began", "source", "target", "conflict"] | None = None
+    outcome: Literal["never-began", "absent", "source", "target", "conflict"] | None = None
 
     @field_validator("expected_source_identity", "intended_target_identity")
     @classmethod

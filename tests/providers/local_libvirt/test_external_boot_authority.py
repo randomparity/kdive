@@ -40,6 +40,7 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    CleanupTombstoneV1,
     FinalizeCleanupProof,
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
@@ -208,6 +209,18 @@ class _FakeIO:
         if self.reopen_fault:
             raise LookupError("libguestfs: /var/lib/kdive/secret.key unreadable")
         return self.metadata
+
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        if not self.tombstone:
+            raise FileNotFoundError("tombstone.json")
+        point = _point(self.metadata)
+        return CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=point,
+            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        )
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         del metadata
@@ -995,13 +1008,13 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert proof.binding == _BINDING
     assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(_point(io.metadata))
 
-    # Cleanup destroys the record the post-commit observation reads, so the observation is
-    # `unreadable` and the lane terminates `conflict`. ADR-0592 documents that; this pins it.
+    # The tombstone remains observable until the authority has anchored the terminal receipt;
+    # only then may finalization remove the recovery directory.
     terminal = repository.records[-1]
     assert terminal.phase is JournalPhase.TERMINAL
-    assert terminal.outcome == "conflict"
+    assert terminal.outcome == "absent"
     assert terminal.observation is not None
-    assert terminal.observation.category == "unreadable"
+    assert terminal.observation.category == "absent"
 
 
 async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path) -> None:
@@ -1065,6 +1078,23 @@ async def test_a_cleanup_commit_refuses_every_unresolvable_recovery_point(
     assert caught.value.category == "provider_conflict"
     assert "cleanup" not in io.actions
     assert "finalize" not in io.actions
+
+
+async def test_cleanup_restart_reconstructs_exact_durable_tombstone(tmp_path: Path) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    observation = await service.execute_mutation(peer, _cleanup_mutation())
+
+    assert observation.category == "absent"
+    assert "cleanup" not in io.actions
+    assert "finalize" not in io.actions
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert repository.records[-1].outcome == "absent"
 
 
 async def test_a_cleanup_commit_neither_recleans_nor_finalizes_an_accounted_tombstone(
