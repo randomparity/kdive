@@ -13,9 +13,10 @@ return of `_domain_exit_probe` logs the bounded raw text at `WARNING` and return
 
 **Tech stack.** Python 3.14, `uv`, pytest, `ruff`, `ty`.
 
-Expected implementation size: 160–200 changed lines (M) — from the file map below: ~56 in
+Expected implementation size: 165–205 changed lines (M) — from the file map below: ~46 in
 `readiness.py` (the enum, the helper, two annotations, five rewritten returns), ~12 in
-`install.py`, ~113 in the test file (three amended assertions, five new tests, five imports).
+`install.py`, ~113 in `test_install.py` (three amended assertions, five new tests, five imports),
+2 in `test_external_boot.py`, and 1 in the ADR status line.
 
 Spec: [`docs/workflow/specs/2026-09-03-probe-error-closed-vocabulary-design.md`](../specs/2026-09-03-probe-error-closed-vocabulary-design.md).
 Decision: [ADR-0594](../../adr/0594-readiness-probe-failures-leave-the-probe-as-a-closed-vocabulary.md).
@@ -40,9 +41,16 @@ Decision: [ADR-0594](../../adr/0594-readiness-probe-failures-leave-the-probe-as-
 | `src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py` | modified | classifying a probe failure and logging the raw text |
 | `src/kdive/providers/local_libvirt/lifecycle/install.py` | modified | rendering the member into `details["probe_error"]` |
 | `tests/providers/local_libvirt/test_install.py` | modified | absence proofs, classification coverage, operator-log proof |
+| `tests/providers/local_libvirt/test_external_boot.py` | modified | the one parametrized `ReadinessResult` pinning a non-empty `probe_error` |
+| the ADR-0594 record linked above | modified | `## Status` flips `Proposed` → `Accepted` in the citing commit |
 
-Nothing is created. `tests/adversarial/test_provider_xml.py:164` builds
-`ReadinessResult(answered=True, ok=True)` with no `probe_error` and needs no change.
+Nothing is created. The survey behind this map is
+`rg -n 'probe_error|_DomainExitProbe|ReadinessResult\(' src tests`; run that, not a narrower
+check, if the map is ever re-derived. Every other construction site passes `None` or omits the
+field and needs no change — including `tests/adversarial/test_provider_xml.py:164`,
+`tests/providers/local_libvirt/lifecycle/boot/test_session.py:2392`, and
+`src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py:1219`, which compares against
+`ReadinessResult(True, True, None)`.
 
 ## Names this plan borrows, confirmed at base `811538fb2`
 
@@ -68,13 +76,9 @@ Nothing is created. `tests/adversarial/test_provider_xml.py:164` builds
 The system UUID is written inline as `UUID("22222222-2222-2222-2222-222222222222")`; that literal
 already appears inline 11 times in the test file and no module constant exists for it.
 
-## Python semantics this plan depends on
-
-`OSError` dispatches to a subclass on errno at construction. `OSError(2, …)` **is** a
-`FileNotFoundError`; `OSError(13, …)` is a `PermissionError`. In `_domain_exit_probe` the
-`except FileNotFoundError` arm precedes `except (subprocess.SubprocessError, OSError)`, so an
-ENOENT never reaches the second arm. Any test aiming at `VIRSH_PROBE_FAILED` through an `OSError`
-must use a non-ENOENT errno.
+**One Python semantic this plan turns on:** `OSError` dispatches to a subclass on errno at
+construction, so `OSError(2, …)` **is** a `FileNotFoundError` and never reaches the
+`except (subprocess.SubprocessError, OSError)` arm. See the spec's vocabulary contract.
 
 ## Task 1 — Classify at the probe and render the member
 
@@ -155,15 +159,8 @@ Add `import logging` and `_log = logging.getLogger(__name__)`. After `ConsoleVer
 class ProbeFailure(StrEnum):
     """Why a ``virsh domstate`` probe failed, as a closed agent-facing vocabulary (ADR-0594).
 
-    ``CategorizedError.details`` is surfaceable to the agent and reaches it through two renderers
-    that are type filters rather than content filters: ``safe_error_details`` on the MCP path, and
-    the worker's ``_failure_context`` on ``jobs.wait``. Free-form transport text in this slot
-    therefore reaches the agent verbatim, host paths included. Members are the only values the
-    slot can hold, so the leak is not representable rather than filtered downstream; the raw text
-    stays available to the operator in the log.
-
-    ``VIRSH_MISSING`` also covers every ENOENT raised by the exec, not only an absent binary:
-    ``OSError(2, ...)`` is a ``FileNotFoundError``, whose arm precedes the ``OSError`` arm.
+    The two agent-facing egresses, the type-not-filter enforcement, and ``VIRSH_MISSING``'s
+    overlap with every ENOENT raised by the exec are recorded in ADR-0594.
     """
 
     VIRSH_MISSING = "virsh_missing"
@@ -228,8 +225,8 @@ Add `ProbeFailure` to the `...boot.readiness` import block, alphabetically order
     ) -> dict[str, object]:
         """The agent-facing details for a failed boot: the System and a closed probe reason.
 
-        Rendered as ``.value`` so the detail is a plain ``str`` rather than an enum member, which
-        keeps both renderers that forward it handling a JSON scalar (ADR-0594).
+        Rendered as ``.value`` so the detail is a JSON scalar rather than an enum member
+        (ADR-0594).
         """
         details: dict[str, object] = {"system_id": str(system_id)}
         if first_probe_error is not None:
@@ -237,10 +234,16 @@ Add `ProbeFailure` to the `...boot.readiness` import block, alphabetically order
         return details
 ```
 
-### Step 1.6 — Verify
+### Step 1.6 — Flip the ADR, then verify
 
-Re-run the Step 1.2 command; expect `1 passed`. Then `just type` — expect diagnostics only from
-`test_install.py`'s `_Readiness` fake, which Task 2 retypes.
+ADR-0594 is `Proposed`. `scripts/guards/check_adr_status.py` fails any ADR cited from `src/` or
+`tests/` while `Proposed`, and Steps 1.3 and 1.5 add exactly those citations — so in **this same
+commit**, flip its `## Status` to `Accepted (2026-09-03)`. That is `docs/adr/README.md`'s
+ratification rule, not a workaround: the PR that adds the citations is the PR that ratifies.
+
+Re-run the Step 1.2 command; expect `1 passed`. Then `just type` — expect diagnostics from exactly
+two sites, both retyped in Task 2: `test_install.py:185` and `test_external_boot.py:2666`. Then
+`just adr-status-check`, expecting exit 0.
 
 **Acceptance criteria.** `ProbeFailure` has exactly the four members above. `_domain_exit_probe`
 returns a member or `None`, never caller text. Every failing branch logs the bounded text once, and
@@ -249,11 +252,19 @@ vocabulary.
 
 ## Task 2 — Prove absence at both egresses; amend the pinned tests
 
-### Step 2.1 — Retype the fake
+### Step 2.1 — Retype the two sites `ty` flagged
 
 `test_install.py:185` becomes `probe_error: ProbeFailure | None = None`; add `ProbeFailure` to the
-`...boot.readiness` import block (37-43), alphabetically ordered. `just type` fails whole-tree
-without this — the type gate doing its job.
+`...boot.readiness` import block (37-43), alphabetically ordered.
+
+`test_external_boot.py:2666` becomes
+`ReadinessResult(True, True, ProbeFailure.VIRSH_PROBE_FAILED)`; add `ProbeFailure` to that file's
+`...boot.readiness` import at :44. It must stay a **non-None** `probe_error`: the parametrization
+at :2661-2667 enumerates results that are *not* exact success, and
+`external_boot.py:1219` compares against `ReadinessResult(True, True, None)`, so a `None` here
+would silently stop pinning what the test exists to pin.
+
+`just type` fails whole-tree without both — the type gate doing its job.
 
 ### Step 2.2 — Amend the three tests that pin the old free text
 
@@ -317,11 +328,23 @@ the failing assertion or exception text**:
 
 | Test | Fault |
 |---|---|
-| MCP-egress absence | `_probe_failed` returns `_DomainExitProbe(False, detail)` — the pre-fix leak restored |
-| worker-egress absence | the same fault |
-| `OSError` absence | the same fault |
+| MCP-egress absence | the two-sided leak fault below |
+| worker-egress absence | the same two-sided fault |
+| `OSError` absence | the same two-sided fault |
 | `virsh_missing` classification | return `VIRSH_PROBE_FAILED` from the `shutil.which is None` arm |
 | operator-log proof | delete the `_log.warning(...)` call from `_probe_failed` |
+
+**The leak fault spans both source files, and it has to.** Restoring only the producer half —
+`_probe_failed` returning `_DomainExitProbe(False, detail)` — makes `probe.error` a plain `str`,
+and `_boot_failure_details`'s `first_probe_error.value` then raises
+`AttributeError: 'str' object has no attribute 'value'` in the test's *arrange* line, before any
+assertion runs. That message names an attribute, not the leak, so this plan's own rule below would
+correctly call it a defective test, and #2220's criterion 4 asks for a clean assertion failure.
+
+So inject both halves together: `_probe_failed` returns `_DomainExitProbe(False, detail)` **and**
+`_boot_failure_details` renders `details["probe_error"] = str(first_probe_error)` instead of
+`.value`. The three absence tests then fail on the payload assertion with the raw stderr as the
+actual value — the pre-fix behaviour reproduced, and the bite the criterion asks for.
 
 Classify each as exactly one of three, and report which:
 

@@ -101,6 +101,12 @@ the overlap rather than engineering around it.
 - **Scrub host paths in a producer-side redacting wrapper.** verified: #2211 built exactly this and
   withdrew it at commit `c79129460` — "it raised a host path itself, producing the defect it was
   added to remove" — and that work was deleted with this surface reassigned here.
+- **Keep `probe_error` a `str` and return fixed author-controlled literals.** judgment: closes both
+  egresses with the same five rewrites and the same log call, and skips retyping
+  `_DomainExitProbe.error` and `ReadinessResult.probe_error` — which is what pulls
+  `test_install.py:185` and `test_external_boot.py:2666` into the change. Rejected because a later
+  edit can put free text back with nothing failing: the type is what makes the leak
+  unrepresentable rather than merely absent today.
 - **Make `safe_error_details` a content filter.** judgment: it is the shared reduction for every
   error payload in the codebase, #2220 puts its general contract out of scope, and a content filter
   over arbitrary free text is a far larger promise than any call site here needs.
