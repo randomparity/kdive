@@ -41,7 +41,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     recovery_directory_name,
     render_target_xml,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     AbsentModuleCapture,
     AuthenticatedGuestTree,
@@ -2663,7 +2663,7 @@ def test_fresh_finalization_resumes_around_tombstone_deletion(
     [
         ReadinessResult(False, False, None),
         ReadinessResult(True, False, None),
-        ReadinessResult(True, True, "probe failed"),
+        ReadinessResult(True, True, ProbeFailure.VIRSH_PROBE_FAILED),
     ],
 )
 def test_activation_advances_only_for_exact_readiness_success(
