@@ -147,3 +147,22 @@ handlers, and tests proving each reason/action path. No other debt record change
 BASE_BRANCH is `main`; branch is `feat/external-boot-idempotency-2202`; review depth is iterating;
 claim/scope token is `q2202-ce529ae2`. Open findings and review deferrals are recorded here after
 the design and branch review phases.
+
+## Design-review blocker
+
+The first design-review pass stopped before implementation with four blocking findings:
+
+1. Issue #2202 requires actual worker loss after `materialize` and `prepare` return but before
+   their durable commits. ADR-0593 assigns those operations to the server-owned preparation path,
+   which this charter excludes, so seeding completed rows cannot prove the criterion.
+2. Cleanup has no provider-neutral absence observation or durable operation receipt. A retry after
+   `cleanup()` returns but before commit must call it again or skip it without evidence, so the
+   issue's at-most-once method-call criterion cannot hold through the existing port.
+3. `ExternalBootPorts.observe` returns only `RunningKernelObservation`; it cannot prove recovery of
+   source definition/modules, prior power state, or inactive state required by ADR-0583.
+4. The three CAS reason/action pairs need explicit terminal/requeue and deadline semantics; a
+   terminal `reservation_not_ready` paired with `jobs.wait` cannot make progress.
+
+Disposition: all four are `blocked`. Continuing requires an operator to amend the incompatible
+acceptance criteria or authorize the provider-port, adapter, and server-preparation surface needed
+to meet them. No implementation task begins until the frozen scope is revised.
