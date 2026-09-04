@@ -111,6 +111,7 @@ class LocalExternalBootAuthorityAdapter:
         # not replace it, and it is deliberately in-process because a restarted adapter
         # must re-derive admission from the journal rather than trust its own memory.
         self._admitted: dict[tuple[str, str], int] = {}
+        self._pending_cleanup_finalization: dict[str, RecoveryPoint] = {}
 
     async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         """Classify observed provider state against the request's exact identities."""
@@ -123,6 +124,25 @@ class LocalExternalBootAuthorityAdapter:
         operation = self._require_permitted_commit_point(request, context)
         self._require_admissible_generation(request)
         return await asyncio.to_thread(self._commit, request, operation, context)
+
+    async def finalize(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> None:
+        """Remove a cleanup tombstone only after the authority anchored its terminal receipt."""
+        if request.operation is not AuthorityOperation.CLEANUP:
+            return
+        authority = _authority_ref(request)
+        point = self._pending_cleanup_finalization.pop(request.operation_identity, None)
+        if point is None:
+            # A restarted authority keeps the durable tombstone as its accounted-absence
+            # receipt. Core convergence does not depend on deleting that receipt.
+            return
+        await asyncio.to_thread(
+            self._ports.finalize_cleanup_tombstone,
+            point,
+            _cleanup_proof(context, point),
+            authority,
+        )
 
     @staticmethod
     def _require_permitted_commit_point(
@@ -163,6 +183,8 @@ class LocalExternalBootAuthorityAdapter:
         binding = _activation_binding(request)
         authority = _authority_ref(request)
         point = self._resolve_point(binding, authority)
+        if point is None and request.operation is AuthorityOperation.CLEANUP:
+            point = self._pending_cleanup_finalization.get(request.operation_identity)
         matched = self._require_matching_identities(request, point)
         if not _ownership_is_proven(
             request, matched, require_named=operation in _DELETING_OPERATIONS
@@ -197,21 +219,9 @@ class LocalExternalBootAuthorityAdapter:
             }:
                 self._ports.recover(point, authority)
             elif operation is AuthorityOperation.CLEANUP:
-                # Finalize only a tombstone this commit published. If one already existed,
-                # the evidence came from an earlier operation, and in the interrupted-publish
-                # case `intent.json` is still beside it — a directory `finalize_tombstone`
-                # refuses, which would turn a harmless retry into a permanent
-                # provider_conflict. That stranded state is a recorded residual of ADR-0592,
-                # not something this call can discharge.
-                accounted = self._ports.cleanup_is_accounted(point, authority)
+                if not self._ports.cleanup_is_accounted(point, authority):
+                    self._pending_cleanup_finalization[context.operation_identity] = point
                 self._ports.cleanup(point, authority)
-                if not accounted:
-                    # Built inside this try on purpose: FinalizeCleanupProof is a validating
-                    # model, so a bad field raises ValidationError, which renders field
-                    # values. The handler below bounds it to a category `from None`.
-                    self._ports.finalize_cleanup_tombstone(
-                        point, _cleanup_proof(context, point), authority
-                    )
             elif operation is AuthorityOperation.TEARDOWN:
                 # Teardown publishes a tombstone through the same primitive and still has no
                 # finalizer. That gap is recorded in ADR-0592 and routed to #2212; it is not
@@ -231,6 +241,20 @@ class LocalExternalBootAuthorityAdapter:
         binding = _activation_binding(request)
         authority = _authority_ref(request)
         point = self._resolve_point(binding, authority)
+        if point is None and request.operation is AuthorityOperation.CLEANUP:
+            point = self._pending_cleanup_finalization.get(request.operation_identity)
+        if (
+            request.operation is AuthorityOperation.CLEANUP
+            and point is not None
+            and self._ports.cleanup_is_accounted(point, authority)
+        ):
+            observed = self._read_state(binding, authority)
+            composite_state = self._composite_state(request, observed)
+            return AuthorityObservationV1(
+                observation_id=self._observation_id(request, composite_state, "absent"),
+                category="absent",
+                composite_state=composite_state,
+            )
         return self._observation(request, binding, authority, point)
 
     def _resolve_point(

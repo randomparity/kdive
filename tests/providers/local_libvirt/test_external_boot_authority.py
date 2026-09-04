@@ -995,13 +995,13 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert proof.binding == _BINDING
     assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(_point(io.metadata))
 
-    # Cleanup destroys the record the post-commit observation reads, so the observation is
-    # `unreadable` and the lane terminates `conflict`. ADR-0592 documents that; this pins it.
+    # The tombstone remains observable until the authority has anchored the terminal receipt;
+    # only then may finalization remove the recovery directory.
     terminal = repository.records[-1]
     assert terminal.phase is JournalPhase.TERMINAL
-    assert terminal.outcome == "conflict"
+    assert terminal.outcome == "absent"
     assert terminal.observation is not None
-    assert terminal.observation.category == "unreadable"
+    assert terminal.observation.category == "absent"
 
 
 async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path) -> None:
