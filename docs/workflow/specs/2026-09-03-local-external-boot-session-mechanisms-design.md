@@ -32,7 +32,7 @@ Five of the six mechanism aliases gain implementations. The sixth does not, deli
 | `PinOperationLease` | new `LocalOperationLane.pin` | none — the lane's own invariants |
 | `OpenArtifactRoot` | new `LocalArtifactRoot.open` | `KDIVE_LIBVIRT_RECOVERY_ROOT` at construction |
 | `OpenGuest` | new `open_libguestfs_guest` | none — constructs a libguestfs handle |
-| `ReadinessProbe` | existing `_real_readiness`, reused unchanged | `KDIVE_LIBVIRT_URI` inside the probe |
+| `ReadinessProbe` | **not bound** — keeps `_unconfigured_readiness` (amendment 7); owner #2212 | — |
 | `CleanupPayloads` | new `LocalPayloadCleanup.cleanup` | `KDIVE_LIBVIRT_RECOVERY_ROOT` at construction |
 | `RunningObserver` | **not bound** — keeps `_unconfigured_observation` | n/a; owner #2212 |
 
@@ -287,14 +287,37 @@ mounts nothing: `_ConcreteSession._open_guest_context` does all of that, and doe
 checks — the session's `require_inactive` path is the single fence, and a second check in the
 opener would be a second place to get it wrong.
 
-### `_real_readiness`, reused unchanged
+### `readiness` is not bound here
 
-`_real_readiness` is already `Callable[[UUID], ReadinessResult]` and already the production probe
-wired at `LocalLibvirtInstall.from_env`. It resolves `KDIVE_LIBVIRT_URI` itself and tails the
-truncated console log. It is imported and passed through **unchanged** — not reimplemented, not
-wrapped.
+An earlier revision of this design bound `readiness` to the existing `_real_readiness`, "reused
+unchanged", on the ground that it already has the `ReadinessProbe` signature, is already the
+production probe wired at `LocalLibvirtInstall.from_env`, and "tails the truncated console log".
+**The last clause is false on this path, and it was the load-bearing one.** Charter amendment 7
+removes the binding; criterion 1 goes from five bound mechanisms to four.
 
-**Criterion 7's redaction half is not discharged here, and this design does not claim it is.**
+The console log is truncated only by `LocalLibvirtInstall`'s identity-checked prepare —
+`read_console_log`'s own docstring names that as its precondition, and the serial log is rendered
+`append="on"`. `_ConcreteSession.start()` is `self._require_open_domain().create()` and truncates
+nothing. Both `_require_readiness` call sites sit on the `xml == "target" and active and
+prior_power == "running"` arm, reached immediately after `start()`; `prior_power == "running"`
+means `LocalLibvirtInstall.boot()` already ran, truncated, and waited for `kdive-ready`. So the
+marker is in the file before the target kernel starts, `classify_console` scans only
+`text[: marker_match.start()]`, and a target-boot panic is invisible by construction. The gate
+returns `ReadinessResult(True, True, None)` and `_require_readiness` passes.
+
+On a markerless log the same probe sleeps one poll interval and returns `answered=False`, which
+this single unlooped consumer treats as failure — `_real_readiness` is built for
+`install._await_ready`'s polling loop, and nothing here loops. So the reuse is a no-op on the
+reachable branch and a false failure on the other.
+
+A correct probe must anchor its window at `start()`, by truncating there or recording the log
+offset there. `start()` is in `session.py`, which this change leaves unmodified, so the binding is
+not made here. The factory keeps `_unconfigured_readiness`, which raises at first call — so #2212,
+the only row that makes `ProviderRuntime.external_boot` non-`None`, cannot ship a live port
+without supplying a real probe. This is a blocking obligation on that row, not a dormant residual.
+
+**Criterion 7's redaction half is not discharged here either, and this design does not claim it
+is.**
 `_bounded_probe_error` bounds *length* and nothing else — it is `message[:200]`.
 `_domain_exit_probe` forwards `proc.stderr` verbatim into `probe_error`, so an unreachable
 hypervisor yields raw libvirt text and a host filesystem path, well inside 200 characters. That is
@@ -432,11 +455,14 @@ The load-bearing tests:
   available, so it does not run in ordinary CI. Faking `os.fstat` to simulate it would assert
   against the mock rather than the guard, so it is not done. This spec therefore does **not** list
   the owner case among the refusals it proves — the gap is stated rather than papered over.
-- **The `readiness` binding is asserted, not assumed.** A test asserts the production builder binds
-  `readiness=_real_readiness` and `open_guest=open_libguestfs_guest` by identity on the built
-  factory. Without it, a future edit that drops either argument leaves the class quietly falling
-  back to `_unconfigured_readiness`, and nothing goes red — the same fail-open shape the
-  fail-closed tests exist to prevent, arriving through the builder instead of the class.
+- **The `open_guest` binding is asserted, not assumed**, by identity on the built factory.
+  Without it, a future edit that drops the argument leaves the class quietly falling back to a
+  fail-closed default, and nothing goes red.
+- **Both unbound probes are asserted by identity *and* invoked.** A test through the production
+  builder asserts `_readiness is _unconfigured_readiness` and `_observe_running is
+  _unconfigured_observation`, then calls each and requires its specific `RuntimeError`. Identity
+  alone would pass against a binding that returns something harmless; an amendment that removes a
+  binding must leave behind a test that fails if the binding silently returns.
 - **No mechanism takes configuration from protocol input.** This is charter criterion 8, and it is
   tested by **provenance, not by signature shape**. `LocalArtifactRoot` and `LocalPayloadCleanup`
   each take a `Path`, so "no parameter accepts a path" would have to fail on the very constructors

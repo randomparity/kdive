@@ -1,8 +1,8 @@
 # Local external-boot session mechanisms — implementation plan
 
-**Goal.** Give `LocalExternalBootSessionFactory` five concrete host mechanisms and give
-`build_external_boot_session_factory` its first production caller, leaving `observe_running` on its
-fail-closed default.
+**Goal.** Give `LocalExternalBootSessionFactory` four concrete host mechanisms and give
+`build_external_boot_session_factory` its first production caller, leaving `readiness` (amendment
+7) and `observe_running` (amendment 2) on their fail-closed defaults.
 
 **Architecture.** One new module, `src/kdive/providers/local_libvirt/lifecycle/boot/
 session_mechanisms.py`, holding a nominal operation lane, a recovery-root-confined artifact-root
@@ -106,13 +106,13 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms: ...
 Modified in place (the only edit to existing code outside the new module):
 
 ```python
-# composition.py — observe_running widens to `| None` and STAYS REQUIRED (no default)
+# composition.py — both probes widen to `| None` and STAY REQUIRED (no default)
 def build_external_boot_session_factory(
     *,
     pin_lease: PinOperationLease,
     open_artifact_root: OpenArtifactRoot,
     open_guest: OpenGuest,
-    readiness: ReadinessProbe,
+    readiness: ReadinessProbe | None,  # was: ReadinessProbe
     observe_running: RunningObserver | None,  # was: RunningObserver
     cleanup_payloads: CleanupPayloads,
 ) -> LocalExternalBootSessionFactory: ...
@@ -125,8 +125,6 @@ Consumed from existing code, each **confirmed to exist with this signature** on 
 def _require_private_owned_directory(fd: int, label: str) -> None
 def _open_private_directory(parent_fd: int, name: str) -> int
 def _open_or_create_private_child(parent_fd: int, name: str) -> int
-# lifecycle/boot/readiness.py
-def _real_readiness(system_id: UUID) -> ReadinessResult
 # lifecycle/boot/session.py
 type PinOperationLease  = Callable[[LocalExternalBootOperationLease], PinnedOperationOwnership]
 type OpenArtifactRoot   = Callable[[OperationOwnership], int]
@@ -534,10 +532,17 @@ Steps:
    the same value the cleanup mechanism holds, so the single-source property is checked rather than
    described. This is the only in-change control on the #2212 divergence, and it must be a real
    assertion on the built object, not a comment.
-5b. Add `test_production_builder_binds_readiness_and_open_guest`: assert by identity that the built
-   factory's `_readiness is _real_readiness` and `_open_guest is open_libguestfs_guest`. Without
-   this, dropping either argument leaves the class falling back to `_unconfigured_readiness` and
-   nothing goes red.
+5b. Add `test_production_builder_binds_open_guest`: assert by identity that the built factory's
+   `_open_guest is open_libguestfs_guest`. Without this, dropping the argument leaves the class
+   falling back to a fail-closed default and nothing goes red.
+
+   **`readiness` is not bound** (amendment 7). `_real_readiness` is one poll of a console log
+   whose only truncation is `LocalLibvirtInstall`'s prepare; `_ConcreteSession.start()` truncates
+   nothing, so on the `prior_power == "running"` arm that reaches `_require_readiness` the source
+   boot's `kdive-ready` marker is still in the file — and `classify_console` scans only
+   `text[: marker_match.start()]`, so a target-boot panic is invisible and the gate reports
+   success. Anchoring the window at `start()` means editing `session.py`, declared unmodified
+   here. Owner #2212, which cannot ship a live port without a real probe.
 5c. Add `test_configuration_comes_only_from_the_composition_seam` (charter criterion 8).
 
    **Do not test this with `inspect.signature`.** `LocalArtifactRoot` and `LocalPayloadCleanup`
@@ -561,10 +566,11 @@ Steps:
    resolved at one site the test names.
 6. Add `test_mechanisms_builder_does_not_advertise_external_boot`: after building the mechanisms,
    `composition.build_runtime(secret_registry=SecretRegistry()).external_boot is None`.
-7. Add `test_production_builder_leaves_observe_running_unconfigured`: build the factory through
-   the production builder and assert `factory._observe_running is _unconfigured_observation`.
-   This is the deferral's guard — it fails the moment someone binds an observer without doing the
-   domain-XML work.
+7. Add `test_production_builder_leaves_the_probes_unconfigured`, parametrised over `readiness`
+   and `observe_running`: assert each is its `_unconfigured_*` default **by identity, then call
+   it** and require its specific `RuntimeError`. Identity alone would pass against a binding that
+   returns something harmless, and amendment 7's rule is that an amendment removing a binding must
+   leave behind a test that fails if the binding silently returns.
 
    **Narrowed from "open a session and call it", and the reason is a fact about the builder.**
    The production builder deliberately leaves `open_overlay` on its real default, which opens
@@ -629,14 +635,14 @@ requirements were unmapped; this table is checkable line by line instead.
 
 | criterion | discharged by |
 | --- | --- |
-| 1 — five aliases implemented, passed to the builder, each with a test | Tasks 1–4; per-alias tests: lane T1.1–T1.8, artifact root T2.1–T2.9, cleanup T3.1–T3.11, guest opener T4.2–T4.3, **readiness T4.5b** |
-| 1 — `RunningObserver` not bound, keeps `_unconfigured_observation` | T4.7, T5.1 (`test_unconfigured_observation_raises`) |
+| 1 — four aliases implemented, passed to the builder, each with a test | Tasks 1–4; per-alias tests: lane T1.1–T1.8a, artifact root T2.1–T2.9, cleanup T3.1–T3.11, guest opener T4.2–T4.3 |
+| 1 — `ReadinessProbe` and `RunningObserver` not bound, keep their `_unconfigured_*` defaults | T4.7 (identity **and** invoked), T5.1 |
 | 2 — three fail-closed defaults, independently, plus identity | T5.1, T5.2 |
 | 3 — `pin_lease` refuses foreign/released, returns exact identity | T1.1, T1.5, T1.7, T1.8a; the `ExpectedOperationOwnership` comparison itself is the factory's, already tested in `test_session.py` |
 | 4 — artifact root confined; symlink, wide mode, non-directory, traversal refused | T2.5 (symlink, both components), T2.6 (mode), T2.7 (non-directory/missing), T2.9 (non-canonical). The **caller-level** "cannot be pointed at another root" half is discharged by the type signatures, not by a test, and **not** by T4.5c — see the note below |
 | 5 — cleanup removes payloads **and** the archive; bounded; idempotent; foreign recovery directory refused | T3.1, T3.6, T3.7, T3.8, **T3.8a (wide-mode recovery directory)**, **T3.8b (wide-mode recovery root — the root's own re-validation)**, T3.9 (symlink), T3.10 |
 | 6 — `open_guest` returns `_Guest`; guest access refused while active via the existing path | T4.2, T4.3 |
-| 7 — `readiness` returns `ReadinessResult` from a real read | reuse of `_real_readiness` unchanged; binding asserted at **T4.5b**. The "no libvirt text, no host path" half is **NOT discharged here** — `_real_readiness` leaks raw `virsh` stderr and this change does not wrap it. Owner **#2220** |
+| 7 — `readiness` returns `ReadinessResult` from a real read | **NOT discharged here** — amendment 7 removes the binding, because `_real_readiness` reads the previous boot's console on this path. Owner **#2212**, which cannot ship without it. The "no libvirt text, no host path" half was already **not** discharged here — owner **#2220** |
 | 8 — no mechanism takes configuration from protocol input | **T4.5c** |
 | 9 — `ProviderRuntime.external_boot` still `None` | T4.6 |
 | 10 — guardrails pass | Task 6 |
@@ -690,6 +696,11 @@ all public, matching the spec, since #2212 is a named consumer of several of the
   resolved value so a mismatch requires discarding it rather than merely forgetting an invariant,
   but #2212 could still re-resolve the setting itself. This is the residual, and it is the reason
   the value is returned at all.
+- **`readiness` is unbound and #2212 must supply a correct probe — owner #2212.** A correct probe
+  anchors its console window at `_ConcreteSession.start()`, by truncating there or recording the
+  log offset there. `_unconfigured_readiness` raises at first call, so this is a blocking
+  obligation on the row that makes `ProviderRuntime.external_boot` non-`None`, not a dormant
+  residual.
 - **`_real_readiness` leaks raw libvirt stderr, including host paths — owner #2220.**
   `_bounded_probe_error` truncates to 200 characters and redacts nothing, so an unreachable
   hypervisor puts `error: Failed to connect socket to '<host path>': ...` into `probe_error`, which

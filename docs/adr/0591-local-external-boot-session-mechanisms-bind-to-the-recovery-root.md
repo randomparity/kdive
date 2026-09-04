@@ -106,13 +106,29 @@ factory was built to produce — and the channel work is tracked separately as t
 is. Nothing regresses: `ProviderRuntime.external_boot` is `None`, so no production caller reaches
 this mechanism either way.
 
-The three mechanisms that already have a home keep it. `readiness` is the existing
-`_real_readiness`, whose signature is already `ReadinessProbe` and which is already the
-production probe wired at `LocalLibvirtInstall.from_env`. `pin_lease` and `open_guest` are
-constructed from the lane capability and the libguestfs handle the session already defines.
+`pin_lease` and `open_guest` are constructed from the lane capability and the libguestfs handle
+the session already defines.
+
+**`readiness` is deliberately left unbound** (charter amendment 7). An earlier revision of this
+record bound it to the existing `_real_readiness` on the ground that it is "already the production
+probe wired at `LocalLibvirtInstall.from_env`" and tails a truncated console log. Both halves are
+true of *that* caller and neither survives the move. `_real_readiness` is one poll of a log whose
+only truncation happens in `LocalLibvirtInstall`'s identity-checked prepare, which
+`read_console_log`'s own docstring names as its precondition; `_ConcreteSession.start()` calls
+`domain.create()` and truncates nothing. Both `_require_readiness` call sites sit on the
+`prior_power == "running"` arm, where the *source* boot's `kdive-ready` marker is therefore still
+in the file — and `classify_console` scans only `text[: marker_match.start()]`, so a target-boot
+panic is invisible and the gate reports success. It is also a single unlooped call against a probe
+built for `install._await_ready`'s polling loop, so a markerless log fails it outright.
+
+A correct probe must anchor its console window at `start()` — by truncating there, or by recording
+the log offset there — and `start()` is in `session.py`, which this change leaves unmodified. So
+the binding is not made here.
 
 The `_unconfigured_readiness` / `_unconfigured_observation` / `_unconfigured_cleanup` defaults are
-untouched and stay the fallback for an unsupplied mechanism.
+untouched and stay the fallback for an unsupplied mechanism. Two of the three are now load-bearing
+rather than vestigial: `readiness` and `observe_running` both fall through to them, and both raise
+at first call, so #2212 cannot ship a live port without supplying real probes.
 
 ## Consequences
 
