@@ -26,8 +26,9 @@ appended byte is observable while an oversized capture fails as malformed eviden
 provider keeps using its bounded qemu-guest-agent reads.
 
 The existing remote `GuestAgentExec` moves behavior-preservingly to a shared libvirt module, with its
-allowlist, two-phase polling, per-call and whole-command timeouts, base64 decoding, output bounds,
-and libvirt error classification unchanged. Both providers consume that seam. The local
+allowlist, two-phase polling, per-call and whole-command timeouts, base64 decoding, and libvirt
+error classification unchanged. Both providers consume that seam. Output bounding remains owned by
+each observation reader, as it is today. The local
 `RunningObserver` receives its session's already opened domain and executes only fixed absolute
 `uname` and `cat` arguments. The local domain renderer adds the standard virtio guest-agent channel
 for newly provisioned Systems, and the observer fails with an actionable readiness error when an
@@ -52,11 +53,15 @@ places an `external-boot-cmdline-mismatch-v1` diagnostic inside `failure_context
 outer `external-boot-authority-result-v1` remains unchanged.
 
 The diagnostic has exactly `schema`, `expected_cmdline`, `observed_cmdline`, and
-`first_differing_byte`. Bytes decode as UTF-8 with `backslashreplace`; JSON encoding then escapes
-control characters. Each rendered string is capped at 8,192 UTF-8 bytes after redaction, and the
-offset is an integer from 0 through 2,048. The offset is the shorter byte length when one sequence is
-a strict prefix. These bounds retain every admitted 2,048-byte observation even when each byte
-expands to a four-character escape.
+`first_differing_byte`. Bytes first decode as UTF-8 with `surrogateescape`, preserving invalid bytes
+as distinct low surrogates while leaving printable secret text matchable. After redaction, a fixed
+renderer preserves printable Unicode, doubles a literal backslash, renders ASCII controls and
+surrogate bytes as `\xNN`, and renders other non-printable scalars as `\uNNNN` or `\UNNNNNNNN`.
+Thus NUL and every C0 byte become PostgreSQL-safe ASCII, while an invalid byte and literal
+backslash escape remain distinguishable. Each rendered string is capped at 8,192 UTF-8 bytes after
+rendering, and the offset is an integer from 0 through 2,048. The offset is the shorter byte length
+when one sequence is a strict prefix. These bounds retain every admitted 2,048-byte observation
+even when each byte expands to a four-character escape.
 
 Migration `0130` changes only `commit_external_boot_authority_result`'s validation of a `fail`
 result. It admits the optional versioned diagnostic beside `phase`, checks exact keys, types,
@@ -83,9 +88,9 @@ may retain defensive parsing checks, but the shared port is the trust-boundary c
 The design adds no anonymous or tenant-facing entry point. It widens three existing boundaries:
 
 - A running guest controls qemu-agent replies. The shared executor admits only fixed absolute
-  programs, bounds time and decoded output, validates the reply protocol, and classifies transport
-  failures. Provider observation additionally bounds and validates every identity field and command
-  line before returning it.
+  programs, bounds time, validates the reply protocol, and classifies transport failures. Each
+  provider observation reader bounds decoded output before validating identity fields and command
+  lines.
 - Plan-derived and guest-derived command lines cross into failure persistence. Core renders bytes
   deterministically, the authority runner redacts with the process registry before constructing the
   closed diagnostic, Pydantic applies byte/range bounds, and migration `0130` independently repeats
@@ -109,7 +114,8 @@ and diagnostic values and terminal readiness classification. Remote tests prove 
 handling and that the provider returns bytes without performing the core comparison. Local tests
 prove the production guest-agent observer, missing-channel recovery diagnostic, channel rendering,
 and exact byte preservation. Authority model, runner, and database tests prove raw registered
-secrets never reach the versioned diagnostic, malformed or oversized diagnostics are refused, and
-old phase-only failures still commit. A native x86_64 `live_vm` case provisions a compatible local
+secrets never reach the versioned diagnostic, NUL/C0/invalid-byte values persist only in the safe
+escaped form, malformed or oversized diagnostics are refused, and old phase-only failures still
+commit. A native x86_64 `live_vm` case provisions a compatible local
 System and proves the real channel plus exact `/proc/cmdline` observation. Provider contract bindings
 gain transient expected and observed bytes.

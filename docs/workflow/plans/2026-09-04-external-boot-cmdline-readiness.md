@@ -69,7 +69,7 @@ Interfaces:
 - Consumes `context.activation.materialization.kernel_observation`, plus transient
   `RunningKernelObservation.identity`, `.cmdline`, and `.expected_cmdline`.
 - Produces a terminal `CategorizedError` with category `ErrorCategory.READINESS_FAILURE` carrying
-  bounded UTF-8-with-backslash-replacement expected/observed strings and
+  bounded deterministically escaped expected/observed strings and
   `first_differing_byte`.
 
 Verification:
@@ -103,8 +103,10 @@ Interfaces:
   first_differing_byte)` nested optionally in `_FailureContext`.
 - Adds `secret_registry: SecretRegistry` to `ExternalBootHandlerPorts`; production assembly supplies
   its existing registry.
-- `_bound_failure` copies only a terminal readiness error's exact recognized scalar keys, redacts
-  both text values through a fresh `Redactor`, bounds them, and otherwise retains phase-only output.
+- `_bound_failure` copies only a terminal readiness error's exact recognized scalar keys, decodes
+  bytes with `surrogateescape`, redacts through a fresh `Redactor`, deterministically escapes every
+  control, invalid byte, and literal backslash, bounds the result, and otherwise emits phase-only
+  output.
 - Migration `0130` widens only the commit function's failure-context validation and retains the
   existing `jobs.failure_context` column and old result compatibility.
 
@@ -114,7 +116,8 @@ Verification:
   diagnostic fields while accepting the legacy phase-only shape; red is extra-field rejection,
   green command: `uv run python -m pytest tests/jobs/test_external_boot_authority_models.py -q`.
 - Mode: focused-test. Runner tests register a secret occurring in both values and prove the carrier
-  contains only redacted bounded strings and the correct offset; green command:
+  contains only redacted bounded strings and the correct offset; NUL, another C0 byte, invalid UTF-8,
+  and a literal backslash remain distinct PostgreSQL-safe text. Green command:
   `uv run python -m pytest tests/jobs/handlers/external_boot/test_runner.py -q`.
 - Mode: focused-test. Database tests prove migration `0130` accepts the closed v1 diagnostic,
   rejects malformed shapes, and preserves legacy commits; use the exact test file that already
@@ -149,8 +152,9 @@ Interfaces:
 - Remote `observe_guest_identity(...) -> RunningKernelObservation` returns live and plan-derived
   expected bytes and no longer compares them locally.
 - The hardened `GuestAgentExec` moves to the shared provider module without changing its fixed
-  program allowlist, two-phase polling, timeout, base64, output-bound, or error classification
-  contracts; both providers import it there.
+  program allowlist, two-phase polling, timeout, base64, or error classification contracts; both
+  providers import it there. Each observation reader applies the 2,048-byte content bound after the
+  executor returns.
 - Local `RunningObserver` receives the opened domain, performs bounded qemu-guest-agent reads, and
   returns live and target-XML-derived expected bytes. The standard guest-agent channel is rendered
   for newly provisioned local domains; absence names reprovisioning as recovery.
