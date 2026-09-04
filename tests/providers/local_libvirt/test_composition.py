@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
+import kdive
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
@@ -27,6 +31,11 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     PinOperationLease,
     ReadinessProbe,
     RunningObserver,
+    _unconfigured_observation,
+    _unconfigured_readiness,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    open_libguestfs_guest,
 )
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
@@ -333,3 +342,143 @@ def test_build_external_boot_refuses_each_half_of_the_precondition(
     assert isinstance(
         composition.build_external_boot(_external_boot_io()), LocalLibvirtExternalBoot
     )
+
+
+@pytest.fixture
+def seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Resolve the composition seam per setting, and record any host open.
+
+    Deliberately not the blanket `lambda _setting: "qemu:///session"` the older laziness test
+    uses. Copying that idiom here would construct `LocalArtifactRoot` and `LocalPayloadCleanup`
+    with the *string* `"qemu:///session"` as their recovery root; the test would still pass,
+    because nothing opens it, and would still type-check, because the patched callable is
+    untyped -- asserting laziness while proving nothing about the value actually resolved.
+    """
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir()
+    recovery_root.chmod(0o700)
+
+    def require(setting: object) -> object:
+        if setting is composition.LIBVIRT_RECOVERY_ROOT:
+            # A *fresh, equal* Path per call, deliberately. Returning the one object would
+            # make `is` identity hold whether the builder resolved the setting once or
+            # twice, so the single-resolution test could not fail -- fault injection caught
+            # exactly that. A distinct object per resolution is also what the real
+            # `config.require` produces, since it re-parses the setting.
+            return Path(str(recovery_root))
+        if setting is composition.LIBVIRT_URI:
+            return "qemu:///session"
+        raise AssertionError(f"unexpected setting: {setting}")
+
+    monkeypatch.setattr(composition.config, "require", require)
+    return recovery_root
+
+
+def test_build_external_boot_session_mechanisms_opens_nothing(
+    seam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(composition.libvirt, "open", lambda uri: opened.append(uri))
+
+    mechanisms = composition.build_external_boot_session_mechanisms()
+
+    assert isinstance(mechanisms, composition.LocalExternalBootMechanisms)
+    assert isinstance(mechanisms.factory, LocalExternalBootSessionFactory)
+    assert mechanisms.recovery_root == seam
+    assert opened == []
+    assert sorted(seam.iterdir()) == []
+
+
+def test_mechanisms_share_one_recovery_root(seam: Path) -> None:
+    # Checked on the built object rather than described in a comment: this is the only
+    # in-change control on the #2212 divergence, where cleanup's archive removal and
+    # RecoveryMetadataStore must resolve the same root or cleanup silently no-ops.
+    mechanisms = composition.build_external_boot_session_mechanisms()
+    cleanup = mechanisms.factory._cleanup_payloads
+
+    assert cleanup.__self__._root is mechanisms.recovery_root  # ty: ignore[unresolved-attribute]
+    assert mechanisms.factory._open_artifact_root.__self__._root is mechanisms.recovery_root  # ty: ignore[unresolved-attribute]
+
+
+def test_production_builder_binds_open_guest(seam: Path) -> None:
+    # By identity. Without this, dropping the argument leaves the class falling back to a
+    # fail-closed default and nothing goes red.
+    factory = composition.build_external_boot_session_mechanisms().factory
+
+    assert factory._open_guest is open_libguestfs_guest
+
+
+@pytest.mark.parametrize(
+    ("mechanism", "default", "message"),
+    [
+        ("_readiness", _unconfigured_readiness, "local external-boot readiness is not configured"),
+        (
+            "_observe_running",
+            _unconfigured_observation,
+            "local external-boot running observation is not configured",
+        ),
+    ],
+)
+def test_production_builder_leaves_the_probes_unconfigured(
+    seam: Path, mechanism: str, default: object, message: str
+) -> None:
+    """Both deferrals' guard: identity, and the raise actually executed.
+
+    Identity alone would pass against a binding that returns something harmless. Amendment 7
+    requires an amendment that removes a binding to leave behind a test that fails if the
+    binding silently returns, so the bound callable is invoked here rather than only compared.
+
+    `readiness` is unbound by amendment 7 (`_real_readiness` reads the previous boot's console);
+    `observe_running` by amendment 2 (no host-reachable qemu-guest-agent channel on local).
+    """
+    factory = composition.build_external_boot_session_mechanisms().factory
+    bound = getattr(factory, mechanism)
+
+    assert bound is default
+    with pytest.raises(RuntimeError, match=message):
+        bound(UUID("11111111-1111-1111-1111-111111111111"))
+
+
+def test_mechanisms_builder_does_not_advertise_external_boot(
+    seam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    composition.build_external_boot_session_mechanisms()
+    # `build_runtime` resolves many settings the seam deliberately refuses, so the seam is
+    # lifted before it runs. Keeping the seam strict is what makes it evidence: a blanket
+    # patch would have answered every setting with the recovery root.
+    monkeypatch.undo()
+
+    assert composition.build_runtime(secret_registry=SecretRegistry()).external_boot is None
+
+
+def test_configuration_comes_only_from_the_composition_seam(
+    seam: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charter criterion 8, tested by provenance rather than by signature shape.
+
+    `inspect.signature` reports arity, never where an argument came from: it cannot tell
+    "the composition seam supplied this Path" from "a protocol handler supplied it". And both
+    constructors *do* take a `Path`, so a "no parameter accepts a path" assertion would have
+    to fail on the very constructors it inspects.
+    """
+    source = Path(kdive.__file__).parent
+    sites = {
+        name: sorted(
+            path.relative_to(source).as_posix()
+            for path in source.rglob("*.py")
+            if re.search(rf"\b{name}\(", path.read_text())
+        )
+        for name in ("LocalArtifactRoot", "LocalPayloadCleanup")
+    }
+
+    # The builder is the only construction site in src/, so there is no second path in.
+    assert sites == {
+        "LocalArtifactRoot": ["providers/local_libvirt/composition.py"],
+        "LocalPayloadCleanup": ["providers/local_libvirt/composition.py"],
+    }
+    # The builder takes no parameters, so no caller can inject configuration into it.
+    assert inspect.signature(composition.build_external_boot_session_mechanisms).parameters == {}
+    # And the value it constructs them with is the one config.require returned.
+    # Equality, not identity: the seam hands out a fresh Path per resolution (see the
+    # fixture), and what this asserts is provenance -- the value came from require.
+    assert composition.build_external_boot_session_mechanisms().recovery_root == seam

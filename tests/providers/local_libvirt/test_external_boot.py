@@ -72,16 +72,13 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
-
-_SOURCE_XML = """<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
-  <name>kdive-system</name>
-  <metadata><owner system="00000000-0000-0000-0000-000000000001" /></metadata>
-  <memory unit="MiB">2048</memory>
-  <os firmware="efi"><type arch="x86_64">hvm</type><kernel>/old</kernel>
-    <initrd>/old-i</initrd><cmdline>old</cmdline></os>
-  <devices><disk type="file"><target dev="vda" /></disk></devices>
-  <qemu:commandline><qemu:arg value="-S" /></qemu:commandline>
-</domain>"""
+from tests.providers.local_libvirt.external_boot_support import (
+    _BINDING,
+    _SOURCE_XML,
+    _metadata,
+    _point,
+    _pre_stop,
+)
 
 
 def test_render_target_xml_changes_only_owned_boot_projection() -> None:
@@ -504,13 +501,6 @@ def test_absence_live_move_error_reclassifies_exact_layout(
     assert io.actions[-3:] == tail
 
 
-_BINDING = ExternalBootActivationBinding(
-    system_id="00000000-0000-0000-0000-000000000001",
-    run_id="00000000-0000-0000-0000-000000000002",
-    activation_id="00000000-0000-0000-0000-000000000003",
-)
-
-
 def test_recovery_reference_resolves_only_exact_binding() -> None:
     reference = OpaqueProviderRef(
         ref=(
@@ -552,44 +542,6 @@ def test_finalize_cleanup_proof_is_closed_and_mutation_started_only() -> None:
         FinalizeCleanupProof.model_validate(values | {"phase": "terminal"})
     with pytest.raises(ValidationError):
         FinalizeCleanupProof.model_validate(values | {"extra": "forbidden"})
-
-
-def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadataV1:
-    absent = AbsentComponentState()
-    source_state = ProviderStateIdentity(definition="sha256:" + "b" * 64, modules=absent)
-    target_state = ProviderStateIdentity(
-        definition="sha256:" + "c" * 64,
-        modules=PresentComponentState(manifest="sha256:" + "3" * 64),
-    )
-
-    return LocalRecoveryMetadataV1(
-        binding=_BINDING,
-        plan_identity="sha256:" + "6" * 64,
-        materialization_identity="sha256:" + "7" * 64,
-        release="6.12.0",
-        materialized_modules=OpaqueProviderRef(ref="artifacts/system/run/modules"),
-        materialized_modules_sha256="sha256:" + "8" * 64,
-        materialized_modules_bytes=123,
-        source_xml_sha256="sha256:" + hashlib.sha256(_SOURCE_XML.encode()).hexdigest(),
-        source_xml=_SOURCE_XML,
-        source_definition="sha256:" + "a" * 64,
-        source_boot="sha256:" + "b" * 64,
-        target_boot="sha256:" + "c" * 64,
-        target_projection_sha256="sha256:" + "d" * 64,
-        target_xml_sha256="sha256:"
-        + hashlib.sha256(_SOURCE_XML.replace("/old", "/new").encode()).hexdigest(),
-        target_xml=_SOURCE_XML.replace("/old", "/new"),
-        expected_running=RunningKernelObservation(
-            architecture="x86_64",
-            release="6.12.0",
-            gnu_build_id="01020304",
-        ),
-        source_state=source_state,
-        target_state=target_state,
-        prior_power="running",
-        capture={"state": "absent"},
-        phase=phase,
-    )
 
 
 @pytest.mark.parametrize("release", ["../escape", "bad/release", ".", ""])
@@ -682,15 +634,6 @@ def test_target_projection_sidecar_rejects_substitution_and_cross_owner(tmp_path
     )
     with TargetProjectionStore(root) as store, pytest.raises(ValueError, match="cross-owner"):
         store.reopen(kernel_ref, crossed)
-
-
-def _pre_stop(metadata: LocalRecoveryMetadataV1) -> LocalPreStopIntentV1:
-    return LocalPreStopIntentV1.model_validate(
-        metadata.model_dump(
-            exclude={"schema_", "source_state", "target_state", "capture", "phase"},
-            by_alias=True,
-        )
-    )
 
 
 def test_recovery_metadata_store_publishes_reopens_and_advances_phase(tmp_path: Path) -> None:
@@ -1374,19 +1317,6 @@ def test_libguestfs_tree_rejects_limit_signal_before_visiting_extra_entry(
     assert guest.tree_limits == [2]
     assert guest.lstat_paths == ["/lib/modules/6.12.0/a", "/lib/modules/6.12.0/b"]
     assert guest.cursor_closes == 1
-
-
-def _point(metadata: LocalRecoveryMetadataV1) -> RecoveryPoint:
-    return RecoveryPoint(
-        binding=metadata.binding,
-        plan_identity=metadata.plan_identity,
-        materialization_identity=metadata.materialization_identity,
-        recovery_ref=OpaqueProviderRef(
-            ref=f"local-recovery-v1/{_BINDING.system_id}/{_BINDING.activation_id}"
-        ),
-        source_state=metadata.source_state,
-        target_state=metadata.target_state,
-    )
 
 
 class _ExternalIO:

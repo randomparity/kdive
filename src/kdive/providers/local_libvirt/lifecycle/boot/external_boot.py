@@ -360,6 +360,15 @@ def _artifact_ref_parts(artifact: OpaqueProviderRef, ownership: ActivationOwners
 def _open_or_create_private_child(parent_fd: int, name: str) -> int:
     try:
         os.mkdir(name, 0o700, dir_fd=parent_fd)
+        # `mkdir` masks its mode argument with the process umask, so a worker started with
+        # `UMask=0177` creates 0600 and the directory then fails the exact-0700 check below —
+        # permanently, because every later call finds it and takes the `FileExistsError` arm.
+        #
+        # Only on the creating arm, never on `FileExistsError`. A directory that was already
+        # present with the wrong mode is foreign or damaged state, and that is precisely what
+        # `_require_private_owned_directory` exists to refuse; setting the mode there would
+        # launder bad state into good and read like a fix.
+        os.chmod(name, 0o700, dir_fd=parent_fd)
         os.fsync(parent_fd)
     except FileExistsError:
         pass

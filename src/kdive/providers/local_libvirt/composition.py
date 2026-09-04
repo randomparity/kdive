@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -54,6 +55,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ReadinessProbe,
     RunningObserver,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalArtifactRoot,
+    LocalOperationLane,
+    LocalPayloadCleanup,
+    open_libguestfs_guest,
+)
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
     LocalLibvirtCaptureQuiescence,
 )
@@ -73,7 +80,7 @@ from kdive.providers.local_libvirt.reaping import (
 )
 from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT, LIBVIRT_URI
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
@@ -184,8 +191,12 @@ def build_external_boot_session_factory(
     pin_lease: PinOperationLease,
     open_artifact_root: OpenArtifactRoot,
     open_guest: OpenGuest,
-    readiness: ReadinessProbe,
-    observe_running: RunningObserver,
+    # Both widened to `| None` and deliberately left REQUIRED, with no default. The factory's own
+    # `or _unconfigured_*` fallbacks then select the fail-closed defaults. Giving either a
+    # default would make every mechanism omittable, so a caller that forgot `open_guest` or
+    # `cleanup_payloads` would get a factory that looks built and fails only mid-operation.
+    readiness: ReadinessProbe | None,
+    observe_running: RunningObserver | None,
     cleanup_payloads: CleanupPayloads,
 ) -> LocalExternalBootSessionFactory:
     """Build the internal operation-session factory without opening host resources."""
@@ -199,6 +210,53 @@ def build_external_boot_session_factory(
         observe_running=observe_running,
         cleanup_payloads=cleanup_payloads,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalExternalBootMechanisms:
+    """The built factory beside the one recovery root every mechanism in it resolved.
+
+    `recovery_root` is returned rather than left implicit because cleanup's archive removal
+    and `RecoveryMetadataStore` must resolve the *same* root: a divergence would make cleanup
+    open a non-existent path, report success under the idempotence rule, and leave
+    `finalize_tombstone` failing for every archived activation. #2212 passes this value to the
+    store rather than re-resolving the setting.
+    """
+
+    factory: LocalExternalBootSessionFactory
+    recovery_root: Path
+
+
+def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
+    """Assemble the local external-boot host mechanisms (ADR-0591); opens nothing here.
+
+    Takes no parameters: the only path into these mechanisms is the composition seam, so no
+    caller can inject a root, URI, path, command or credential into them.
+    """
+    root = config.require(LIBVIRT_RECOVERY_ROOT)
+    factory = build_external_boot_session_factory(
+        pin_lease=LocalOperationLane().pin,
+        open_artifact_root=LocalArtifactRoot(root).open,
+        open_guest=open_libguestfs_guest,
+        # Neither probe is bound, and both omissions are explicit at the call site so the
+        # factory's fail-closed defaults are selected on purpose rather than by oversight.
+        #
+        # `readiness` (amendment 7): `_real_readiness` reads a console log whose only
+        # truncation happens in `LocalLibvirtInstall`'s prepare, and `_ConcreteSession.start()`
+        # truncates nothing. On the `prior_power == "running"` arm that reaches it, the source
+        # boot's `kdive-ready` marker is still in the file, and `classify_console` scans only
+        # the bytes *before* the marker — so a target-boot panic is invisible and the gate
+        # reports success. A correct probe must anchor its window at `start()`, which is in
+        # `session.py`. Owner #2212, which cannot ship a live port without one because
+        # `_unconfigured_readiness` raises on first call.
+        #
+        # `observe_running` (amendment 2): local domains render no qemu-guest-agent channel,
+        # so there is no host-reachable read of a running guest. Owner #2212.
+        readiness=None,
+        observe_running=None,
+        cleanup_payloads=LocalPayloadCleanup(root).cleanup,
+    )
+    return LocalExternalBootMechanisms(factory=factory, recovery_root=root)
 
 
 def external_boot_authority_is_configured() -> bool:
