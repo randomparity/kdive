@@ -9,15 +9,16 @@ leaking host paths, and no renderer changes.
 return of `_domain_exit_probe` logs the bounded raw text at `WARNING` and returns a member.
 `_DomainExitProbe.error` and `ReadinessResult.probe_error` are typed `ProbeFailure | None`, so
 `ty`'s strict whole-tree check refuses a free-form `str` at every call site in `src/` and `tests/`.
-`install.py` renders `.value` into `details["probe_error"]`.
+`LocalLibvirtBooter._boot_failure_details` renders `.value` into `details["probe_error"]`.
 
 **Tech stack.** Python 3.14, `uv`, pytest, `ruff`, `ty`.
 
-Expected implementation size: 160–240 changed lines (M) — from the file map and task code below:
-roughly 45 lines in `readiness.py`, 12 in `install.py`, 141 in the test file (three amended
-assertions plus five new tests). No new module, no new dependency.
+Expected implementation size: 160–200 changed lines (M) — from the file map below: ~56 in
+`readiness.py` (the enum, the helper, two annotations, five rewritten returns), ~12 in
+`install.py`, ~113 in the test file (three amended assertions, five new tests, five imports).
 
 Spec: [`docs/workflow/specs/2026-09-03-probe-error-closed-vocabulary-design.md`](../specs/2026-09-03-probe-error-closed-vocabulary-design.md).
+Decision: [ADR-0594](../../adr/0594-readiness-probe-failures-leave-the-probe-as-a-closed-vocabulary.md).
 
 ## Global Constraints
 
@@ -25,16 +26,12 @@ Spec: [`docs/workflow/specs/2026-09-03-probe-error-closed-vocabulary-design.md`]
 - Guardrails: `just lint`, `just type`, `just test-changed` while iterating; `just ci` as the
   pre-push gate. Run gates **bare** — no pipe to `tail`/`head`, no trailing `; echo $?` (both
   replace the recipe's exit status). Capture with `just ci > <file> 2>&1 < /dev/null`.
-- Ruff line length 100, lint set `E,F,I,UP,B,SIM`. `ty` runs whole-tree (`src` + `tests`).
-- `just format` before committing; the ruff hooks otherwise rewrite the tree mid-commit.
-- `ruff format` may rewrite `except (A, B):` to `except A, B:` under PEP 758. Both forms exist on
-  `main`. Accept whatever `just format` produces.
-- Prose rule (project-wide): plain and factual; avoid "critical", "robust", "comprehensive",
-  "elegant". Applies to docstrings and comments here.
-- `CategorizedError.details` values must be finite JSON scalars — `details` is agent-surfaceable
-  and both renderers that forward it are type filters, not content filters.
+- Ruff line length 100, lint set `E,F,I,UP,B,SIM`; `ty` whole-tree. Run `just format` before
+  committing, and accept its PEP 758 rewrite of `except (A, B):` to `except A, B:` if it makes one.
+- Prose rule (project-wide): plain and factual; avoid "critical", "robust", "comprehensive".
+- `CategorizedError.details` values must be finite JSON scalars.
 - Do **not** modify `src/kdive/serialization.py`, `src/kdive/security/secrets/redaction.py`, or
-  anything under `src/kdive/providers/remote_libvirt/`. All three are out of scope for #2220.
+  anything under `src/kdive/providers/remote_libvirt/` — all three are out of scope for #2220.
 
 ## File map
 
@@ -49,28 +46,35 @@ Nothing is created. `tests/adversarial/test_provider_xml.py:164` builds
 
 ## Names this plan borrows, confirmed at base `811538fb2`
 
-- `readiness.py`: `_bounded_probe_error(message: str) -> str` (line 58); `_DOMSTATE_PROBE_TIMEOUT`
-  (19); `_VIRSH` (21); `_TERMINAL_DOMSTATES` (20); `StrEnum` already imported from `enum` (8);
+- `readiness.py`: `_bounded_probe_error(message: str) -> str` (58); `_DOMSTATE_PROBE_TIMEOUT` (19);
+  `_TERMINAL_DOMSTATES` (20); `_VIRSH` (21); `StrEnum` imported from `enum` (9);
   `from __future__ import annotations` (3), so forward references resolve.
-- `install.py`: the `...lifecycle.boot.readiness` import block (53-57) already pulls
-  `_POLL_INTERVAL_SECONDS`, `ReadinessResult`, `_real_readiness`.
-- `test_install.py`: `readiness_mod` (27); the `...boot.readiness` import block (37-43);
-  the `_Readiness` dataclass fake (179-190), `probe_error: str | None` at 184; and
-
-  ```python
-  def _capture_domstate(
-      monkeypatch: pytest.MonkeyPatch, *, returncode: int, stdout: str, stderr: str = ""
-  ) -> dict[str, object]   # line 1741 — stubs shutil.which and subprocess.run
-  ```
-
-  `CategorizedError`, `ErrorCategory` (26), `subprocess`, `pytest`, `UUID`, `LocalLibvirtInstall`
-  are already imported. `logging` and `kdive.mcp.responses.ToolResponse` are **not**, and must be
-  added.
+- `install.py`: **`_boot_failure_details` is a `@staticmethod` of `LocalLibvirtBooter`** (class 170,
+  method 266) — *not* of `LocalLibvirtInstall`, a separate composing class at 582 exposing only
+  `install`, `boot`, `from_env`. The `...boot.readiness` import block (53-57) already pulls
+  `_POLL_INTERVAL_SECONDS`, `ReadinessResult`, `_real_readiness`. `_install_failure` returns at
+  132-136, `_libvirt_transport_failure` at 149-152.
+- `test_install.py`: `readiness_mod` (27); the `...boot.readiness` import block (37-43); the
+  `_Readiness` fake (179-190) with `probe_error: str | None` at **185**; and, at line 1741,
+  `_capture_domstate(monkeypatch, *, returncode: int, stdout: str, stderr: str = "")`, which stubs
+  `shutil.which` and `subprocess.run`. Already imported: `CategorizedError`, `ErrorCategory` (26),
+  `subprocess`, `pytest`, `UUID`, `LocalLibvirtInstall` (46). **Not** imported and required:
+  `logging`, `kdive.mcp.responses.ToolResponse`, `LocalLibvirtBooter`,
+  `kdive.jobs.worker._failure_context`,
+  `kdive.security.secrets.secret_registry.SecretRegistry`.
 - `jobs/worker.py`: `_failure_context(exc, registry)` (768).
-  `security/secrets/secret_registry.py`: `SecretRegistry` (15), constructible with no arguments.
+  `security/secrets/secret_registry.py`: `SecretRegistry` (15), no-argument constructible.
 
 The system UUID is written inline as `UUID("22222222-2222-2222-2222-222222222222")`; that literal
 already appears inline 11 times in the test file and no module constant exists for it.
+
+## Python semantics this plan depends on
+
+`OSError` dispatches to a subclass on errno at construction. `OSError(2, …)` **is** a
+`FileNotFoundError`; `OSError(13, …)` is a `PermissionError`. In `_domain_exit_probe` the
+`except FileNotFoundError` arm precedes `except (subprocess.SubprocessError, OSError)`, so an
+ENOENT never reaches the second arm. Any test aiming at `VIRSH_PROBE_FAILED` through an `OSError`
+must use a non-ENOENT errno.
 
 ## Task 1 — Classify at the probe and render the member
 
@@ -79,6 +83,7 @@ One task: `just type` is red between the two edits, so no reviewer could accept 
 **Interfaces.** Defines, for Task 2:
 
 ```python
+# readiness.py
 class ProbeFailure(StrEnum):
     VIRSH_MISSING = "virsh_missing"
     VIRSH_TIMEOUT = "virsh_timeout"
@@ -89,14 +94,12 @@ def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _Doma
 class _DomainExitProbe(NamedTuple): exited: bool; error: ProbeFailure | None = None
 class ReadinessResult(NamedTuple): answered: bool; ok: bool; probe_error: ProbeFailure | None = None
 
+# install.py — on LocalLibvirtBooter
 @staticmethod
 def _boot_failure_details(system_id: UUID, first_probe_error: ProbeFailure | None) -> dict[str, object]
 ```
 
 ### Step 1.1 — Write the failing test
-
-Add to `tests/providers/local_libvirt/test_install.py` (placement is free; `_capture_domstate` is
-defined at line 1741 but resolves at call time):
 
 ```python
 # The ordinary stderr `virsh` writes when the session daemon is unreachable. Every fragment is
@@ -121,7 +124,7 @@ def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
     error = CategorizedError(
         "System did not become ready within the boot window",
         category=ErrorCategory.BOOT_TIMEOUT,
-        details=LocalLibvirtInstall._boot_failure_details(system_id, probe.error),
+        details=LocalLibvirtBooter._boot_failure_details(system_id, probe.error),
     )
     payload = dict(ToolResponse.failure_from_error(str(system_id), error).data or {})
 
@@ -131,7 +134,8 @@ def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload(
         assert substring not in rendered
 ```
 
-Add `from kdive.mcp.responses import ToolResponse` to the imports.
+Add `from kdive.mcp.responses import ToolResponse` and `LocalLibvirtBooter` to the existing
+`...lifecycle.install` import.
 
 ### Step 1.2 — Confirm it fails
 
@@ -139,24 +143,27 @@ Add `from kdive.mcp.responses import ToolResponse` to the imports.
 uv run python -m pytest "tests/providers/local_libvirt/test_install.py::test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload" -q
 ```
 
-Expect `1 failed` on the `payload["probe_error"]` assertion — the current code returns the raw
-stderr. Do not skip this step.
+Expect `1 failed` with an **assertion** failure on `payload["probe_error"]`, showing the raw stderr
+as the actual value. An `AttributeError` or any collection error here means an import or class name
+is wrong — fix that before continuing; it is not the red this step is for.
 
-### Step 1.3 — Add the vocabulary and helper to `readiness.py`
+### Step 1.3 — `readiness.py`
 
-Add `import logging` to the stdlib imports, and `_log = logging.getLogger(__name__)` beside the
-module constants. After `ConsoleVerdict`:
+Add `import logging` and `_log = logging.getLogger(__name__)`. After `ConsoleVerdict`, add:
 
 ```python
 class ProbeFailure(StrEnum):
-    """Why a ``virsh domstate`` probe failed, as a closed agent-facing vocabulary (#2220).
+    """Why a ``virsh domstate`` probe failed, as a closed agent-facing vocabulary (ADR-0594).
 
     ``CategorizedError.details`` is surfaceable to the agent and reaches it through two renderers
-    that are both type filters rather than content filters: ``safe_error_details`` on the MCP
-    path, and the worker's ``_failure_context`` on ``jobs.wait``. Free-form transport text in this
-    slot therefore reaches the agent verbatim, host paths included. Members are the only values
-    the slot can hold, so the leak is not representable rather than filtered downstream. The raw
-    text stays available to the operator in the log.
+    that are type filters rather than content filters: ``safe_error_details`` on the MCP path, and
+    the worker's ``_failure_context`` on ``jobs.wait``. Free-form transport text in this slot
+    therefore reaches the agent verbatim, host paths included. Members are the only values the
+    slot can hold, so the leak is not representable rather than filtered downstream; the raw text
+    stays available to the operator in the log.
+
+    ``VIRSH_MISSING`` also covers every ENOENT raised by the exec, not only an absent binary:
+    ``OSError(2, ...)`` is a ``FileNotFoundError``, whose arm precedes the ``OSError`` arm.
     """
 
     VIRSH_MISSING = "virsh_missing"
@@ -165,7 +172,7 @@ class ProbeFailure(StrEnum):
     VIRSH_NONZERO_EXIT = "virsh_nonzero_exit"
 ```
 
-After `_bounded_probe_error`:
+After `_bounded_probe_error`, add:
 
 ```python
 def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _DomainExitProbe:
@@ -173,7 +180,7 @@ def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _Doma
 
     The raw text goes to the host log, not into the returned value — the same split
     ``_install_failure`` and ``_libvirt_transport_failure`` already make on this module's raise
-    path, where the error carries only the domain name and the transport text is left to the log.
+    path, where the error carries only the domain name.
     """
     _log.warning(
         "domstate probe failed for %s (%s): %s",
@@ -184,81 +191,35 @@ def _probe_failed(domain_name: str, failure: ProbeFailure, detail: str) -> _Doma
     return _DomainExitProbe(False, failure)
 ```
 
-Retype both carriers, changing only the annotation and `_DomainExitProbe`'s docstring:
+Retype the two carriers — annotation only, plus `_DomainExitProbe`'s docstring, which becomes
+"The domstate probe result plus its classified probe-failure reason":
 
-```python
-class ReadinessResult(NamedTuple):
-    """The run-readiness preflight result: did the System answer, and did its checks pass."""
+- `ReadinessResult.probe_error: ProbeFailure | None = None`
+- `_DomainExitProbe.error: ProbeFailure | None = None`
 
-    answered: bool
-    ok: bool
-    probe_error: ProbeFailure | None = None
+### Step 1.4 — Rewrite the five failing returns
 
+In `_domain_exit_probe`, leave every non-failing line as it is and replace each failing return:
 
-class _DomainExitProbe(NamedTuple):
-    """The domstate probe result plus its classified probe-failure reason."""
+| Arm | Replacement |
+|---|---|
+| `virsh is None` | `return _probe_failed(domain_name, ProbeFailure.VIRSH_MISSING, "virsh executable not found")` |
+| `except subprocess.TimeoutExpired as exc` | `return _probe_failed(domain_name, ProbeFailure.VIRSH_TIMEOUT, f"virsh domstate timed out after {exc.timeout:g}s")` |
+| `except FileNotFoundError as exc` | `return _probe_failed(domain_name, ProbeFailure.VIRSH_MISSING, f"virsh domstate probe failed: {exc}")` |
+| `except (subprocess.SubprocessError, OSError) as exc` | `return _probe_failed(domain_name, ProbeFailure.VIRSH_PROBE_FAILED, f"virsh domstate probe failed: {exc}")` |
+| `if proc.returncode != 0` | `return _probe_failed(domain_name, ProbeFailure.VIRSH_NONZERO_EXIT, stderr or f"virsh domstate exited {proc.returncode}")` |
 
-    exited: bool
-    error: ProbeFailure | None = None
-```
+Note the third row: the `FileNotFoundError` arm gains `as exc` and now logs `str(exc)` instead of
+the fixed literal, so an ENOENT transport fault leaves the operator its errno and path (ADR-0594).
+Its agent-facing member is unchanged.
 
-### Step 1.4 — Route every failing return through the helper
+The two success returns (`_DomainExitProbe(True)`) and the final `_DomainExitProbe(False)` are
+untouched. `_bounded_probe_error` keeps its name and body; it now bounds the logged text.
 
-`_domain_exit_probe`'s body becomes:
+### Step 1.5 — `install.py`
 
-```python
-def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cover - live_vm
-    """Return whether ``virsh domstate`` reports terminal state plus its classified failure."""
-    uri = config.require(LIBVIRT_URI)
-    virsh = shutil.which(_VIRSH)
-    if virsh is None:
-        return _probe_failed(domain_name, ProbeFailure.VIRSH_MISSING, "virsh executable not found")
-    try:
-        proc = subprocess.run(  # noqa: S603 - virsh argv; URI/domain are data  # nosec B603
-            [virsh, "-c", uri, "domstate", domain_name],
-            capture_output=True,
-            text=True,
-            timeout=_DOMSTATE_PROBE_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return _probe_failed(
-            domain_name,
-            ProbeFailure.VIRSH_TIMEOUT,
-            f"virsh domstate timed out after {exc.timeout:g}s",
-        )
-    except FileNotFoundError:
-        return _probe_failed(domain_name, ProbeFailure.VIRSH_MISSING, "virsh executable not found")
-    except (subprocess.SubprocessError, OSError) as exc:
-        return _probe_failed(
-            domain_name, ProbeFailure.VIRSH_PROBE_FAILED, f"virsh domstate probe failed: {exc}"
-        )
-    if proc.stdout.strip().lower() in _TERMINAL_DOMSTATES:
-        return _DomainExitProbe(True)
-    stderr = proc.stderr.strip().lower()
-    exited = (
-        proc.returncode != 0
-        and domain_name.startswith("kdive-")
-        and "failed to get domain" in stderr
-    )
-    if exited:
-        return _DomainExitProbe(True)
-    if proc.returncode != 0:
-        return _probe_failed(
-            domain_name,
-            ProbeFailure.VIRSH_NONZERO_EXIT,
-            stderr or f"virsh domstate exited {proc.returncode}",
-        )
-    return _DomainExitProbe(False)
-```
-
-`_bounded_probe_error` keeps its name and body; it now bounds the logged text.
-
-### Step 1.5 — Render the member in `install.py`
-
-Add `ProbeFailure` to the `...lifecycle.boot.readiness` import block, alphabetically ordered as
-`ruff`'s `I` rules require. In `_await_ready`, annotate
-`first_probe_error: ProbeFailure | None = None`. Then:
+Add `ProbeFailure` to the `...boot.readiness` import block, alphabetically ordered. In
+`LocalLibvirtBooter._await_ready`, annotate `first_probe_error: ProbeFailure | None = None`. Then:
 
 ```python
     @staticmethod
@@ -268,7 +229,7 @@ Add `ProbeFailure` to the `...lifecycle.boot.readiness` import block, alphabetic
         """The agent-facing details for a failed boot: the System and a closed probe reason.
 
         Rendered as ``.value`` so the detail is a plain ``str`` rather than an enum member, which
-        keeps both renderers that forward it handling a JSON scalar (#2220).
+        keeps both renderers that forward it handling a JSON scalar (ADR-0594).
         """
         details: dict[str, object] = {"system_id": str(system_id)}
         if first_probe_error is not None:
@@ -278,29 +239,23 @@ Add `ProbeFailure` to the `...lifecycle.boot.readiness` import block, alphabetic
 
 ### Step 1.6 — Verify
 
-```sh
-uv run python -m pytest "tests/providers/local_libvirt/test_install.py::test_nonzero_domstate_exit_keeps_transport_text_out_of_the_mcp_payload" -q
-```
-
-Expect `1 passed`. Then `just type` — expect no diagnostics from `src/`, and failures only from
+Re-run the Step 1.2 command; expect `1 passed`. Then `just type` — expect diagnostics only from
 `test_install.py`'s `_Readiness` fake, which Task 2 retypes.
 
 **Acceptance criteria.** `ProbeFailure` has exactly the four members above. `_domain_exit_probe`
-returns a member or `None`, never caller text. Every failing branch logs the bounded text once.
-`details["probe_error"]` is a plain `str` from the vocabulary. No other detail key changes.
+returns a member or `None`, never caller text. Every failing branch logs the bounded text once, and
+the `FileNotFoundError` arm logs `str(exc)`. `details["probe_error"]` is a plain `str` from the
+vocabulary.
 
 ## Task 2 — Prove absence at both egresses; amend the pinned tests
 
-**Interfaces.** Consumes Task 1's `ProbeFailure` and `_boot_failure_details`.
-
 ### Step 2.1 — Retype the fake
 
-`test_install.py:184` becomes `probe_error: ProbeFailure | None = None`; add `ProbeFailure` to the
-`...boot.readiness` import block (37-43). `just type` fails whole-tree without this.
+`test_install.py:185` becomes `probe_error: ProbeFailure | None = None`; add `ProbeFailure` to the
+`...boot.readiness` import block (37-43), alphabetically ordered. `just type` fails whole-tree
+without this — the type gate doing its job.
 
 ### Step 2.2 — Amend the three tests that pin the old free text
-
-Each keeps pinning the same behaviour against the new vocabulary:
 
 - `test_boot_timeout_includes_first_readiness_probe_error` (~1131): seam becomes
   `_Readiness(answered=False, probe_error=ProbeFailure.VIRSH_TIMEOUT)`; assert
@@ -309,115 +264,41 @@ Each keeps pinning the same behaviour against the new vocabulary:
   returns `readiness_mod._DomainExitProbe(False, ProbeFailure.VIRSH_NONZERO_EXIT)`; assert
   `result.probe_error is ProbeFailure.VIRSH_NONZERO_EXIT`.
 - `test_real_readiness_reports_domstate_probe_timeout` (~1892): assert
-  `result.probe_error is ProbeFailure.VIRSH_TIMEOUT`.
+  `result.probe_error is ProbeFailure.VIRSH_TIMEOUT`. This is the real `TimeoutExpired` arm, and it
+  is what covers `VIRSH_TIMEOUT`.
 
-### Step 2.3 — The worker egress
+### Steps 2.3-2.6 — Four more tests
 
-```python
-def test_nonzero_domstate_exit_keeps_transport_text_out_of_the_worker_payload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The second agent-facing egress: the boot step runs as a worker job, and `_failure_context`
-    # projects details into `failure_detail_*` on `jobs.wait`. `Redactor` is a secrets filter and
-    # leaves a host path untouched, so a boundary-only fix would leave this one open.
-    _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
-    system_id = UUID("22222222-2222-2222-2222-222222222222")
+Each follows Step 1.1's shape — arrange the probe, build the `CategorizedError` from
+`LocalLibvirtBooter._boot_failure_details(system_id, probe.error)`, render, assert the member and
+then the absence of every `_TRANSPORT_SUBSTRINGS` entry from `repr(...)`. Only the arrangement and
+the expected member differ:
 
-    probe = readiness_mod._domain_exit_probe("kdive-abc")
-    error = CategorizedError(
-        "System did not become ready within the boot window",
-        category=ErrorCategory.BOOT_TIMEOUT,
-        details=LocalLibvirtInstall._boot_failure_details(system_id, probe.error),
-    )
-    context = _failure_context(error, SecretRegistry())
+| Step / test | Arrangement | Asserts |
+|---|---|---|
+| 2.3 `…_out_of_the_worker_payload` | same `_capture_domstate` as 1.1; render with `_failure_context(error, SecretRegistry())` instead of `ToolResponse` | `context["failure_detail_probe_error"] == "virsh_nonzero_exit"`, then absence |
+| 2.4 `test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload` | patch `shutil.which` to `f"/usr/bin/{tool}"` and `subprocess.run` to raise `OSError(13, "Permission denied", "/run/user/1000/libvirt/virtqemud-sock")`; category `READINESS_FAILURE` | `payload["probe_error"] == "virsh_probe_failed"`, then absence |
+| 2.5 `test_missing_virsh_classifies_as_virsh_missing` | patch `shutil.which` to `lambda tool: None`; no rendering | `probe.exited is False` and `probe.error is readiness_mod.ProbeFailure.VIRSH_MISSING` |
+| 2.6 `test_probe_failure_logs_the_raw_transport_text_for_the_operator` | same `_capture_domstate` as 1.1, inside `caplog.at_level(logging.WARNING, logger=readiness_mod.__name__)` | the joined `record.getMessage()` contains `virtqemud-sock`, `kdive-abc`, and `virsh_nonzero_exit` |
 
-    assert context["failure_detail_probe_error"] == "virsh_nonzero_exit"
-    rendered = repr(context)
-    for substring in _TRANSPORT_SUBSTRINGS:
-        assert substring not in rendered
-```
+Step 2.3 carries a comment saying why it exists: the boot step runs as a worker job,
+`_failure_context` is persisted to the job row, `jobs.wait` reads it back, and `Redactor` leaves a
+host path untouched — so a boundary-only fix would leave this egress open.
 
-Imports: `from kdive.jobs.worker import _failure_context` and
-`from kdive.security.secrets.secret_registry import SecretRegistry`.
+Step 2.4 carries a comment saying why errno 13: errno 2 would construct a `FileNotFoundError` and
+be taken by the earlier arm, testing the wrong branch entirely.
 
-### Step 2.4 — The `OSError` arm
-
-```python
-def test_oserror_probe_keeps_its_filename_out_of_the_mcp_payload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # An OSError renders `.filename` and `.strerror` in `str(exc)`, so the socket path reaches the
-    # payload through the exception rather than through stderr.
-    def domstate_oserror(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
-        raise OSError(2, "No such file or directory", "/run/user/1000/libvirt/virtqemud-sock")
-
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(readiness_mod.subprocess, "run", domstate_oserror)
-    system_id = UUID("22222222-2222-2222-2222-222222222222")
-
-    probe = readiness_mod._domain_exit_probe("kdive-abc")
-    error = CategorizedError(
-        "System booted but a run-readiness check failed",
-        category=ErrorCategory.READINESS_FAILURE,
-        details=LocalLibvirtInstall._boot_failure_details(system_id, probe.error),
-    )
-    payload = dict(ToolResponse.failure_from_error(str(system_id), error).data or {})
-
-    assert payload["probe_error"] == "virsh_probe_failed"
-    rendered = repr(payload)
-    for substring in _TRANSPORT_SUBSTRINGS:
-        assert substring not in rendered
-```
-
-### Step 2.5 — Reach the last uncovered member
-
-```python
-def test_missing_virsh_classifies_as_virsh_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(readiness_mod.shutil, "which", lambda tool: None)
-    probe = readiness_mod._domain_exit_probe("kdive-abc")
-    assert probe.exited is False
-    assert probe.error is readiness_mod.ProbeFailure.VIRSH_MISSING
-```
-
-That completes the four: `VIRSH_NONZERO_EXIT` from Steps 2.3 and 2.6, `VIRSH_PROBE_FAILED` from
-2.4, and `VIRSH_TIMEOUT` from the amended `test_real_readiness_reports_domstate_probe_timeout` in
-Step 2.2. Do not add a second timeout test — Step 2.2 already drives the real `TimeoutExpired` arm
-and asserts the member.
-
-### Step 2.6 — The operator keeps the text
-
-```python
-def test_probe_failure_logs_the_raw_transport_text_for_the_operator(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # The relocation proven rather than asserted: the operator keeps the full diagnostic, it just
-    # arrives in the host log instead of the agent-facing payload.
-    _capture_domstate(monkeypatch, returncode=1, stdout="", stderr=_LEAKY_DOMSTATE_STDERR)
-
-    with caplog.at_level(logging.WARNING, logger=readiness_mod.__name__):
-        readiness_mod._domain_exit_probe("kdive-abc")
-
-    logged = "\n".join(record.getMessage() for record in caplog.records)
-    assert "virtqemud-sock" in logged
-    assert "kdive-abc" in logged
-    assert "virsh_nonzero_exit" in logged
-```
-
-Add `import logging` to the test file.
+All four members are now reached: `VIRSH_NONZERO_EXIT` (2.3, 2.6), `VIRSH_PROBE_FAILED` (2.4),
+`VIRSH_TIMEOUT` (2.2's third test), `VIRSH_MISSING` (2.5).
 
 ### Step 2.7 — Verify
 
-```sh
-just test-changed
-just lint
-just type
-```
+Run `just test-changed`, `just lint`, `just type` — each bare, each expected to exit 0, with no
+collection or import error.
 
-Each bare, each expected to exit 0, with no collection or import error.
-
-**Acceptance criteria.** Both absence tests assert absence of all three transport substrings, not
-inequality against the raw stderr. All four members are reached by a test. The log proof shows the
-raw text still reaches the operator. The three amended tests pin the behaviour they pinned before.
+**Acceptance criteria.** Both absence tests assert absence of all three transport substrings. All
+four members are reached. The log proof shows the raw text still reaches the operator. The three
+amended tests pin the behaviour they pinned before.
 
 ## Task 3 — Bite-prove every new test
 
@@ -425,62 +306,55 @@ raw text still reaches the operator. The three amended tests pin the behaviour t
 
 ### Step 3.1 — Commit first, then guard the tree
 
-Commit Tasks 1-2 before injecting anything. The harness refuses a dirty tree:
-
-```sh
-test -z "$(git status --porcelain)" || { echo "refusing: dirty tree"; exit 1; }
-```
-
-Copy the three target files to a backup **outside** the repo and record `sha256sum` for each.
-Restore from that copy — **never `git checkout --`**.
+Commit Tasks 1-2 before injecting anything. The harness refuses a dirty tree
+(`test -z "$(git status --porcelain)"`). Copy the three target files to a backup **outside** the
+repo and record `sha256sum` for each. Restore from that copy — **never `git checkout --`**.
 
 ### Step 3.2 — One controlled fault per test
 
-Make the smallest edit that should break each test, run only that test, record the outcome:
+Make the smallest edit that should break each test, run only that test, record the outcome **and
+the failing assertion or exception text**:
 
 | Test | Fault |
 |---|---|
 | MCP-egress absence | `_probe_failed` returns `_DomainExitProbe(False, detail)` — the pre-fix leak restored |
 | worker-egress absence | the same fault |
 | `OSError` absence | the same fault |
-| `virsh_missing` / `virsh_timeout` classification | swap the member in that arm for `VIRSH_PROBE_FAILED` |
+| `virsh_missing` classification | return `VIRSH_PROBE_FAILED` from the `shutil.which is None` arm |
 | operator-log proof | delete the `_log.warning(...)` call from `_probe_failed` |
 
-Classify each result as exactly one of three, and report which:
+Classify each as exactly one of three, and report which:
 
 - **assertion bite** — pytest `FAILED` with an `AssertionError` from the test body;
 - **exception bite** — pytest `FAILED` with an exception raised from the code under test. This
-  counts as a bite; a classifier recognising only assertion shapes reports a false NO BITE.
+  counts; a classifier recognising only assertion shapes reports a false NO BITE.
 - **no bite** — the test passed, or the run produced a collection, import, or fixture error. The
-  latter is not a bite and must be fixed before the proof means anything.
+  latter proves nothing and must be fixed first.
+
+**The recorded failure text must name the behaviour the fault changed.** A bite whose message is
+about something else — a missing attribute, a wrong class, an unrelated branch — is a defective
+test, not a proof. This is the check that would have caught a test calling a method on the wrong
+class, or aimed at an arm the fault never reaches.
 
 ### Step 3.3 — Prove the gate does not fire spuriously
 
-A fault tests one direction only. Also make a genuine no-op edit — a blank line inside
-`_probe_failed`'s body — run the same tests, and confirm every one passes.
+A fault tests one direction only. With the tree restored and **no fault injected**, run all five
+tests: every one must pass. Any test that fails here is defective and must be fixed before its
+Step 3.2 bite counts for anything — this is a stop condition, not an observation.
 
 ### Step 3.4 — Restore and verify byte identity
 
-```sh
-sha256sum src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py \
-          src/kdive/providers/local_libvirt/lifecycle/install.py \
-          tests/providers/local_libvirt/test_install.py
-git status --porcelain
-```
-
-Every digest must match the pre-injection digest; `git status --porcelain` must be empty.
+Restore from the backup, then `sha256sum` the three files and `git status --porcelain`. Every
+digest must match the pre-injection digest and the status must be empty.
 
 **Acceptance criteria.** Every new test recorded an assertion or exception bite, with the shape
-named. The no-op control recorded no bite for every test. Byte identity restored and verified.
+named and the failure text confirmed to name the faulted behaviour. Every test passes under the
+no-fault control. Byte identity restored and verified.
 
 ## Task 4 — Full gate
 
-```sh
-just ci > /tmp/ci-2220.log 2>&1 < /dev/null
-```
-
-Bare, as the last command. Expect exit 0. The redirects give ansible-core the blocking streams it
-requires; a fresh worktree needs `just install-mermaid-deps` once first.
+`just ci > /tmp/ci-2220.log 2>&1 < /dev/null`, bare, as the last command. Expect exit 0. A fresh
+worktree needs `just install-mermaid-deps` once first.
 
 ## Deferrals
 
