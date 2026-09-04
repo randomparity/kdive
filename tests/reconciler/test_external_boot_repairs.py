@@ -168,8 +168,22 @@ def test_reconciler_role_enqueues_one_exhausted_prepared_successor(
     ("lane", "purpose", "activation_state", "seed_options", "expected_operation"),
     [
         ("recovery", "recover", "recovering", {}, "recover"),
+        (
+            "recovery",
+            "resolve-conflict",
+            "recovering",
+            {"with_pre_recovery": True},
+            "resolve-conflict",
+        ),
         ("release", "release", "recovered", {"with_reservation": True}, "release"),
         ("cleanup", "release", "recovered", {"with_release": True}, "cleanup"),
+        (
+            "cleanup",
+            "teardown",
+            "recovery_failed",
+            {"attempt_state": "failed", "with_release": True},
+            "teardown",
+        ),
     ],
 )
 def test_each_post_prepared_lane_enqueues_its_existing_worker_operation(
@@ -200,9 +214,15 @@ def test_each_post_prepared_lane_enqueues_its_existing_worker_operation(
             if lane == "recovery":
                 await admin.execute(
                     "UPDATE external_boot_recovery_attempts "
-                    "SET recovery_readiness_deadline = now() - interval '1s' "
+                    "SET recovery_readiness_deadline = now() - interval '1s', "
+                    "recovery_basis = %s "
                     "WHERE activation_id = %s",
-                    (vehicle.activation_id,),
+                    (
+                        "pre_recovery"
+                        if expected_operation == "resolve-conflict"
+                        else "recovery_point",
+                        vehicle.activation_id,
+                    ),
                 )
         async with await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_reconciler"), autocommit=True
