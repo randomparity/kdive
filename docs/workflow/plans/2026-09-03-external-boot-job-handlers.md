@@ -855,6 +855,39 @@ for `purpose == "teardown"` and `BOOT` otherwise, matching
 Any further deferral a `$trial-loop` run on this branch disposes of as `deferred-tracked` is
 appended here with its owning record path or tracker issue before the branch ships.
 
+## Constraints only execution found
+
+Recorded after the fact, because the design set does not carry them and every one of them cost a
+red run to discover. A reader who trusts the tables above without this section rediscovers all of
+them.
+
+- **A `recovering` recovery-attempt row requires `recovery_readiness_deadline`.**
+  `external_boot_attempt_deadline` (`0121_external_boot_activations.sql:232-233`). The §7 table's
+  † footnote names the attempt row's *state* and nothing else, so a seeder that supplies only the
+  state fails at INSERT with a `CheckViolation`, before any handler runs.
+- **The attempt row's evidence columns are required *iff* its state says so.**
+  `external_boot_attempt_evidence` (`:241-246`) pairs `conflict` with `conflict_evidence` and
+  `failed`/`recovered` with `terminal_evidence`, each an equality rather than an implication, and
+  `external_boot_attempt_evidence_ownership` (`:253-262`) pins the outcome per state —
+  `recovery_failed` for `failed`, `recovered` for `recovered`.
+- **A four-key `pre_recovery_evidence` satisfies the table CHECK but not the domain model.**
+  `tests/db/external_boot_authority_support.py` seeds `{schema, activation_id, system_id, run_id,
+  plan_identity}`, which Postgres accepts; `ExternalBootPreRecoveryEvidenceV1` also requires
+  `recovery_object`, `source_composite_state` and `observed_at`. A row seeded the short way fails
+  at `ExternalBootActivation.model_validate` the moment a handler reads the activation back — a
+  decode failure standing in front of the behaviour under test.
+- **`jobs.authorizing` must carry `agent_session`.**
+  `queue.commit_external_boot_authority_result` validates the row through `Job` after an applied
+  commit, so omitting it makes a **successful** commit surface as a pydantic `ValidationError` —
+  the confusing direction, since the commit itself worked.
+- **Test modules under `tests/jobs/handlers/` are imported by bare basename** unless the directory
+  is a package, and `test_admission.py` and `test_lifecycle.py` already exist elsewhere in the
+  tree. Both new directories need an `__init__.py`, which is how `tests/services/external_boot/`
+  already avoids the same collision.
+- **`ruff format` processes Python inside Markdown fences**, and `pyproject.toml` excludes only
+  `docs/adr`. So `docs/workflow/specs/` and `docs/workflow/plans/` are formatted by `just lint`,
+  and an unformatted code block in this plan fails the branch gate.
+
 ## Known adjacent state this plan does not change
 
 - An authority-marked job whose commit returns `superseded`, or whose worker dies, stays
