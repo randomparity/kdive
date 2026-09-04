@@ -1,127 +1,127 @@
 # External-boot idempotency and bounded failures — design
 
 Issue: [#2202](https://github.com/randomparity/kdive/issues/2202). Parent: #2118. Governing
-decisions: [ADR-0583](../../adr/0583-external-run-boot-uses-prepared-recovery-points.md) and
-[ADR-0593](../../adr/0593-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
+decisions: [ADR-0583](../../adr/0583-external-run-boot-uses-prepared-recovery-points.md),
+[ADR-0584](../../adr/0584-provider-host-authority-fences-external-boot-mutations.md),
+[ADR-0593](../../adr/0593-external-boot-operations-ride-marked-boot-and-teardown-jobs.md), and
+[ADR-0595](../../adr/0595-external-boot-reentry-uses-provider-receipts.md).
 
 ## Goal
 
-An authority-marked external-boot job may be replayed after worker loss without repeating a
-provider mutation that already took effect. Each retry observes durable activation state and the
-provider destination, reuses persisted deadlines, advances the recovery-attempt ledger, handles
-losing compare-and-set outcomes, and exposes only a closed failure vocabulary.
+Every external-boot phase is restartable after the provider returned but before core committed.
+Re-entry observes provider-owned durable evidence before deciding whether to call a mutating port.
+Retries reuse persisted deadlines, consume every compare-and-set result, advance the recovery-attempt
+ledger, and expose only a closed failure vocabulary.
 
-No new architectural decision is introduced. ADR-0583 already requires observation-driven
-re-entry, absolute persisted deadlines, recovery-attempt terminalization, and conflict-deadline
-replacement. ADR-0593 fixes the marked-job/authority seam and assigns its mid-operation commits to
-this issue. Migration 0128 makes that existing result contract persist the bounded recovery reason
-and action which `jobs.get`/`jobs.wait` already surface from `jobs.failure_context`.
+## Two execution lanes
 
-## Existing boundaries
+The lifecycle has two owners and therefore two receipt shapes.
 
-- `run_operation` owns provider resolution, activation validation, authority allocation,
-  acknowledgement, provider execution, and failure wrapping.
-- `commit_external_boot_authority_result` is the worker's only authorized activation write path.
-  Its `deadline` and `recovery-attempt` results deliberately keep the job running.
-- `ExternalBootActivationRepository` keeps authority predicate failures opaque. Differentiation is
-  a caller decision made from activation, reservation, attempt, and marker facts already visible to
-  the worker; the repository's `CasStatus` contract is unchanged.
-- `ExternalBootPorts.observe` is the only provider-neutral observation available to a worker.
-- Materialization and preparation remain prepared-before-admission under ADR-0593. Re-entry tests
-  cover worker loss after each persisted materialization/preparation boundary by seeding those
-  durable facts; the authority-marked worker never repeats those server-owned provider calls.
+The server owns `materialize` and `prepare`. A new `ExternalBootPreparationPorts` seam exposes
+`observe_preparation(request)` and `execute_preparation(request)`. The request carries the plan,
+activation binding, authority reference, and stable operation identity. The result is a closed
+`ExternalBootPreparationObservation`: `absent`, `materialized`, or `prepared`, with the exact
+materialization and recovery point when present. Providers persist the observation before returning.
+An equal operation identity replays the stored result; a different identity for the same activation
+is a conflict. The server preparation service observes first, performs only the missing phase, and
+records each returned value through `ExternalBootActivationRepository`. A process loss after either
+provider return therefore re-observes the provider receipt and commits it without a second mutation.
 
-## Re-entry protocol
+The worker owns activate, recover, resolve-conflict, release, cleanup, and teardown. After takeover
+acknowledgement it sends `AuthorityMutationRequestV1` through a widened
+`ExternalBootAuthorityExecutor.execute`. The authority service already observes the provider,
+journals mutation intent and outcome, and returns `AuthorityObservationV1`; it is the only worker
+path that may invoke the provider adapter. `run_operation` no longer calls
+`ProviderRuntime.external_boot` directly. On retry, the authority journal either returns its
+terminal observation or observes the destination before deciding whether another commit point is
+needed. This is the durable receipt for worker phases.
 
-The runner reads the activation and its ready reservation before allocation. It classifies a
-non-admissible retry without invoking a provider:
+The worker result is built only from an observation whose category satisfies the operation:
+`target` for activate, `source` for recover, and the provider's accounted-absence observation for
+cleanup. `mixed`, `conflict`, and `unreadable` never become success. Release has no provider mutation;
+its database result is naturally idempotent. The authority observation includes definition, module,
+power, and owned-object state through its closed category and composite digest, so recovery is not
+proved from running-kernel identity alone.
 
-1. A mismatched activation identity is `observed_identity_stale` and directs the caller to
-   `systems.get`.
-2. An activation that still needs capacity but has no ready reservation is
-   `reservation_not_ready` and directs the caller to `jobs.wait`.
-3. A marker whose authority generation/owner has lost the row is `authority_superseded` and
-   directs the caller to `jobs.get`.
+## Preparation adapters
 
-These are failure-context reasons, not new `ErrorCategory` values. They map to existing
-`stale_handle`, `infrastructure_failure`, and `stale_handle` categories respectively. The failure
-context contains only `phase`, `reason`, and `next_action`; it never includes provider exception
-text, paths, host identifiers, or object identifiers.
+Fault-inject stores preparation observations in memory and exposes deterministic before-return and
+after-receipt fault points plus per-phase mutation counts.
 
-After acknowledgement, operations that can safely determine completion call `observe` before a
-mutation. Activate skips `activate` when the observed running kernel already equals the persisted
-materialization. Recover and conflict resolution similarly skip `recover` when the observed kernel
-already proves the operation's postcondition. A non-matching or unavailable observation permits
-the mutation only while the persisted deadline remains open. Cleanup stays idempotent at the port
-contract: it calls the provider cleanup operation, whose implementations must accept already-absent
-owned objects; there is no provider-neutral deletion observation in `ExternalBootPorts`.
+Local-libvirt stores a canonical `preparation-result.json` beside the existing activation recovery
+metadata. Publication uses the existing descriptor-relative, no-follow, atomic-write discipline.
+The record binds the operation identity, plan identity, activation ownership, materialization, and
+recovery point. It is written only after the corresponding host operation has reached its existing
+durable phase. Observation rejects malformed, foreign, or mismatched records. Cleanup removes the
+receipt with the activation's other owned objects only after its result is durably accounted.
 
-Every successful post-mutation path observes again before building terminal evidence. A provider
-raise is converted once to `ExternalBootAuthorityFailure`; unknown exceptions map to
-`infrastructure_failure`. Known `CategorizedError` values retain their category only when the SQL
-contract accepts it; otherwise they use the same bounded substitute. The explicit category tuple
-is pinned against migration 0128.
+Remote-libvirt implements the same provider-neutral seam over its recovery record. The adapter is
+kept fail-closed until its existing offline-module and authority-host composition prerequisites are
+present; adding this receipt does not advertise an unavailable runtime capability.
 
-## Deadline and recovery ledger protocol
+## Re-entry and CAS classification
 
-Activation uses `activation_readiness_deadline` from the activation row whenever present. Only its
-first commit computes an absolute UTC deadline from the worker reference clock. A retry at or past
-that instant does not activate again: it begins or resumes recovery and ultimately returns a
-terminal failure carrying `boot_timeout` if readiness is not proved.
+Before mutation, the handler reads the activation and ready reservation under the System lock.
+Every `CasStatus` is consumed:
 
-Recovery uses the current attempt's persisted `recovery_readiness_deadline`. The first ordinary
-recovery creates one attempt with a deterministic attempt identity derived from the admitted
-operation identity and commits it through the existing `recovery-attempt` authority result before
-provider mutation. A retry reuses that row. At or past its deadline, the handler finishes the
-attempt as `recovery_failed`, retaining the activation's recovery point and pre-recovery evidence.
+- `NOT_FOUND` or a mismatched activation identity becomes `observed_identity_stale`, terminal for
+  this job, with next action `systems.get`;
+- a state that can progress but has no ready reservation becomes `reservation_not_ready`,
+  non-terminal and requeued without changing either deadline, with next action `jobs.wait`;
+- a lost operation owner or authority generation becomes `authority_superseded`, terminal for this
+  job but not for the activation, with next action `jobs.get`.
 
-Conflict resolution is the one deadline replacement edge. It creates a new attempt and computes
-its deadline from that operation's server time, so time parked in `recovery_conflict` is excluded.
-The previous conflict attempt remains immutable in the ledger.
+These are closed failure-context reasons, not new `ErrorCategory` values. They map to
+`stale_handle`, `infrastructure_failure`, and `stale_handle`. No `IllegalTransition` escapes the
+handler. Migration 0128 validates the three exact reason/action pairs and their terminal/requeue
+shape, and makes equal deadline and recovery-attempt commits idempotent.
 
-All compare-and-set results are consumed. `APPLIED` continues. `NOT_FOUND` becomes
-`observed_identity_stale`. `SUPERSEDED` is differentiated from a same-lock reread into
-`reservation_not_ready` or `authority_superseded`. No `IllegalTransition` escapes the handler; an
-unexpected transition is converted to a bounded commit-phase failure.
+## Deadlines and recovery attempts
+
+Activation uses the row's `activation_readiness_deadline` whenever present. Only the first
+`prepared -> activating` result computes it from the operation's server time. At expiry, the handler
+does not invoke activate; it enters recovery using the retained recovery point.
+
+Ordinary recovery uses the current attempt's persisted `recovery_readiness_deadline`. The first
+edge creates a deterministic attempt identity and commits the `recovery-attempt` result before the
+provider mutation. Retry reuses that attempt. Expiry finishes it as `recovery_failed` while leaving
+the recovery point and pre-recovery evidence readable.
+
+Conflict resolution is the sole replacement edge: its new attempt computes a new deadline from the
+resolving operation's `server_time`, so time parked in `recovery_conflict` is excluded. Previous
+attempts remain immutable.
+
+## Failure mapping
+
+Authority transport errors, provider observation categories, and fault-inject failures map once to
+`ExternalBootAuthorityFailure`. The failure context contains only closed `phase`, `reason`, and
+`next_action` fields. Unknown exceptions become `infrastructure_failure`; raw exception text,
+provider paths, host identifiers, and chained exceptions never cross into the result. Tests pin the
+complete category tuple accepted by migration 0128 and enumerate every injected fault.
 
 ## Migration 0128
 
-Migration `0128_external_boot_reentry_failures.sql` replaces
-`commit_external_boot_authority_result` without changing its signature or privileges. It accepts
-only the three reason/action pairs above in `failure_context`, in addition to the existing optional
-phase, and stores them on a terminal job. Retryable failures continue to clear failure context when
-requeued. The migration also makes repeated `deadline` and `recovery-attempt` commits idempotent:
-an equal persisted value applies, while a different value is superseded. A recovery-attempt replay
-cannot append a second ledger row.
+`0128_external_boot_reentry_failures.sql` replaces
+`commit_external_boot_authority_result` without changing its signature or privileges. It validates
+the reason/action/terminal combinations, accepts exact replay of persisted deadlines and attempts,
+and refuses conflicting replay as superseded. Rollback follows the forward-only migration rule:
+revert callers first; the widened validation remains compatible with phase-only failures.
 
-Rollback is the normal forward-only migration rule: revert Python callers first; the widened
-validation remains compatible with old phase-only failures. The SQL function cannot be rolled back
-by deleting migration history.
+## Proof
 
-## Fault injection and tests
+Focused Postgres and fault-inject tests interrupt after each of materialize, prepare, activate,
+release, recover, and cleanup returns but before core commit. The retry must produce equal activation
+and attempt rows except `updated_at`, and each provider mutation counter must remain one. Separate
+tests pin observe-before-redo, all CAS outcomes, both deadline families, conflict deadline reset,
+total bounded error mapping, and serialization redaction.
 
-The fault-inject port gains per-operation call counts, configured faults before or after mutation,
-and stable observation state. Tests prove:
-
-- replay after the materialization, preparation, activation, release, recover, and cleanup durable
-  boundaries preserves activation and attempt rows apart from `updated_at` and invokes each
-  provider mutation at most once;
-- observation occurs before a redo decision and a matching observation skips mutation;
-- each `CasStatus` is consumed and concurrent state movement never leaks `IllegalTransition`;
-- activation and recovery deadlines are reused and expire into the required terminal states;
-- conflict resolution starts a fresh deadline from its own clock;
-- every injected provider fault maps to the explicit category tuple, and serialized failures carry
-  no raw exception, host, or path text.
-
-Focused integration tests use disposable Postgres. No native ppc64le proof is required: all changed
-contracts are provider-neutral and exercised through fault-inject on the x86_64 host.
+Local-libvirt contract tests run on this host and exercise the preparation receipt plus authority
+journal replay. The native ppc64le live tier is excluded by campaign authority. No MCP tool contract
+or reconciler lane changes in this issue.
 
 ## Security model
 
-No entry point or authorization grant changes. The existing authority acknowledgement and SQL
-generation fence remain the trust boundary. Provider output and exceptions cross from an
-operator-configured runtime into the worker; the control is a closed model plus constant failure
-context, with no exception chaining. Marker and activation facts cross from persisted queue input;
-the control is the existing binding validation plus same-System-lock reread before a CAS reason is
-selected. The design does not authenticate provider transports or add provider adapters; those are
-owned by their existing issues.
+No entry point or authorization grant changes. Preparation receipts accept only closed values and
+are bound to plan, System, Run, activation, and operation identity before reuse. The authority host
+remains the sole worker-side mutation boundary. Provider output is reduced to closed observations;
+free-form failures remain in operator logs and are raised without chaining across the boundary.
