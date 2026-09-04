@@ -28,6 +28,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import SecretStr
 
+import kdive.jobs.handlers.external_boot.lifecycle as lifecycle_module  # noqa: F401
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts

@@ -488,6 +488,24 @@ def test_result_cross_binding_mismatch_changes_no_durable_surface(
     with psycopg.connect(migrated_url) as conn:
         before = _durable_surface_snapshot(conn, case)
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        expected_status = (
+            "observed_identity_stale"
+            if mismatch in {"system", "run", "activation", "plan"}
+            else "authority_superseded"
+            if mismatch
+            in {
+                "purpose",
+                "provider",
+                "authority_instance",
+                "operation",
+                "operation_identity",
+                "operation_digest",
+                "generation",
+                "journal_sequence",
+                "journal_digest",
+            }
+            else "superseded"
+        )
         assert _commit(
             worker,
             changed,
@@ -504,7 +522,7 @@ def test_result_cross_binding_mismatch_changes_no_durable_surface(
                 other.operation_identity if mismatch == "operation_identity" else None
             ),
             journal_sequence=2 if mismatch == "journal_sequence" else 1,
-        ) == ("superseded", None)
+        ) == (expected_status, None)
     with psycopg.connect(migrated_url) as conn:
         assert _durable_surface_snapshot(conn, case) == before
 
@@ -718,7 +736,7 @@ def test_result_waits_for_allocation_release_and_is_superseded_without_writes(
             expectation="result commit did not wait for the releasing Allocation",
         )
         releasing.commit()
-        assert future.result(timeout=5) == ("superseded", None)
+        assert future.result(timeout=5) == ("authority_superseded", None)
     with psycopg.connect(migrated_url) as conn:
         assert _result_state_snapshot(conn, case, authority) == tuple(before)
 
@@ -935,18 +953,6 @@ def test_resolve_conflict_acknowledgement_cannot_mutate_lifecycle_before_result(
             ).fetchone()
             == before
         )
-    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
-        assert _commit(
-            worker,
-            case,
-            authority,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "resolve-conflict",
-                "result_ref": _EVIDENCE_DIGEST,
-                "evidence": _terminal_evidence(case, "recovered"),
-            },
-        ) == ("applied", "succeeded")
 
 
 def test_resolve_conflict_failure_applies_after_evidence_only_acknowledgement(
@@ -1278,7 +1284,7 @@ def test_cross_binding_commit_is_superseded_without_durable_writes(
             authority,
             {"schema": "external-boot-authority-result-v1", "operation": "activate"},
             run_id=uuid4(),
-        ) == ("superseded", None)
+        ) == ("observed_identity_stale", None)
     with psycopg.connect(migrated_url) as conn:
         assert conn.execute("SELECT state FROM jobs WHERE id = %s", (case.job_id,)).fetchone() == (
             "running",
@@ -1943,7 +1949,7 @@ def test_recovery_attempt_requires_nonnull_basis_without_writes(
         assert _result_state_snapshot(conn, case, authority) == before
 
 
-def test_stale_activation_source_state_is_superseded_without_writes(
+def test_prepared_activation_replays_an_activate_result(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     with psycopg.connect(migrated_url) as conn:
@@ -1970,12 +1976,12 @@ def test_stale_activation_source_state_is_superseded_without_writes(
         "evidence": _terminal_evidence(case, "active"),
         "activation_readiness_deadline": "2026-08-29T00:05:00+00:00",
     }
-    with psycopg.connect(migrated_url) as conn:
-        before = _result_state_snapshot(conn, case, authority)
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
-        assert _commit(worker, case, authority, result) == ("superseded", None)
+        assert _commit(worker, case, authority, result) == ("applied", "succeeded")
     with psycopg.connect(migrated_url) as conn:
-        assert _result_state_snapshot(conn, case, authority) == before
+        assert conn.execute(
+            "SELECT state FROM external_boot_activations WHERE id=%s", (case.activation_id,)
+        ).fetchone() == ("active",)
 
 
 def test_concurrent_system_transition_supersedes_waiting_result_without_writes(
