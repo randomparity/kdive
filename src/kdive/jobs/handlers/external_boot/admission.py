@@ -7,12 +7,12 @@ caller must supply them — and a ``provider_kind`` disagreeing with the resolve
 ``allocate_external_boot_authority``. A pydantic validator cannot do it: it has no database and no
 resolver.
 
-**This ships with no ``src/`` caller.** #2204 wires the MCP tools to it. That is deliberate and is
-also why the ordering matters: a caller that composes a marker by hand instead of coming through
-here can build one disagreeing with the activation row, and while that is caught at execution — by
-the runner's step 2 and by ``allocate_external_boot_authority``'s nine-field re-check — an
-execution-time refusal is safe but not *recoverable*, because a pre-allocation refusal wedges the
-job. Going through this helper makes the disagreement unconstructible instead.
+This is also the production prepared-before-admission boundary: a ``preparing`` activation is
+resumed through its provider's durable preparation receipt before a marker can be returned. #2204
+wires the MCP tools to this helper. The ordering matters: a caller that composes a marker by hand
+can build one disagreeing with the activation row, and while execution catches that mismatch, a
+pre-allocation refusal is safe but not recoverable. Going through this helper makes the
+disagreement unconstructible instead.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from kdive.jobs.payloads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
+from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.services.external_boot.preparation import prepare_external_boot_for_admission
 
 __all__ = ["build_external_boot_payload"]
 
@@ -51,6 +53,7 @@ async def build_external_boot_payload(
     authority_instance: str,
     operation_identity: str,
     resolver: ProviderResolver,
+    preparation_plan: ExternalBootPlan | None = None,
 ) -> tuple[JobKind, BootPayload | TeardownPayload]:
     """Return the ``JobKind`` and payload one authority-marked operation must be enqueued as.
 
@@ -76,6 +79,18 @@ async def build_external_boot_payload(
         raise _refuse(
             f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
             "has no external_boot port"
+        )
+    if activation.state.value == "preparing":
+        if preparation_plan is None:
+            raise _refuse("a preparing activation requires its durable preparation plan")
+        activation = await prepare_external_boot_for_admission(
+            conn,
+            repository=_ACTIVATIONS,
+            resolver=resolver,
+            plan=preparation_plan,
+            activation_id=activation.id,
+            provider_kind=provider_kind,
+            authority_instance=authority_instance,
         )
 
     marker = {

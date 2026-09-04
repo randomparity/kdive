@@ -4,7 +4,22 @@ DECLARE
     v_function constant regprocedure :=
         'public.commit_external_boot_authority_result(bytea,uuid,integer,uuid,bigint,uuid,uuid,uuid,text,text,text,text,text,text,bigint,text,text,jsonb)'::regprocedure;
     v_definition text;
-    v_old constant text := $old$WHERE field <> 'phase'
+    v_old constant text := $old$WHERE field NOT IN ('phase', 'reason', 'next_action')
+           )
+           OR NOT (
+               NOT (v_failure_context ? 'reason') AND NOT (v_failure_context ? 'next_action')
+               OR (v_failure_context ->> 'reason' = 'observed_identity_stale'
+                   AND v_failure_context ->> 'next_action' = 'systems.get'
+                   AND p_result ->> 'error_category' = 'stale_handle'
+                   AND (p_result ->> 'terminal')::boolean = true)
+               OR (v_failure_context ->> 'reason' = 'reservation_not_ready'
+                   AND v_failure_context ->> 'next_action' = 'jobs.wait'
+                   AND p_result ->> 'error_category' = 'infrastructure_failure'
+                   AND (p_result ->> 'terminal')::boolean = false)
+               OR (v_failure_context ->> 'reason' = 'authority_superseded'
+                   AND v_failure_context ->> 'next_action' = 'jobs.get'
+                   AND p_result ->> 'error_category' = 'stale_handle'
+                   AND (p_result ->> 'terminal')::boolean = true)
            )
            OR (
                v_failure_context ? 'phase'
@@ -15,7 +30,24 @@ DECLARE
                    )
                )
            )$old$;
-    v_new constant text := $new$WHERE field <> ALL (ARRAY['phase', 'cmdline_mismatch'])
+    v_new constant text := $new$WHERE field NOT IN (
+               'phase', 'reason', 'next_action', 'cmdline_mismatch'
+           )
+           )
+           OR NOT (
+               NOT (v_failure_context ? 'reason') AND NOT (v_failure_context ? 'next_action')
+               OR (v_failure_context ->> 'reason' = 'observed_identity_stale'
+                   AND v_failure_context ->> 'next_action' = 'systems.get'
+                   AND p_result ->> 'error_category' = 'stale_handle'
+                   AND (p_result ->> 'terminal')::boolean = true)
+               OR (v_failure_context ->> 'reason' = 'reservation_not_ready'
+                   AND v_failure_context ->> 'next_action' = 'jobs.wait'
+                   AND p_result ->> 'error_category' = 'infrastructure_failure'
+                   AND (p_result ->> 'terminal')::boolean = false)
+               OR (v_failure_context ->> 'reason' = 'authority_superseded'
+                   AND v_failure_context ->> 'next_action' = 'jobs.get'
+                   AND p_result ->> 'error_category' = 'stale_handle'
+                   AND (p_result ->> 'terminal')::boolean = true)
            )
            OR (
                v_failure_context ? 'phase'

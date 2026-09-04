@@ -175,18 +175,58 @@ class ExternalBootCmdlineMismatchV1(_ClosedModel):
         return value
 
 
-class _FailureContext(_ClosedModel):
+class ExternalBootAuthorityFailureContext(_ClosedModel):
     phase: Literal["admission", "preparation", "provider-call", "observation", "commit"] | None = (
         None
     )
+    reason: (
+        Literal["observed_identity_stale", "reservation_not_ready", "authority_superseded"] | None
+    ) = None
+    next_action: Literal["systems.get", "jobs.wait", "jobs.get"] | None = None
     cmdline_mismatch: ExternalBootCmdlineMismatchV1 | None = None
+
+    @model_validator(mode="after")
+    def _reason_action_pair_is_closed(self) -> ExternalBootAuthorityFailureContext:
+        if self.reason is None and self.next_action is None:
+            return self
+        pairs = {
+            "observed_identity_stale": "systems.get",
+            "reservation_not_ready": "jobs.wait",
+            "authority_superseded": "jobs.get",
+        }
+        if self.reason is None or pairs[self.reason] != self.next_action:
+            raise ValueError("failure reason and next action do not match")
+        return self
 
 
 class _FailureResult(_ResultBase):
     operation: Literal["fail"]
     error_category: ErrorCategory
-    failure_context: _FailureContext
+    failure_context: ExternalBootAuthorityFailureContext
     terminal: bool
+    recovery_readiness_deadline: datetime | None = None
+
+    _normalize_timestamp = field_validator("recovery_readiness_deadline")(_utc_datetime)
+
+    @model_validator(mode="after")
+    def _cas_failure_shape_is_closed(self) -> _FailureResult:
+        reason = self.failure_context.reason
+        if reason is None:
+            if self.recovery_readiness_deadline is not None and not (
+                self.error_category is ErrorCategory.BOOT_TIMEOUT and self.terminal
+            ):
+                raise ValueError("only terminal boot timeout carries a recovery deadline")
+            return self
+        if self.recovery_readiness_deadline is not None:
+            raise ValueError("classified CAS failure cannot carry a recovery deadline")
+        expected = {
+            "observed_identity_stale": ("stale_handle", True),
+            "reservation_not_ready": ("infrastructure_failure", False),
+            "authority_superseded": ("stale_handle", True),
+        }[reason]
+        if (self.error_category, self.terminal) != expected:
+            raise ValueError("failure reason, category, and terminal flag do not match")
+        return self
 
     @model_validator(mode="after")
     def _diagnostic_matches_failure(self) -> _FailureResult:
@@ -294,13 +334,13 @@ class ExternalBootAuthorityResultV1(BaseModel):
         allowed = {
             "activate": {"activate", "deadline", "fail"},
             "recover": {"recover", "deadline", "recovery-attempt", "fail"},
-            "resolve-conflict": {"resolve-conflict", "fail"},
+            "resolve-conflict": {"resolve-conflict", "recovery-attempt", "fail"},
             "release": {"release", "cleanup", "fail"},
             "teardown": {"teardown", "fail"},
         }
         if admitted_operation not in allowed[self.purpose]:
             raise ValueError("admitted operation does not match authority purpose")
-        if operation != "fail" and operation != admitted_operation:
+        if operation not in allowed[self.purpose]:
             raise ValueError("result operation does not match authority purpose")
         result_ref = getattr(self.result, "result_ref", None)
         if result_ref is not None:

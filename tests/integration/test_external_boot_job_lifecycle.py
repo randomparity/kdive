@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, LiteralString
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -42,6 +43,11 @@ from kdive.jobs.handlers.external_boot.router import route_marked
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing
 from kdive.jobs.worker import Worker
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+)
+from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 from tests.jobs.handlers.external_boot.conftest import resolver_for
@@ -72,6 +78,26 @@ ARMS: dict[str, dict[str, Any]] = {
 }
 
 
+class _VehicleExecutor:
+    def __init__(self, vehicle: Vehicle) -> None:
+        self.vehicle = vehicle
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        authority = OpaqueProviderRef(
+            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+        )
+        if request.operation.value == "activate":
+            self.vehicle.port.activate(self.vehicle.recovery_point, authority)
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "target"
+        else:
+            self.vehicle.port.cleanup(self.vehicle.recovery_point, authority)
+            category = "absent"
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
+        )
+
+
 def _registry(vehicle: Vehicle, dsns: Callable[[str], str]) -> HandlerRegistry:
     """The production routing shape: one operations registry behind ``route_marked``.
 
@@ -89,6 +115,7 @@ def _registry(vehicle: Vehicle, dsns: Callable[[str], str]) -> HandlerRegistry:
             incarnation_credential=CREDENTIAL,
             secret_registry=SecretRegistry(),
             acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+            authority_executor=_VehicleExecutor(vehicle),
         )
     )
     registry = HandlerRegistry()

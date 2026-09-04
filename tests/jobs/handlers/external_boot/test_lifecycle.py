@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, LiteralString
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -29,9 +30,9 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import SecretStr
 
+import kdive.jobs.handlers.external_boot.lifecycle as lifecycle_module  # noqa: F401
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.lifecycle import ACTIVATION_READINESS_WINDOW
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
@@ -45,7 +46,15 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
-from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+)
+from kdive.providers.ports.external_boot import (
+    OpaqueProviderRef,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
@@ -108,6 +117,54 @@ async def _system_state(conn: AsyncConnection, system_id: Any) -> str:
     return str(row["state"])
 
 
+class _VehicleExecutor:
+    def __init__(self, vehicle: Vehicle) -> None:
+        self.vehicle = vehicle
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        authority = OpaqueProviderRef(
+            ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+        )
+        operation = request.operation.value
+        if operation == "activate":
+            self.vehicle.port.activate(self.vehicle.recovery_point, authority)
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "target"
+        elif operation in {"recover", "resolve-conflict"}:
+            self.vehicle.port.recover(self.vehicle.recovery_point, authority)
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "source"
+        elif operation == "release":
+            self.vehicle.port.observe(self.vehicle.recovery_point, authority)
+            category = "source"
+        else:
+            self.vehicle.port.cleanup(self.vehicle.recovery_point, authority)
+            category = "absent"
+        category = getattr(self.vehicle.port, "authority_category", category)
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
+        )
+
+
+class _ReceiptExecutor(_VehicleExecutor):
+    """Model the authority journal's terminal-observation replay at the handler boundary."""
+
+    def __init__(self, vehicle: Vehicle) -> None:
+        super().__init__(vehicle)
+        self.observations: dict[str, AuthorityObservationV1] = {}
+        self.mutations = 0
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        recorded = self.observations.get(request.operation_identity)
+        if recorded is not None:
+            return recorded
+        if request.operation.value != "release":
+            self.mutations += 1
+        observation = await super().execute(request)
+        self.observations[request.operation_identity] = observation
+        return observation
+
+
 def _ports(
     case: SeededCase, vehicle: Vehicle, dsns: Callable[[str], str]
 ) -> ExternalBootHandlerPorts:
@@ -116,7 +173,92 @@ def _ports(
         incarnation_credential=SecretStr(case.credential),
         secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+        authority_executor=_VehicleExecutor(vehicle),
     )
+
+
+async def _durable_rows(conn: AsyncConnection, activation_id: Any) -> tuple[Any, Any]:
+    activation = await _one(
+        conn,
+        "SELECT to_jsonb(a) - 'updated_at' AS value "
+        "FROM external_boot_activations AS a WHERE id = %s",
+        (activation_id,),
+    )
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT to_jsonb(r) - 'updated_at' AS value "
+            "FROM external_boot_recovery_attempts AS r WHERE activation_id = %s "
+            "ORDER BY attempt_id",
+            (activation_id,),
+        )
+        attempts = [row["value"] for row in await cur.fetchall()]
+    return activation["value"], attempts
+
+
+@pytest.mark.parametrize("operation", ["activate", "release", "recover", "cleanup"])
+def test_post_provider_interruption_replays_without_a_second_mutation(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    operation: str,
+) -> None:
+    """A lost core finalizer converges from the authority receipt exactly once."""
+    spec = CASES[operation]
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        executor = _ReceiptExecutor(case.vehicle)
+        ports = ExternalBootHandlerPorts(
+            resolver=resolver_for(case.vehicle),
+            incarnation_credential=SecretStr(case.credential),
+            secret_registry=SecretRegistry(),
+            acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+            authority_executor=executor,
+        )
+        handler = build_operations(ports).get(operation)
+        assert handler is not None
+        marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+        job = _job(case)
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            # The first worker disappears after the provider authority returns.
+            await handler(worker, job, marker)
+            replayed = await handler(worker, job, marker)
+            expected_mutations = 0 if operation == "release" else 1
+            assert executor.mutations == expected_mutations
+            assert len(executor.observations) == 1
+            readiness_reads = [] if operation == "cleanup" else ["observe", "observe"]
+            assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
+
+            committed = await queue.complete_external_boot(
+                worker,
+                job,
+                replayed,
+                incarnation_credential=SecretStr(case.credential),
+            )
+            assert committed is not None
+            before = await _durable_rows(seed, case.vehicle.activation_id)
+
+            # Exact finalizer replay must not duplicate durable effects or leak a transition.
+            await queue.complete_external_boot(
+                worker,
+                job,
+                replayed,
+                incarnation_credential=SecretStr(case.credential),
+            )
+            after = await _durable_rows(seed, case.vehicle.activation_id)
+
+        assert before == after
+        assert executor.mutations == expected_mutations
+        assert before[0]["state"] == spec["after"]
+        if operation == "release":
+            row = await _one(
+                seed,
+                "SELECT count(*) AS count FROM external_boot_reservation_releases "
+                "WHERE activation_id = %s",
+                (case.vehicle.activation_id,),
+            )
+            assert row["count"] == 1
+
+    _drive(migrated_url, authority_role_dsns, operation, body)
 
 
 async def _run_operation(
@@ -134,9 +276,21 @@ async def _run_operation(
     handler = operations.get(operation)
     assert handler is not None
     async with await role_connection(dsns("kdive_worker")) as worker:
-        return await handler(
+        result = await handler(
             worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
         )
+        if result.result.operation == "recovery-attempt":
+            committed = await queue.complete_external_boot(
+                worker,
+                _job(case),
+                result,
+                incarnation_credential=SecretStr(case.credential),
+            )
+            assert committed is not None
+            return await handler(
+                worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            )
+        return result
     del seed
 
 
@@ -176,7 +330,8 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         result = await _run_operation(authority_role_dsns, seed, case, operation)
 
         # 1. the §7 port call, against the row's recovery point rather than the test's object
-        assert case.vehicle.port.calls == spec["port_calls"]
+        readiness_reads = [] if operation in {"cleanup", "teardown"} else ["observe"]
+        assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
         assert case.vehicle.port.recoveries[0] == persisted
 
         # 2. criterion 7, through the worker's own gate
@@ -206,28 +361,17 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
     _drive(migrated_url, authority_role_dsns, operation, body)
 
 
-def test_activate_emits_a_readiness_deadline_one_window_ahead(
+def test_activate_reuses_the_persisted_readiness_deadline(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """``_ActivateResult.activation_readiness_deadline`` is required, so a value must be emitted.
-
-    Nothing reads it today — the commit stores it after a parse check only and no reader exists in
-    ``src/`` outside the model definition — so this asserts the unit and reference clock the
-    docstring claims (``now(UTC)`` plus ``ACTIVATION_READINESS_WINDOW``) and nothing more.
-    Enforcing the deadline is #2202's.
-    """
+    """Retries carry forward the row's absolute deadline instead of extending it."""
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        before = datetime.now(UTC)
-
         result = await _run_operation(authority_role_dsns, seed, case, "activate")
 
         payload = result.result
         assert isinstance(payload, _ActivateResult)
-        assert before + ACTIVATION_READINESS_WINDOW <= payload.activation_readiness_deadline
-        assert payload.activation_readiness_deadline <= (
-            datetime.now(UTC) + ACTIVATION_READINESS_WINDOW
-        )
+        assert payload.activation_readiness_deadline == datetime(2027, 1, 1, tzinfo=UTC)
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
@@ -443,7 +587,7 @@ def test_cmdline_failure_redacts_before_authority_persistence(
             committed = await queue.fail_external_boot(
                 worker, _job(case), carrier, incarnation_credential=SecretStr(case.credential)
             )
-        assert committed is not None
+        assert isinstance(committed, Job)
         assert ToolResponse.from_job(committed).data == {"kind": "boot", **context}
         row = await _one(
             seed, "SELECT state, failure_context FROM jobs WHERE id = %s", (case.job_id,)
@@ -457,20 +601,11 @@ def test_cmdline_failure_redacts_before_authority_persistence(
 def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
     migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
 ) -> None:
-    """The threat model's control for the provider-call boundary, asserted rather than described.
-
-    ``observe``'s return is not consumed by the evidence — ``composite_state`` is the
-    acknowledgement's digest. Its whole contribution is this post-mutation liveness precondition:
-    the running kernel must be the one the activation's persisted
-    ``materialization.kernel_observation`` records, and terminal evidence must not be emitted when
-    it is not. ``cleanup`` and ``teardown`` have no such control because their port call is
-    ``cleanup`` and ``ExternalBootPorts`` offers nothing to observe a deletion with, so they are
-    not parametrized here.
-    """
+    """A non-terminal authority category cannot be promoted to lifecycle evidence."""
     spec = CASES[operation]
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        case.vehicle.port.__dict__["observe"] = _DisagreeingObserver(case.vehicle.port).observe
+        case.vehicle.port.__dict__["authority_category"] = "conflict"
 
         with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
             await _run_operation(authority_role_dsns, seed, case, operation)
@@ -480,7 +615,10 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
         assert payload.failure_context.phase == "commit"
         # The mutation happened; what is refused is *recording* it as a good terminal state.
         row = await _activation_row(seed, case.vehicle.activation_id)
-        assert row["state"] == spec["activation_state"]
+        expected_state = (
+            "recovering" if operation == "resolve-conflict" else spec["activation_state"]
+        )
+        assert row["state"] == expected_state
 
     _drive(migrated_url, authority_role_dsns, operation, body)
 
@@ -523,17 +661,10 @@ def test_a_terminal_failure_result_leaves_the_job_failed(
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-def test_a_superseded_commit_leaves_the_job_running(
+def test_an_authority_superseded_commit_terminalizes_once_in_the_classifying_transaction(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """Records the #2203-owned availability leak; it does not fix it.
-
-    A commit that returns ``superseded`` writes no ``jobs`` row at all, so the job keeps its lease,
-    is re-claimed when it lapses, and once ``attempt >= max_attempts`` is permanently ``running`` —
-    both generic finalizers and ``repair_abandoned_jobs`` are fenced against a marked payload.
-    Reaping it is #2203's and re-entry is #2202's; this test pins the behaviour so it cannot change
-    silently, and is not coverage of an intended outcome.
-    """
+    """Authority loss is classified and finalized without replaying the same stale carrier."""
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
         result = await _run_operation(authority_role_dsns, seed, case, "activate")
@@ -547,8 +678,42 @@ def test_a_superseded_commit_leaves_the_job_running(
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert committed is None
-        assert await _job_state(seed, case.job_id) == "running"
+        assert isinstance(committed, Job)
+        assert committed.state.value == "failed"
+        assert committed.error_category == "stale_handle"
+        assert await _job_state(seed, case.job_id) == "failed"
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            replay = await queue.complete_external_boot(
+                worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
+            )
+        assert replay is queue.ExternalBootCommitStatus.SUPERSEDED
+
+    _drive(migrated_url, authority_role_dsns, "activate", body)
+
+
+def test_observed_identity_stale_terminalizes_once_in_the_classifying_transaction(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        result = await _run_operation(authority_role_dsns, seed, case, "activate")
+        stale = ExternalBootAuthoritySuccessV1.model_validate(
+            result.model_dump(by_alias=True) | {"plan_identity": "sha256:" + "f" * 64}
+        )
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            committed = await queue.complete_external_boot(
+                worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
+            )
+
+        assert isinstance(committed, Job)
+        assert committed.state.value == "failed"
+        assert committed.error_category == "stale_handle"
+        assert await _job_state(seed, case.job_id) == "failed"
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            replay = await queue.complete_external_boot(
+                worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
+            )
+        assert replay is queue.ExternalBootCommitStatus.SUPERSEDED
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
 

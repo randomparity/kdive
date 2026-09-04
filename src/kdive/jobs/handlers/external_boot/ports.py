@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from pydantic import SecretStr
@@ -11,6 +13,8 @@ from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -18,6 +22,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
     "ExternalBootAuthorityAcknowledger",
+    "ExternalBootAuthorityExecutor",
     "ExternalBootHandlerPorts",
 ]
 
@@ -25,7 +30,7 @@ __all__ = [
 class ExternalBootAuthorityAcknowledger(Protocol):
     """The worker's one call into the provider-authority host.
 
-    ``commit_external_boot_authority_result`` returns ``superseded`` unless an
+    ``commit_external_boot_authority_result`` rejects current authority unless an
     ``external_boot_authority_acknowledgements`` row exists for the allocated authority, and
     ``acknowledge_external_boot_authority`` is granted to ``kdive_provider_authority`` alone — a
     role no worker session holds, by ADR-0584's design. So a worker cannot acknowledge its own
@@ -43,6 +48,12 @@ class ExternalBootAuthorityAcknowledger(Protocol):
     ) -> AuthorityAcknowledgementV1: ...
 
 
+class ExternalBootAuthorityExecutor(Protocol):
+    """Execute one mutation through the provider authority receipt journal."""
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExternalBootHandlerPorts:
     """Ports one ``build_operations`` call binds into all six operation handlers.
@@ -58,3 +69,7 @@ class ExternalBootHandlerPorts:
     incarnation_credential: SecretStr
     secret_registry: SecretRegistry
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
+    authority_executor: ExternalBootAuthorityExecutor | None = None
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    activation_readiness_timeout: timedelta = timedelta(minutes=5)
+    recovery_readiness_timeout: timedelta = timedelta(minutes=5)

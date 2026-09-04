@@ -227,6 +227,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Confine the external-boot artifact root
 - Remove the activation recovery archive on cleanup
 - Build the external-boot session mechanisms
+- Define durable reentry receipts
+- Resume server preparation from receipts
+- Route lifecycle through authority
+- Persist retry deadlines
+- Terminalize expired retries
+- Persist external boot operation receipts
 
 ### Changed
 
@@ -1199,6 +1205,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record that readiness is not bound here
 - Say the recovery root stages boot payloads
 - State the recovery root's operator preconditions
+- Design idempotent re-entry
+- Record design blockers
+- Authorize provider receipts
+- Bound provider receipt scope
+- Resolve external boot CAS classification
+- Reconcile cleanup receipt decision
+- Satisfy decision record schema
 
 ### Fixed
 
@@ -1942,6 +1955,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the mechanism count and the lane's claim
 - Refuse an absent or symlinked recovery root
 - Set the artifact directory mode after creating it
+- Classify losing authority commits
+- Close reviewed reentry gaps
+- Replay terminal authority receipts
+- Retain cleanup receipt through authority
+- Renew recovery deadline after timeout
+- Reconstruct cleanup tombstones
 
 ### Security
 

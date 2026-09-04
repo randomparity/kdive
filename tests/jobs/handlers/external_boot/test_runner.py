@@ -17,6 +17,7 @@ the claim about what they mean is corrected.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -442,9 +443,11 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
     driven through it rather than through a re-implementation of the same nine comparisons.
     """
     secret = "/var/lib/kdive/secret-path-that-must-not-travel"
+    provider_identifier = "fault-inject://private-provider.example.internal/system-47"
+    raw_message = f"provider {provider_identifier} failed while reading {secret}"
 
     def explode(_context: OperationContext) -> RunningKernelObservation:
-        raise OSError(secret)
+        raise OSError(raw_message)
 
     async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
         case = await seed_case(seed, vehicle, purpose="activate")
@@ -465,7 +468,10 @@ def test_provider_exception_becomes_an_authority_failure_bound_to_the_allocation
         assert failure.result.journal_sequence > 0
         # `from None`, so the provider's own exception is not chained onto a renderable traceback.
         assert failure.__cause__ is None
-        assert secret not in repr(failure.result.model_dump())
+        serialized = json.dumps(failure.result.model_dump(mode="json", by_alias=True))
+        assert raw_message not in serialized
+        assert secret not in serialized
+        assert provider_identifier not in serialized
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
@@ -485,19 +491,40 @@ def test_committable_categories_match_the_migration_exactly() -> None:
 
     assert accepted, "the migration's accepted-category list was not found"
     assert {category.value for category in COMMITTABLE_ERROR_CATEGORIES} == accepted
+    assert tuple(
+        category.value for category in ErrorCategory if category in COMMITTABLE_ERROR_CATEGORIES
+    ) == (
+        "configuration_error",
+        "missing_dependency",
+        "build_failure",
+        "boot_timeout",
+        "readiness_failure",
+        "debug_attach_failure",
+        "infrastructure_failure",
+        "stale_handle",
+        "transport_conflict",
+        "not_implemented",
+        "allocation_denied",
+        "lease_expired",
+        "provisioning_failure",
+        "install_failure",
+        "transport_failure",
+        "control_failure",
+        "authorization_denied",
+    )
 
 
 @pytest.mark.parametrize(
     "category",
-    [ErrorCategory.CONFLICT, ErrorCategory.NOT_FOUND, ErrorCategory.CAPACITY_EXHAUSTED],
+    list(ErrorCategory),
 )
-def test_an_uncommittable_provider_category_is_mapped_and_the_commit_applies(
+def test_every_provider_category_maps_to_a_committable_failure(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     vehicle: Vehicle,
     category: ErrorCategory,
 ) -> None:
-    """A provider category the commit does not accept must not reach it.
+    """Enumerate the closed fault vocabulary and prove every result can be committed.
 
     ``ErrorCategory`` has 24 members and the commit accepts 17. Copying an unaccepted one through
     raises SQLSTATE ``22023`` from inside the commit — and that call sits **outside**
@@ -529,7 +556,12 @@ def test_an_uncommittable_provider_category_is_mapped_and_the_commit_applies(
 
         result = excinfo.value.result.result
         assert isinstance(result, _FailureResult)
-        assert result.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        expected = (
+            category
+            if category in COMMITTABLE_ERROR_CATEGORIES
+            else ErrorCategory.INFRASTRUCTURE_FAILURE
+        )
+        assert result.error_category is expected
         committed = await queue.fail_external_boot(
             conn,
             _job(case),
@@ -540,9 +572,3 @@ def test_an_uncommittable_provider_category_is_mapped_and_the_commit_applies(
         assert (await _job_row(seed, case.job_id))["state"] == "failed"
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
-
-
-def test_a_committable_provider_category_is_passed_through_unchanged() -> None:
-    """The mapping must not flatten every category; only the uncommittable ones move."""
-    assert ErrorCategory.BOOT_TIMEOUT in COMMITTABLE_ERROR_CATEGORIES
-    assert ErrorCategory.CONFLICT not in COMMITTABLE_ERROR_CATEGORIES

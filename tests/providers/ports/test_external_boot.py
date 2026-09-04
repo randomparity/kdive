@@ -13,6 +13,8 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     KernelIdentity,
     OpaqueProviderRef,
     RecoveryPoint,
@@ -343,3 +345,87 @@ def test_activation_binding_changes_recovery_point_identity() -> None:
         }
     )
     assert first != second
+
+
+def test_preparation_request_is_closed_and_binds_every_owner() -> None:
+    plan = ExternalBootPlan.model_validate(_plan_data())
+    request = ExternalBootPreparationRequest(
+        phase="materialize",
+        plan=plan,
+        binding=ExternalBootActivationBinding(
+            system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+        ),
+        authority=OpaqueProviderRef(ref="authority/current"),
+        operation_identity="materialize-1",
+    )
+
+    assert request.plan.ownership.system_id == request.binding.system_id
+    assert request.plan.ownership.run_id == request.binding.run_id
+    with pytest.raises(ValidationError):
+        ExternalBootPreparationRequest.model_validate(
+            {**request.model_dump(by_alias=True), "unexpected": True}
+        )
+    with pytest.raises(ValidationError, match="ownership"):
+        ExternalBootPreparationRequest.model_validate(
+            {
+                **request.model_dump(by_alias=True),
+                "binding": {
+                    **request.binding.model_dump(),
+                    "run_id": "11111111-1111-1111-1111-111111111111",
+                },
+            }
+        )
+
+
+def test_preparation_observation_enforces_phase_and_exact_binding() -> None:
+    provider = FaultInjectExternalBoot()
+    authority = OpaqueProviderRef(ref="authority/current")
+    plan = ExternalBootPlan.model_validate(_plan_data())
+    materialization = provider.materialize(plan, authority)
+    binding = ExternalBootActivationBinding(
+        system_id=SYSTEM_ID, run_id=RUN_ID, activation_id=ACTIVATION_ID
+    )
+    recovery = provider.prepare(materialization, binding, authority)
+
+    assert (
+        ExternalBootPreparationObservation(
+            state="absent",
+            binding=binding,
+            plan_identity=plan.identity,
+            authority=authority,
+            operation_identity="materialize-1",
+        ).state
+        == "absent"
+    )
+    assert (
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=binding,
+            plan_identity=plan.identity,
+            authority=authority,
+            operation_identity="materialize-1",
+            materialization=materialization,
+        ).materialization
+        == materialization
+    )
+    assert (
+        ExternalBootPreparationObservation(
+            state="prepared",
+            binding=binding,
+            plan_identity=plan.identity,
+            authority=authority,
+            operation_identity="prepare-1",
+            materialization=materialization,
+            recovery_point=recovery,
+        ).recovery_point
+        == recovery
+    )
+    with pytest.raises(ValidationError, match="prepared"):
+        ExternalBootPreparationObservation(
+            state="prepared",
+            binding=binding,
+            plan_identity=plan.identity,
+            authority=authority,
+            operation_identity="prepare-1",
+            materialization=materialization,
+        )

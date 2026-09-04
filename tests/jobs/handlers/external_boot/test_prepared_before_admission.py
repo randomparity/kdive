@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -28,6 +29,10 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
@@ -69,11 +74,24 @@ async def _authority_count(conn: AsyncConnection) -> int:
 async def _dispatch(
     dsns: Callable[[str], str], case: SeededCase, operation: str, vehicle: Vehicle
 ) -> None:
+    class Executor:
+        async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+            vehicle.port.calls.append("authority-execute")
+            category = "target" if request.operation.value == "activate" else "source"
+            if request.operation.value in {"cleanup", "teardown"}:
+                category = "absent"
+            return AuthorityObservationV1(
+                observation_id=uuid4(),
+                category=category,  # type: ignore[arg-type]
+                composite_state="sha256:" + "8" * 64,
+            )
+
     ports = ExternalBootHandlerPorts(
         resolver=resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
         secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+        authority_executor=Executor(),
     )
     handler = build_operations(ports).get(operation)
     assert handler is not None

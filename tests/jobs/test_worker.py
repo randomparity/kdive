@@ -24,7 +24,11 @@ from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
-from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.models import (
+    ExternalBootAuthorityFailureV1,
+    ExternalBootAuthoritySuccessV1,
+    HandlerRegistry,
+)
 from kdive.jobs.payloads import (
     Authorizing,
     BootPayload,
@@ -33,7 +37,7 @@ from kdive.jobs.payloads import (
     SystemPayload,
     load_payload,
 )
-from kdive.jobs.worker import Worker, WorkerConfig
+from kdive.jobs.worker import Worker, WorkerConfig, _classified_external_boot_failure
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.local_libvirt.lifecycle.install import _open
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -48,6 +52,61 @@ from tests.support.otel import tracer_provider
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 _INCARNATION_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
+_DIGEST = "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("status", "action", "category", "terminal"),
+    [
+        (
+            queue.ExternalBootCommitStatus.OBSERVED_IDENTITY_STALE,
+            "systems.get",
+            "stale_handle",
+            True,
+        ),
+        (
+            queue.ExternalBootCommitStatus.RESERVATION_NOT_READY,
+            "jobs.wait",
+            "infrastructure_failure",
+            False,
+        ),
+        (queue.ExternalBootCommitStatus.AUTHORITY_SUPERSEDED, "jobs.get", "stale_handle", True),
+    ],
+)
+def test_worker_consumes_atomic_external_boot_commit_classification(
+    status: queue.ExternalBootCommitStatus, action: str, category: str, terminal: bool
+) -> None:
+    result = ExternalBootAuthoritySuccessV1.model_validate(
+        {
+            "schema": "external-boot-authority-result-v1",
+            "authority_id": uuid4(),
+            "generation": 1,
+            "activation_id": uuid4(),
+            "run_id": uuid4(),
+            "system_id": uuid4(),
+            "plan_identity": _DIGEST,
+            "purpose": "activate",
+            "provider_kind": "local-libvirt",
+            "authority_instance": "authority-1",
+            "admitted_operation": "activate",
+            "operation_identity": "activate-1",
+            "operation_digest": _DIGEST,
+            "journal_sequence": 1,
+            "journal_digest": _DIGEST,
+            "result": {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "deadline",
+                "deadline": "2026-09-04T00:00:00Z",
+            },
+        }
+    )
+    failure = _classified_external_boot_failure(result, status)
+    assert isinstance(failure, ExternalBootAuthorityFailureV1)
+    payload = cast(Any, failure.result)
+    assert payload.failure_context.reason == status.value
+    assert payload.failure_context.next_action == action
+    assert payload.error_category.value == category
+    assert payload.terminal is terminal
 
 
 class _UnsafeSqlstateError(psycopg.Error):

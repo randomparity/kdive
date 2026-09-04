@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import BinaryIO, Literal, cast
 from uuid import UUID
 
 import pytest
@@ -65,6 +65,8 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     KernelIdentity,
     MaterializedArtifacts,
     OpaqueProviderRef,
@@ -874,6 +876,7 @@ def test_recovery_metadata_store_retries_interrupted_temporary_replacement(
             else:
                 expected_model = CleanupTombstoneV1(
                     binding=metadata.binding,
+                    recovery_point=_point(metadata),
                     point_digest=LocalLibvirtExternalBoot.point_digest(_point(metadata)),
                 )
                 temporary_name = ".tombstone.next"
@@ -1336,6 +1339,7 @@ class _ExternalIO:
         self.close_fault = close_fault
         self.opened: list[ExpectedOperationOwnership] = []
         self.close_attempts = 0
+        self.preparation_receipts: dict[str, ExternalBootPreparationObservation] = {}
 
     def open(
         self,
@@ -1345,6 +1349,34 @@ class _ExternalIO:
         assert authority == OpaqueProviderRef(ref="authority/current")
         self.opened.append(expected)
         return _ExternalContext(self)
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        return self.preparation_receipts.get(
+            request.phase,
+            ExternalBootPreparationObservation(
+                state="absent",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+            ),
+        )
+
+    def publish_preparation(
+        self, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation:
+        phase = "materialize" if receipt.state == "materialized" else "prepare"
+        self.preparation_receipts[phase] = receipt
+        return receipt
+
+    def preparation_materialization(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootMaterialization:
+        receipt = self.preparation_receipts["materialize"]
+        assert receipt.materialization is not None
+        return receipt.materialization
 
     def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
         self.actions.append("materialize")
@@ -1384,6 +1416,18 @@ class _ExternalIO:
         if self.operation_fault:
             raise LookupError("operation primary")
         return self.metadata
+
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        if not self.tombstone:
+            raise FileNotFoundError("tombstone.json")
+        point = _point(self.metadata)
+        return CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=point,
+            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        )
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         self.actions.append("observe-state")
@@ -3441,6 +3485,26 @@ def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path)
     assert session.close_attempts == 3
 
 
+def test_real_adapter_restart_reconstructs_cleanup_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    io, _session = _real_io(root, host)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    LocalLibvirtExternalBoot(io).cleanup(point, OpaqueProviderRef(ref="authority/current"))
+    restarted = LocalLibvirtExternalBoot(io)
+
+    assert (
+        restarted.cleanup_receipt(point.binding, OpaqueProviderRef(ref="authority/current"))
+        == point
+    )
+    assert host.actions == ["cleanup"]
+
+
 def test_real_adapter_rechecks_exact_metadata_before_cleanup_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3574,6 +3638,97 @@ def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path:
 
     assert session.close_attempts == 0
     assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
+
+
+def _preparation_request(phase: str) -> ExternalBootPreparationRequest:
+    return ExternalBootPreparationRequest(
+        phase=cast(Literal["materialize", "prepare"], phase),
+        plan=_plan(),
+        binding=_BINDING,
+        authority=OpaqueProviderRef(ref="authority/current"),
+        operation_identity=f"{phase}-operation",
+    )
+
+
+def test_preparation_receipt_store_reopens_canonical_partial_and_complete_records(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": request.plan.identity}
+        ),
+    )
+    assert receipt.materialization is not None
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        assert store.observe_preparation(request) == receipt
+        store.publish_pre_stop(
+            _pre_stop(_metadata()).model_copy(
+                update={
+                    "plan_identity": receipt.plan_identity,
+                    "materialization_identity": receipt.materialization.identity,
+                }
+            )
+        )
+        assert store.observe_preparation(request) == receipt
+
+
+def test_local_preparation_receipt_replay_avoids_second_provider_mutation() -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    request = _preparation_request("materialize")
+
+    first = ports.execute_preparation(request)
+    second = ports.execute_preparation(request)
+
+    assert first == second == ports.observe_preparation(request)
+    assert io.actions == ["materialize"]
+
+
+def test_local_prepare_receipt_replay_avoids_second_provider_mutation() -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    ports.execute_preparation(_preparation_request("materialize"))
+    request = _preparation_request("prepare")
+
+    first = ports.execute_preparation(request)
+    second = ports.execute_preparation(request)
+
+    assert first == second == ports.observe_preparation(request)
+    assert io.actions == ["materialize", "prepare"]
+
+
+def test_accounted_cleanup_removes_preparation_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": metadata.plan_identity}
+        ),
+    )
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_preparation(receipt)
+        store.publish_tombstone(
+            reference, metadata.binding, metadata, LocalLibvirtExternalBoot.point_digest(point)
+        )
+        assert store.observe_preparation(request).state == "absent"
 
 
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:

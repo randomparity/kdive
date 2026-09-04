@@ -577,8 +577,27 @@ class Worker:
             else:
                 _log.warning("external boot job %s returned an untyped result variant", job.id)
                 return
-        if committed is None:
-            _log.warning("external boot job %s result was superseded; result dropped", job.id)
+        if not isinstance(committed, queue.ExternalBootCommitStatus):
+            if committed is None:
+                _log.warning("external boot job %s was reclaimed; result dropped", job.id)
+            return
+        if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
+            _log.warning("external boot job %s was reclaimed; result dropped", job.id)
+            return
+        failure = _classified_external_boot_failure(result, committed)
+        async with self._pool.connection() as conn:
+            finalized = await queue.fail_external_boot(
+                conn,
+                job,
+                failure,
+                incarnation_credential=self._incarnation_credential,
+            )
+        if not isinstance(finalized, Job):
+            _log.warning(
+                "external boot job %s lost its fence while committing classified failure; "
+                "result dropped",
+                job.id,
+            )
 
     async def _heartbeat_loop(self, job_id: UUID, attempt: int) -> None:
         """Renew the lease until cancelled, the fence misses, or a heartbeat errors.
@@ -617,6 +636,40 @@ def _failure_category(exc: Exception) -> ErrorCategory:
     if isinstance(exc, PayloadValidationError):
         return ErrorCategory.CONFIGURATION_ERROR
     return ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def _classified_external_boot_failure(
+    result: ExternalBootAuthorityResultV1,
+    status: queue.ExternalBootCommitStatus,
+) -> ExternalBootAuthorityFailureV1:
+    """Bind a closed losing-CAS failure to the provider result's authenticated facts."""
+    shapes = {
+        queue.ExternalBootCommitStatus.OBSERVED_IDENTITY_STALE: (
+            "systems.get",
+            ErrorCategory.STALE_HANDLE,
+            True,
+        ),
+        queue.ExternalBootCommitStatus.RESERVATION_NOT_READY: (
+            "jobs.wait",
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            False,
+        ),
+        queue.ExternalBootCommitStatus.AUTHORITY_SUPERSEDED: (
+            "jobs.get",
+            ErrorCategory.STALE_HANDLE,
+            True,
+        ),
+    }
+    next_action, category, terminal = shapes[status]
+    carrier = result.model_dump(mode="json", by_alias=True)
+    carrier["result"] = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": "fail",
+        "error_category": category.value,
+        "failure_context": {"reason": status.value, "next_action": next_action},
+        "terminal": terminal,
+    }
+    return ExternalBootAuthorityFailureV1.model_validate(carrier)
 
 
 def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
