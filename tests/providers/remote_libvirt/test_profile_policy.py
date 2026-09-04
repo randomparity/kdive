@@ -77,6 +77,11 @@ def test_host_dump_provisioned_tracks_flag() -> None:
     assert policy.host_dump_provisioned(_remote_profile(host_dump=False)) is False
 
 
+def test_fadump_remains_unsupported_for_remote_libvirt() -> None:
+    policy = RemoteLibvirtProfilePolicy()
+    assert policy.fadump_provisioned(_remote_profile(crashkernel="512M")) is False
+
+
 def test_available_capture_includes_host_dump_when_opted_in() -> None:
     policy = RemoteLibvirtProfilePolicy()
     methods = available_capture(policy, _remote_profile(host_dump=True))
