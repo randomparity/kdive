@@ -140,6 +140,25 @@ class _VehicleExecutor:
         )
 
 
+class _ReceiptExecutor(_VehicleExecutor):
+    """Model the authority journal's terminal-observation replay at the handler boundary."""
+
+    def __init__(self, vehicle: Vehicle) -> None:
+        super().__init__(vehicle)
+        self.observations: dict[str, AuthorityObservationV1] = {}
+        self.mutations = 0
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        recorded = self.observations.get(request.operation_identity)
+        if recorded is not None:
+            return recorded
+        if request.operation.value != "release":
+            self.mutations += 1
+        observation = await super().execute(request)
+        self.observations[request.operation_identity] = observation
+        return observation
+
+
 def _ports(
     case: SeededCase, vehicle: Vehicle, dsns: Callable[[str], str]
 ) -> ExternalBootHandlerPorts:
@@ -149,6 +168,88 @@ def _ports(
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
         authority_executor=_VehicleExecutor(vehicle),
     )
+
+
+async def _durable_rows(conn: AsyncConnection, activation_id: Any) -> tuple[Any, Any]:
+    activation = await _one(
+        conn,
+        "SELECT to_jsonb(a) - 'updated_at' AS value "
+        "FROM external_boot_activations AS a WHERE id = %s",
+        (activation_id,),
+    )
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT to_jsonb(r) - 'updated_at' AS value "
+            "FROM external_boot_recovery_attempts AS r WHERE activation_id = %s "
+            "ORDER BY attempt_id",
+            (activation_id,),
+        )
+        attempts = [row["value"] for row in await cur.fetchall()]
+    return activation["value"], attempts
+
+
+@pytest.mark.parametrize("operation", ["activate", "release", "recover", "cleanup"])
+def test_post_provider_interruption_replays_without_a_second_mutation(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    operation: str,
+) -> None:
+    """A lost core finalizer converges from the authority receipt exactly once."""
+    spec = CASES[operation]
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        executor = _ReceiptExecutor(case.vehicle)
+        ports = ExternalBootHandlerPorts(
+            resolver=resolver_for(case.vehicle),
+            incarnation_credential=SecretStr(case.credential),
+            acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+            authority_executor=executor,
+        )
+        handler = build_operations(ports).get(operation)
+        assert handler is not None
+        marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+        job = _job(case)
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            # The first worker disappears after the provider authority returns.
+            await handler(worker, job, marker)
+            replayed = await handler(worker, job, marker)
+            expected_mutations = 0 if operation == "release" else 1
+            assert executor.mutations == expected_mutations
+            assert len(executor.observations) == 1
+            assert case.vehicle.port.calls == spec["port_calls"]
+
+            committed = await queue.complete_external_boot(
+                worker,
+                job,
+                replayed,
+                incarnation_credential=SecretStr(case.credential),
+            )
+            assert committed is not None
+            before = await _durable_rows(seed, case.vehicle.activation_id)
+
+            # Exact finalizer replay must not duplicate durable effects or leak a transition.
+            await queue.complete_external_boot(
+                worker,
+                job,
+                replayed,
+                incarnation_credential=SecretStr(case.credential),
+            )
+            after = await _durable_rows(seed, case.vehicle.activation_id)
+
+        assert before == after
+        assert executor.mutations == expected_mutations
+        assert before[0]["state"] == spec["after"]
+        if operation == "release":
+            row = await _one(
+                seed,
+                "SELECT count(*) AS count FROM external_boot_reservation_releases "
+                "WHERE activation_id = %s",
+                (case.vehicle.activation_id,),
+            )
+            assert row["count"] == 1
+
+    _drive(migrated_url, authority_role_dsns, operation, body)
 
 
 async def _run_operation(
@@ -388,16 +489,13 @@ def test_a_terminal_failure_result_leaves_the_job_failed(
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-def test_a_superseded_commit_leaves_the_job_running(
+def test_an_authority_superseded_commit_is_classified_and_leaves_the_job_running(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """Records the #2203-owned availability leak; it does not fix it.
+    """The persistence seam classifies authority loss for the worker finalizer.
 
-    A commit that returns ``superseded`` writes no ``jobs`` row at all, so the job keeps its lease,
-    is re-claimed when it lapses, and once ``attempt >= max_attempts`` is permanently ``running`` —
-    both generic finalizers and ``repair_abandoned_jobs`` are fenced against a marked payload.
-    Reaping it is #2203's and re-entry is #2202's; this test pins the behaviour so it cannot change
-    silently, and is not coverage of an intended outcome.
+    The queue layer deliberately leaves consumption to the worker, so this direct persistence test
+    also observes the unchanged running row.
     """
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
@@ -412,7 +510,7 @@ def test_a_superseded_commit_leaves_the_job_running(
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert committed is None
+        assert committed is queue.ExternalBootCommitStatus.AUTHORITY_SUPERSEDED
         assert await _job_state(seed, case.job_id) == "running"
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
