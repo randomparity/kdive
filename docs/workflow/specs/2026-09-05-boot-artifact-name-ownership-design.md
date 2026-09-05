@@ -17,7 +17,7 @@ remote-module names, provider-neutral models, or ppc64le coverage.
 kind, canonical UUID values, a `sha256:` digest, final/partial state, and an attempt UUID only for a
 partial. It rejects malformed digests or invalid state/attempt combinations. Its parser accepts
 only byte-for-byte canonical output: anchored lowercase grammar, canonical UUID spellings, known
-kind, exact version, and exactly one final/partial suffix. Rendered names are ASCII and at most 203
+kind, exact version, and exactly one final/partial suffix. Rendered names are ASCII and at most 204
 bytes.
 
 The parsed record contains `name`, `kind`, `system_id`, `run_id`, `digest`, `partial`, and

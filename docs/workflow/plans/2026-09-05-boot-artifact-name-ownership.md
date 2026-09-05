@@ -11,7 +11,7 @@ shared-double operations, and focused/live tests.
 
 ## Global constraints
 
-- Grammar is exact ADR-0599 version 1, ASCII, and at most 203 bytes under the proven 255-byte
+- Grammar is exact ADR-0599 version 1, ASCII, and at most 204 bytes under the proven 255-byte
   dir-pool limit.
 - Unknown, legacy, malformed, mismatched, unreadable, and live-owner objects are never deleted.
 - No metadata fallback, schema/dependency change, remote-module change, or ppc64le proof.
@@ -33,7 +33,8 @@ Interfaces:
 
 Verification:
 
-- Mode: focused-test. Canonical final/partial round trips, 203-byte ceiling, and all malformed
+- Mode: focused-test. Canonical final/partial round trips, the exact 204-byte longest rendering,
+  conformance to the independently established 255-byte dir-pool ceiling, and all malformed
   classes fail before implementation; green command:
   `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/rootfs/test_boot_artifact_name.py -q`.
 

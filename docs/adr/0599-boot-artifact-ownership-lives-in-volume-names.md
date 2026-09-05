@@ -29,7 +29,7 @@ kdive-boot-v1-<kind>-<system-uuid>-<run-uuid>-<sha256-hex>-partial-<attempt-uuid
 ```
 
 `kind` is exactly `kernel` or `initrd`. UUIDs are canonical lowercase hyphenated strings.
-`sha256-hex` is exactly 64 lowercase hexadecimal characters. The longest name is 203 ASCII bytes,
+`sha256-hex` is exactly 64 lowercase hexadecimal characters. The longest name is 204 ASCII bytes,
 within the 255-byte dir-pool limit measured by ADR-0588. No field is truncated or encoded through
 a lossy abbreviation.
 
@@ -67,7 +67,7 @@ unknown elements.
 - **Keep the legacy final name and put only a short digest tag in metadata or content.** verified:
   the metadata does not survive, while content is written after volume creation. Either channel
   leaves a crash window in which a present object has no durable integrity identity.
-- **Put only a truncated digest in the name.** judgment: the full digest fits with 52 bytes of
+- **Put only a truncated digest in the name.** judgment: the full digest fits with 51 bytes of
   headroom, so accepting collisions buys no needed capacity.
 - **Delete legacy names after rehashing their bytes.** judgment: bytes can prove content but cannot
   recover the absent digest expectation or distinguish KDIVE ownership from a foreign object that
