@@ -1238,6 +1238,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close metadata design gaps
 - Fix metadata plan reference
 - Correct metadata test evidence
+- Design boot artifact name ownership
+- Correct artifact name bound
 
 ### Fixed
 
@@ -2008,6 +2010,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Group ownership metadata
 - Bind every disk identity
 - Prefer recorded cleanup pool
+- Encode boot artifact ownership
+- Preserve mismatched partials
 
 ### Security
 
