@@ -114,7 +114,8 @@ endpoint, certificate, credential, host identifier, or private network detail is
 
 ## Error contract
 
-- Inventory or partial host configuration: `CONFIGURATION_ERROR` with fixed field-category text.
+- Invalid inventory: `CONFIGURATION_ERROR` with fixed field-category text. Partial or invalid
+  authority-host settings preserve the existing bounded `READINESS_FAILURE` contract.
 - Missing/unreadable TLS secret: existing secret-resolution category, redacted by registration.
 - TLS, authentication, inactive incarnation, endpoint, timeout, framing, or peer failure:
   `READINESS_FAILURE` for readiness and `INFRASTRUCTURE_FAILURE` for operation use, with closed
