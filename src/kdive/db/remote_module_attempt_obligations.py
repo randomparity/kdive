@@ -21,6 +21,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.db.locks import LockScope, advisory_xact_lock
+
 type MutationDischargeReason = Literal["restored", "baseline_committed", "terminal_escape"]
 
 _NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -171,6 +173,13 @@ class RemoteModuleAttemptObligationRepository:
             )
             return cur.rowcount == 1
 
+    async def mutation_obligation_is_open(
+        self, conn: AsyncConnection, attempt: ModuleAttempt
+    ) -> bool:
+        """Return whether the exact attempt has an open mutation obligation."""
+        state = await self._state(conn, attempt)
+        return state is not None and state["mutation_discharged_at"] is None
+
     async def discharge_mutation_obligation(
         self, conn: AsyncConnection, attempt: ModuleAttempt, *, reason: MutationDischargeReason
     ) -> bool:
@@ -185,7 +194,10 @@ class RemoteModuleAttemptObligationRepository:
                 f"mutation discharge reason must be one of {sorted(_DISCHARGE_REASONS)}, "
                 f"got {reason!r}"
             )
-        async with conn.cursor() as cur:
+        async with (
+            advisory_xact_lock(conn, LockScope.SYSTEM, attempt.system_id),
+            conn.cursor() as cur,
+        ):
             await cur.execute(
                 "UPDATE remote_module_attempt_obligations "
                 "SET mutation_discharged_at = now(), mutation_discharge_reason = %s "
