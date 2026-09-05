@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -22,6 +23,7 @@ from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 _DOMAIN_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
+_MAX_STORAGE_PATH_BYTES = 4096
 
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (
@@ -101,6 +103,7 @@ class StoragePool(Protocol):
 class AttachmentConn(Protocol):
     def listAllDomains(self, flags: int = 0) -> Sequence[Domain]: ...  # noqa: N802
     def storagePoolLookupByName(self, name: str) -> StoragePool: ...  # noqa: N802
+    def storageVolLookupByPath(self, path: str) -> StorageVolume: ...  # noqa: N802
 
 
 def _conflict(message: str, **details: object) -> CategorizedError:
@@ -210,13 +213,28 @@ def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:
             pool=pool_name,
             volume=volume_name,
         ) from exc
-    if not path:
-        raise _conflict(
-            "remote module volume path is empty",
-            pool=pool_name,
-            volume=volume_name,
-        )
-    return path
+    return _normalize_storage_path(path, pool=pool_name, volume=volume_name)
+
+
+def _normalize_storage_path(path: str, **details: object) -> str:
+    if not path.startswith("/") or "\x00" in path or len(path.encode()) > _MAX_STORAGE_PATH_BYTES:
+        raise _conflict("remote module storage path is invalid", **details)
+    return posixpath.normpath("/" + path.lstrip("/"))
+
+
+def _resolve_direct_path(conn: AttachmentConn, path: str) -> str:
+    normalized = _normalize_storage_path(path, source_path=path)
+    try:
+        managed = conn.storageVolLookupByPath(normalized)
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+            return normalized
+        raise _conflict("could not resolve remote module storage path", path=path) from exc
+    try:
+        managed_path = managed.path()
+    except libvirt.libvirtError as exc:
+        raise _conflict("could not resolve remote module storage path", path=path) from exc
+    return _normalize_storage_path(managed_path, source_path=path)
 
 
 def _protected_volume_paths(
@@ -246,7 +264,7 @@ def _inspect_definition(
     if len(sources) != len(set(sources)):
         raise _conflict("duplicate volume reference in domain", domain=name)
     referenced = {volume for pool, volume in sources if pool == expected.pool}
-    direct_paths = _path_references(root)
+    direct_paths = {_resolve_direct_path(conn, path) for path in _path_references(root)}
     system_tags = root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
     if len(system_tags) > 1:
         raise _conflict("duplicate System ownership metadata", domain=name)

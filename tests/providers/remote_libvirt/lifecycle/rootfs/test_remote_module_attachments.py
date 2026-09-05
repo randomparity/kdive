@@ -1,5 +1,7 @@
 """Fail-closed remote module attachment inspection."""
 
+import posixpath
+
 import libvirt
 import pytest
 
@@ -49,6 +51,15 @@ class Conn:
             return self.pools[name]
         except KeyError as exc:
             raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_POOL) from exc
+
+    def storageVolLookupByPath(self, path: str):  # noqa: N802
+        normalized = posixpath.normpath(path)
+        for pool in self.pools.values():
+            for name in pool.listVolumes():
+                volume = pool.storageVolLookupByName(name)
+                if posixpath.normpath(volume.path()) == normalized:
+                    return volume
+        raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
 
 
 def storage_pool(*, name: str = "systems", target_path: str = "/pool") -> FakeStoragePool:
@@ -327,6 +338,34 @@ def test_path_referenced_protected_volume_is_rejected(attribute: str, active: bo
         inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
     assert raised.value.category is ErrorCategory.CONFLICT
     assert "by path" in str(raised.value)
+
+
+@pytest.mark.parametrize("attribute", ["file", "dev"])
+@pytest.mark.parametrize("active", [True, False])
+def test_lexical_path_alias_of_protected_volume_is_rejected(attribute: str, active: bool) -> None:
+    state = expected()
+    tenant = foreign_xml(
+        "tenant",
+        f"<disk type='file'><source {attribute}='/pool/../pool/root'/></disk>",
+        active=active,
+    )
+
+    with pytest.raises(CategorizedError, match="by path"):
+        inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
+
+
+def test_managed_path_lookup_error_fails_closed() -> None:
+    class FailingConn(Conn):
+        def storageVolLookupByPath(self, path: str):  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    state = expected()
+    tenant = foreign_xml("tenant", "<disk type='file'><source file='/srv/unmanaged'/></disk>")
+
+    with pytest.raises(CategorizedError, match="could not resolve"):
+        inspect_module_attachments(
+            FailingConn([Domain(system_xml(state.system_id)), tenant]), state
+        )
 
 
 def test_unprotected_path_reference_is_ignored() -> None:
