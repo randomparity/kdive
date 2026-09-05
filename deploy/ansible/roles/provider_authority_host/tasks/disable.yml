@@ -42,6 +42,7 @@
     - /etc/kdive/libvirtd-external-boot-authority.conf
     - /etc/tmpfiles.d/kdive-provider-authority.conf
     - /var/lib/kdive/provider-authority/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
+    - /var/lib/kdive/provider-authority/.ansible
     - /run/kdive/provider-authority
     - /opt/kdive-provider-authority
   register: provider_authority_host_removed

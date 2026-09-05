@@ -162,6 +162,35 @@ def test_provider_authority_disable_retains_journal_evidence() -> None:
     assert "/var/lib/kdive/provider-authority/journal" not in tasks
 
 
+def test_provider_authority_owns_ansible_temporary_directories() -> None:
+    tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/install.yml"))
+    inspection = next(
+        task for task in tasks if task.get("register") == "provider_authority_host_paths"
+    )
+    creation = next(
+        task for task in tasks if task["name"] == "Create private authority directories"
+    )
+    for path in (
+        "/var/lib/kdive/provider-authority/.ansible",
+        "/var/lib/kdive/provider-authority/.ansible/tmp",
+    ):
+        assert path in inspection["loop"], "temporary paths need the existing symlink refusal"
+        assert {"path": path} in creation["loop"]
+    policy = creation["ansible.builtin.file"]
+    assert policy["owner"] == "kdive-provider-authority"
+    assert policy["group"] == "{{ item.group | default('kdive-provider-authority') }}"
+    assert policy["mode"] == "{{ item.mode | default('0700') }}"
+    first_user_tasks = next(
+        task for task in tasks if task.get("ansible.builtin.import_tasks") == "libvirt.yml"
+    )
+    assert tasks.index(creation) < tasks.index(first_user_tasks)
+    cleanup = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/disable.yml"))
+    removal = next(
+        task for task in cleanup if task.get("register") == "provider_authority_host_removed"
+    )
+    assert "/var/lib/kdive/provider-authority/.ansible" in removal["loop"]
+
+
 def test_provider_authority_failed_convergence_stops_the_service() -> None:
     tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/main.yml"))
     convergence = next(

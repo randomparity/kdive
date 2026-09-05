@@ -72,6 +72,8 @@
     - /opt/kdive-provider-authority
     - /etc/kdive/credentials/provider-authority
     - /var/lib/kdive/provider-authority
+    - /var/lib/kdive/provider-authority/.ansible
+    - /var/lib/kdive/provider-authority/.ansible/tmp
     - /var/lib/kdive/provider-authority/journal
     - /run/kdive/provider-authority
     - /run/kdive/provider-authority/request
@@ -96,6 +98,8 @@
     - {path: /opt/kdive-provider-authority}
     - {path: /etc/kdive/credentials/provider-authority}
     - {path: /var/lib/kdive/provider-authority}
+    - {path: /var/lib/kdive/provider-authority/.ansible}
+    - {path: /var/lib/kdive/provider-authority/.ansible/tmp}
     - {path: /var/lib/kdive/provider-authority/journal}
     - {path: /run/kdive/provider-authority, mode: "0710", group: kdive-provider-authority-client}
     - {path: /run/kdive/provider-authority/request, mode: "2750", group: kdive-provider-authority-client}
