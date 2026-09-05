@@ -100,3 +100,4 @@ echo "gdbstub_acl prune harness: all cases passed"
 
 # production provider_authority_preflight and authority_firewall lifecycle contracts
 python3 "$here/check_authority_firewall.py"
+python3 "$here/check_authority_install.py"
