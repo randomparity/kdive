@@ -98,7 +98,15 @@ def inspect_module_attachments(
 def storage_pool(*, name: str = "systems", target_path: str = "/pool") -> FakeStoragePool:
     pool = FakeStoragePool(name=name, target_path=target_path)
     for volume in ("root", "source", "scratch"):
-        pool.createXML(render_volume_xml(volume, capacity_bytes=1024, backing_path="/base"))
+        pool.createXML(
+            render_volume_xml(
+                volume,
+                capacity_bytes=1024,
+                backing_path="/base",
+                owner_id=1000,
+                group_id=1000,
+            )
+        )
     return pool
 
 
@@ -249,7 +257,15 @@ def test_active_domain_persistent_definition_is_also_scanned() -> None:
     state = expected()
     other = "00000000-0000-4000-8000-000000000099"
     pool = storage_pool()
-    pool.createXML(render_volume_xml("unrelated", capacity_bytes=1024, backing_path="/base"))
+    pool.createXML(
+        render_volume_xml(
+            "unrelated",
+            capacity_bytes=1024,
+            backing_path="/base",
+            owner_id=1000,
+            group_id=1000,
+        )
+    )
     domains = [
         Domain(system_xml(state.system_id)),
         Domain(
