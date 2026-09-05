@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -174,19 +176,15 @@ def test_verification_holds_lock_through_consumer_and_returns_only_result(
                 )
             )
             await entered.wait()
-
-            async def discharge() -> bool:
-                async with server.connection() as conn, conn.transaction():
-                    return await repo.discharge_mutation_obligation(
-                        conn, attempt, reason="restored"
-                    )
-
-            discharge_task = asyncio.create_task(discharge())
-            await asyncio.sleep(0.05)
-            assert discharge_task.done() is False
+            async with server.connection() as conn:
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    async with conn.transaction():
+                        await conn.execute("SET LOCAL lock_timeout = '100ms'")
+                        await repo.discharge_mutation_obligation(conn, attempt, reason="restored")
             release.set()
             assert await verification == "created-two"
-            assert await discharge_task is True
+            async with server.connection() as conn, conn.transaction():
+                assert await repo.discharge_mutation_obligation(conn, attempt, reason="restored")
         assert retained == [attempt]
         assert not hasattr(retained[0], "authorize")
         post_return_called = False
@@ -299,9 +297,21 @@ def test_worker_database_failure_is_redacted(
 
 
 def test_production_mutation_discharge_sql_is_repository_mediated() -> None:
-    needle = "SET mutation_discharged_at = now()"
     root = Path(__file__).parents[2] / "src" / "kdive"
-    hits = [path for path in root.rglob("*.py") if needle in path.read_text()]
+    update = re.compile(r"\bupdate\s+(?:[a-z_][a-z0-9_]*\.)?remote_module_attempt_obligations\b")
+    hits: list[Path] = []
+    for path in root.rglob("*.py"):
+        constants = (
+            node.value
+            for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+        if any(
+            update.search(normalized := " ".join(value.lower().split()))
+            and "mutation_discharged_at" in normalized
+            for value in constants
+        ):
+            hits.append(path)
 
     assert [path.relative_to(root).as_posix() for path in hits] == [
         "db/remote_module_attempt_obligations.py"
