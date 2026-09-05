@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-02
+> **Resolved by #2203** (2026-09-04)
 
 ## Concern
 
@@ -88,3 +87,9 @@ Found by the `$gauntlet` adversarial review of the #2117 branch on 2026-09-02 (f
 8). The exemption reason it challenged was corrected in that fix; the underlying gap it
 describes is this record.
 tracker: #2118
+
+## Resolution
+
+ADR-0596 adds allocation release to the closed matrix as a fail-closed operation. Both the
+project-facing release and the reconciler's `reclaim_under_lock` path now acquire every historical
+System lock in stable order and consult the matrix before ending the Allocation lease.

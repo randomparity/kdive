@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,11 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.error_details import categorized_details
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
+)
 
 AuditWriter = Callable[[AsyncConnection, audit.AuditEvent], Awaitable[None]]
 
@@ -164,6 +170,27 @@ async def _transition_and_audit(
 LockedPrecondition = Callable[[AsyncConnection], Awaitable[bool]]
 
 
+async def guard_external_boot_release(
+    conn: AsyncConnection, allocation_id: UUID, *, project: str
+) -> None:
+    """Lock every historical System and reject release while one remains restricted."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM systems WHERE allocation_id = %s ORDER BY id", (allocation_id,)
+        )
+        system_ids = [row[0] for row in await cur.fetchall()]
+    async with AsyncExitStack() as locks:
+        for system_id in system_ids:
+            await locks.enter_async_context(advisory_xact_lock(conn, LockScope.SYSTEM, system_id))
+        for system_id in system_ids:
+            await check_external_boot_admission(
+                conn,
+                system_id,
+                ExternalBootOperation.ALLOCATION_RELEASE,
+                project=project,
+            )
+
+
 async def reclaim_under_lock(
     conn: AsyncConnection,
     audit_writer: AuditWriter,
@@ -210,6 +237,14 @@ async def reclaim_under_lock(
             )
         if precondition is not None and not await precondition(conn):
             return ReleaseOutcome(released=False, current_status=current.state.value)
+        try:
+            await guard_external_boot_release(conn, uid, project=project)
+        except ExternalBootDenied:
+            return ReleaseOutcome(
+                released=False,
+                category=ErrorCategory.CONFLICT,
+                current_status=current.state.value,
+            )
         await _transition_and_audit(
             conn, audit_writer, uid, current.state, AllocationState.RELEASING, project=project
         )
@@ -270,6 +305,7 @@ async def _release_locked(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 current_status=current.state.value,
             )
+        await guard_external_boot_release(conn, uid, project=project)
         if current.state in _RELEASABLE:
             await _transition_and_audit(
                 conn, audit_writer, uid, current.state, AllocationState.RELEASING, project=project
