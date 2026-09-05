@@ -201,15 +201,13 @@ def _is_expected_overlay(
     source = disk.find("source")
     driver = disk.find("driver")
     target = disk.find("target")
-    volume_identity = source is not None and (
-        (source.get("pool"), source.get("volume")) == (pool, volume)
-        or (source.get("file") == overlay_path and storage == (pool, volume))
-    )
     return (
-        source is not None
+        disk.get("type") == "file"
+        and source is not None
         and driver is not None
         and target is not None
-        and volume_identity
+        and source.get("file") == overlay_path
+        and storage == (pool, volume)
         and driver.get("type") == "qcow2"
         and target.get("dev") == "vda"
         and target.get("bus") == "virtio"

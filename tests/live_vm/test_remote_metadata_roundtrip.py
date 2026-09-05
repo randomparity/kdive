@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 import xml.etree.ElementTree as ET
 from contextlib import closing
 from typing import Protocol, cast
@@ -26,6 +27,14 @@ _POOL = "default"
 class _Domain(Protocol):
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802
     def undefine(self) -> object: ...
+
+
+class _Volume(Protocol):
+    def delete(self, flags: int = 0) -> object: ...
+
+
+class _Pool(Protocol):
+    def storageVolLookupByName(self, name: str) -> _Volume: ...  # noqa: N802
 
 
 def _profile(base_image: str) -> ProvisioningProfile:
@@ -55,6 +64,50 @@ def _required(root: ET.Element, path: str) -> ET.Element:
     element = root.find(path)
     assert element is not None
     return element
+
+
+def _cleanup(domain: _Domain | None, pool: _Pool, overlay_name: str) -> None:
+    failures: list[str] = []
+    if domain is not None:
+        try:
+            domain.undefine()
+        except libvirt.libvirtError:
+            failures.append("domain undefine")
+    try:
+        pool.storageVolLookupByName(overlay_name).delete(0)
+    except libvirt.libvirtError:
+        failures.append("overlay delete")
+    if failures:
+        raise AssertionError("remote metadata proof cleanup failed: " + ", ".join(failures))
+
+
+def test_cleanup_attempts_overlay_delete_after_undefine_failure() -> None:
+    class Domain:
+        def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+            del flags
+            return "<domain/>"
+
+        def undefine(self) -> None:
+            raise libvirt.libvirtError("failed")
+
+    class Volume:
+        deleted = False
+
+        def delete(self, flags: int = 0) -> None:
+            del flags
+            self.deleted = True
+
+    class Pool:
+        volume = Volume()
+
+        def storageVolLookupByName(self, name: str) -> Volume:  # noqa: N802
+            assert name == "owned-overlay"
+            return self.volume
+
+    pool = Pool()
+    with pytest.raises(AssertionError, match="domain undefine"):
+        _cleanup(Domain(), pool, "owned-overlay")
+    assert pool.volume.deleted
 
 
 @pytest.mark.live_vm
@@ -110,6 +163,12 @@ def test_remote_metadata_round_trips_and_binds_storage_identity() -> None:
             _required(wrong_path, "./devices/disk/source").set("file", "/unrelated/other.qcow2")
             _assert_rejected(ET.tostring(wrong_path, encoding="unicode"), system_id, overlay.path)
         finally:
-            if domain is not None:
-                domain.undefine()
-            pool.storageVolLookupByName(overlay_name).delete(0)
+            primary = sys.exception()
+            try:
+                _cleanup(domain, cast("_Pool", pool), overlay_name)
+            except AssertionError as cleanup_error:
+                if isinstance(primary, Exception):
+                    raise ExceptionGroup(
+                        "remote metadata proof and cleanup both failed", [primary, cleanup_error]
+                    ) from None
+                raise
