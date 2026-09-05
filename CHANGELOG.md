@@ -1986,6 +1986,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound authority job discovery
 - Isolate repair transactions
 - Count committed repair jobs
+- Make guest restorecon optional
 
 ### Security
 
