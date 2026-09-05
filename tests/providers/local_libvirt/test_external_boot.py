@@ -3906,17 +3906,13 @@ def test_activate_never_defines_a_target_xml_substituted_on_disk(tmp_path: Path)
     assert [action for action in host.actions if action.startswith("define:")] == []
 
 
-def test_finalization_refuses_a_directory_whose_recovery_record_was_never_unlinked(
+def test_finalization_continues_a_matching_recovery_record_left_by_publication(
     tmp_path: Path,
 ) -> None:
     """`publish_tombstone` writes the tombstone and *then* unlinks `intent.json`.
 
-    A crash between those two writes leaves both files present. `cleanup_complete` reports
-    True for that directory, so `LocalLibvirtExternalBoot.cleanup` short-circuits without
-    completing the unlink — and finalization then refuses, because the directory holds more
-    than the tombstone. No fake can carry this precondition, so it is pinned here against the
-    real store. The authority adapter must not finalize in this state; it asks
-    `cleanup_is_accounted` first for exactly this reason.
+    A crash between those two writes leaves both files present. Accounting remains read-only,
+    while proof-gated finalization validates and completes the exact producer transition.
     """
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
@@ -3947,8 +3943,159 @@ def test_finalization_refuses_a_directory_whose_recovery_record_was_never_unlink
             journal_digest="sha256:" + "4" * 64,
             phase="mutation-started",
         )
-        with pytest.raises(ValueError, match="unexpected payload"):
-            store.finalize_tombstone(reference, point, proof)
+        store.finalize_tombstone(reference, point, proof)
+
+    assert not (root / name).exists()
+
+
+def _tombstone_residue_fixture(
+    root: Path,
+    *,
+    intent: bool = True,
+    preparation: bool = True,
+) -> tuple[OpaqueProviderRef, RecoveryPoint, FinalizeCleanupProof, Path]:
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    authority = OpaqueProviderRef(ref="authority/current")
+    materialization = _materialization().model_copy(
+        update={
+            "ownership": external_boot_module.ActivationOwnership(
+                system_id=metadata.binding.system_id,
+                run_id=metadata.binding.run_id,
+            ),
+            "plan_identity": metadata.plan_identity,
+        }
+    )
+    prepared = ExternalBootPreparationObservation(
+        state="prepared",
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        authority=authority,
+        operation_identity="prepare-operation",
+        materialization=materialization,
+        recovery_point=point.model_copy(
+            update={"materialization_identity": materialization.identity}
+        ),
+    )
+    metadata = metadata.model_copy(update={"materialization_identity": materialization.identity})
+    point = _point(metadata)
+    prepared = prepared.model_copy(update={"recovery_point": point})
+    materialized = prepared.model_copy(update={"state": "materialized", "recovery_point": None})
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_preparation(materialized)
+        store.publish_preparation(prepared)
+        directory = root / recovery_directory_name(reference, metadata.binding)
+        intent_bytes = (directory / "intent.json").read_bytes()
+        preparation_bytes = (directory / "preparation-result.json").read_bytes()
+        store.publish_tombstone(
+            reference,
+            metadata.binding,
+            metadata,
+            LocalLibvirtExternalBoot.point_digest(point),
+        )
+    if intent:
+        (directory / "intent.json").write_bytes(intent_bytes)
+        (directory / "intent.json").chmod(0o600)
+    if preparation:
+        (directory / "preparation-result.json").write_bytes(preparation_bytes)
+        (directory / "preparation-result.json").chmod(0o600)
+    proof = FinalizeCleanupProof(
+        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        binding=point.binding,
+        operation_id="cleanup-operation",
+        attempt_id="00000000-0000-0000-0000-000000000005",
+        journal_sequence=1,
+        journal_digest="sha256:" + "4" * 64,
+        phase="mutation-started",
+    )
+    return reference, point, proof, directory
+
+
+def test_cleanup_accounting_is_read_only_for_interrupted_publication(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    reference, point, _proof, directory = _tombstone_residue_fixture(root)
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.cleanup_complete(reference, point) is True
+
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+@pytest.mark.parametrize("residual", ["intent.json", "preparation-result.json"])
+def test_finalization_retries_each_residual_unlink_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    residual: str,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    reference, point, proof, directory = _tombstone_residue_fixture(root)
+    real_unlink = os.unlink
+    interrupted = False
+
+    def interrupt_after_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal interrupted
+        real_unlink(path, dir_fd=dir_fd)
+        if path == residual and not interrupted:
+            interrupted = True
+            raise OSError("injected interruption after residual unlink")
+
+    monkeypatch.setattr(os, "unlink", interrupt_after_unlink)
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises(OSError, match="injected interruption"),
+    ):
+        store.finalize_tombstone(reference, point, proof)
+    assert residual not in {path.name for path in directory.iterdir()}
+
+    with RecoveryMetadataStore(root) as store:
+        store.finalize_tombstone(reference, point, proof)
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["unknown", "malformed", "changed", "changed-preparation", "symlink", "non-private"],
+)
+def test_finalization_refuses_untrusted_tombstone_residue(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    reference, point, proof, directory = _tombstone_residue_fixture(root)
+    intent = directory / "intent.json"
+    if corruption == "unknown":
+        (directory / "foreign").write_bytes(b"unowned")
+    elif corruption == "malformed":
+        intent.write_bytes(b'{"schema":')
+    elif corruption == "changed":
+        changed = _metadata("recovered").model_copy(update={"plan_identity": "sha256:" + "e" * 64})
+        intent.write_bytes(external_boot_module._metadata_bytes(changed))
+    elif corruption == "changed-preparation":
+        intent.unlink()
+        preparation = directory / "preparation-result.json"
+        payload = json.loads(preparation.read_text())
+        payload["prepare"]["recovery_point"]["source_state"]["definition"] = "sha256:" + "e" * 64
+        preparation.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    elif corruption == "symlink":
+        intent.unlink()
+        intent.symlink_to(directory / "tombstone.json")
+    else:
+        intent.chmod(0o644)
+    before = sorted(path.name for path in directory.iterdir())
+
+    with (
+        RecoveryMetadataStore(root) as store,
+        pytest.raises((OSError, ValueError, ValidationError)),
+    ):
+        store.finalize_tombstone(reference, point, proof)
+
+    assert sorted(path.name for path in directory.iterdir()) == before
+    assert (directory / "tombstone.json").is_file()
 
 
 def test_target_projection_digest_still_measures_projection_inputs() -> None:

@@ -1,4 +1,4 @@
-"""Local-libvirt external-boot recovery state machine (ADR-0586)."""
+"""Local-libvirt external-boot recovery state machine (ADRs 0586, 0601)."""
 
 from __future__ import annotations
 
@@ -2183,10 +2183,17 @@ class RecoveryMetadataStore:
             raise ValueError("cleanup tombstone does not match recovery point")
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
-            if os.listdir(directory_fd) != [_TOMBSTONE_NAME]:
+            entries = set(os.listdir(directory_fd))
+            allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME}
+            if entries - allowed:
                 raise ValueError("cleanup tombstone directory contains unexpected payload")
             if self._read_tombstone(directory_fd) != expected:
                 raise ValueError("cleanup tombstone changed before finalization")
+            self._validate_tombstone_residue(directory_fd, entries, expected)
+            for residual in (_INTENT_NAME, _PREPARATION_NAME):
+                if residual in entries:
+                    os.unlink(residual, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
             os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
             os.fsync(directory_fd)
         finally:
@@ -2198,6 +2205,41 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return
         raise ValueError("cleanup tombstone remained after finalization")
+
+    def _validate_tombstone_residue(
+        self,
+        directory_fd: int,
+        entries: set[str],
+        expected: CleanupTombstoneV1,
+    ) -> None:
+        point = expected.recovery_point
+        if _INTENT_NAME in entries:
+            metadata = self._read(directory_fd)
+            recovered = RecoveryPoint(
+                binding=metadata.binding,
+                plan_identity=metadata.plan_identity,
+                materialization_identity=metadata.materialization_identity,
+                recovery_ref=point.recovery_ref,
+                source_state=metadata.source_state,
+                target_state=metadata.target_state,
+            )
+            if metadata.phase != "recovered" or recovered != point:
+                raise ValueError("cleanup intent does not match tombstone recovery point")
+        if _PREPARATION_NAME not in entries:
+            return
+        receipts = self._read_preparation(directory_fd)
+        for receipt in (receipts.materialize, receipts.prepare):
+            if receipt is None:
+                continue
+            materialization = receipt.materialization
+            if (
+                receipt.binding != point.binding
+                or receipt.plan_identity != point.plan_identity
+                or materialization is None
+                or materialization.identity != point.materialization_identity
+                or (receipt.recovery_point is not None and receipt.recovery_point != point)
+            ):
+                raise ValueError("cleanup preparation does not match tombstone recovery point")
 
     def _open_or_create_partial(self, name: str) -> int:
         try:
@@ -2228,15 +2270,19 @@ class RecoveryMetadataStore:
             return None
         try:
             try:
-                data = _read_private_file(directory_fd, _PREPARATION_NAME)
+                return self._read_preparation(directory_fd)
             except FileNotFoundError:
                 return None
-            receipts = LocalPreparationReceiptsV1.model_validate_json(data)
-            if _preparation_bytes(receipts) != data:
-                raise ValueError("preparation result is not canonical JSON")
-            return receipts
         finally:
             os.close(directory_fd)
+
+    @staticmethod
+    def _read_preparation(directory_fd: int) -> LocalPreparationReceiptsV1:
+        data = _read_private_file(directory_fd, _PREPARATION_NAME)
+        receipts = LocalPreparationReceiptsV1.model_validate_json(data)
+        if _preparation_bytes(receipts) != data:
+            raise ValueError("preparation result is not canonical JSON")
+        return receipts
 
     def _try_read(self, name: str) -> LocalRecoveryMetadataV1 | None:
         try:
