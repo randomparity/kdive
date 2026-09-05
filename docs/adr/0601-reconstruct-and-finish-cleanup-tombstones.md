@@ -1,8 +1,8 @@
-# ADR-0601: Reconstruct and finish cleanup tombstones
+# 0601 — Reconstruct and finish cleanup tombstones
 
 ## Status
 
-Accepted
+Accepted (2026-09-05)
 
 ## Context
 
