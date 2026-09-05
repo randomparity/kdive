@@ -40,8 +40,10 @@ Verification:
   sibling shape fails the grouped-root assertion. Green command:
   `just test-verbose tests/providers/test_libvirt_xml.py tests/providers/remote_libvirt/lifecycle`.
 - Mode: focused-test. Contract: ownership admission rejects changed pool, volume, and path. Test:
-  `test_admission_rejects_a_source_that_is_not_the_owned_baseline`. Expected red: the new wrong-
-  volume case is not exercised. Green command:
+  `test_admission_rejects_a_source_that_is_not_the_owned_baseline`. Baseline characterization:
+  the existing comparison already rejects a changed volume; add the explicit regression and
+  verify it bites by temporarily removing the volume comparison, observing failure, and reverting
+  that controlled fault. Green command:
   `just test-verbose tests/providers/remote_libvirt/lifecycle/test_external_boot.py`.
 - Mode: focused-test. Contract: namespace-stripped grouped metadata remains authoritative and
   legacy standalone System metadata remains reapable without storage authority. Tests: remote
