@@ -35,6 +35,7 @@ def _set_remote_companions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://s3.example:9000")
     monkeypatch.setenv("KDIVE_S3_BUCKET", "kdive-artifacts")
     monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", "http://127.0.0.1:9466/metrics")
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_SSH", "operator@host.example")
 
 
 def test_throwaway_absent_when_rootfs_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,6 +353,15 @@ def test_remote_misconfigured_when_reconciler_unset(monkeypatch: pytest.MonkeyPa
     assert "KDIVE_LIVE_VM_REMOTE_RECONCILER" in result.reason
 
 
+def test_remote_misconfigured_when_ssh_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_SSH", raising=False)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_LIVE_VM_REMOTE_SSH" in result.reason
+
+
 def test_remote_available_resolves_full_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
     _set_remote_companions(monkeypatch)
@@ -363,6 +373,7 @@ def test_remote_available_resolves_full_contract(monkeypatch: pytest.MonkeyPatch
     assert result.contract.s3_endpoint_url == "http://s3.example:9000"
     assert result.contract.s3_bucket == "kdive-artifacts"
     assert result.contract.reconciler == "http://127.0.0.1:9466/metrics"
+    assert result.contract.ssh_destination == "operator@host.example"
 
 
 def test_remote_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,6 +388,7 @@ def test_remote_fails_loud_when_misconfigured(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
     monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", raising=False)
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_SSH", raising=False)
     with pytest.raises(pytest.fail.Exception):
         require_live_vm_remote()
 

@@ -55,6 +55,7 @@ LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
 LIVE_VM_REMOTE_URI_ENV = "KDIVE_LIVE_VM_REMOTE_URI"
 LIVE_VM_REMOTE_BASE_IMAGE_ENV = "KDIVE_LIVE_VM_REMOTE_BASE_IMAGE"
 LIVE_VM_REMOTE_RECONCILER_ENV = "KDIVE_LIVE_VM_REMOTE_RECONCILER"
+LIVE_VM_REMOTE_SSH_ENV = "KDIVE_LIVE_VM_REMOTE_SSH"
 _REMOTE_TLS_SCHEME = "qemu+tls://"
 
 # The object-store env a provisioned-System live run needs. Verified against
@@ -128,6 +129,7 @@ class RemoteContract:
     s3_endpoint_url: str
     s3_bucket: str
     reconciler: str
+    ssh_destination: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,9 +299,11 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
         )
     base_image = os.environ.get(LIVE_VM_REMOTE_BASE_IMAGE_ENV)
     reconciler = os.environ.get(LIVE_VM_REMOTE_RECONCILER_ENV)
+    ssh_destination = os.environ.get(LIVE_VM_REMOTE_SSH_ENV)
     companions = {
         LIVE_VM_REMOTE_BASE_IMAGE_ENV: base_image,
         LIVE_VM_REMOTE_RECONCILER_ENV: reconciler,
+        LIVE_VM_REMOTE_SSH_ENV: ssh_destination,
         **{name: os.environ.get(name) for name in _S3_REQUIRED_ENV},
     }
     missing = [name for name, value in companions.items() if not value]
@@ -315,6 +319,7 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
         )
     assert base_image is not None
     assert reconciler is not None
+    assert ssh_destination is not None
     return EnvResolution(
         LiveVmEnvState.AVAILABLE,
         RemoteContract(
@@ -323,6 +328,7 @@ def resolve_remote_contract() -> EnvResolution[RemoteContract]:
             s3_endpoint_url=companions["KDIVE_S3_ENDPOINT_URL"] or "",
             s3_bucket=companions["KDIVE_S3_BUCKET"] or "",
             reconciler=reconciler,
+            ssh_destination=ssh_destination,
         ),
     )
 
