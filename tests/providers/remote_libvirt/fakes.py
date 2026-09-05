@@ -295,6 +295,10 @@ class FakeStoragePool:
         except KeyError as exc:
             raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL) from exc
 
+    def refresh(self, flags: int = 0) -> int:
+        del flags
+        return 0
+
     def listVolumes(self) -> list[str]:  # noqa: N802 - libvirt binding name
         return list(self._volumes)
 

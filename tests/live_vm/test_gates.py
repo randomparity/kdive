@@ -35,6 +35,7 @@ def _set_remote_companions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://s3.example:9000")
     monkeypatch.setenv("KDIVE_S3_BUCKET", "kdive-artifacts")
     monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", "http://127.0.0.1:9466/metrics")
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_SSH", "operator@host.example")
 
 
 def test_throwaway_absent_when_rootfs_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:

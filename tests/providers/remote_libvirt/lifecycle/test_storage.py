@@ -33,13 +33,27 @@ class _Volume:
         capacity: int = 10 * 2**30,
         pool: _Pool | None = None,
         delete_error: libvirt.libvirtError | None = None,
+        backing_path: str | None = None,
+        xml: str | None = None,
+        path_error: libvirt.libvirtError | None = None,
+        xml_error: libvirt.libvirtError | None = None,
+        owner_id: int = 64055,
+        group_id: int = 108,
     ) -> None:
         self.name = name
         self.capacity = capacity
         self.pool = pool
         self.delete_error = delete_error
+        self.backing_path = backing_path
+        self.xml = xml
+        self.path_error = path_error
+        self.xml_error = xml_error
+        self.owner_id = owner_id
+        self.group_id = group_id
 
     def path(self) -> str:
+        if self.path_error is not None:
+            raise self.path_error
         return f"/pool/{self.name}"
 
     def info(self) -> list[int]:
@@ -54,6 +68,23 @@ class _Volume:
         self.pool.deleted.append(self.name)
         return 0
 
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+        del flags
+        if self.xml_error is not None:
+            raise self.xml_error
+        if self.xml is not None:
+            return self.xml
+        backing = (
+            ""
+            if self.backing_path is None
+            else (f"<backingStore><path>{self.backing_path}</path></backingStore>")
+        )
+        return (
+            f"<volume><name>{self.name}</name><target><permissions>"
+            f"<owner>{self.owner_id}</owner><group>{self.group_id}</group>"
+            f"</permissions></target>{backing}</volume>"
+        )
+
 
 class _Pool:
     def __init__(
@@ -62,10 +93,12 @@ class _Pool:
         *,
         lookup_error: libvirt.libvirtError | None = None,
         create_error: libvirt.libvirtError | None = None,
+        refresh_error: libvirt.libvirtError | None = None,
     ) -> None:
         self.volumes = volumes if volumes is not None else {}
         self.lookup_error = lookup_error
         self.create_error = create_error
+        self.refresh_error = refresh_error
         self.created_xml: list[str] = []
         self.deleted: list[str] = []
         for volume in self.volumes.values():
@@ -85,9 +118,16 @@ class _Pool:
         self.created_xml.append(xml)
         name = fromstring(xml).findtext("./name")
         assert name is not None
-        volume = _Volume(name, pool=self)
+        backing_path = fromstring(xml).findtext("./backingStore/path")
+        volume = _Volume(name, pool=self, backing_path=backing_path)
         self.volumes[name] = volume
         return volume
+
+    def refresh(self, flags: int = 0) -> int:
+        del flags
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        return 0
 
 
 class _Conn:
@@ -138,11 +178,21 @@ def test_lookup_pool_maps_unexpected_libvirt_error_to_infrastructure() -> None:
 
 def test_ensure_overlay_reuses_existing_overlay() -> None:
     overlay_name = overlay_volume_name(_SYSTEM_ID)
-    pool = _Pool({overlay_name: _Volume(overlay_name)})
+    pool = _Pool(
+        {
+            _BASE_VOLUME: _Volume(_BASE_VOLUME),
+            overlay_name: _Volume(overlay_name, backing_path=f"/pool/{_BASE_VOLUME}"),
+        }
+    )
 
     overlay = ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
 
-    assert overlay == PreparedOverlay(name=overlay_name, created=False)
+    assert overlay == PreparedOverlay(
+        name=overlay_name,
+        path=f"/pool/{overlay_name}",
+        backing_path=f"/pool/{_BASE_VOLUME}",
+        created=False,
+    )
     assert pool.created_xml == []
 
 
@@ -152,13 +202,21 @@ def test_ensure_overlay_creates_overlay_from_base_volume() -> None:
 
     overlay = ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
 
-    assert overlay == PreparedOverlay(name=overlay_volume_name(_SYSTEM_ID), created=True)
+    assert overlay == PreparedOverlay(
+        name=overlay_volume_name(_SYSTEM_ID),
+        path=f"/pool/{overlay_volume_name(_SYSTEM_ID)}",
+        backing_path=f"/pool/{_BASE_VOLUME}",
+        created=True,
+    )
     [xml] = pool.created_xml
     root = fromstring(xml)
     assert root.tag == "volume"
     assert root.findtext("./name") == overlay.name
     assert root.findtext("./capacity") == "42"
     assert root.findtext("./backingStore/path") == "/pool/kdive-base-fedora-42.qcow2"
+    assert root.findtext("./target/permissions/owner") == "64055"
+    assert root.findtext("./target/permissions/group") == "108"
+    assert root.findtext("./target/permissions/mode") == "0600"
 
 
 def test_ensure_overlay_missing_base_volume_is_configuration_error() -> None:
@@ -187,12 +245,85 @@ def test_ensure_overlay_create_error_is_provisioning_failure() -> None:
     assert str(caught.value) == "could not create the per-System overlay volume"
 
 
+def test_ensure_overlay_refreshes_before_lookup() -> None:
+    pool = _Pool({_BASE_VOLUME: _Volume(_BASE_VOLUME)})
+    pool.refresh_error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    with pytest.raises(CategorizedError) as caught:
+        ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert pool.created_xml == []
+
+
+def test_ensure_overlay_rejects_chained_base_before_mutation() -> None:
+    pool = _Pool({_BASE_VOLUME: _Volume(_BASE_VOLUME, backing_path="/pool/parent.qcow2")})
+
+    with pytest.raises(CategorizedError) as caught:
+        ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert pool.created_xml == []
+
+
+@pytest.mark.parametrize("fault", ["path", "xml"])
+def test_ensure_overlay_maps_base_metadata_rpc_failure_to_infrastructure(fault: str) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    base = _Volume(
+        _BASE_VOLUME,
+        path_error=error if fault == "path" else None,
+        xml_error=error if fault == "xml" else None,
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        ensure_overlay(_Pool({_BASE_VOLUME: base}), _BASE_VOLUME, _SYSTEM_ID)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"volume": _BASE_VOLUME}
+
+
+def test_ensure_overlay_rejects_reused_overlay_with_wrong_backing() -> None:
+    overlay_name = overlay_volume_name(_SYSTEM_ID)
+    pool = _Pool(
+        {
+            _BASE_VOLUME: _Volume(_BASE_VOLUME),
+            overlay_name: _Volume(overlay_name, backing_path="/pool/other.qcow2"),
+        }
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert overlay_name in pool.volumes
+
+
+def test_ensure_overlay_deletes_created_overlay_when_readback_is_invalid() -> None:
+    class _InvalidReadbackPool(_Pool):
+        def createXML(self, xml: str, flags: int = 0) -> _Volume:  # noqa: N802
+            volume = super().createXML(xml, flags)
+            volume.xml = "<volume>"
+            return volume
+
+    pool = _InvalidReadbackPool({_BASE_VOLUME: _Volume(_BASE_VOLUME)})
+
+    with pytest.raises(CategorizedError) as caught:
+        ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert overlay_volume_name(_SYSTEM_ID) not in pool.volumes
+
+
 def test_cleanup_overlay_only_deletes_created_overlay() -> None:
     overlay_name = overlay_volume_name(_SYSTEM_ID)
     pool = _Pool({overlay_name: _Volume(overlay_name), "existing": _Volume("existing")})
 
-    cleanup_overlay_if_created(pool, PreparedOverlay(overlay_name, created=True))
-    cleanup_overlay_if_created(pool, PreparedOverlay("existing", created=False))
+    cleanup_overlay_if_created(
+        pool, PreparedOverlay(overlay_name, f"/pool/{overlay_name}", "/pool/base", created=True)
+    )
+    cleanup_overlay_if_created(
+        pool, PreparedOverlay("existing", "/pool/existing", "/pool/base", created=False)
+    )
 
     assert overlay_name not in pool.volumes
     assert "existing" in pool.volumes
