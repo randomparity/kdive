@@ -35,6 +35,8 @@ class _Volume:
         delete_error: libvirt.libvirtError | None = None,
         backing_path: str | None = None,
         xml: str | None = None,
+        path_error: libvirt.libvirtError | None = None,
+        xml_error: libvirt.libvirtError | None = None,
     ) -> None:
         self.name = name
         self.capacity = capacity
@@ -42,8 +44,12 @@ class _Volume:
         self.delete_error = delete_error
         self.backing_path = backing_path
         self.xml = xml
+        self.path_error = path_error
+        self.xml_error = xml_error
 
     def path(self) -> str:
+        if self.path_error is not None:
+            raise self.path_error
         return f"/pool/{self.name}"
 
     def info(self) -> list[int]:
@@ -60,6 +66,8 @@ class _Volume:
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
         del flags
+        if self.xml_error is not None:
+            raise self.xml_error
         if self.xml is not None:
             return self.xml
         backing = (
@@ -241,6 +249,22 @@ def test_ensure_overlay_rejects_chained_base_before_mutation() -> None:
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert pool.created_xml == []
+
+
+@pytest.mark.parametrize("fault", ["path", "xml"])
+def test_ensure_overlay_maps_base_metadata_rpc_failure_to_infrastructure(fault: str) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    base = _Volume(
+        _BASE_VOLUME,
+        path_error=error if fault == "path" else None,
+        xml_error=error if fault == "xml" else None,
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        ensure_overlay(_Pool({_BASE_VOLUME: base}), _BASE_VOLUME, _SYSTEM_ID)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"volume": _BASE_VOLUME}
 
 
 def test_ensure_overlay_rejects_reused_overlay_with_wrong_backing() -> None:

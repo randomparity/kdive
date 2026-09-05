@@ -191,9 +191,10 @@ This drives the remote-libvirt family (a sub-selection of `live_vm`, also run by
 to the staged base-image volume name, `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`
 to the **guest-routable** object store, and `KDIVE_LIVE_VM_REMOTE_RECONCILER` to a
 presence marker for a running reconciler (its metrics endpoint, or `1`). Standing
-up the host also requires `KDIVE_LIVE_VM_REMOTE_SSH` as the noninteractive SSH destination for
-the same host. The account must have key-based SSH and passwordless `sudo` for the fixed proof
-script. The proof creates only unique scratch volumes beside the staged base, inspects the
+The AppArmor carrier additionally uses `KDIVE_LIVE_VM_REMOTE_SSH` as the noninteractive SSH
+destination for the same host. It skips when that carrier-specific variable is unset. Once set,
+the account must have key-based SSH and passwordless `sudo` for the fixed proof script; failures
+are red. The proof creates only unique scratch volumes beside the staged base, inspects the
 generated AppArmor profile, and removes its own artifacts; it never modifies the base.
 up the host — mutual TLS, the staged base volume, the gdbstub-port ACL, and
 object-store reachability — is the [remote live-stack runbook](remote-live-stack.md).

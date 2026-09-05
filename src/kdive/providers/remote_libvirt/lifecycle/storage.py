@@ -154,10 +154,16 @@ def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> Prep
                 details={"base_image_volume": base_volume},
             ) from exc
         raise _infra("looking up base image volume", volume=base_volume) from exc
-    backing_path = base.path()
+    try:
+        backing_path = base.path()
+    except libvirt.libvirtError as exc:
+        raise _infra("resolving base image volume path", volume=base_volume) from exc
     _require_backing_path(base, expected=None, volume=base_volume)
     if _volume_exists(pool, name):
-        overlay = pool.storageVolLookupByName(name)
+        try:
+            overlay = pool.storageVolLookupByName(name)
+        except libvirt.libvirtError as exc:
+            raise _infra("reading existing overlay volume", volume=name) from exc
         _require_backing_path(overlay, expected=backing_path, volume=name)
         return PreparedOverlay(name=name, backing_path=backing_path, created=False)
     created: Volume | None = None
@@ -187,8 +193,12 @@ def _require_backing_path(item: _InspectableVolume, *, expected: str | None, vol
     from kdive.providers.remote_libvirt.lifecycle.xml import volume_backing_path
 
     try:
-        actual = volume_backing_path(item.XMLDesc())
-    except (libvirt.libvirtError, ValueError) as exc:
+        volume_xml = item.XMLDesc()
+    except libvirt.libvirtError as exc:
+        raise _infra("reading storage volume metadata", volume=volume) from exc
+    try:
+        actual = volume_backing_path(volume_xml)
+    except ValueError as exc:
         raise CategorizedError(
             "remote storage volume has invalid backing metadata",
             category=ErrorCategory.CONFIGURATION_ERROR,

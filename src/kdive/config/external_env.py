@@ -180,7 +180,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         None,
         "Noninteractive SSH destination for the live_vm_remote AppArmor proof (#2236, ADR-0597). "
         "It must identify the same host as KDIVE_LIVE_VM_REMOTE_URI and permit passwordless sudo "
-        "for the fixed test script. Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
+        "for the fixed test script. Unset means that carrier skips.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_VM_VMCORE",
