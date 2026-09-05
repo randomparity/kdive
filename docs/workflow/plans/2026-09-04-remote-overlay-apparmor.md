@@ -20,8 +20,8 @@ provisioning.
 - Do not add a dependency, migration, host-wide AppArmor rule, or native ppc64le proof.
 - Guardrails: `just lint`, `just type`, `just test-ansible`, focused pytest, and `just ci`.
 
-Expected implementation size: 130–220 changed lines (M) — derived from pool refresh, remote
-metadata/readback validation, the storage carrier, XML threading, fakes, and focused regressions.
+Expected implementation size: 250–400 changed lines (M) — derived from pool refresh, remote
+metadata/readback validation, XML threading, fakes, and the bounded SSH-backed live proof.
 
 ## Task 1 — Bind refreshed remote overlays to their observed base
 
@@ -89,7 +89,18 @@ Start retry and teardown remain unchanged.
 
 ## Task 3 — Prove Ubuntu/AppArmor behavior and ship
 
-Files: add `tests/live_vm/test_remote_overlay_apparmor.py`; no host policy file is expected.
+Files: add `tests/live_vm/test_remote_overlay_apparmor.py` and document its opt-in control endpoint
+in `tests/live_vm/__init__.py` and `docs/operating/runbooks/live-testing.md`; no host policy file is
+expected.
+
+Interfaces:
+
+- `KDIVE_LIVE_VM_REMOTE_SSH` names the operator-provided SSH destination paired with the existing
+  remote libvirt URI. Its value is never logged or persisted.
+- The live fixture runs fixed argv through `ssh -- DEST sudo -n -- COMMAND...`; it accepts no shell
+  fragment and redacts stdout/stderr before assertion output.
+- A unique test prefix owns negative chain files, the decoy, overlay, and domain. The configured
+  staged catalog base is borrowed read-only and excluded from cleanup.
 
 Verification (`focused-test`): on the authorized clean native Ubuntu host, create test-owned chained
 operator-style and pre-existing supplied-style base volumes outside libvirt metadata, then call
@@ -103,17 +114,23 @@ domain, volume, or file.
 
 Implementation steps:
 
-1. Add the native `live_vm` test using the production storage/XML functions and a fixture whose
-   cleanup owns every test domain, volume, and file; gate it on the existing remote-live contract.
-2. Run both negative remote-byte cases and assert the pool contains no derived overlay after each
+1. Add the native `live_vm` test using production storage/XML functions. Gate on both the existing
+   remote-live contract and `KDIVE_LIVE_VM_REMOTE_SSH`; missing opt-in skips, while any failure after
+   configuration is red. Probe a unique SSH-created marker through libvirt to bind both channels to
+   one host before the test.
+2. Implement fixed-argv SSH helpers with noninteractive sudo and redacted errors. The cleanup
+   fixture owns only unique negative files, decoy, overlay, and domain; it never touches the staged
+   catalog base.
+3. Run both negative remote-byte cases and assert the pool contains no derived overlay after each
    rejection.
-3. Run the standalone AppArmor boot plus exact positive and decoy/wildcard-negative profile checks.
-4. Run `just test-ansible` to prove repository host provisioning stays green.
-5. Inspect and retain only redacted live success/failure facts.
-6. Run `just format`, stage intended paths, run `prek run`, re-add only those paths if rewritten,
+4. Boot from the configured staged catalog base, then run exact positive and
+   decoy/wildcard-negative generated-profile checks; leave the catalog base unchanged.
+5. Run `just test-ansible` to prove repository host provisioning stays green.
+6. Inspect and retain only redacted live success/failure facts.
+7. Run `just format`, stage intended paths, run `prek run`, re-add only those paths if rewritten,
    and commit any hook-only correction separately.
-7. Run focused tests, `just lint`, `just type`, and bare
+8. Run focused tests, `just lint`, `just type`, and bare
    `just ci > /tmp/kdive-2236-ci.log 2>&1 < /dev/null`.
 
 Acceptance: the clean host starts the production-shaped domain under AppArmor, every gate is green,
-and test-owned live artifacts are absent afterward.
+the staged catalog base remains byte-identical, and test-owned live artifacts are absent afterward.

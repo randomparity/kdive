@@ -86,6 +86,25 @@ the host path.
 Native ppc64le execution is excluded by the campaign. No Ansible policy change is expected: the
 host's standard helper is the mechanism under test.
 
+### Native proof control topology
+
+The committed `live_vm` test pairs the existing remote libvirt TLS configuration with an explicit
+operator-provided SSH control endpoint for the same host. SSH is used only to create/remove
+test-owned pool files, query enforcing AppArmor state, and read the generated per-domain `.files`
+profile through bounded argv commands. The test first creates a unique marker through SSH and
+requires that exact volume to become visible through the libvirt connection after refresh; a
+mismatched host therefore fails before the proof.
+
+An absent remote-live configuration or absent control-endpoint environment variable skips under the
+existing opt-in live-test rule. Once both are configured, unreachable SSH, missing noninteractive
+`sudo`, disabled AppArmor, a cross-host mismatch, or cleanup failure is a test failure, never a
+skip. Commands and assertions redact the endpoint and host paths from pytest messages.
+
+The positive boot uses the already staged catalog base selected by the operator. That base is
+immutable proof input and is never deleted or rewritten. The test owns and cleans only its uniquely
+named negative base/backing fixtures, positive overlay/domain, and decoy. It does not manufacture a
+replacement base whose bootability would be unrelated to the catalog acceptance criterion.
+
 ## Threat model
 
 ### Boundary inventory
