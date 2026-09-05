@@ -1,7 +1,7 @@
 # Plan — commit module-attempt intent before worker volume creation
 
-Goal: provide the closed request carrier, server commit service, worker read-only verifier, and
-verified authorization type required before #2170 can create either attempt volume.
+Goal: provide the closed request carrier, server commit service, and worker read-only verifier that
+awaits #2170's bounded two-volume consumer under the verification lock.
 
 Spec: `docs/workflow/specs/2026-09-05-module-attempt-obligation-receipt-design.md`.
 Governing decisions: ADR-0588 and ADR-0605.
@@ -24,17 +24,16 @@ service module, one small repository read method, and ~180 lines of focused unit
 
 | Path | Action | Responsibility |
 |---|---|---|
-| `src/kdive/domain/remote_module_attempt_preparation.py` | create | strict canonical receipt/request models and verified authorization value |
+| `src/kdive/domain/remote_module_attempt_preparation.py` | create | strict canonical receipt/request models |
 | `src/kdive/db/remote_module_attempt_obligations.py` | modify | exact open-state read and automatic mutation-discharge fence |
 | `src/kdive/services/remote_module_attempt_preparation.py` | create | server commit-before-return and worker verification services |
-| `tests/domain/test_remote_module_attempt_preparation.py` | create | closed/canonical model and typed-authorization contracts |
+| `tests/domain/test_remote_module_attempt_preparation.py` | create | closed/canonical model contracts |
 | `tests/services/test_remote_module_attempt_preparation.py` | create | real-role commit, replay, lock lifetime, failure, and verification behavior |
 | `tests/db/external_boot_authority_support.py` | consume unchanged | reusable isolated server/worker login fixture |
 
 ## Task 1 — implement the contract models with TDD
 
-Verification: `focused-test` for the closed canonical receipt/request and typed authorization
-contracts. Red command:
+Verification: `focused-test` for the closed canonical receipt/request contracts. Red command:
 `uv run python -m pytest tests/domain/test_remote_module_attempt_preparation.py -q`; expected red
 failure: import/collection fails because the new domain module does not exist. Green command: the
 same command; expected green result: every strict-shape, canonical-byte, bound, and construction
@@ -42,8 +41,7 @@ case passes.
 
 Create the domain test file first. Cover canonical request and receipt round trips; exact version,
 UUID, nonce, and field shape; noncanonical ordering/trailing bytes; and the 4,096-byte decoder
-bound. Assert `VerifiedModuleAttemptAuthorization` cannot be constructed without the module-private
-witness and that its public accessor yields only the exact `ModuleAttempt`.
+bound. Assert neither model is accepted as worker verification or storage-mutation authority.
 
 Run:
 
@@ -53,9 +51,9 @@ uv run python -m pytest tests/domain/test_remote_module_attempt_preparation.py -
 
 Expect collection/import failure before implementation. Then create the domain values:
 
-Create `remote_module_attempt_preparation.py` with one private canonical base, the two versioned
-models, and the verified authorization value/factory. Reuse `ModuleAttempt` rather than defining a
-second attempt tuple. Keep error messages structural and free of field values.
+Create `remote_module_attempt_preparation.py` with one private canonical base and the two versioned
+models. Reuse `ModuleAttempt` rather than defining a second attempt tuple. Keep error messages
+structural and free of field values.
 
 Run the green command. Prove the new tests bite by temporarily accepting one unknown field, observe
 the unknown-field test fail, restore strict config, and rerun green.
@@ -64,7 +62,7 @@ the unknown-field test fail, restore strict config, and rerun green.
 
 Verification: `focused-test` for the repository open-state query, commit-before-return service,
 exact expected-attempt comparison, read-only worker verification, self-fenced mutation discharge,
-System-lock lifetime, redacted failures, replay, and typed authorization handoff. Red command:
+System-lock lifetime, redacted failures, replay, and awaited consumer handoff. Red command:
 `uv run python -m pytest tests/services/test_remote_module_attempt_preparation.py -q`; expected red
 failure: import/collection fails because the new service module and repository read method do not
 exist. Green command: the same command; expected green result: every real-role, transaction,
@@ -84,11 +82,13 @@ Cover:
 - worker verification succeeds only when the receipt, expected operation tuple, and open row match;
 - missing, mismatched, discharged, and unreadable state return the same redacted failure;
 - the worker role cannot insert/update the obligation; and
-- the ordinary mutation-discharge repository call cannot run until the verification context's
+- the ordinary mutation-discharge repository call cannot run until the verification service's
   two-create probe exits;
-- rollback and cancellation release the lock without yielding reusable authorization;
+- rollback, consumer exception, and cancellation release the lock without yielding reusable
+  authorization or leaving detached work;
 - a production-source inventory rejects direct mutation-discharge SQL outside the repository; and
-- only the verified value passes the production runtime gate and reaches a two-create probe once.
+- a retained attempt tuple cannot authorize a post-return operation, and the service awaits both
+  creates before returning the consumer result.
 
 Run:
 
@@ -110,12 +110,14 @@ Implement the commit and verification services:
 
 Create the service module. The server function owns `pool.connection()` and `conn.transaction()`,
 opens idempotently, confirms open state, leaves both contexts, and only then constructs/returns the
-request. The worker async context manager owns a read-only transaction, acquires
+request. The worker function owns a read-only transaction, acquires
 `advisory_xact_lock(..., LockScope.SYSTEM, expected_attempt.system_id)`, validates the typed request,
 checks exact open state, maps missing/discharged/database failures to one redacted verification
-error, and yields the verified authorization while retaining the lock. Add the production runtime
-gate beside the authorization type; #2170's helper will reuse it. Add the source inventory test to
-hold repository mediation and document privileged direct SQL as outside the trusted contract.
+error, and awaits one supplied asynchronous consumer with the validated `ModuleAttempt` while
+retaining the lock. Return only its result. Do not expose an authorization token or context manager;
+document that the consumer must perform both operations inline and may not detach background work.
+Add the source inventory test to hold repository mediation and document privileged direct SQL as
+outside the trusted contract.
 
 Run both focused test files. Use a controlled fault that constructs/returns inside a transaction
 test double before its commit marker; require the ordering assertion to fail, restore, and rerun

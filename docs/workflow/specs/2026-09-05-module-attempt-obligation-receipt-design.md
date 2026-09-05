@@ -9,7 +9,7 @@ Governing decisions: ADR-0588 (durable intent precedes every attempt volume) and
 Bridge ADR-0588's server-owned durable obligation to the worker that will create remote-module
 volumes. The server returns a dispatchable preparation request only after the obligation commit;
 the worker independently confirms that exact obligation through its read-only database authority
-before the synchronous libvirt helper can receive an authorization value.
+and awaits the bounded source-and-scratch consumer while the verification lock remains held.
 
 ## Existing boundary
 
@@ -55,32 +55,28 @@ the expected resumable residue already accepted by ADR-0588.
 
 ## Worker verification service
 
-`verified_module_attempt_preparation(pool, repository, request, expected_attempt)` is an async
-context manager. It opens a worker-role transaction, acquires the transaction-scoped advisory lock
-for `expected_attempt.system_id`, requires the receipt tuple to equal the enclosing operation's
-expected attempt, and requires that exact row's mutation obligation to remain open. It yields the
-authorization while retaining both transaction and lock; #2170 calls its synchronous helper inside
-that context, covering both creates. Missing, mismatched, discharged, or unreadable state fails
-with one redacted `ModuleAttemptObligationVerificationError`; database details and tuple values are
-not copied into the error.
+`run_verified_module_attempt_preparation(pool, repository, request, expected_attempt, consumer)`
+opens a worker-role transaction, acquires the transaction-scoped advisory lock for
+`expected_attempt.system_id`, requires the receipt tuple to equal the enclosing operation's
+expected attempt, and requires that exact row's mutation obligation to remain open. Only then does
+the service call and await `consumer(expected_attempt)`. It returns the consumer's result only
+after the awaited call finishes and the transaction exits. Missing, mismatched, discharged, or
+unreadable state fails with one redacted `ModuleAttemptObligationVerificationError`; database
+details and tuple values are not copied into the error.
 
-Success yields `VerifiedModuleAttemptAuthorization`, a separate immutable type containing the exact
-attempt. Its constructor requires a module-private witness. The production
-`require_verified_module_attempt(value: object)` gate unwraps only this type and rejects a boolean,
-callback, coroutine, request, or raw receipt. #2170's synchronous helper will call that gate once
-and use its returned attempt tuple for both volume names. The type and runtime gate prevent
-accidental bypass; the locked database read is the authority check.
-
-Exactly one locked verification context encloses the helper's single operation that creates both
-source and scratch volumes. #2170 will enter it before its first lookup/create sequence and leave it
-after both creates or failure cleanup. This issue does not implement or call libvirt.
+The consumer is one asynchronous, bounded operation supplied by #2170. It receives only the
+validated `ModuleAttempt` tuple, performs the source and scratch lookup/create sequence inline, and
+must not detach work into a task that can outlive its return. The service exposes no verified token,
+context manager, witness, or unwrapping gate. A retained attempt tuple is data rather than proof and
+cannot re-enter the consuming seam without a new database verification. This issue supplies the
+generic awaited seam and test consumer but does not implement or call libvirt.
 
 `RemoteModuleAttemptObligationRepository.discharge_mutation_obligation` acquires the same
 transaction-scoped System advisory lock before updating the row. The method already owns the only
 production mutation-discharge operation; putting the fence there makes every current and future
 caller participate without a cross-issue calling convention. A concurrent discharge waits until
-the verification context and both creates finish. Callers continue to own the transaction, so the
-repository-acquired lock survives through their commit or rollback.
+the verification-owned consumer and both creates finish. Callers continue to own the transaction,
+so the repository-acquired lock survives through their commit or rollback.
 
 The production boundary is repository-mediated access. Direct SQL by a process already holding
 the server database credential can bypass application invariants and is outside this contract, as
@@ -125,14 +121,15 @@ admitted work.
 - Closed, strict, versioned canonical models reject payload shape substitution and ambiguity.
 - The receipt binds all three attempt fields; the verifier compares and queries all three exactly.
 - Verification requires an open committed row, not receipt possession.
-- The existing System advisory lock spans verification and the complete consuming helper; the
+- The existing System advisory lock spans verification and the complete awaited consumer; the
   mutation-discharge repository method takes the same lock automatically.
 - Migration 0126 remains the enforcement for server write and worker read-only privileges; this
   change adds no grant or migration.
 - The server transaction exits before returning the request, making commit a prerequisite for
   dispatch.
 - Errors omit tuple values and database text.
-- The synchronous provider boundary receives only the verified authorization type.
+- No verified capability leaves the service; the consumer receives only the validated attempt data
+  while the service retains the lock.
 
 ### Out of scope
 
@@ -154,11 +151,12 @@ remain #2172 and #2168.
 5. Missing, mismatched, discharged, and unreadable rows fail verification with the same redacted
    error before any supplied volume-operation probe can run.
 6. A concurrent call to the ordinary mutation-discharge repository method remains blocked while
-   the verification context's two-create probe runs, then proceeds after context exit. Rollback
-   and task cancellation release the worker-held lock and leave no reusable authorization.
-7. A focused composition test calls the production runtime gate before a two-create probe. One
-   verified authorization precedes both creates, while a raw request, receipt, boolean, callback,
-   or coroutine is rejected by that exact gate. #2170 reuses it in the final libvirt helper.
+   the verification-owned two-create probe runs, then proceeds after the service returns.
+   Rollback, consumer exception, and task cancellation release the worker-held lock.
+7. Composition tests deliberately retain the consumer's `ModuleAttempt` argument and prove that it
+   cannot authorize a post-return operation. The service directly awaits the two-create probe and
+   creates no task of its own; cancellation reaches that inline probe and exposes no reusable
+   authorization value.
 8. A source inventory test rejects production mutation-discharge SQL outside the repository module
    and proves every production caller reaches the self-fencing method.
 
@@ -174,11 +172,18 @@ by the campaign and no live provider is needed for this contract-only prerequisi
 - **Sign the receipt and skip the database read.** Rejected: signature validity cannot show that
   the obligation remains open after discharge, adds key lifecycle, and duplicates the database
   authority already required by the reaper.
-- **Pass a callback or boolean into the synchronous helper.** Rejected: neither proves an
+- **Pass a callback or boolean as proof into the synchronous helper.** Rejected: neither proves an
   asynchronous transaction committed, and both are easy to invoke or forge at the wrong point.
+  The chosen consumer is not proof: the verification service invokes it only after the database
+  check and while retaining the lock.
 - **Release verification state before calling the helper.** Rejected: a concurrent terminal path
   could discharge the row before either create; the existing per-System serialization lock must
   cover both the check and its consuming operation.
+- **Yield an immutable authorization from a lock-holding context.** Rejected: the value remains
+  type-valid after context exit, rollback, or cancellation, so a caller could reuse it after the
+  lock is released. Service-owned invocation exposes no such value.
+- **Use a revocable lease token.** Rejected: invalidation and per-entry checks introduce mutable
+  state and race surface that a lexical, awaited consumer call avoids.
 - **Use an exact PostgreSQL row lock.** Rejected: all four row-lock modes require authority the
   existing select-only worker login does not hold. A narrowly granted function would add schema
   and permission surface; the self-fencing repository method uses the existing advisory mechanism.
