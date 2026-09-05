@@ -390,6 +390,7 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
     assert {
         PROVIDER_TLS_ID,
         GDBSTUB_ACL_ID,
+        "provider_authority",
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
         GUEST_ARCH_ACCEL_ID,
@@ -546,6 +547,7 @@ def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) ->
     assert unavailable_ids == {
         PROVIDER_TLS_ID,
         GDBSTUB_ACL_ID,
+        "provider_authority",
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
         GUEST_ARCH_ACCEL_ID,

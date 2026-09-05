@@ -476,7 +476,8 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
     class _FakeComposition:
         secret_registry = caller_registry
 
-        def build_provider_resolver(self) -> object:
+        def build_provider_resolver(self, *, authority_sender_factory: object) -> object:
+            assert callable(authority_sender_factory)
             return resolver
 
     def _register(
