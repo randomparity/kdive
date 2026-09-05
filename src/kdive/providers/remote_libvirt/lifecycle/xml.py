@@ -253,8 +253,8 @@ def disk_pool_strict(domain_xml: str, *, operation: str, domain: str) -> str | N
 
 
 def _disk_pool(root: ET.Element) -> str | None:
-    source = root.find("./devices/disk/source")
-    if source is not None and source.get("pool") is not None:
-        return source.get("pool")
     storage = remote_metadata_storage_identity(root)
-    return None if storage is None else storage[0]
+    if storage is not None:
+        return storage[0]
+    source = root.find("./devices/disk/source")
+    return None if source is None else source.get("pool")

@@ -50,6 +50,18 @@ def _domain_xml(pool: str = "default") -> str:
     return f"<domain><devices><disk><source pool='{pool}'/></disk></devices></domain>"
 
 
+def _domain_xml_with_storage(*, source_pool: str, metadata_pool: str) -> str:
+    return (
+        f"<domain xmlns:kdive='{KDIVE_METADATA_NS}'>"
+        "<metadata><kdive:domain>"
+        f"<kdive:system>{_SID}</kdive:system>"
+        f"<kdive:storage pool='{metadata_pool}' volume='{_OVERLAY}'/>"
+        "</kdive:domain></metadata>"
+        f"<devices><disk><source pool='{source_pool}'/></disk></devices>"
+        "</domain>"
+    )
+
+
 def _list(conn: _FakeConn) -> list[OwnedDomain]:
     # The fakes duck-type the reaper's private conn slice; cast at the seam (list invariance).
     return list_host_owned(cast("_ReaperConn", conn))
@@ -141,6 +153,18 @@ def test_teardown_reaps_the_domain_and_reclaims_its_overlay() -> None:
     assert domain.destroyed and domain.undefined
     # Overlay reclaimed from the pool the domain XML recorded, not the fallback config pool.
     assert conn.pool.deleted == [("warm-pool", _OVERLAY)]
+
+
+def test_teardown_prefers_grouped_metadata_when_disk_source_pool_diverges() -> None:
+    domain = _FakeDomain(
+        _DOMAIN,
+        xml=_domain_xml_with_storage(source_pool="changed-pool", metadata_pool="owned-pool"),
+    )
+    conn = _FakeConn(domains=[domain])
+
+    assert _teardown(conn, "fallback-pool", _DOMAIN) is True
+
+    assert conn.pool.deleted == [("owned-pool", _OVERLAY)]
 
 
 def test_teardown_uses_the_config_pool_when_the_domain_records_none() -> None:
