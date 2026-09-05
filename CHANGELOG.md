@@ -238,6 +238,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Return exact guest command line bytes
 - Inspect module attachments
 - Anchor external boot readiness
+- Verify committed module attempt intent
 
 ### Changed
 
@@ -403,6 +404,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the lock-queue report once
 - Trim the docstring AGENTS.md already carries
 - Move shared boot doubles into support modules
+- Clarify discharge SQL inventory
 
 ### Documentation
 
@@ -1254,6 +1256,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plan readiness window implementation
 - Correct readiness window design
 - Define readiness descriptor ownership
+- Design module attempt obligation receipt
+- Define obligation receipt verification evidence
+- Fence module attempt authorization lifetime
+- Fence module obligation discharge
+- Bind verification to consumer lifetime
+- Accept module attempt receipt decision
 
 ### Fixed
 
@@ -2038,6 +2046,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound identity inspection
 - Gate legacy external boot domains
 - Detect console replacement races
+- Redact module obligation failures
 
 ### Security
 
