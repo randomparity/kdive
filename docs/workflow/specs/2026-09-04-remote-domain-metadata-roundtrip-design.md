@@ -19,29 +19,35 @@ Under `<domain><metadata>`, KDIVE emits exactly one top-level element in
 </kdive:domain>
 ```
 
-The renderer builds this with ElementTree. Remote readers use shared helpers for the grouped
-System and storage fields rather than repeating paths. System parsing accepts the old standalone
-`<kdive:system>` only at the reaper metadata API boundary, where retaining discovery of existing
-domains is necessary. Full-domain XML admission requires the grouped contract.
+The renderer builds this with ElementTree. Full-domain readers use remote helpers for the grouped
+System and storage fields rather than repeating paths. The reaper's namespace-specific metadata
+API returns a namespace-stripped `<domain><system>...</system><storage ... /></domain>` fragment;
+its existing shared System parser accepts that exact form and the old standalone System element.
+Full-domain XML admission requires the grouped namespaced contract.
 
 The external-boot ownership gate accepts a file-backed overlay only when the grouped System id,
 pool, volume, and disk source path all match the requested System. A changed or missing value is a
-conflict. Teardown pool lookup uses the grouped storage field and otherwise keeps its existing
-configured-pool fallback.
+conflict. Teardown and reaping are not authority-granting admission: when a convention-owned
+legacy domain has no recorded pool, they retain the deterministic overlay-name/configured-pool
+cleanup fallback.
 
 ## Failure handling
 
 Malformed XML keeps each caller's current failure contract. Missing or divergent ownership never
-becomes inferred authority: external boot rejects it, while teardown/reaping may use their
-existing idempotent fallback paths.
+becomes inferred boot authority. Cleanup fallback can address only the deterministic overlay name
+in the configured pool.
 
 ## Verification
 
 - Unit rendering asserts one namespaced root containing both children.
 - Admission tests independently change pool, volume, and overlay path and observe `boot-disk`.
-- Parser/reaper tests retain legacy standalone System discovery without granting storage identity.
-- The native Ubuntu/libvirt carrier defines production XML, reads inactive XML back, proves both
-  children, accepts the unchanged definition, and rejects each changed storage identity.
+- Parser/reaper tests feed the exact namespace-stripped grouped fragment with a metadata id that
+  differs from the domain name and prove the metadata id wins. A separate legacy standalone case
+  remains discoverable without granting storage identity; missing-pool cleanup stays bounded.
+- `tests/live_vm/test_remote_metadata_roundtrip.py` defines production XML through the configured
+  remote URI, reads inactive XML back, proves both children, accepts the unchanged definition, and
+  rejects each changed storage identity. Its `require_live_vm_remote` gate must resolve available,
+  and cleanup must remove its domain and overlay.
 
 ## Threat model
 

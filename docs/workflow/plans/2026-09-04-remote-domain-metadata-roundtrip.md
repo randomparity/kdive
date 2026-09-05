@@ -7,8 +7,8 @@ the renderer, admission gate, teardown, and reaper aligned without changing loca
 
 Tech stack: Python 3.14, ElementTree/defusedxml, pytest, libvirt.
 
-Expected implementation size: 45–80 changed lines (S) — one renderer, two helpers, direct readers,
-and focused regressions.
+Expected implementation size: 90–140 changed lines (S) — one renderer, two parser shapes, direct
+readers, focused regressions, and a bounded live carrier.
 
 ## Global constraints
 
@@ -28,7 +28,9 @@ Files: `src/kdive/providers/shared/libvirt_xml.py`,
 
 Interfaces: add pure helpers that locate the grouped KDIVE root and return System text or storage
 attributes from a parsed full-domain root. `render_domain_xml(...) -> str` emits that shape;
-`require_disk_grub_source(...) -> None`, `disk_pool[_strict](...)`, and reaper ownership consume it.
+`require_disk_grub_source(...) -> None` and `disk_pool[_strict](...)` consume it. Existing
+`parse_metadata_system_id(meta_xml: str) -> str | None` additionally consumes libvirt's exact
+namespace-stripped grouped fragment for the reaper metadata API.
 
 Verification:
 
@@ -40,9 +42,11 @@ Verification:
   `test_admission_rejects_a_source_that_is_not_the_owned_baseline`. Expected red: the new wrong-
   volume case is not exercised. Green command:
   `just test-verbose tests/providers/remote_libvirt/lifecycle/test_external_boot.py`.
-- Mode: focused-test. Contract: legacy standalone System metadata remains reapable without storage
-  authority. Tests: remote reaper and XML parser regressions. Expected red: grouped-only parsing
-  would lose legacy ownership. Green command:
+- Mode: focused-test. Contract: namespace-stripped grouped metadata remains authoritative and
+  legacy standalone System metadata remains reapable without storage authority. Tests: remote
+  reaper and XML parser regressions, including a grouped metadata id different from the domain
+  name and existing configured-pool cleanup fallback. Expected red: grouped parsing currently
+  returns container whitespace rather than the System id. Green command:
   `just test-verbose tests/providers/test_libvirt_xml.py tests/providers/remote_libvirt/reaping/test_domains.py`.
 
 Steps:
@@ -57,8 +61,7 @@ changed identity fails, and existing standalone System tags remain discoverable 
 
 ## Task 2: Prove the real-libvirt round trip
 
-Files: the existing #2121 native carrier under `tests/live_vm/`, if a reusable assertion belongs
-there; otherwise no tracked file is required.
+Files: create `tests/live_vm/test_remote_metadata_roundtrip.py`.
 
 Interfaces: production `render_domain_xml` output enters libvirt `defineXML`; inactive `XMLDesc`
 feeds the same ownership parser and admission gate.
@@ -66,13 +69,16 @@ feeds the same ownership parser and admission gate.
 Verification:
 
 - Mode: focused-test. Contract: real libvirt retains both children and the production gate accepts
-  only the exact readback. Test: authorized native Ubuntu/libvirt carrier. Expected red: the old
-  sibling shape loses storage. Green command: invoke the existing carrier with its private
-  environment, without logging secret values.
+  only the exact readback. Test:
+  `tests/live_vm/test_remote_metadata_roundtrip.py::test_remote_metadata_round_trips_and_binds_storage_identity`.
+  Expected red: the old sibling shape loses storage. Green command: run that exact node with
+  `uv run python -m pytest -m live_vm -q`; `require_live_vm_remote` must report available rather
+  than skip. Supply the existing private inline environment without logging values, following
+  `docs/operating/runbooks/live-testing.md`.
 
 Steps:
 
-1. Run the carrier against the clean native Ubuntu host.
+1. Run the exact carrier node against the clean native Ubuntu host and require one passed test.
 2. Confirm unchanged inactive XML passes and independent pool, volume, and path mutations fail.
 3. Clean every domain, overlay, boot artifact, and isolated pool created by the carrier.
 

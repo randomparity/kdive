@@ -16,12 +16,16 @@ overlay then cannot pass the external-boot ownership gate.
 Remote-libvirt domain metadata uses one namespaced `<kdive:domain>` root containing
 `<kdive:system>` and `<kdive:storage>` children. Every remote-libvirt reader follows that shape.
 The reaper also accepts the former standalone `<kdive:system>` element so domains created by an
-older worker remain discoverable; storage-sensitive operations fail closed when the grouped
-storage child is absent.
+older worker remain discoverable. Libvirt's namespace-specific metadata API strips that namespace
+from its returned fragment, so its parser accepts the grouped unqualified
+`<domain><system>...</system></domain>` form as well as the legacy element.
 
 The System id stays element text. Storage continues to record exact `pool` and `volume`
 attributes, while the disk source supplies the exact overlay path. These three storage identities
-must agree with the request.
+must agree with the request before external-boot admission grants authority. Teardown and reaping
+keep their existing bounded fallback: a convention-owned domain with no recorded pool deletes only
+its deterministic overlay name from the configured pool. That cleanup fallback grants no boot or
+general storage authority.
 
 ## Consequences
 
