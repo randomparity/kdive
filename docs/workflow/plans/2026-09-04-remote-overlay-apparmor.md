@@ -26,25 +26,26 @@ the storage carrier and readback validation, XML threading, fakes, and focused r
 ## Task 1 — Enforce standalone supplied bases
 
 Files: modify `src/kdive/providers/remote_libvirt/lifecycle/rootfs/volume_upload.py` and
-`tests/providers/remote_libvirt/lifecycle/rootfs/test_volume_upload.py`.
+`tests/providers/remote_libvirt/test_volume_upload.py`.
 
 Interfaces:
 
 - `_require_standalone_qcow2(path: Path, *, qemu_img: str = "qemu-img") -> None` executes bounded
   argv-only `qemu-img info --output=json --backing-chain PATH` before pool lookup/create/upload.
-- `upload_qcow2_volume(...)` retains its public signature and calls the new admission check after
-  the existing existence fast path but before remote mutation.
+- `upload_qcow2_volume(...)` retains its public signature and calls the new admission check before
+  pool lookup and before both the existing-volume fast path and remote mutation.
 
 Verification (`focused-test`): injected subprocess cases admit exactly one qcow2 record and reject
 a second backing-chain record, missing executable, timeout, nonzero exit, and malformed JSON. Each
 failure must precede `createXML`. Add cases first and observe red with
-`uv run python -m pytest tests/providers/remote_libvirt/lifecycle/rootfs/test_volume_upload.py -q`;
+`uv run python -m pytest tests/providers/remote_libvirt/test_volume_upload.py -q`;
 then implement and run green.
 
 Implementation steps:
 
-1. Add failing cases with a patched `subprocess.run`; assert argv, timeout, no shell, and no remote
-   create on every rejection.
+1. Add failing cases with a patched `subprocess.run`; assert argv, timeout, no shell, and no pool
+   lookup or remote create on every rejection. Run every rejection against both absent and already
+   present deterministic remote volumes, proving the retry fast path cannot bypass admission.
 2. Implement the bounded command and require a JSON array of exactly one qcow2 image with no
    `backing-filename` or `full-backing-filename`.
 3. Map missing executable, timeout, launch failure, tool failure, and malformed output through the

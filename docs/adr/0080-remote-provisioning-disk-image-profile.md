@@ -114,6 +114,13 @@ overlay is reused **without** checking its backing store against the profile —
 retries carry the same profile (the handler re-reads the stored profile), and a profile
 *change* goes through `reprovision`, whose teardown deletes the old overlay first.
 
+### Amendment (2026-09-04): reuse verifies backing identity (#2236)
+
+[ADR-0597](0597-render-remote-overlay-backing-chain.md) partially supersedes the preceding
+existence-only reuse claim. A present overlay is still never recreated, but its recorded immediate
+backing path must agree with the selected base before that path is rendered into a per-domain
+AppArmor grant.
+
 ### 4. Provision/teardown semantics: ADR-0025 transactionality + a guest-agent readiness gate
 
 `provision` is idempotent and transactional in the ADR-0025 sense: deterministic domain name

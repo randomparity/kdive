@@ -20,6 +20,10 @@ domain's exact file rules.
 
 ## Decision
 
+This decision partially supersedes ADR-0080 §3's statement that a present overlay is reused
+without checking its backing store. Existence remains the idempotency gate; reuse now additionally
+requires backing identity to agree before the overlay can supply an AppArmor grant.
+
 Before upload, a supplied qcow2 is inspected with the already-provisioned `qemu-img`; any backing
 filename is rejected. Before overlay creation, the selected remote base volume's XML must likewise
 contain no `backingStore`. `ensure_overlay` then returns the base path obtained from libvirt

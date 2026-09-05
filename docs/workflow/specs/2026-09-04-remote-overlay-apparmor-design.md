@@ -25,9 +25,11 @@ security driver, and cleanup behavior.
 
 ## Components and flow
 
-1. The supplied upload lane runs bounded `qemu-img info --output=json --backing-chain` before any
-   remote mutation and rejects output containing more than the source image. The executable is an
-   existing `libvirt_stack` prerequisite.
+1. The supplied upload lane runs bounded `qemu-img info --output=json --backing-chain` before pool
+   lookup and before both the existing-volume return and new-volume mutation. It rejects output
+   containing more than the source image. The executable is an existing `libvirt_stack`
+   prerequisite. Every retry therefore revalidates the immutable local source named by the stored
+   profile rather than treating remote volume-definition XML as proof of its embedded qcow2 header.
 2. `ensure_named_overlay` resolves the requested base volume, reads its libvirt XML, requires no
    `backingStore`, and obtains its path before creating an overlay. This covers both operator and
    supplied remote volumes. On reuse, it reads the existing overlay's volume XML and verifies that
