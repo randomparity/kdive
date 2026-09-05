@@ -26,13 +26,20 @@ certificate verification, active-incarnation authentication, bounded sessions, a
 The network listener binds only an operator-configured IPv4 address and port. Its certificate is
 verified against the stable name derived from the configured authority instance.
 
-Worker construction resolves the selected binding's three TLS values through the existing secret
-backend. A private resource-bound byte transport accepts one encoder-produced frame and a deadline
-and retains no incarnation credential. It is reachable only through a typed worker-owned request
+Resource rebinding captures only the selected immutable binding, the existing secret-backend
+handle, and a worker-owned credential-borrowing accessor/factory. It resolves no authority secret,
+creates no TLS context or transport, and retains no material-resolution failure. Each typed
+authority operation or readiness probe materializes its private sender transport and resolves the
+binding's three TLS values only for that call. Invalid or missing authority material fails that
+authority use, not unrelated provider selection, power, provisioning, or teardown.
+
+The private resource-bound byte transport accepts one encoder-produced frame and a deadline and
+retains no incarnation credential. It is reachable only through a typed worker-owned request
 sender whose methods correspond to closed protocol operations. The worker assembly, which already
-owns the active process credential, supplies a borrowing accessor; the sender reads it only while
-encoding each envelope. No second standing copy is placed in inventory, provider runtime state,
-logs, or results.
+owns the active process credential, supplies the borrowing accessor; the sender reads it only while
+encoding each envelope. No secret value, temporary certificate file, TLS context, transport, or
+second incarnation-credential copy becomes standing inventory or provider-runtime state. Call-local
+TLS material and transport are not cached across operations; errors remain bounded and redacted.
 
 Authority-host readiness reconstructs both listeners and performs an authority-owned TLS health
 handshake when the network listener is configured. Worker readiness constructs the selected route

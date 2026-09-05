@@ -63,13 +63,19 @@ bounded redacted categories. No public object exposes raw bytes, a reader/writer
 command, path, argument, or environment input.
 
 `WorkerHandlerAssembly` remains the sole process-lifetime incarnation-credential owner. It creates
-a worker-owned `AuthorityRequestSender` from a borrowing accessor over that existing field and the
-private transport. The sender exposes only typed `health` and operation-specific methods, reads the
+a worker-owned `AuthorityRequestSender` from a borrowing accessor over that existing field and a
+private transport factory. The sender exposes only typed `health` and operation-specific methods,
+materializes a fresh private transport only at each typed call/readiness boundary, and reads the
 credential accessor only while calling `encode_request_envelope`, drops the method-local plaintext
 after encoding, and gives the resulting frame to its private transport. Neither sender nor
 transport has a credential field, and cancellation or worker replacement leaves no copied
-`SecretStr`. Resource rebinding selects one config by Resource name and creates the pair only from
-that config's closed binding. Secret values resolve through `SecretBackend` and register with
+`SecretStr`. Resource rebinding selects one config by Resource name and captures only that config's
+immutable closed binding, the existing `SecretBackend`/registry handle, and the worker's borrowing
+accessor/factory. It resolves no authority material and captures no material-resolution failure.
+The standing route retains no secret value, temporary certificate file, TLS context, or transport;
+none is cached between calls. Authority materialization failures are confined to typed authority
+use/readiness, leaving unrelated controller/provisioner selection and power/teardown behavior
+available. At typed authority use, secret values resolve through `SecretBackend` and register with
 `SecretRegistry`; temporary certificate files follow the existing remote-libvirt TLS material
 pattern and are removed after context construction.
 
@@ -180,6 +186,8 @@ limiting beyond existing session/frame/time bounds and systemd/firewall controls
 ## Verification
 
 Tests cover binding completeness and validation; resource rebinding and endpoint substitution;
+missing/malformed authority material without blocking unrelated lifecycle use; standing routes
+without resolved secrets, TLS contexts, temporary files or transports; call-local materialization;
 TLS version, certificate trust, server-name mismatch, expired/untrusted certificates; inactive and
 replaced credentials; deadline and stalled-peer behavior; bounded framing; redaction; AF_UNIX and
 existing-operation compatibility; listener and credential drift; cleanup; worker composition; role

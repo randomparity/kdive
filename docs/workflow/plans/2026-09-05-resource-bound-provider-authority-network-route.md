@@ -4,8 +4,10 @@ Goal: add an opt-in Resource-bound mTLS route to the provider-host authority whi
 AF_UNIX behavior and closed protocol.
 
 Architecture: inventory produces one frozen route binding per remote-libvirt Resource. A private
-deadline-bound transport closes only over that binding and resolved TLS material. A typed
-worker-owned sender is its sole caller and borrows the assembly-owned incarnation credential only
+deadline-bound transport closes only over that binding and call-local resolved TLS material. A typed
+worker-owned route captures only the immutable binding, secret-backend handle and borrowing factory;
+it materializes the private transport only for typed authority use/readiness, never generic Resource
+rebinding. Its sender borrows the assembly-owned incarnation credential only
 while encoding one closed envelope. The authority optionally serves the same closed dispatcher over
 TCP and publishes readiness only after both listeners and their TLS evidence pass.
 
@@ -136,9 +138,13 @@ Interfaces:
 - A worker-owned `AuthorityRequestSender` exposes only `health` and typed operation methods; it
   reads the existing assembly field only inside those methods, encodes the closed envelope, and
   gives bytes to its private credential-free transport.
-- Resource rebinding constructs the private transport and sender only from
-  `RemoteLibvirtConfig.authority`, the existing `SecretBackend`, and the assembly-owned borrowing
-  accessor.
+- Resource rebinding captures only the immutable `RemoteLibvirtConfig.authority`, existing
+  `SecretBackend`/registry handle, and assembly-owned borrowing accessor/factory. The route retains
+  no resolved secret, temporary certificate file, TLS context, transport, or material failure.
+- Each typed authority operation/readiness call materializes its private sender transport within
+  the existing deadline/redaction contract; no resolved material or transport is cached. Missing
+  or malformed authority material fails authority use, while generic rebinding and unrelated
+  controller/provisioner selection, power and teardown remain available.
 - Remote worker diagnostics expose a closed readiness result and no network identity.
 
 Verification:
@@ -146,7 +152,9 @@ Verification:
 - Mode: focused-test — process-role separation, sender/transport objects without credential fields,
   no exported raw-byte call, exact active credential borrowing during typed `health`,
   active/inactive authentication, cancellation/replacement without a copied secret, per-Resource
-  rebinding, missing binding/credential and redacted diagnostics; observe new assertions fail, then
+  rebinding, missing binding/credential and redacted diagnostics; malformed/missing authority material
+  must not break generic rebind or unrelated lifecycle use but must fail authority health; standing
+  routes contain no resolved secret/TLS context/temporary file/transport; observe new assertions fail, then
   pass `just test-verbose
   tests/jobs/test_assembly.py tests/providers/remote_libvirt tests/diagnostics`.
 
@@ -156,7 +164,8 @@ Steps:
    retain no credential before, during, or after request cancellation and worker replacement.
 2. Add a worker-owned typed request sender that borrows the assembly field during envelope
    construction; keep the byte transport private and extend provider-composition inputs with the
-   sender factory, failing closed when a bound operation lacks it.
+   sender factory. Capture references only during rebinding and materialize TLS/transport for each
+   typed authority call, failing closed at authority use rather than unrelated lifecycle selection.
 3. Add the remote worker readiness builder and health call without exposing an application action.
 4. Run the focused command; expect all selected tests to pass.
 5. Commit as `feat(providers): compose worker authority routes`.
