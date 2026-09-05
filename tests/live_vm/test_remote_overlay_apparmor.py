@@ -49,6 +49,7 @@ def test_safe_ssh_rejects_shell_metacharacters() -> None:
 def _profile() -> ProvisioningProfile:
     return ProvisioningProfile.parse(
         {
+            "schema_version": 1,
             "arch": "x86_64",
             "vcpu": 2,
             "memory_mb": 2048,
@@ -58,7 +59,7 @@ def _profile() -> ProvisioningProfile:
             "provider": {
                 "remote-libvirt": {
                     "base_image_volume": "operator-catalog",
-                    "debug": {"gdbstub": True},
+                    "crashkernel": "256M",
                 }
             },
         }
