@@ -17,7 +17,8 @@ pytest, ruff, ty, and the repository `just` recipes.
 - Preserve the existing v1 tombstone schema and introduce no database or filesystem migration.
 - A tombstone alone is never deletion authority; finalization requires the authenticated,
   still-current terminal context selected by the authority service.
-- Validate all directory content before deletion, use literal descriptor-relative names, and never
+- Keep accounting predicates and observations read-only. Validate all directory content after the
+  finalization proof and before deletion, use literal descriptor-relative names, and never
   recursively remove or accept unknown entries.
 - Keep provider exception detail in host-local logs and return only the closed authority category.
 - Use `just` recipes as the guardrail source of truth and keep 100-character lines.
@@ -29,7 +30,7 @@ their focused adapter/store regression matrices.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py` | validate and continue exact tombstone publication residue |
+| `src/kdive/providers/local_libvirt/lifecycle/boot/external_boot.py` | continue exact tombstone publication only during proven finalization |
 | `src/kdive/providers/local_libvirt/external_boot_authority.py` | reconstruct and finalize cleanup/teardown after restart |
 | `tests/providers/local_libvirt/test_external_boot.py` | real filesystem continuation and fail-closed matrix |
 | `tests/providers/local_libvirt/test_external_boot_authority.py` | service/adapter restart, teardown, replay, and mutation-count contracts |
@@ -42,7 +43,10 @@ their focused adapter/store regression matrices.
   `_read_private_file`, `_metadata_bytes`, `_preparation_bytes`, and `RecoveryPoint` as defined on
   current main.
 - Preserve `RecoveryMetadataStore.cleanup_complete(reference: OpaqueProviderRef,
-  recovery: RecoveryPoint) -> bool` for the coordinator and Task 2.
+  recovery: RecoveryPoint) -> bool` as a read-only predicate for the coordinator and Task 2.
+- Extend only `RecoveryMetadataStore.finalize_tombstone(reference: OpaqueProviderRef,
+  recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None` to continue known residue after its
+  existing proof validation.
 - Add only private helpers needed to reconstruct a point from metadata and validate preparation
   receipts against the expected tombstone.
 
@@ -50,14 +54,21 @@ their focused adapter/store regression matrices.
 
 - Mode: focused-test. Contract: tombstone plus matching intent/preparation is reduced to the exact
   tombstone, including restart after either unlink. Tests:
-  `test_cleanup_complete_continues_exact_tombstone_publication` and
-  `test_cleanup_complete_retries_each_residual_unlink_boundary`. Expected red: existing
-  `cleanup_complete` leaves residual files. Green command:
+  `test_finalize_continues_exact_tombstone_publication` and
+  `test_finalize_retries_each_residual_unlink_boundary`. Expected red: the existing finalizer
+  rejects every directory containing a residual file. Green command:
   `uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py -k 'tombstone_publication or residual_unlink' -q`.
 - Mode: focused-test. Contract: foreign, changed, malformed, symlinked, non-private, or unknown
   residue is never removed. Test family:
-  `test_cleanup_complete_refuses_untrusted_tombstone_residue`. Expected red: existing code returns
-  true instead of rejecting. Use the same focused command and require all parameters pass.
+  `test_finalize_refuses_untrusted_tombstone_residue`. Expected red: the continuation does not yet
+  exist; after it is added, each parameter proves its validation boundary. Use the same focused
+  command and require all parameters pass.
+- Mode: focused-test. Contract: observation and `cleanup_complete` never mutate interrupted
+  publication state. Test: `test_cleanup_accounting_is_read_only_for_interrupted_publication`.
+  Expected red under the controlled fault that invokes continuation from `cleanup_complete`: the
+  directory snapshot changes. Restore the correct finalizer-only call path before the green run.
+  Green command:
+  `uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py -k 'accounting_is_read_only' -q`.
 
 ### Steps
 
@@ -65,16 +76,16 @@ their focused adapter/store regression matrices.
    and snapshot directory bytes/names before each call.
 2. Run the focused command and record that matching continuation and rejection cases fail against
    the current `cleanup_complete` behavior.
-3. Change `cleanup_complete` to validate the exact tombstone, inventory the complete directory,
-   validate every known residual against its recovery point, and only then unlink the present
-   literal residual names followed by directory fsync and tombstone re-read.
+3. Keep `cleanup_complete` pure. Extend `finalize_tombstone`, after its existing proof checks, to
+   inventory the complete directory, validate every known residual against its recovery point, and
+   only then unlink the present literal residual names before continuing tombstone removal.
 4. Inject failure after each unlink, reopen a fresh store, and prove the remaining subset completes
    without touching unknown or mismatched content.
 5. Run the focused command and require every new case pass. Commit production code and tests as one
    logical crash-consistency change.
 
-Acceptance: exact interrupted publication converges; every unproven directory remains byte-for-byte
-unchanged; the tombstone-only finalizer contract is preserved.
+Acceptance: exact interrupted publication converges only through proven finalization; observation
+is byte-for-byte read-only; every unproven operation-start directory remains unchanged.
 
 Rollback: reverting the task restores quarantine of interrupted states and does not change record
 formats.

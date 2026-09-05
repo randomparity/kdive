@@ -30,7 +30,8 @@ refuses the extra entries.
    binding and recovery reference match the requested activation.
 4. Before finalization, the adapter compares request plan, source, and target identities against the
    reconstructed point and requires the request to name the recovery object it destroys.
-5. Interrupted publication may remove only literal `intent.json` and
+5. `cleanup_complete` and every observation remain read-only. Only authenticated finalization may
+   continue interrupted publication, and it may remove only literal `intent.json` and
    `preparation-result.json`. Every present record must be canonical, private, non-symlinked, and
    identity-equivalent to the tombstone. Unknown entries cause zero removal.
 6. Removing either known residual is independently crash-safe. A retry accepts the remaining valid
@@ -43,10 +44,14 @@ refuses the extra entries.
 
 ### Store continuation
 
-`RecoveryMetadataStore.cleanup_complete(reference, recovery)` opens the owner-derived directory,
-reads the exact tombstone, and constructs the expected tombstone from the caller's recovery point.
-After equality succeeds it inventories the directory. The allowed set is `tombstone.json` plus any
-subset of `intent.json` and `preparation-result.json`; any other name rejects before unlinking.
+`RecoveryMetadataStore.cleanup_complete(reference, recovery)` stays a pure exact-tombstone
+predicate. It performs no unlink even when matching residual content remains, so the observation
+path that consumes it cannot mutate durable state.
+
+`RecoveryMetadataStore.finalize_tombstone(reference, recovery, proof)` first applies its existing
+proof, point, binding, and tombstone comparisons. Only then does it inventory the directory. The
+allowed set is `tombstone.json` plus any subset of `intent.json` and
+`preparation-result.json`; any other name rejects before unlinking.
 
 If intent is present, it is decoded with the existing canonical/private-file reader as
 `LocalRecoveryMetadataV1`. A `RecoveryPoint` reconstructed from it must equal the tombstone point,
@@ -55,11 +60,9 @@ receipt decoder validates it. Every contained receipt must match the tombstone b
 its materialization identity must match; a prepared receipt must carry the exact tombstone recovery
 point. Validation of all present records completes before either unlink. The store then unlinks
 only the two known names that were present, fsyncs the directory, reopens the tombstone, and returns
-true. A crash after either unlink is safe because the remaining subset is accepted only after the
-same validation on retry.
-
-`finalize_tombstone` remains unchanged: it accepts only a directory containing the exact tombstone,
-then removes that file and directory with the existing fsync sequence.
+the known residuals and continues the existing tombstone and directory removal sequence. A crash
+after either unlink is safe because the remaining subset is accepted only after the same validation
+on retry.
 
 ### Adapter reconstruction
 
@@ -87,8 +90,10 @@ matching terminal record and started context.
 - An absent tombstone cannot independently prove completion. It is accepted only by the existing
   finalizer after the authority service has selected a matching terminal operation and supplied its
   started-record context.
-- Validation precedes removal. A mixed or foreign directory is unchanged even when one record is
-  otherwise valid.
+- Validation of the operation-start snapshot precedes removal. A mixed or foreign directory is
+  unchanged even when one record is otherwise valid. The mode-0700 provider-owned root and
+  same-effective-UID inode checks make its owner a trusted serialization boundary; concurrent
+  mutation by that trusted owner is outside this contract.
 - No recursive delete, glob, path from peer input, schema fallback, or record repair is introduced.
 
 ## Threat model
@@ -105,10 +110,12 @@ matching terminal record and started context.
 ### Actors and trust
 
 Authenticated tenants control request identity fields and recovery-object lists but not the
-authority journal, configured recovery root, or descriptor-relative filenames. A local process or
-operator may alter recovery-directory content; such content is untrusted until canonical parsing,
-ownership checks, and inode constraints succeed. The authority service and its anchored journal
-context are trusted to establish current terminal execution.
+authority journal, configured recovery root, or descriptor-relative filenames. Persisted content
+left by a crash or accidental prior corruption is untrusted until canonical parsing, ownership
+checks, and inode constraints succeed. The configured root's mode-0700 owner is trusted not to race
+the operation; a same-UID concurrent writer can replace names between POSIX validation and unlink,
+so claiming protection from that trusted principal would be false. The authority service and its
+anchored journal context are trusted to establish current terminal execution.
 
 ### Controls
 
@@ -116,12 +123,13 @@ context are trusted to establish current terminal execution.
 | --- | --- | --- | --- |
 | request to finalizer | service authentication/current-generation/terminal replay; exact operation, request identities, and named recovery object | one owner-derived directory and one tombstone | closed `provider_conflict` only |
 | tombstone to point | canonical closed model; exact binding, reference, digest, plan, source, target, and materialization identities | one bounded v1 record read via `O_NOFOLLOW` | exception details remain host-local logs |
-| residual to unlink | complete preflight inventory; canonical private-file reads; all identities match before mutation | two literal filenames, no recursion or peer path | closed provider category |
+| residual to unlink | authenticated proof first; complete preflight inventory; canonical private-file reads; all identities match before mutation | two literal filenames, no recursion or peer path; trusted mode-0700 owner does not race | closed provider category |
 
 ### Out of scope
 
-Compromise of the authority service or configured recovery-root owner is outside this change; those
-are existing trusted components. General orphan discovery and retention policy belong to #2245.
+Compromise or concurrent mutation by the authority service or configured recovery-root owner is
+outside this change; those are existing trusted components. General orphan discovery and retention
+policy belong to #2245.
 Remote-libvirt storage has separate provider contracts. Native ppc64le proof is excluded by the
 campaign, while architecture-independent tests remain required.
 
@@ -135,6 +143,8 @@ campaign, while architecture-independent tests remain required.
   A fresh store/adapter completes exact states without a second provider cleanup.
 - Real-store negative tests cover foreign binding, changed point/digest, stale operation identity,
   malformed JSON, symlink and mode violations, and an unknown entry; each asserts no removal.
+- An observation regression snapshots an interrupted directory and proves `observe` changes no
+  name or byte; continuation is exercised only through authenticated terminal finalization.
 - Focused local-libvirt tests, lint, type checking, and the full `just ci` gate must pass. No native
   ppc64le run is part of this issue.
 
