@@ -72,17 +72,22 @@ def test_remote_play_owns_authority_and_firewall_before_service_start() -> None:
     assert quiesce["ansible.builtin.systemd_service"]["state"] == "stopped"
     condition = Environment(undefined=StrictUndefined).compile_expression(quiesce["when"][1])
     previous = {"source": "192.0.2.0/24", "port": 18443}
-    for current, enabled, expected in (
-        (previous, True, False),
-        (previous | {"port": 18444}, True, True),
-        (previous | {"source": "198.51.100.0/24"}, True, True),
-        (None, True, True),
-        (None, False, True),
+    for current, pending, enabled, expected in (
+        (previous, None, True, False),
+        (previous, previous, True, True),
+        (previous | {"port": 18444}, None, True, True),
+        (previous | {"source": "198.51.100.0/24"}, None, True, True),
+        (None, None, True, True),
+        (None, None, False, True),
     ):
         assert (
             condition(
                 provider_authority_host_enabled=enabled,
-                gdbstub_acl_authority_targets={"previous": previous, "current": current},
+                gdbstub_acl_authority_targets={
+                    "previous": previous,
+                    "pending": pending,
+                    "current": current,
+                },
             )
             is expected
         )
@@ -197,6 +202,7 @@ def test_provider_authority_failed_convergence_stops_the_service() -> None:
         task for task in tasks if task["name"] == "Converge the production authority"
     )
     rescue = convergence["rescue"]
+    assert convergence["block"][0]["ansible.builtin.include_role"]["name"] == "gdbstub_acl"
     assert any(
         task.get("ansible.builtin.systemd_service", {}).get("state") == "stopped" for task in rescue
     )

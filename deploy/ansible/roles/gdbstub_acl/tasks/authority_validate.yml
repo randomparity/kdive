@@ -7,7 +7,11 @@
       - |
         import ipaddress, json, os, pathlib, stat, sys
         try:
-            value = json.load(sys.stdin)
+            def unique_object(pairs):
+                result = dict(pairs)
+                assert len(result) == len(pairs)
+                return result
+            value = json.load(sys.stdin, object_pairs_hook=unique_object)
             path = pathlib.Path(value['path'])
             assert path.is_absolute()
             for parent in path.parents:
@@ -34,7 +38,7 @@
             if value['port'] is not None:
                 assert value['family'] in ('Debian', 'RedHat')
                 current = validate({'port': value['port'], 'source': value['source']})
-            previous = None
+            previous, pending = None, None
             try:
                 fd = os.open(value['path'], os.O_RDONLY | os.O_NOFOLLOW)
             except FileNotFoundError:
@@ -43,10 +47,16 @@
                 with os.fdopen(fd) as stream:
                     mode = os.fstat(stream.fileno())
                     assert stat.S_ISREG(mode.st_mode) and mode.st_uid == os.geteuid()
-                    assert stat.S_IMODE(mode.st_mode) == 0o600 and mode.st_size <= 256
-                    previous = validate(json.load(stream))
+                    assert stat.S_IMODE(mode.st_mode) == 0o600 and mode.st_size <= 512
+                    retained = json.load(stream, object_pairs_hook=unique_object)
+                    assert type(retained) is dict and set(retained) == {'current', 'pending'}
+                    previous = validate(retained['current']) if retained['current'] is not None else None
+                    pending = validate(retained['pending']) if retained['pending'] is not None else None
+                    assert previous is not None or pending is not None
                 assert value['family'] in ('Debian', 'RedHat')
-            print(json.dumps({'previous': previous, 'current': current}))
+            owned = [item for item in (previous, pending) if item is not None]
+            print(json.dumps({'previous': previous, 'pending': pending, 'current': current,
+                              'owned': owned}))
         except Exception:
             sys.exit('invalid authority firewall configuration or retained ownership')
     stdin: >-

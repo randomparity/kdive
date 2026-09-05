@@ -5,14 +5,14 @@
 - name: Quiesce changed authority routes before firewall reconciliation
   ansible.builtin.import_tasks: prepare.yml
 
-- name: Apply the shared protected-port firewall owner
-  ansible.builtin.include_role:
-    name: gdbstub_acl
-  vars:
-    gdbstub_acl_authority_port: "{{ provider_authority_host_network_port if provider_authority_host_enabled else none }}"
-
 - name: Converge the production authority
   block:
+    - name: Apply the shared protected-port firewall owner
+      ansible.builtin.include_role:
+        name: gdbstub_acl
+      vars:
+        gdbstub_acl_authority_port: "{{ provider_authority_host_network_port if provider_authority_host_enabled else none }}"
+
     - name: Install the enabled production authority
       ansible.builtin.include_tasks: install.yml
       when: provider_authority_host_enabled | bool

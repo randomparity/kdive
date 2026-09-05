@@ -20,4 +20,5 @@
     - provider_authority_host_existing_unit.stat.exists
     - >-
       not provider_authority_host_enabled or
+      gdbstub_acl_authority_targets.pending is not none or
       gdbstub_acl_authority_targets.previous != gdbstub_acl_authority_targets.current

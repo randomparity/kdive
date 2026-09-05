@@ -28,4 +28,7 @@ class ActionModule(ActionBase):
         with (root / "calls.jsonl").open("a") as output:
             output.write(json.dumps({"remove": remove, **rule}) + "\n")
         result["changed"] = before != rules
+        grant = args.get("rule") == "allow" or args.get("rich_rule", "").endswith(" accept")
+        if not remove and grant and os.environ.get("FAIL_AFTER_AUTHORITY_GRANT") == "1":
+            result.update(failed=True, msg="controlled interruption after authority grant")
         return result
