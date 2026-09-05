@@ -12,7 +12,7 @@ guards stay unchanged. The fixed-worker and Ansible seams pass and validate one 
 Design: [spec](../specs/2026-09-05-local-external-boot-storage-lifecycle-design.md),
 [ADR-0602](../../adr/0602-local-external-boot-storage-is-reclaimed-by-owned-identities.md).
 
-Expected implementation size: 550–800 changed lines (L) — derived from four production/deployment
+Expected implementation size: 750–1050 changed lines (L) — derived from four production/deployment
 surfaces and focused destructive-path, gate, and provisioning regressions.
 
 ## Global Constraints
@@ -25,7 +25,26 @@ surfaces and focused destructive-path, gate, and provisioning regressions.
   `just ci > <file> 2>&1 < /dev/null` without masking its exit status.
 - Stage Markdown/YAML before `prek run`, then re-add exactly the staged paths.
 
-## Task 1 — make cleanup metadata-bound and power-independent
+## Task 1 — make artifact ownership activation-exclusive
+
+**Files:** `external_boot.py`, `session_mechanisms.py`, and their focused tests.
+
+**Interfaces:** replace `_projection_ref` and `_artifact_ref_parts` with the v2 six-component
+reference including `activation_id`; change `LocalArtifactRoot.open` to return the activation
+directory; make `TargetProjectionStore` publish/reopen below that same component.
+
+**Verification:** Mode: focused-test. Add v1 refusal, v2 ownership round-trip, and two-activation
+same-Run/same-digest isolation tests. Observe the current shared path and deletion; run
+`uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py -q`
+and expect green.
+
+Steps:
+
+1. Add the two-activation collision and reference-version tests; observe shared ownership fail.
+2. Add the activation directory and v2 parser/publisher.
+3. Run focused tests and commit `refactor(local-libvirt): isolate activation artifacts`.
+
+## Task 2 — make cleanup metadata-bound and power-independent
 
 **Files:** `session.py`, `external_boot.py`, `session_mechanisms.py`, and their focused tests.
 
@@ -45,7 +64,7 @@ Steps:
 2. Carry metadata through the callback and remove only cleanup's inactive check.
 3. Run the focused command and commit `fix(local-libvirt): separate artifact cleanup from guest power`.
 
-## Task 2 — reclaim the exact activation hierarchy
+## Task 3 — reclaim the exact activation hierarchy
 
 **Files:** `session_mechanisms.py`, `external_boot.py`, and
 `test_session_mechanisms.py`.
@@ -69,7 +88,31 @@ Steps:
 5. Inject interruption at every removal, retry, and assert convergence without sibling changes.
 6. Run focused tests and commit `feat(local-libvirt): reclaim external-boot artifacts`.
 
-## Task 3 — propagate the per-slot recovery root
+## Task 4 — reclaim interrupted preparation through teardown
+
+**Files:** `external_boot.py`, `external_boot_authority.py`, and their focused tests.
+
+**Interfaces:** add provider-local
+`LocalLibvirtExternalBoot.abort_preparation(binding, request identities, authority) -> bool`; add
+store inspection/deletion helpers that accept only canonical matching receipts/intents. No shared
+`ExternalBootPorts` method changes.
+
+**Verification:** Mode: focused-test. Drive authority-adapter teardown through receipt-only,
+pre-stop-before-stop, and archive-before-rename partials; assert source power restoration, retry
+convergence, and fail-closed foreign/ambiguous cases. First expect `provider_conflict`; run
+`uv run python -m pytest tests/providers/local_libvirt/test_external_boot.py tests/providers/local_libvirt/test_external_boot_authority.py -q`
+and expect green.
+
+Steps:
+
+1. Add failing real-caller crash-window and malformed-owner tests.
+2. Implement canonical partial inspection and explicit bounded unlink/rmdir helpers.
+3. Implement abort preparation, including source-state verification and prior-power restoration.
+4. Route TEARDOWN to abort preparation only when complete recovery-point resolution is absent.
+5. Inject interruption at each removal and prove request retry converges.
+6. Run focused tests and commit `feat(local-libvirt): reclaim interrupted preparation`.
+
+## Task 5 — propagate the per-slot recovery root
 
 **Files:** `deploy/systemd/bin/kdive-live-worker-gate`,
 `deploy/ansible/roles/live_vm_host/tasks/main.yml`, `tests/deploy/test_live_worker_gate.py`, and
@@ -89,7 +132,7 @@ Steps:
 2. Add the allowlist name and exact slot environment entry.
 3. Run focused tests and commit `feat(deploy): pass external-boot recovery roots to workers`.
 
-## Task 4 — enforce and document capacity
+## Task 6 — enforce and document capacity
 
 **Files:** Ansible defaults/tasks/verify files, deployment tests, and
 `docs/operating/runbooks/live-testing.md`.

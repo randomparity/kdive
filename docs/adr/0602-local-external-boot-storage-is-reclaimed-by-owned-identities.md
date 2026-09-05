@@ -7,8 +7,9 @@ Proposed
 ## Context
 
 Local external boot stores boot payloads and target projections below an owner-only per-worker
-root, and stores recovery evidence beside them. Cleanup currently removes only the three payload
-files and the recovery archive. Digest, Run, and System directories accumulate, interrupted
+root, and stores recovery evidence beside them. ADR-0591 deliberately retained a per-Run artifact
+directory while routing its cross-activation deletion hazard to #2212. Cleanup currently removes
+only the three payload files and the recovery archive. Digest, Run, and System directories accumulate, interrupted
 preparation can leave a partial recovery directory, and host-only cleanup is incorrectly blocked
 after power has been restored. The same root is provisioned without a capacity admission contract.
 
@@ -18,6 +19,12 @@ deletion set.
 
 ## Decision
 
+This record supersedes ADR-0591's per-Run artifact-layout decision. Before the dormant local port is
+bound, artifact references move to `local-artifact-v2` and insert the canonical activation id:
+`<system>/<run>/<activation>/<digest>/<filename>`. The session artifact descriptor is the
+activation directory. Payload names and every projection digest directory are therefore exclusive
+to one activation even when two activations share a Run and projection digest.
+
 Terminal cleanup receives the authenticated recovery metadata, not only its binding. A local
 reclaimer derives the one projection digest and activation names from that metadata, opens every
 directory descriptor-relative with no-follow and owner-only checks, and removes only an explicit
@@ -25,9 +32,13 @@ bounded set of files. It removes the exact digest directory, then prunes the Run
 parents only when empty. Absence is retry success; an unexpected entry, shape, mode, owner, or
 record is reported and left untouched. No recursive deletion is used.
 
-The exact activation's partial directory is reclaimed only after its durable pre-stop intent or
-preparation receipt authenticates the same binding and the final recovery record proves the
-activation has reached terminal cleanup. Its known files are removed explicitly. Any malformed,
+The local authority adapter has a separate teardown path for an activation whose preparation has
+not reached complete metadata. It authenticates the request against the canonical durable
+preparation receipt or pre-stop intent, then asks the provider-local operation to abort preparation.
+A receipt-only partial is removed directly because no guest operation has begun. A pre-stop partial
+first verifies that the domain still has its recorded source definition and has not reached a
+target/mutated state; it restores recorded prior power, then removes only its known files and
+directory. A normal prepare retry instead resumes the same matching partial. Any malformed,
 foreign, symlinked, wide-mode, non-directory, or ambiguous partial is retained and reported.
 
 Host-artifact cleanup is separated from guest mutation. Opening or changing the overlay, module
@@ -48,6 +59,10 @@ Cleanup is idempotent across interruption at each unlink and rmdir, while siblin
 activations remain outside its derived names. A non-empty parent remains available for its
 siblings. Ambiguity consumes operator attention and disk rather than risking unrelated data.
 
+The artifact reference version changes before a production writer exists. Existing test fixtures
+using v1 are replaced; no compatibility reader or data migration is needed because the local port
+remains unbound until #2246.
+
 The cleanup callback and session method now carry recovery metadata. Deployment defaults must
 track the source bounds deliberately; raising a payload or archive bound requires reconsidering
 the provisioned minimum. The capacity gate reserves for a worst-case envelope and may require
@@ -59,6 +74,9 @@ operators to allocate substantially more storage than typical activations consum
   entries part of the deletion set and cannot prove exact ownership at each descent.
 - **Delete every partial matching the activation-shaped filename.** judgment: a filename is not
   durable ownership evidence; retaining an ambiguous entry is the safe failure mode.
+- **Retain the per-Run artifact layout with reference counting.** judgment: it adds a second
+  durable ownership ledger for objects that are not intentionally shared; activation-exclusive
+  placement makes deletion authority structural and removes the counter and its crash recovery.
 - **Keep the inactive-domain gate around all cleanup.** verified: issue #2245 traces
   `cleanup_payloads` to host-only unlink operations and shows that restored-running cleanup cannot
   reach tombstone finalization under that gate.

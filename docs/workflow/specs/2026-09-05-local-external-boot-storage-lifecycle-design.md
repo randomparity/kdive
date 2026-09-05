@@ -13,6 +13,18 @@ is #2244.
 
 ## Required behavior
 
+### Activation-exclusive artifact layout
+
+The dormant `local-artifact-v1/<system>/<run>/<digest>/<file>` reference is replaced, not migrated,
+by `local-artifact-v2/<system>/<run>/<activation>/<digest>/<file>`. `LocalArtifactRoot.open` creates
+and returns `<system>/<run>/<activation>`, so fixed payload names from different activations never
+share a directory. `TargetProjectionStore` publishes below the same activation component. Parsing
+requires all three owner identities. There is no compatibility reader because #2246 has not bound
+the production writer; tests prove v1 is refused and two same-Run/same-digest activations remain
+independent when one is cleaned.
+
+### Completed activation cleanup
+
 `CleanupPayloads` changes from `(run_fd, binding)` to `(run_fd, metadata)`. The operation passes
 the exact `LocalRecoveryMetadataV1` it has reopened before cleanup. `_ConcreteSession` no longer
 calls `require_inactive` for this host-only callback. All guest contexts, XML/overlay mutation, and
@@ -24,7 +36,7 @@ guest-tree access retain their existing inactive checks.
    through the existing owner-bound artifact-reference parser and obtain its exact digest.
 2. Open the configured root, System, Run, projection, recovery, and partial directories only by
    descriptor-relative no-follow helpers. Require mode 0700 and the current effective owner.
-3. Validate the projection sidecar against the metadata ownership and digest before removing the
+3. Validate the activation-exclusive projection sidecar against the metadata ownership and digest before removing the
    fixed payload names and `target-projection.json`, then remove the digest directory.
 4. Remove `modules.tar` from the exact complete recovery directory. A matching partial may contain
    only the bounded preparation/pre-stop files and archive temporary/final names. Reopen and parse
@@ -40,14 +52,25 @@ directory remains until tombstone finalization; #2244 owns reconstruction after 
 
 ## Partial residue
 
-A partial is reclaimable only during terminal cleanup for the same activation and only when one
-canonical durable record inside it (`pre-stop-intent.json` or preparation receipts) parses and
-matches the authenticated binding. A partial with both competing ownership records, unexpected
-entries, noncanonical bytes, or a conflicting binding is ambiguous. Symlinked, non-directory,
-wrong-owner, or non-0700 entries are likewise refused. Refusal leaves the partial untouched and
-uses a fixed diagnostic with symbolic errno only.
+A normal `prepare` retry reopens the partial and resumes it only when its canonical preparation
+receipt or pre-stop intent matches the request's binding, plan, materialization, and authority.
 
-This change does not add a background sweep. Request-bound retry is the only deletion authority;
+Teardown gets a separate provider-local abort-preparation arm reachable before recovery-point
+resolution. The authority adapter passes the authenticated request identities to
+`LocalLibvirtExternalBoot.abort_preparation`; the coordinator opens the usual authority-bound
+operation and returns `False` when no partial exists. For a receipt-only partial it validates the
+receipt and removes its fixed files. For a pre-stop intent it validates the intent, inspects the
+domain, and accepts only the recorded source definition with no module or target mutation. If prior
+power was running and the domain is inactive, it restarts the source and uses the same bounded
+readiness mechanism required by #2243 before deleting evidence. It then removes only preparation,
+intent, archive, and archive-temporary names and the exact partial directory. Every step is
+idempotent; teardown retries this arm until it returns absent.
+
+A partial with competing ownership records, unexpected entries, noncanonical bytes, or conflicting
+identity is ambiguous. Symlinked, non-directory, wrong-owner, or non-0700 entries are likewise
+refused. Refusal leaves the partial untouched and uses a fixed diagnostic with symbolic errno only.
+
+This change does not add a background sweep. Prepare retry and authenticated teardown are the only deletion authorities;
 foreign residues are reported for operator handling.
 
 ## Provisioning contract
@@ -95,3 +118,7 @@ symlink, mode, owner, and ambiguity refusals; and retained guest mutation gates.
 cover the worker environment and all capacity-gate branches. An Ansible check-mode/syntax run and
 the authorized x86_64 local-libvirt provisioning path provide clean-host evidence. Repository
 guardrails remain the final gate.
+
+The partial proof drives the real adapter teardown path for three crash windows: preparation receipt
+only, pre-stop intent before stop, and published archive before completion rename. It also proves a
+same-Run/same-digest sibling remains openable after the first activation's terminal cleanup.
