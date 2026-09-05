@@ -21,20 +21,28 @@ provisioning lifecycle.
 
 The local external-boot session owns one readiness window at a time.
 
-1. Before every session-owned `domain.create()`, the session requires the domain inactive and calls
-   the ADR-0576 console-preparation seam. Preparation truncates the validated worker-owned inode to
-   zero. Successful preparation is the anchor; byte-offset slicing is not restored.
-2. A dedicated external-boot readiness probe polls the whole fresh window until ready, crashed,
-   terminal, probe failure, or the configured `KDIVE_LIBVIRT_BOOT_WINDOW_S` deadline. It uses a
-   monotonic clock and never extends that single deadline after a probe failure.
-3. Each `start()` replaces the prior anchor. `readiness()` is fail-closed before a successful start.
-   Running-power restoration follows the same prepare-before-create path.
-4. Console reads are capped. Oversize evidence, read failure, and evidence that cannot be tied to
-   the prepared window return a failed readiness result; they never retry from historical bytes.
-5. Session opening parses the owned inactive definition and requires exactly one standard
+1. Before every session-owned `domain.create()`, the session requires the domain inactive and opens
+   an ADR-0576 console window. Preparation truncates the validated worker-owned inode to zero, keeps
+   its descriptor and identity, and captures one monotonic deadline before `create()`. Successful
+   preparation is the anchor; byte-offset slicing is not restored.
+2. A dedicated external-boot readiness probe polls that window until ready, crashed, terminal, or
+   the captured `KDIVE_LIBVIRT_BOOT_WINDOW_S` deadline. A transient domain-state probe failure is
+   retained for a timeout result while polling continues; a later console ready/crash verdict takes
+   precedence. Neither a delayed first call nor a repeated call renews the deadline.
+3. Each `start()` closes and replaces the prior window. `readiness()` is fail-closed before a
+   successful start and caches its terminal result. Running-power restoration follows the same
+   prepare-before-create path.
+4. Console reads are capped and append-continuity checked. Each read verifies the retained
+   descriptor still matches the path and that all bytes observed previously remain an exact prefix.
+   Replacement, divergent truncate/regrow, disappearance, oversize evidence, and read failure fail
+   closed; a byte-identical rewritten prefix is observationally the same window and changes no
+   verdict. The probe never retries from historical bytes.
+5. Session opening separately requests libvirt's inactive-definition XML, validates its ownership,
+   and requires exactly one standard
    `org.qemu.guest_agent.0` virtio channel before opening or creating the artifact root. A missing or
    malformed channel raises terminal `READINESS_FAILURE` with a reprovision instruction and no host
-   path or guest output.
+   path or guest output. Failure to retrieve the inactive definition is a bounded
+   `INFRASTRUCTURE_FAILURE`, also without raw libvirt text.
 6. Production session-mechanism construction binds the preparation and external-boot readiness
    probes. It does not bind `ProviderRuntime.external_boot`; #2246 owns that advertisement change.
 
@@ -49,8 +57,8 @@ Legacy Systems must be reprovisioned once before external boot can mutate them. 
 compatibility refusal rather than an automatic domain redefine. Rollback is a code revert; no
 persisted schema or data is rewritten.
 
-The append-mode file can still undergo operator-side rotation. A window that cannot be proven to be
-the prepared window fails closed rather than reading a replacement or historical file.
+The append-mode file can still undergo operator-side rotation. Identity and prefix checks make a
+replacement or discontinuous retained inode fail closed rather than reading historical bytes.
 
 ## Considered & rejected
 
