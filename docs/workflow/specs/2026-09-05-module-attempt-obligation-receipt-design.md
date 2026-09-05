@@ -55,22 +55,31 @@ the expected resumable residue already accepted by ADR-0588.
 
 ## Worker verification service
 
-`verify_module_attempt_preparation(pool, repository, request, expected_attempt)` first requires the
-receipt tuple to equal the attempt selected by the worker's enclosing operation, then reads through
-a worker-role pool and requires that exact row's mutation obligation to remain open. Missing,
-mismatched, discharged, or unreadable state fails with one redacted
-`ModuleAttemptObligationVerificationError`; database details and tuple values are not copied into
-the error.
+`verified_module_attempt_preparation(pool, repository, request, expected_attempt)` is an async
+context manager. It opens a worker-role transaction, acquires the transaction-scoped advisory lock
+for `expected_attempt.system_id`, requires the receipt tuple to equal the enclosing operation's
+expected attempt, and requires that exact row's mutation obligation to remain open. It yields the
+authorization while retaining both transaction and lock; #2170 calls its synchronous helper inside
+that context, covering both creates. Missing, mismatched, discharged, or unreadable state fails
+with one redacted `ModuleAttemptObligationVerificationError`; database details and tuple values are
+not copied into the error.
 
-Success returns `VerifiedModuleAttemptAuthorization`, a separate immutable type containing the
-exact attempt. Its constructor requires a module-private witness, so ordinary callers cannot
-accidentally substitute a boolean, callback, coroutine, request, or raw receipt. #2170's
-synchronous helper will accept only this type and use its attempt tuple for both volume names.
-The type prevents accidental bypass; the database read is the authority check.
+Success yields `VerifiedModuleAttemptAuthorization`, a separate immutable type containing the exact
+attempt. Its constructor requires a module-private witness. The production
+`require_verified_module_attempt(value: object)` gate unwraps only this type and rejects a boolean,
+callback, coroutine, request, or raw receipt. #2170's synchronous helper will call that gate once
+and use its returned attempt tuple for both volume names. The type and runtime gate prevent
+accidental bypass; the locked database read is the authority check.
 
-Exactly one verification authorizes the helper's single operation that creates both source and
-scratch volumes. #2170 will place that call before its first lookup/create sequence. This issue
-does not implement or call libvirt.
+Exactly one locked verification context encloses the helper's single operation that creates both
+source and scratch volumes. #2170 will enter it before its first lookup/create sequence and leave it
+after both creates or failure cleanup. This issue does not implement or call libvirt.
+
+Every path that discharges or deletes an attempt obligation must acquire the same transaction-
+scoped System advisory lock. This is already the repository's cross-cutting lifecycle invariant;
+#2172 owns applying it to the future discharge services. A concurrent discharge waits until the
+verification context and both creates finish. The low-level repository remains lock-agnostic for
+composition inside those services.
 
 ## Failure and replay behavior
 
@@ -82,7 +91,7 @@ does not implement or call libvirt.
 - A discharged row is terminal for this receipt; neither server replay nor worker verification
   reopens it.
 - The worker exposes one redacted verification error for missing, mismatched, discharged, or
-  unreadable state.
+  unreadable state and releases its transaction/lock on every exit.
 - A request for another attempt is rejected against the enclosing operation's expected tuple
   before repository access.
 
@@ -108,6 +117,8 @@ admitted work.
 - Closed, strict, versioned canonical models reject payload shape substitution and ambiguity.
 - The receipt binds all three attempt fields; the verifier compares and queries all three exactly.
 - Verification requires an open committed row, not receipt possession.
+- The existing System advisory lock spans verification and the complete consuming helper; every
+  discharge/delete consumer takes the same lock.
 - Migration 0126 remains the enforcement for server write and worker read-only privileges; this
   change adds no grant or migration.
 - The server transaction exits before returning the request, making commit a prerequisite for
@@ -134,9 +145,11 @@ remain #2172 and #2168.
    the obligation.
 5. Missing, mismatched, discharged, and unreadable rows fail verification with the same redacted
    error before any supplied volume-operation probe can run.
-6. A focused composition test passes one verified authorization to a two-create probe and proves
-   a raw request, receipt, boolean, callback, or coroutine is rejected by the helper's typed gate.
-   #2170 owns the final libvirt implementation of that gate.
+6. A concurrent discharge using the System lock remains blocked while the verification context's
+   two-create probe runs, then proceeds after context exit; failure releases the lock as well.
+7. A focused composition test calls the production runtime gate before a two-create probe. One
+   verified authorization precedes both creates, while a raw request, receipt, boolean, callback,
+   or coroutine is rejected by that exact gate. #2170 reuses it in the final libvirt helper.
 
 The new tests run on the ordinary disposable-Postgres tier. Native ppc64le live tests are excluded
 by the campaign and no live provider is needed for this contract-only prerequisite.
@@ -152,6 +165,9 @@ by the campaign and no live provider is needed for this contract-only prerequisi
   authority already required by the reaper.
 - **Pass a callback or boolean into the synchronous helper.** Rejected: neither proves an
   asynchronous transaction committed, and both are easy to invoke or forge at the wrong point.
+- **Release verification state before calling the helper.** Rejected: a concurrent terminal path
+  could discharge the row before either create; the existing per-System serialization lock must
+  cover both the check and its consuming operation.
 - **Do nothing until #2173 adds a job payload.** Rejected: #2173 would then have to invent the
   cross-role contract while also orchestrating it, recreating the scope collision that split
   #2251 from #2170.

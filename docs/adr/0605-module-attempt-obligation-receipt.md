@@ -25,13 +25,19 @@ The request contains one closed, strict, versioned, canonical JSON receipt namin
 attempt tuple. The receipt is evidence to look up, not a bearer capability. It contains no secret,
 host, path, credential, or operator identifier.
 
-Before remote-module volume preparation, a worker first compares the receipt with the enclosing
-operation's expected attempt tuple, then uses its existing read-only database authority to verify
-that the receipt's exact row exists and its mutation obligation remains open. Only that successful
-check constructs a distinct immutable authorization value accepted by #2170's
-synchronous volume helper. A request, raw receipt, boolean, callback, or coroutine is not that
-value. Missing, mismatched, malformed, discharged, or unreadable state fails closed before either
-volume creation with a redacted error.
+Before remote-module volume preparation, a worker opens a transaction, acquires the existing
+transaction-scoped System advisory lock, compares the receipt with the enclosing operation's
+expected attempt tuple, and uses its read-only database authority to verify that the receipt's
+exact row exists and its mutation obligation remains open. Only that successful check constructs a
+distinct immutable authorization value accepted by #2170's synchronous volume helper. The worker
+holds the transaction and System lock while that helper creates both volumes, then releases them.
+Every discharge or deletion path, including #2172's terminal paths, acquires the same System lock,
+so an authorization cannot become stale between verification and either create.
+
+A production runtime gate unwraps only the verified authorization type for #2170; a request, raw
+receipt, boolean, callback, or coroutine is rejected rather than treated as authorization.
+Missing, mismatched, malformed, discharged, or unreadable state fails closed before either volume
+creation with a redacted error.
 
 The receipt/request decoder is bounded to 4,096 bytes and rejects unknown fields, wrong versions or
 types, and noncanonical encodings. Migration 0126's server-write/worker-read privileges remain
@@ -42,15 +48,17 @@ reaping behavior.
 
 The server-to-worker handoff becomes replayable without granting the worker obligation-write
 authority. A committed row with no volume remains normal crash residue, while a receipt without a
-matching open row cannot authorize storage mutation. Every preparation pays one exact read before
-the shared two-volume helper runs.
+matching open row cannot authorize storage mutation. Every preparation pays one exact read and
+holds the per-System serialization lock while the shared two-volume helper runs.
 
 The Python authorization type prevents accidental bypass within the provider composition; it is
 not a cryptographic boundary against arbitrary code executing inside the worker. The database role
 and exact-row read are the authority boundary.
 
 #2173 must serialize the version-1 request field unchanged, #2170 must require one verified value
-before its first lookup/create sequence, and #2172/#2168 retain discharge/reaping ownership.
+before its first lookup/create sequence, and #2172/#2168 retain discharge/reaping ownership. The
+shared lock requirement is part of those consumers' contract, not a new discharge implementation
+in this issue.
 
 ## Considered & rejected
 
@@ -65,5 +73,8 @@ before its first lookup/create sequence, and #2172/#2168 retain discharge/reapin
   repository open is asynchronous and caller-transactional
   (`src/kdive/db/remote_module_attempt_obligations.py`), so neither value proves the transaction
   committed before the helper runs.
+- **Verify, release the database transaction, then create.** judgment: teardown or another terminal
+  path could discharge the row between the read and either create, turning the detached value into
+  stale authorization. Holding the existing System lock through the helper closes that interval.
 - **Wait for #2173 and define the contract inside its job payload.** judgment: combining contract
   ownership with orchestration recreates the scope collision for which #2251 was split from #2170.

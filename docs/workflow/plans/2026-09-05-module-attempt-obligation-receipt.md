@@ -27,7 +27,8 @@ service module, one small repository read method, and ~180 lines of focused unit
 | `src/kdive/db/remote_module_attempt_obligations.py` | modify | exact open-state read used by both roles |
 | `src/kdive/services/remote_module_attempt_preparation.py` | create | server commit-before-return and worker verification services |
 | `tests/domain/test_remote_module_attempt_preparation.py` | create | closed/canonical model and typed-authorization contracts |
-| `tests/services/test_remote_module_attempt_preparation.py` | create | real-role commit, replay, failure, and verification behavior |
+| `tests/services/test_remote_module_attempt_preparation.py` | create | real-role commit, replay, lock lifetime, failure, and verification behavior |
+| `tests/db/external_boot_authority_support.py` | consume unchanged | reusable isolated server/worker login fixture |
 
 ## Task 1 — implement the contract models with TDD
 
@@ -61,16 +62,17 @@ the unknown-field test fail, restore strict config, and rerun green.
 ## Task 2 — implement server and worker services with TDD
 
 Verification: `focused-test` for the repository open-state query, commit-before-return service,
-exact expected-attempt comparison, read-only worker verification, redacted failures, replay, and
-typed authorization handoff. Red command:
+exact expected-attempt comparison, read-only worker verification, System-lock lifetime, redacted
+failures, replay, and typed authorization handoff. Red command:
 `uv run python -m pytest tests/services/test_remote_module_attempt_preparation.py -q`; expected red
 failure: import/collection fails because the new service module and repository read method do not
 exist. Green command: the same command; expected green result: every real-role, transaction,
 failure, replay, and ordering case passes.
 
-Create the service test file using the disposable migrated database and the existing role-DSN
-fixture. Seed the Resource→Run spine as administrator, then use separate `kdive_server` and
-`kdive_worker` pools.
+Create the service test file using the disposable migrated database. Re-export the existing
+`authority_role_dsns` fixture from `tests.db.external_boot_authority_support` into this test module;
+it creates isolated LOGIN roles with cleanup and is already safe for parallel test databases. Seed
+the Resource→Run spine as administrator, then use separate `kdive_server` and `kdive_worker` pools.
 
 Cover:
 
@@ -81,7 +83,9 @@ Cover:
 - worker verification succeeds only when the receipt, expected operation tuple, and open row match;
 - missing, mismatched, discharged, and unreadable state return the same redacted failure;
 - the worker role cannot insert/update the obligation; and
-- only the verified value reaches a two-create probe once.
+- a competing discharge holding the same System lock cannot run until the verification context's
+  two-create probe exits; and
+- only the verified value passes the production runtime gate and reaches a two-create probe once.
 
 Run:
 
@@ -101,9 +105,11 @@ Implement the commit and verification services:
 
 Create the service module. The server function owns `pool.connection()` and `conn.transaction()`,
 opens idempotently, confirms open state, leaves both contexts, and only then constructs/returns the
-request. The worker function validates the typed request, checks exact open state through a
-read-only connection, maps missing/discharged/database failures to one redacted verification error,
-and creates the verified authorization through the module-private factory.
+request. The worker async context manager owns a read-only transaction, acquires
+`advisory_xact_lock(..., LockScope.SYSTEM, expected_attempt.system_id)`, validates the typed request,
+checks exact open state, maps missing/discharged/database failures to one redacted verification
+error, and yields the verified authorization while retaining the lock. Add the production runtime
+gate beside the authorization type; #2170's helper will reuse it.
 
 Run both focused test files. Use a controlled fault that constructs/returns inside a transaction
 test double before its commit marker; require the ordering assertion to fail, restore, and rerun
