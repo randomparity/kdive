@@ -193,7 +193,9 @@ def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(
 
 
 def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
-    require_disk_grub_source(_source_xml(), system_id=_SYSTEM_ID, pool="kdive")
+    require_disk_grub_source(
+        _source_xml(), system_id=_SYSTEM_ID, pool="kdive", overlay_path="/pool/overlay.qcow2"
+    )
 
 
 @pytest.mark.parametrize(
@@ -205,6 +207,7 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         ),
         (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
         (lambda xml: xml.replace('pool="kdive"', 'pool="other"'), "boot-disk"),
+        (lambda xml: xml.replace("/pool/overlay.qcow2", "/unrelated/attacker.qcow2"), "boot-disk"),
         (lambda xml: xml.replace('dev="vda"', 'dev="sda"'), "boot-disk"),
         (lambda xml: xml.replace('type="qcow2"', 'type="raw"'), "boot-disk"),
         (
@@ -218,6 +221,7 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         "external-boot-fields",
         "other-system",
         "wrong-pool",
+        "wrong-overlay-path",
         "wrong-target-dev",
         "wrong-driver-type",
         "extra-boot-selection",
@@ -229,7 +233,12 @@ def test_admission_rejects_a_source_that_is_not_the_owned_baseline(
     mutate: Callable[[str], str], rule: str
 ) -> None:
     with pytest.raises(CategorizedError) as caught:
-        require_disk_grub_source(mutate(_source_xml()), system_id=_SYSTEM_ID, pool="kdive")
+        require_disk_grub_source(
+            mutate(_source_xml()),
+            system_id=_SYSTEM_ID,
+            pool="kdive",
+            overlay_path="/pool/overlay.qcow2",
+        )
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details["rule"] == rule
 
@@ -344,6 +353,7 @@ def _prepare(**overrides: Any) -> RemoteExternalBootDefinition:
         "materialization": overrides.pop("materialization", None) or _materialization(plan=plan),
         "binding": overrides.pop("binding", None) or _binding(),
         "pool": "kdive",
+        "overlay_path": "/pool/overlay.qcow2",
         "kernel_path": _KERNEL_PATH,
         "initrd_path": _INITRD_PATH,
     }

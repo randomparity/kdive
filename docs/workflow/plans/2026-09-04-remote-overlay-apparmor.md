@@ -3,9 +3,9 @@
 Issue: #2236
 Spec: [remote overlay AppArmor design](../specs/2026-09-04-remote-overlay-apparmor-design.md)
 
-The remote provider will carry the libvirt-resolved base path from overlay preparation into the
-existing volume-disk renderer. It will render the supported two-layer chain explicitly, letting
-libvirt's standard per-domain AppArmor helper grant only the selected base.
+The remote provider carries both libvirt-resolved paths from overlay preparation into the domain
+renderer. It renders the supported two-layer file chain explicitly, letting libvirt's standard
+per-domain AppArmor helper grant only the selected overlay and base.
 
 Tech stack: Python 3.14, libvirt-python, ElementTree, pytest, and the existing Ansible/live-host
 provisioning.
@@ -13,7 +13,7 @@ provisioning.
 ## Global constraints
 
 - Work in `feat/remote-overlay-apparmor-2236`, based on `main`.
-- Preserve the enabled security driver, volume disk source, pool identity, cleanup semantics, and
+- Preserve the enabled security driver, pool/volume identity in kdive metadata, cleanup semantics, and
   the standalone-base contract.
 - Grant only a libvirt-resolved backing path and encode it with ElementTree.
 - Fail before domain definition on missing, malformed, or divergent reused backing metadata.
@@ -32,7 +32,7 @@ Interfaces:
 
 - `Volume.XMLDesc(flags: int = 0) -> str` supplies backing metadata for reuse validation.
 - `Pool.refresh(flags: int = 0) -> int` reconstructs volume metadata from actual remote files.
-- `PreparedOverlay(name: str, backing_path: str, created: bool)` is consumed by provisioning.
+- `PreparedOverlay(name: str, path: str, backing_path: str, created: bool)` is consumed by provisioning.
 - `ensure_named_overlay(pool, base_volume, name) -> PreparedOverlay` returns the exact base path
   only after the base is terminal and the overlay metadata agrees.
 
@@ -67,8 +67,9 @@ Files: modify `src/kdive/providers/remote_libvirt/lifecycle/xml.py`,
 
 Interfaces:
 
-- `render_domain_xml(..., pool: str, volume: str, backing_path: str, ...) -> str` renders a volume
-  disk with one file backing node and an empty terminator.
+- `render_domain_xml(..., pool: str, volume: str, overlay_path: str, backing_path: str, ...) -> str`
+  renders a file disk with one file backing node and an empty terminator; kdive metadata retains
+  pool/volume identity.
 - `_define_and_start(..., overlay: PreparedOverlay, ...)` and `_render(..., overlay, ...)` pass the
   bound name/path pair together.
 
@@ -85,7 +86,8 @@ Implementation steps:
 5. Run both focused provider files, `just lint`, and `just type`, then commit.
 
 Acceptance: the definition handed to libvirt names only the prepared overlay and its bound base.
-Start retry and teardown remain unchanged.
+Start retry remains unchanged; teardown and external-boot admission resolve the recorded metadata
+and bind the file source to the libvirt-resolved overlay path.
 
 ## Task 3 — Prove Ubuntu/AppArmor behavior and ship
 
