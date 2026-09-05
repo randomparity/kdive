@@ -23,8 +23,10 @@ composition/report wiring, and provider, fleet, lane, and loop tests.
 
 ## File map
 
+- `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_attachments.py`: expose the
+  landed complete disk-graph reference traversal without changing its behavior.
 - `src/kdive/providers/remote_libvirt/reaping/module_volumes.py`: single-host algorithm and async
-  multi-host provider adapter.
+  multi-host provider adapter consuming that traversal.
 - `src/kdive/providers/infra/reaping.py`: provider-neutral module-volume reaper port and null port.
 - `src/kdive/reconciler/cleanup/provider_resources/module_volume_reaping.py`: durable-obligation
   expansion and lane call.
@@ -40,7 +42,17 @@ composition/report wiring, and provider, fleet, lane, and loop tests.
 ### Interfaces
 
 Consumes `parse_module_volume_name(name: str) -> ModuleVolumeOwner | None`, `CategorizedError`,
-`ErrorCategory`, and libvirt connection/pool/domain duck types. Produces:
+`ErrorCategory`, libvirt connection/pool/domain duck types, and the landed #2167 traversal promoted
+to these provider-package interfaces:
+
+```python
+def volume_references(root: Element) -> list[tuple[str, str]]: ...
+def path_references(root: Element) -> set[str]: ...
+```
+
+Both walk every `source` descendant of each disk; `path_references` additionally reads active and
+legacy mirror `file`/`dev` attributes. The existing attachment inspector remains their first
+consumer. This task produces:
 
 ```python
 class ModuleVolumeReaperConn(Protocol):
@@ -71,17 +83,22 @@ def reap_orphaned_module_volumes(
 
 ### Steps
 
-1. Add the eleven named tests plus mixed-pool and active/inactive lexical-alias regressions, with
-   fakes that record refresh, enumeration, retention-read, path lookup, and delete order; run the
-   focused command and observe the missing-module failure.
-2. Implement protocols and safe domain XML parsing with `defusedxml`; direct file/device paths and
-   candidate paths use remote POSIX lexical normalization, managed direct aliases resolve through
+1. Rename #2167's landed `_volume_references` and `_path_references` helpers as public
+   provider-package interfaces, update its internal calls, and retain its complete disk-graph tests.
+2. Add the eleven named reaper tests plus mixed-pool, active/inactive lexical-alias, nested backing
+   store, data store, and active/legacy mirror regressions, with fakes that record refresh,
+   enumeration, retention-read, path lookup, and delete order; run the focused command and observe
+   the missing-module failure.
+3. Implement protocols and parse each active and inactive definition with #2167's bounded parser;
+   feed every document through the shared reference helpers. Direct file/device paths and candidate
+   paths use remote POSIX lexical normalization, managed direct aliases resolve through
    `storageVolLookupByPath`, volume references resolve through their named pool and volume, and any
    missing required volume attribute or operational resolution error raises infrastructure failure.
-3. Implement one complete enumeration, retention filtering, a complete reference/conflict
+4. Implement one complete enumeration, retention filtering, a complete reference/conflict
    preflight, then deletion. Translate libvirt errors with bounded details and count
    `VIR_ERR_NO_STORAGE_VOL` as removed.
-4. Run the focused command and require every named and added regression to pass. Commit the task.
+5. Run the focused command plus #2167's attachment tests and require every named and added
+   regression to pass. Commit the task.
 
 Acceptance: only whole-name matches can reach `delete`; `retained_owners` is first invoked after
 `listAllVolumes` returns; the complete protected set exists before the first delete; attached

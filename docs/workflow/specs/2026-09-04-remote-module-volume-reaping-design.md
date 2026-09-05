@@ -19,8 +19,10 @@ storage referenced by an active or inactive domain definition.
   volume classified against it.
 - Mutation retention protects `source.ext4` and `scratch.ext4`; reap retention independently
   protects `reaping.journal` and `reaped.journal`.
-- The domain-reference set is resolved after retained owners and before deletion. File and device
-  sources are normalized lexically with POSIX path rules on both sides of the comparison; local
+- The domain-reference set is resolved after retained owners and before deletion. The collector
+  reuses #2167's landed complete disk-graph traversal: every `source` below a disk, including
+  nested backing stores and data stores, plus active and legacy mirror path attributes. File and
+  device sources are normalized lexically with POSIX path rules on both sides of the comparison; local
   `realpath` is forbidden because the paths belong to the remote host. The connection also attempts
   `storageVolLookupByPath` so a libvirt-managed alias resolves to the volume's canonical path. An
   unmanaged direct path falls back only on lexical normalization; an operational lookup error
@@ -38,8 +40,12 @@ storage referenced by an active or inactive domain definition.
 
 `providers/remote_libvirt/reaping/module_volumes.py` owns the synchronous, single-host libvirt
 algorithm and the exact interfaces named by #2168. It refreshes and enumerates once, calls the
-retained-owner callback only after enumeration, resolves all domain references, rejects conflicts,
-and deletes the remaining candidates.
+retained-owner callback only after enumeration, resolves all domain references through the shared
+`volume_references` and `path_references` traversal from
+`remote_module_attachments.py`, rejects conflicts, and deletes the remaining candidates. #2168
+promotes those two landed private helpers to provider-package interfaces without changing their
+behavior, so the attempt-scoped inspector and whole-pool sweep cannot drift onto different disk
+graphs.
 
 `RemoteLibvirtModuleVolumeReaper` is the asynchronous fleet port. Its libvirt work runs in one
 worker thread through the existing remote-reaper connection bundle. The low-level algorithm's
@@ -99,8 +105,9 @@ Unreachable remote hosts use the established per-host warning and are retried ne
 
 - Whole-name anchored parsing is the ownership boundary; no prefix or malformed near-match can
   reach deletion.
-- Domain XML is parsed with `defusedxml`, and only the three specified source forms are read.
-  Volume references must resolve through libvirt or the entire deletion preflight fails closed.
+- Domain XML is parsed with the landed bounded parser, and the shared traversal covers top-level
+  and nested source, backing-store, data-store, and mirror forms. Volume references must resolve
+  through libvirt or the entire deletion preflight fails closed.
   Direct paths are normalized as remote POSIX paths; managed aliases resolve through libvirt, and
   operational lookup failures fail closed. No local filesystem resolution participates.
 - Durable retention is read after enumeration and expanded by the kind-specific obligation flags.
@@ -122,8 +129,9 @@ campaign run.
 
 The provider tests cover the eleven named Task 5 behaviors, including foreign-name exclusion,
 both obligation classes, the enumeration/read interleaving, unresolved references, attachment
-conflicts, mixed attached/orphan pools, active and inactive lexical aliases, managed direct-path
-aliases, and idempotent disappearance. Fleet-adapter tests prove the callback crosses from the
+conflicts, mixed attached/orphan pools, active and inactive lexical aliases, nested backing/data/
+mirror references, managed direct-path aliases, and idempotent disappearance. A shared-traversal
+test pins the reaper to #2167's exported helpers. Fleet-adapter tests prove the callback crosses from the
 worker thread at the required point, two cancellation requests cannot finish the adapter before
 the worker and callback finish, the cancellation count is preserved, and unreachable-host handling
 remains inherited. Lane tests prove obligation expansion, catalog registration, reporting, failure
