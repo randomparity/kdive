@@ -48,7 +48,7 @@ from kdive.providers.remote_libvirt.reaping.boot_artifacts import (
 )
 from kdive.providers.shared.guest_agent import AgentExecResult, GuestAgentExec, qemu_agent_command
 from tests.live_vm import require_live_vm_remote
-from tests.live_vm.test_remote_external_boot_support import (
+from tests.live_vm.remote_external_boot_support import (
     assert_cmdline_equal,
     attempt_all_cleanup,
     first_differing_byte,

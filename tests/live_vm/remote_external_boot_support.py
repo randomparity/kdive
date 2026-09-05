@@ -1,4 +1,4 @@
-"""Test-only helpers for the remote external-boot native carrier (#2121)."""
+"""Support helpers for the remote external-boot native carrier (#2121)."""
 
 from __future__ import annotations
 
