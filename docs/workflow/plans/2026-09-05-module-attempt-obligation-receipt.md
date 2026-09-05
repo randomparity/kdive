@@ -29,7 +29,14 @@ service module, one small repository read method, and ~180 lines of focused unit
 | `tests/domain/test_remote_module_attempt_preparation.py` | create | closed/canonical model and typed-authorization contracts |
 | `tests/services/test_remote_module_attempt_preparation.py` | create | real-role commit, replay, failure, and verification behavior |
 
-## Task 1 — write failing contract-model tests
+## Task 1 — implement the contract models with TDD
+
+Verification: `focused-test` for the closed canonical receipt/request and typed authorization
+contracts. Red command:
+`uv run python -m pytest tests/domain/test_remote_module_attempt_preparation.py -q`; expected red
+failure: import/collection fails because the new domain module does not exist. Green command: the
+same command; expected green result: every strict-shape, canonical-byte, bound, and construction
+case passes.
 
 Create the domain test file first. Cover canonical request and receipt round trips; exact version,
 UUID, nonce, and field shape; noncanonical ordering/trailing bytes; and the 4,096-byte decoder
@@ -42,18 +49,24 @@ Run:
 uv run python -m pytest tests/domain/test_remote_module_attempt_preparation.py -q
 ```
 
-Expect collection/import failure before implementation, then green after Task 2.
-
-## Task 2 — implement the domain values
+Expect collection/import failure before implementation. Then create the domain values:
 
 Create `remote_module_attempt_preparation.py` with one private canonical base, the two versioned
 models, and the verified authorization value/factory. Reuse `ModuleAttempt` rather than defining a
 second attempt tuple. Keep error messages structural and free of field values.
 
-Run Task 1's command. Prove the new tests bite by temporarily accepting one unknown field, observe
+Run the green command. Prove the new tests bite by temporarily accepting one unknown field, observe
 the unknown-field test fail, restore strict config, and rerun green.
 
-## Task 3 — write failing server/worker service tests
+## Task 2 — implement server and worker services with TDD
+
+Verification: `focused-test` for the repository open-state query, commit-before-return service,
+exact expected-attempt comparison, read-only worker verification, redacted failures, replay, and
+typed authorization handoff. Red command:
+`uv run python -m pytest tests/services/test_remote_module_attempt_preparation.py -q`; expected red
+failure: import/collection fails because the new service module and repository read method do not
+exist. Green command: the same command; expected green result: every real-role, transaction,
+failure, replay, and ordering case passes.
 
 Create the service test file using the disposable migrated database and the existing role-DSN
 fixture. Seed the Resource→Run spine as administrator, then use separate `kdive_server` and
@@ -76,18 +89,15 @@ Run:
 uv run python -m pytest tests/services/test_remote_module_attempt_preparation.py -q
 ```
 
-Expect failures for missing repository/service interfaces before Tasks 4–5.
+Expect failures for the missing repository/service interfaces before implementation.
 
-## Task 4 — add the exact open-state repository read
+Then add the exact open-state repository read:
 
 Add `mutation_obligation_is_open(conn, attempt) -> bool`. One exact-key query returns true only for
 an existing row with `mutation_discharged_at IS NULL`; missing and discharged rows return false.
 It performs no write and is valid under both server and worker roles.
 
-Run the existing repository tests plus Task 3's service tests. Expect only missing service failures
-after this task.
-
-## Task 5 — implement commit and verify services
+Implement the commit and verification services:
 
 Create the service module. The server function owns `pool.connection()` and `conn.transaction()`,
 opens idempotently, confirms open state, leaves both contexts, and only then constructs/returns the
@@ -99,7 +109,11 @@ Run both focused test files. Use a controlled fault that constructs/returns insi
 test double before its commit marker; require the ordering assertion to fail, restore, and rerun
 green.
 
-## Task 6 — guardrails and review
+## Task 3 — guardrails and review
+
+Verification: `task-test-not-applicable` for the review and publication process itself because this
+task changes no executable or structural product contract; Tasks 1–2 own all changed contracts and
+their focused evidence. Repository guardrails and adversarial/security reviews remain mandatory.
 
 Run, bare:
 
