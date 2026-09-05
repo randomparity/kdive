@@ -251,8 +251,14 @@ def _materialize_one(
     try:
         partial = _lookup(pool, partial_name)
         if partial is not None:
-            # A partial with this deterministic ownership key can only be from an earlier attempt
-            # of this exact artifact.  It is never a published volume and is safe to replace.
+            try:
+                partial_matches = _rehash_volume(conn, partial, payload)
+            except (libvirt.libvirtError, OSError, RuntimeError) as exc:
+                raise _infra(
+                    "rehashing the existing partial artifact", kind=kind, pool=pool_name
+                ) from exc
+            if not partial_matches:
+                raise _conflict(kind, pool_name)
             partial.delete(0)
         staged = _upload_volume(
             conn,

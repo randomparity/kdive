@@ -14,14 +14,31 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
+    artifact_partial_volume_name,
     materialize_boot_artifacts,
+    render_boot_artifact_volume_xml,
     require_boot_artifact_capacity,
 )
 from tests.providers.remote_libvirt.conftest import libvirt_error
-from tests.providers.remote_libvirt.fakes import FakeStorageConn, FakeStoragePool
+from tests.providers.remote_libvirt.fakes import FakeStorageConn, FakeStoragePool, FakeStorageVolume
 
 SYSTEM = UUID("00000000-0000-0000-0000-000000000003")
 RUN = UUID("00000000-0000-0000-0000-000000000002")
+ATTEMPT = UUID("00000000-0000-0000-0000-000000000004")
+
+
+def _store_bytes(conn: FakeStorageConn, volume: FakeStorageVolume, payload: bytes) -> None:
+    stream = conn.newStream(0)
+    volume.upload(stream, 0, len(payload), 0)
+    remaining = payload
+
+    def send(_stream: object, nbytes: int, _opaque: object) -> bytes:
+        nonlocal remaining
+        chunk, remaining = remaining[:nbytes], remaining[nbytes:]
+        return chunk
+
+    stream.sendAll(send, None)
+    stream.finish()
 
 
 class _Stream:
@@ -140,7 +157,7 @@ def test_materialization_survives_metadata_free_dir_pool_readback() -> None:
         run_id=RUN,
         kernel=b"kernel",
         initrd=b"initrd",
-        attempt_id=UUID("00000000-0000-0000-0000-000000000004"),
+        attempt_id=ATTEMPT,
     )
 
     assert result.kernel.ref == f"kernel/{SYSTEM}/{RUN}"
@@ -197,6 +214,30 @@ def test_retry_mismatch_is_conflict_and_leaves_existing_volume() -> None:
     assert exc.value.category is ErrorCategory.CONFLICT
     assert pool.existing is not None
     assert not pool.existing.deleted
+
+
+def test_retry_mismatched_partial_is_conflict_and_preserves_evidence() -> None:
+    pool = FakeStoragePool(name="images")
+    conn = FakeStorageConn(pool)
+    partial_name = artifact_partial_volume_name("kernel", SYSTEM, RUN, b"kernel", ATTEMPT)
+    partial = pool.createXML(
+        render_boot_artifact_volume_xml(partial_name, capacity_bytes=len(b"different"))
+    )
+    _store_bytes(conn, partial, b"different")
+
+    with pytest.raises(CategorizedError) as exc:
+        materialize_boot_artifacts(
+            conn,
+            "images",
+            system_id=SYSTEM,
+            run_id=RUN,
+            kernel=b"kernel",
+            initrd=None,
+            attempt_id=ATTEMPT,
+        )
+
+    assert exc.value.category is ErrorCategory.CONFLICT
+    assert pool.listVolumes() == [partial_name]
 
 
 def test_failed_attempt_deletes_only_its_partial_volume() -> None:
