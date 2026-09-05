@@ -13,12 +13,17 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+import libvirt
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    ConsoleReadinessWindow,
+    ReadinessResult,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     ModuleArchiveCapture,
     RealGuestRecoveryWriter,
@@ -1692,6 +1697,8 @@ def _factory(
     domain: Domain | None = None,
     *,
     pin_lease: PinOperationLease = LANE.pin,
+    prepare_console: Callable[[UUID], ConsoleReadinessWindow] | None = None,
+    readiness: Callable[[UUID, ConsoleReadinessWindow], ReadinessResult] | None = None,
 ) -> LocalExternalBootSessionFactory:
     selected = domain or Domain(events)
     return LocalExternalBootSessionFactory(
@@ -1704,6 +1711,8 @@ def _factory(
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: events.append("artifact.close"),
+        prepare_console=prepare_console,
+        readiness=readiness,
     )
 
 
@@ -1716,6 +1725,197 @@ def test_factory_pins_before_open_and_lease_cannot_release_while_session_live() 
         lease.release()
     session.close()
     lease.release()
+
+
+class _Window:
+    def __init__(self, events: list[str], name: str) -> None:
+        self.events = events
+        self.name = name
+        self.closed = False
+
+    @property
+    def deadline(self) -> float:
+        return 10.0
+
+    def read(self) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self.events.append(f"window.close:{self.name}")
+
+
+def test_start_prepares_each_fresh_readiness_window() -> None:
+    events: list[str] = []
+    prepared = 0
+
+    def prepare(_system_id: UUID) -> ConsoleReadinessWindow:
+        nonlocal prepared
+        prepared += 1
+        events.append(f"window.prepare:{prepared}")
+        return cast(ConsoleReadinessWindow, _Window(events, str(prepared)))
+
+    domain = Domain(events)
+    session = _factory(
+        events,
+        domain,
+        prepare_console=prepare,
+        readiness=lambda _sid, _window: ReadinessResult(True, True),
+    ).open(_lease(), _expected())
+    session.start()
+    assert events.index("window.prepare:1") < events.index("domain.create")
+    assert session.readiness() == ReadinessResult(True, True)
+    domain.active = False
+    session.start()
+    assert events.count("window.prepare:2") == 1
+    assert events.count("domain.create") == 2
+    session.close()
+
+
+def test_start_refuses_active_domain_before_preparation() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    domain.active = True
+    session = _factory(
+        events,
+        domain,
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, _Window(events, "unexpected")),
+    ).open(_lease(), _expected())
+
+    with pytest.raises(RuntimeError, match="inactive"):
+        session.start()
+
+    assert not any(event.startswith("window.") for event in events)
+    session.close()
+
+
+def test_failed_start_invalidates_readiness_and_closes_window() -> None:
+    events: list[str] = []
+
+    class FailingDomain(Domain):
+        def create(self) -> int:
+            self.events.append("domain.create")
+            raise RuntimeError("create failed")
+
+    window = _Window(events, "failed")
+    session = _factory(
+        events,
+        FailingDomain(events),
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, window),
+    ).open(_lease(), _expected())
+
+    with pytest.raises(RuntimeError, match="create failed"):
+        session.start()
+    with pytest.raises(RuntimeError, match="successful start"):
+        session.readiness()
+    assert events.count("window.close:failed") == 1
+    session.close()
+
+
+def test_repeated_readiness_returns_cached_result_and_closes_once() -> None:
+    events: list[str] = []
+    calls = 0
+    window = _Window(events, "cached")
+
+    def readiness(_sid: UUID, candidate: ConsoleReadinessWindow) -> ReadinessResult:
+        nonlocal calls
+        assert candidate is window
+        calls += 1
+        return ReadinessResult(True, True)
+
+    session = _factory(
+        events,
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, window),
+        readiness=readiness,
+    ).open(_lease(), _expected())
+    session.start()
+
+    assert session.readiness() == session.readiness() == ReadinessResult(True, True)
+    assert calls == 1
+    assert events.count("window.close:cached") == 1
+    session.close()
+
+
+def test_replacement_start_and_session_close_release_retained_windows() -> None:
+    events: list[str] = []
+    domain = Domain(events)
+    windows = [_Window(events, "first"), _Window(events, "second")]
+    session = _factory(
+        events,
+        domain,
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, windows.pop(0)),
+    ).open(_lease(), _expected())
+
+    session.start()
+    domain.active = False
+    session.start()
+    assert events.count("window.close:first") == 1
+    assert "window.close:second" not in events
+
+    session.close()
+    assert events.count("window.close:second") == 1
+
+
+@pytest.mark.parametrize("channel", ["absent", "duplicate", "malformed"])
+def test_factory_rejects_legacy_definition_before_resource_mutation(channel: str) -> None:
+    events: list[str] = []
+    domain = Domain(events, inactive_xml=_xml(channel=channel))
+
+    with pytest.raises(CategorizedError, match="reprovision") as caught:
+        _factory(events, domain).open(_lease(), _expected())
+
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+    assert caught.value.details == {"system_id": str(SYSTEM_ID)}
+    assert "artifact.open" not in events
+    assert "domain.define" not in events
+    assert "domain.create" not in events
+    assert "domain.destroy" not in events
+
+
+@pytest.mark.parametrize(
+    ("live_channel", "inactive_channel", "accepted"),
+    [("valid", "absent", False), ("absent", "valid", True)],
+)
+def test_factory_uses_inactive_channel_when_live_xml_disagrees(
+    live_channel: str, inactive_channel: str, accepted: bool
+) -> None:
+    events: list[str] = []
+    domain = Domain(
+        events,
+        _xml(channel=live_channel),
+        inactive_xml=_xml(channel=inactive_channel),
+    )
+    if accepted:
+        session = _factory(events, domain).open(_lease(), _expected())
+        session.close()
+        assert "domain.define" not in events
+    else:
+        with pytest.raises(CategorizedError, match="reprovision"):
+            _factory(events, domain).open(_lease(), _expected())
+        assert "artifact.open" not in events
+
+    if accepted:
+        assert events.index("domain.xml:2") < events.index("domain.xml:0")
+
+
+def test_factory_bounds_inactive_xml_failure_before_resource_mutation() -> None:
+    events: list[str] = []
+
+    class UnreadableInactiveDomain(Domain):
+        def XMLDesc(self, flags: int) -> str:  # noqa: N802
+            if flags == 2:
+                raise libvirt.libvirtError("private host path")
+            return super().XMLDesc(flags)
+
+    with pytest.raises(CategorizedError) as caught:
+        _factory(events, UnreadableInactiveDomain(events)).open(_lease(), _expected())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"system_id": str(SYSTEM_ID)}
+    assert "private host path" not in str(caught.value)
+    assert "artifact.open" not in events
 
 
 @pytest.mark.parametrize("lease", [None, object()])
@@ -1746,7 +1946,7 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     assert inspection.definition_identity.startswith("sha256:")
     assert inspection.source_boot_identity.startswith("sha256:")
     assert inspection.definition_identity == (
-        "sha256:b3a319e84c14ad49042057dab9c8ce445a144e7d4dea7b193674d9a35aef3110"
+        "sha256:c2e059232ae83929abca824acf42ad76f803f4a105dd416e18dcb8f21fb6bc27"
     )
     assert inspection.source_boot_identity == (
         "sha256:af7c3d00f78226cd4b917aa70737e2557cfa5989c5efa9a42b2555992adbe176"
@@ -2254,7 +2454,8 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
             events.append(f"openat:{root}:{name}:{flags}:{mode}") or 42
         ),
         unlink_relative=lambda root, name: events.append(f"unlinkat:{root}:{name}"),
-        readiness=lambda _system_id: ReadinessResult(True, True),
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, _Window(events, "authority")),
+        readiness=lambda _system_id, _window: ReadinessResult(True, True),
         observe_running=lambda _system_id, _domain: observation,
         cleanup_payloads=lambda root, binding: events.append(
             f"cleanup:{root}:{binding.activation_id}"
@@ -2263,8 +2464,10 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     session = factory.open(_lease(), _expected())
     assert session.open_artifact("point.json", 0) == 42
     session.unlink_artifact("point.json")
+    session.start()
     assert session.readiness() == ReadinessResult(True, True)
     assert session.observe_running() == observation
+    session.restore_power("inactive")
     session.cleanup_payloads()
     session.restore_power("running")
     assert domain.active
@@ -2300,7 +2503,10 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        readiness=lambda system_id: observed_ids.append(system_id) or ReadinessResult(True, True),
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, _Window(events, "snapshot")),
+        readiness=lambda system_id, _window: (
+            observed_ids.append(system_id) or ReadinessResult(True, True)
+        ),
         observe_running=lambda system_id, _domain: (
             observed_ids.append(system_id)
             or RunningKernelObservation(
@@ -2323,8 +2529,10 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         activation_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     )
     assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    session.start()
     session.readiness()
     session.observe_running()
+    session.restore_power("inactive")
     session.cleanup_payloads()
     assert observed_ids == [SYSTEM_ID, SYSTEM_ID]
     assert cleaned == [original_binding]

@@ -21,21 +21,47 @@ OVERLAY = f"/var/lib/kdive/rootfs/{SYSTEM_ID}-overlay.qcow2"
 ACTIVATION_ID = UUID(BINDING.activation_id)
 
 
-def _xml(*, overlay: str = OVERLAY, system_id: UUID = SYSTEM_ID) -> str:
+def _xml(
+    *,
+    overlay: str = OVERLAY,
+    system_id: UUID = SYSTEM_ID,
+    channel: str = "valid",
+) -> str:
+    channels = {
+        "valid": (
+            '<channel type="unix"><target type="virtio" name="org.qemu.guest_agent.0"/></channel>'
+        ),
+        "absent": "",
+        "duplicate": (
+            '<channel type="unix"><target type="virtio" '
+            'name="org.qemu.guest_agent.0"/></channel>' * 2
+        ),
+        "malformed": (
+            '<channel type="unix"><target type="pty" name="org.qemu.guest_agent.0"/></channel>'
+        ),
+    }[channel]
     return (
         "<domain><name>kdive-" + str(system_id) + "</name><metadata>"
         '<kdive:system xmlns:kdive="https://kdive.dev/libvirt/1">'
         + str(system_id)
         + "</kdive:system></metadata><os><kernel>/old</kernel><cmdline>root=x</cmdline></os>"
         '<devices><disk type="file" device="disk"><driver name="qemu" type="qcow2"/>'
-        f'<source file="{overlay}"/><target dev="vda" bus="virtio"/></disk></devices></domain>'
+        f'<source file="{overlay}"/><target dev="vda" bus="virtio"/></disk>'
+        f"{channels}</devices></domain>"
     )
 
 
 class Domain:
-    def __init__(self, events: list[str], xml: str | None = None) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        xml: str | None = None,
+        *,
+        inactive_xml: str | None = None,
+    ) -> None:
         self.events = events
         self.xml = xml or _xml()
+        self.inactive_xml = inactive_xml or self.xml
         self.active = False
 
     def name(self) -> str:
@@ -43,9 +69,8 @@ class Domain:
         return self.xml[start : self.xml.index("</name>", start)]
 
     def XMLDesc(self, flags: int) -> str:  # noqa: N802
-        del flags
-        self.events.append("domain.xml")
-        return self.xml
+        self.events.append(f"domain.xml:{flags}")
+        return self.inactive_xml if flags == 2 else self.xml
 
     def isActive(self) -> int:  # noqa: N802
         self.events.append("domain.active")
