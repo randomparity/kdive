@@ -236,6 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recover stranded external boots
 - Compare external boot command lines
 - Return exact guest command line bytes
+- Inspect module attachments
 
 ### Changed
 
@@ -1246,6 +1247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep observations read-only
 - Correct cleanup finalization contract
 - Conform cleanup decision record
+- Define device identity port
+- Conform device identity record
 
 ### Fixed
 
@@ -2019,6 +2022,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Encode boot artifact ownership
 - Preserve mismatched partials
 - Finalize durable cleanup receipts
+- Resolve attachment backing paths
+- Inspect nested storage sources
+- Bind owning root source
+- Retain owning domain activity
+- Normalize attachment paths
+- Compare physical attachment identity
+- Validate attachment identities
+- Identify block device aliases
+- Bound identity inspection
 
 ### Security
 
