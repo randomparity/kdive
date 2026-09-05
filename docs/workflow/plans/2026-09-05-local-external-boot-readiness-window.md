@@ -76,8 +76,10 @@ Files:
 - Modify `src/kdive/providers/local_libvirt/lifecycle/boot/session.py`.
 - Modify `src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py`.
 - Modify `src/kdive/providers/local_libvirt/lifecycle/boot/session_mechanisms.py`.
+- Modify `src/kdive/providers/local_libvirt/lifecycle/storage.py`.
 - Modify `tests/providers/local_libvirt/lifecycle/boot/test_session.py`.
 - Modify `tests/providers/local_libvirt/lifecycle/boot/test_session_mechanisms.py`.
+- Modify `tests/providers/local_libvirt/test_provisioning.py`.
 
 Interfaces:
 
@@ -86,6 +88,10 @@ Interfaces:
 - Add `PrepareConsole = Callable[[UUID], ConsoleReadinessWindow]` to the factory. The window retains
   the opened descriptor, `(device, inode)`, prior observed prefix, and pre-create deadline, with
   bounded `read()` and idempotent `close()` methods.
+- Add `_open_validated_console_log(path: Path, flags: int) -> int` under the existing storage seam.
+  `_prepare_console_log(path: Path) -> None` retains its signature and closes its descriptor. The
+  separate `prepare_console_readiness_window(system_id: UUID) -> ConsoleReadinessWindow` requests
+  read/write access and transfers its descriptor to the returned window.
 - Add `LocalExternalBootReadiness`, constructed from the existing console path, classifier,
   `_domain_exit_probe`, monotonic clock, sleep, and configured boot-window setting.
 - `_ConcreteSession.start()` and `restore_power("running")` use one private prepare/create operation;
@@ -109,20 +115,31 @@ Verification:
   the regression test fails under a controlled fault. Case:
   `test_new_boot_panic_cannot_be_hidden_by_prior_ready_marker`. Expected red: current whole-log
   single probe returns ready. Same green command.
+- Mode: focused-test. Contract: both console preparation paths apply identical identity checks while
+  the old seam still closes and returns `None`, and the new seam transfers one descriptor closed on
+  successful readiness, create failure, replacement failure, second start, or session close. Cases:
+  `test_prepare_console_readiness_window_reuses_identity_guards` and the session lifetime cases
+  above. Expected red: no transferable descriptor operation exists. Green commands:
+  `uv run python -m pytest tests/providers/local_libvirt/test_provisioning.py -q` and the two boot
+  test commands above.
 
 Steps:
 
 1. Add session ordering/generation tests and deterministic readiness tests; observe the named reds.
-2. Add the narrow window-preparation dependency and one private inactive prepare/create path.
+2. Factor the current console open/identity checks into `_open_validated_console_log` without
+   changing `_prepare_console_log`'s signature, close ownership, or behavior. Test both callers
+   against symlink, foreign-owner, non-regular, and multi-link identities.
+3. Add the separate prepare-and-open window operation, narrow factory dependency, and one private
+   inactive prepare/create path.
    Invalidate/close the prior window and cached result before preparation, expose the new window only
    after successful create, and close it on create failure and session close.
-3. Implement the retained-descriptor window with path-identity and prefix-continuity checks, then the
+4. Implement the retained-descriptor window with path-identity and prefix-continuity checks, then the
    readiness mechanism with injected clock/sleep/probe seams and an explicit byte cap. Preserve the
    first `ProbeFailure` only for an eventual failed result, let later console verdicts win, and
    perform one final read after terminal state.
-4. Add the stale-marker controlled-fault test and verify it bites when the preparation callback is
+5. Add the stale-marker controlled-fault test and verify it bites when the preparation callback is
    replaced with a no-op, then restore it.
-5. Run both focused commands and commit as `fix(local-libvirt): anchor external boot readiness`.
+6. Run all three focused commands and commit as `fix(local-libvirt): anchor external boot readiness`.
 
 Acceptance: all session-owned create paths prepare; a previous marker cannot satisfy a later boot;
 every loop exit is bounded and classified without exposing evidence.
@@ -139,8 +156,8 @@ Files:
 Interfaces:
 
 - `build_external_boot_session_factory(...)` accepts and forwards `prepare_console` and readiness.
-- `build_external_boot_session_mechanisms()` supplies `_prepare_console_log` through a System-ID
-  adapter and a constructed `LocalExternalBootReadiness`.
+- `build_external_boot_session_mechanisms()` supplies the separate
+  `prepare_console_readiness_window` operation and a constructed `LocalExternalBootReadiness`.
 - Preserve `build_runtime(...).external_boot is None` until #2246.
 
 Verification:

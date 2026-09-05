@@ -24,7 +24,9 @@ The local external-boot session owns one readiness window at a time.
 1. Before every session-owned `domain.create()`, the session requires the domain inactive and opens
    an ADR-0576 console window. Preparation truncates the validated worker-owned inode to zero, keeps
    its descriptor and identity, and captures one monotonic deadline before `create()`. Successful
-   preparation is the anchor; byte-offset slicing is not restored.
+   preparation is the anchor; byte-offset slicing is not restored. A new prepare-and-open operation
+   owns this transfer. It and `_prepare_console_log` share the same private open/identity validator,
+   while `_prepare_console_log` keeps its existing prepare-and-close contract for every prior caller.
 2. A dedicated external-boot readiness probe polls that window until ready, crashed, terminal, or
    the captured `KDIVE_LIBVIRT_BOOT_WINDOW_S` deadline. A transient domain-state probe failure is
    retained for a timeout result while polling continues; a later console ready/crash verdict takes
@@ -72,3 +74,7 @@ replacement or discontinuous retained inode fail closed rather than reading hist
   external-boot caller performs one comparison.
 - **Add a new external-boot timeout setting.** judgment: the existing local boot-window setting
   already expresses the same unit, clock, host scope, timeout consequence, and operator recovery.
+- **Change `_prepare_console_log` to return its descriptor.** judgment: transferring ownership from
+  an established `None`-returning seam would force every existing start path to acquire a close
+  obligation it does not need. A separate operation keeps that ownership change local to the
+  readiness session while sharing the identity checks underneath.

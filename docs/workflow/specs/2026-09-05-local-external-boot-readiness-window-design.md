@@ -30,6 +30,14 @@ The returned session-owned window retains the validated worker-owned inode descr
 `domain.create()`. The deadline is captured before create, so create latency and any delay before
 `readiness()` consume the one window rather than renewing it.
 
+Production construction uses a separate `prepare_console_readiness_window` operation. In
+`storage.py`, one private open/identity helper performs parent creation, `O_NOFOLLOW`, regular-file,
+effective-owner, single-link, and mode checks and returns the descriptor to its caller.
+`_prepare_console_log` calls that helper with write access, truncates, and closes exactly as before.
+The new readiness operation calls it with read/write access, truncates, captures identity/deadline,
+and transfers the descriptor into `ConsoleReadinessWindow`. A failure before transfer closes the
+descriptor; after transfer, only the window/session closes it.
+
 `start()` and `restore_power("running")` both use one private prepare-and-create method. Each attempt
 closes and invalidates any prior window/result before preparation; only a successful create makes
 the new window readable. A create failure closes it. `readiness()` fails closed before success and
@@ -107,6 +115,8 @@ outside the change; each fails closed when it violates the checked identity or e
 - Every direct create path records `prepare`, then `create`; active starts fail before preparation.
 - A delayed first readiness call and repeated calls share the deadline captured before create; a
   second start owns a second window; readiness cannot run after a failed or absent start.
+- Descriptor-lifetime tests cover preparation failure, successful transfer, create failure, path
+  replacement, second start, terminal readiness, and session close, each with exactly one close.
 - Deterministic clock tests cover immediate ready, crash, terminal-domain reread, probe failure,
   deadline expiry, exact evidence limit, oversize evidence, replacement, shrink, divergent
   truncate/regrow, and no sleep past the deadline.
