@@ -21,15 +21,17 @@ identity service calls the ADR-0603 `HostStatDeviceIdentity` adapter. The extern
 service and its existing request operations remain unchanged.
 
 A synchronous remote-libvirt adapter connects with one injected, fixed mutual-TLS Unix client
-configuration and request credential. Each call consumes one monotonic absolute preparation
-deadline across connection, handshake, request, response, and close. Both ends strictly validate
+configuration, request credential, and monotonic absolute preparation deadline. Each call consumes
+that captured deadline across connection, handshake, request, response, and close. Both ends
+strictly validate
 closed shapes and bounds; the caller receives only redacted conflict or infrastructure errors.
 
 ## Consequences
 
 Remote preparation gains one authenticated device-identity path without a second host agent or a
-generic execution surface. It must run where the configured authority Unix socket and credentials
-are available. The shared transport gains an additive operation that must remain compatible with
+generic execution surface. Its client must run where the configured authority Unix socket and
+active incarnation credentials are available. The shared transport gains an additive operation
+that must remain compatible with
 external-boot consumers, including #2200. #2170 supplies the later preparation orchestration that
 calls this adapter.
 

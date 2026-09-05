@@ -26,14 +26,16 @@ single server endpoint, and the two existing operation schemas and dispatch path
 
 `RemoteAuthorityDeviceIdentity` is a synchronous adapter because ADR-0603's inspection port and
 libvirt preparation path are synchronous. It opens a mutual-TLS AF_UNIX connection using one
-injected, already-bound client configuration. The configuration contains a fixed socket, authority
-server name, TLS CA/certificate/key paths, and a secret request credential; `identity(path,
-deadline)` cannot select any of them. A monotonic absolute deadline is converted to the positive
-remaining budget immediately before every potentially blocking connect, TLS, write, read, and
+injected, per-preparation client configuration. The configuration contains a fixed socket,
+authority server name, TLS CA/certificate/key paths, the active incarnation request credential, and
+the preparation's monotonic absolute deadline; `identity(path)` cannot select any of them. The
+captured deadline is converted to the positive remaining budget immediately before every
+potentially blocking connect, TLS, write, read, and
 orderly-close operation. A zero or expired budget fails before connection.
 
-Remote-libvirt composition exposes one factory that accepts only the validated client configuration
-and returns the port. #2170 will inject that factory into its server-preparation adapter; this issue
+Remote-libvirt composition exposes one factory that accepts only the validated per-preparation
+client configuration and returns the port. #2170 will inject that factory into its
+server-preparation adapter; this issue
 does not invent that not-yet-landed preparation lifecycle. An absent client configuration yields no
 port, so callers fail closed before storage mutation. Resource selection stays in the existing
 remote-libvirt `config_factory`; neither the wire request nor the identity client can rebind it.
@@ -87,8 +89,9 @@ allowed after the budget expires.
 - Existing widened: the mutual-TLS AF_UNIX listener accepts a third operation. Existing TLS 1.3,
   client-certificate authentication, request credential authentication, frame bound, session
   timeout, and socket ownership/ACL checks remain unchanged.
-- Existing used: injected client configuration supplies destination and credentials. Trusted
-  deployment composition owns it; no request or path can select another destination or credential.
+- Existing used: injected per-preparation client configuration supplies destination, TLS material,
+  active incarnation credential, and deadline. Trusted deployment and #2170 preparation composition
+  own it; no request or path can select another destination or credential.
 
 ### Actors and controls
 
