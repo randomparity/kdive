@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from pydantic import SecretStr
 
-from kdive.providers.external_boot_authority import transport
+from kdive.providers.external_boot_authority import host, transport
 from kdive.providers.external_boot_authority.host import (
     AuthorityHostConfig,
     HostReadinessError,
@@ -733,3 +733,254 @@ def test_authority_server_name_is_lowercase_unpadded_base32_sha256() -> None:
     assert authority_server_name("Authority-A") == f"{digest}.authority.kdive.invalid"
     assert "=" not in authority_server_name("Authority-A")
     assert socket.AF_UNIX is not None
+
+
+@pytest.mark.parametrize("network", [False, True])
+@pytest.mark.parametrize("authenticated", [False, True])
+def test_health_authenticates_without_provider_dispatch(
+    tmp_path: Path,
+    network: bool,
+    authenticated: bool,
+) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+        calls: list[str] = []
+
+        async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
+            calls.append(credential.get_secret_value())
+            if not authenticated:
+                raise ValueError("inactive worker")
+            return AuthenticatedPeer("worker-a")
+
+        if network:
+            listener = await _network_listener(config, authenticate)
+        else:
+            listener = await serve_authority_transport(config, authenticate, service=None)
+        await listener.start_serving()
+        try:
+            payload = encode_request_envelope(
+                "health", {"schema": "external-boot-authority-health-v1"}, "credential"
+            )
+            if network:
+                response = await _network_exchange(listener, material, payload)
+            else:
+                response = await _exchange(config, material, payload)
+            assert json.loads(response) == (
+                {"status": "ok", "value": {"schema": "external-boot-authority-health-v1"}}
+                if authenticated
+                else {"status": "error", "category": "unauthenticated"}
+            )
+            assert calls == ["credential"]
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+async def _network_listener(config: AuthorityHostConfig, authenticate: Any) -> Any:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = replace(config, network_address="127.0.0.1", network_port=port)
+    return await transport.serve_authority_network_transport(config, authenticate)
+
+
+async def _network_exchange(
+    listener: Any,
+    material: dict[str, Path],
+    payload: bytes,
+    *,
+    certificate: bool = True,
+) -> bytes:
+    reader, writer = await asyncio.open_connection(
+        *listener.address,
+        ssl=_client_context(material, certificate=certificate),
+        server_hostname=listener.server_name,
+    )
+    try:
+        writer.write(len(payload).to_bytes(4, "big") + payload)
+        await writer.drain()
+        return await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize("fault", ["missing", "untrusted", "expired", "server-name"])
+def test_network_rejects_certificate_before_authentication(tmp_path: Path, fault: str) -> None:
+    async def run() -> None:
+        material = _tls_material(
+            tmp_path,
+            "authority-a",
+            trusted_client=fault != "untrusted",
+            client_valid=fault != "expired",
+            server_name=authority_server_name("other") if fault == "server-name" else None,
+        )
+        config = _config(tmp_path, material)
+        authenticated = False
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            nonlocal authenticated
+            authenticated = True
+            return AuthenticatedPeer("worker-a")
+
+        listener = await _network_listener(config, authenticate)
+        await listener.start_serving()
+        try:
+            with pytest.raises((ConnectionError, ssl.SSLError, asyncio.IncompleteReadError)):
+                await _network_exchange(listener, material, b"{}", certificate=fault != "missing")
+            assert not authenticated
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault", ["address", "tls", "credential", "closed"])
+def test_network_listener_rejects_drift(tmp_path: Path, fault: str) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            return AuthenticatedPeer("worker-a")
+
+        listener = await _network_listener(config, authenticate)
+        try:
+            listener.validate()
+            assert not listener.server.is_serving()
+            await listener.start_serving()
+            listener.validate()
+            await check_tls_health(listener, config)
+            if fault == "address":
+                listener.address = ("127.0.0.2", listener.address[1])
+            elif fault == "tls":
+                listener.tls_context.verify_mode = ssl.CERT_NONE
+            elif fault == "credential":
+                config.worker_client_ca.chmod(0o600)
+            else:
+                await listener.close()
+            with pytest.raises(OSError, match="listener"):
+                listener.validate()
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+def test_network_rejects_oversize_frame_before_authentication(tmp_path: Path) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            pytest.fail("oversize frame must not authenticate")
+
+        listener = await _network_listener(config, authenticate)
+        await listener.start_serving()
+        try:
+            reader, writer = await asyncio.open_connection(
+                *listener.address,
+                ssl=_client_context(material),
+                server_hostname=listener.server_name,
+            )
+            try:
+                writer.write((MAX_ENVELOPE_BYTES + 1).to_bytes(4, "big"))
+                await writer.drain()
+                response = await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
+                assert json.loads(response) == {"status": "error", "category": "invalid-request"}
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_one_shot_checks_existing_network_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    running: bool,
+) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+
+        async def static(*_args: object) -> None:
+            return None
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            pytest.fail("host TLS probe has no worker credential")
+
+        monkeypatch.setattr(host, "_check_static_authority_host", static)
+        listener = await _network_listener(config, authenticate)
+        config = replace(
+            config,
+            network_address=listener.address[0],
+            network_port=listener.address[1],
+        )
+        if running:
+            await listener.start_serving()
+        try:
+            if running:
+                await host.check_authority_host_once(config)
+                listener.validate()
+            else:
+                with pytest.raises(HostReadinessError, match="tls-health: handshake-failed"):
+                    await host.check_authority_host_once(config)
+            assert not config.request_socket.with_name("authority-probe.sock").exists()
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+def test_health_operation_cannot_carry_provider_request() -> None:
+    with pytest.raises(ValueError, match="invalid-request"):
+        encode_request_envelope("health", _request(), "credential")
+
+
+@pytest.mark.parametrize("network", [False, True])
+def test_tls_health_redacts_unreadable_material(tmp_path: Path, network: bool) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            pytest.fail("TLS health never authenticates a worker")
+
+        listener = (
+            await _network_listener(config, authenticate)
+            if network
+            else await serve_authority_transport(config, authenticate)
+        )
+        await listener.start_serving()
+        try:
+            config.health_client_key.unlink()
+            with pytest.raises(HostReadinessError, match="tls-health: handshake-failed"):
+                await check_tls_health(listener, config)
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["acknowledge-takeover", "execute-mutation"])
+def test_existing_operation_envelopes_keep_canonical_bytes(operation: Any) -> None:
+    request = _request()
+    if operation == "execute-mutation":
+        request.update(
+            attempt_id=str(uuid4()),
+            expected_source_identity="source",
+            intended_target_identity="target",
+            recovery_objects=[],
+        )
+    expected = json.dumps(
+        {"credential": "credential", "operation": operation, "request": request},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert encode_request_envelope(operation, request, "credential") == expected

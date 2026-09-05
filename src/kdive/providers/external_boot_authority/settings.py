@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ipaddress import IPv4Address
 from pathlib import Path
 
 from kdive.config.registry import Setting
@@ -30,6 +31,20 @@ def _absolute_path(raw: str) -> Path:
 
 def _always(_env: object) -> bool:
     return True
+
+
+def _network_address(raw: str) -> str:
+    address = IPv4Address(raw)
+    if str(address) != raw or address.is_multicast:
+        raise ValueError("must be a canonical numeric IPv4 bind address")
+    return raw
+
+
+def _network_port(raw: str) -> int:
+    value = int(raw)
+    if not 1 <= value <= 65535:
+        raise ValueError("must be a TCP port from 1 through 65535")
+    return value
 
 
 AUTHORITY_INSTANCE = Setting(
@@ -86,6 +101,19 @@ AUTHORITY_PROVIDER_SOCKET = Setting(
     help="Dormant authority-owned provider mutation socket checked for local reachability.",
 )
 
+AUTHORITY_NETWORK_ADDRESS = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
+    parse=_network_address,
+    group="external-boot-authority",
+    help="Optional numeric IPv4 listener address; requires the network port setting.",
+)
+AUTHORITY_NETWORK_PORT = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
+    parse=_network_port,
+    group="external-boot-authority",
+    help="Optional mutual-TLS TCP listener port; requires the network address setting.",
+)
+
 SETTINGS = [
     AUTHORITY_INSTANCE,
     AUTHORITY_UID,
@@ -94,4 +122,6 @@ SETTINGS = [
     AUTHORITY_JOURNAL_DIR,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_PROVIDER_SOCKET,
+    AUTHORITY_NETWORK_ADDRESS,
+    AUTHORITY_NETWORK_PORT,
 ]

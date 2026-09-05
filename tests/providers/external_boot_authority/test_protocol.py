@@ -29,6 +29,25 @@ _DIGEST = "sha256:" + "a" * 64
 _OTHER_DIGEST = "sha256:" + "b" * 64
 
 
+def test_health_request_is_versioned_and_closed() -> None:
+    payload = b'{"schema":"external-boot-authority-health-v1"}'
+    request = decode_authority_request(payload)
+    assert type(request).__name__ == "AuthorityHealthRequestV1"
+    assert request.model_dump(by_alias=True) == json.loads(payload)
+    with pytest.raises(ValueError):
+        decode_authority_request(
+            b'{"command":"execute","schema":"external-boot-authority-health-v1"}'
+        )
+
+
+def test_health_acknowledgement_is_versioned_and_closed() -> None:
+    value_type = getattr(protocol, "AuthorityHealthAcknowledgementV1", None)
+    assert value_type is not None
+    assert value_type().model_dump(by_alias=True) == {"schema": "external-boot-authority-health-v1"}
+    with pytest.raises(ValidationError):
+        value_type.model_validate({"schema": "external-boot-authority-health-v1", "result": "ok"})
+
+
 def _binding() -> dict[str, object]:
     return {
         "authority_id": uuid4(),

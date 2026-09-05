@@ -32,15 +32,19 @@ from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_GID,
     AUTHORITY_INSTANCE,
     AUTHORITY_JOURNAL_DIR,
+    AUTHORITY_NETWORK_ADDRESS,
+    AUTHORITY_NETWORK_PORT,
     AUTHORITY_PROVIDER_SOCKET,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_UID,
 )
 from kdive.providers.external_boot_authority.transport import (
     AuthorityListener,
+    AuthorityNetworkListener,
     SocketLockBusyError,
     authority_server_name,
     health_tls_context,
+    serve_authority_network_transport,
     serve_authority_transport,
     validate_protected_parents,
     validate_socket_parent,
@@ -120,6 +124,20 @@ class AuthorityHostConfig:
     credentials_source_dir: Path = _AUTHORITY_CREDENTIALS_SOURCE_DIR
     state_dir: Path = _AUTHORITY_STATE_DIR
     denied_identities: tuple[str, ...] = _FIXED_DENIED_IDENTITIES
+    network_address: str | None = None
+    network_port: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.network_address is None) != (self.network_port is None):
+            raise HostReadinessError("configuration", "invalid")
+        if self.network_address is not None and self.network_port is not None:
+            try:
+                AUTHORITY_NETWORK_ADDRESS.parse(self.network_address)
+                if type(self.network_port) is not int:
+                    raise ValueError
+                AUTHORITY_NETWORK_PORT.parse(str(self.network_port))
+            except ValueError, TypeError:
+                raise HostReadinessError("configuration", "invalid") from None
 
     @classmethod
     def from_environment(cls) -> AuthorityHostConfig:
@@ -138,6 +156,8 @@ class AuthorityHostConfig:
             journal_dir = config_registry.require(AUTHORITY_JOURNAL_DIR)
             request_socket = config_registry.require(AUTHORITY_REQUEST_SOCKET)
             provider_socket = config_registry.require(AUTHORITY_PROVIDER_SOCKET)
+            network_address = config_registry.get(AUTHORITY_NETWORK_ADDRESS)
+            network_port = config_registry.get(AUTHORITY_NETWORK_PORT)
         except CategorizedError:
             raise HostReadinessError("configuration", "invalid") from None
         return cls(
@@ -155,6 +175,8 @@ class AuthorityHostConfig:
             worker_client_ca=credentials / "worker-client-ca",
             health_client_certificate=credentials / "health-client-certificate",
             health_client_key=credentials / "health-client-key",
+            network_address=network_address,
+            network_port=network_port,
         )
 
 
@@ -949,36 +971,74 @@ async def check_authority_host(
     config: AuthorityHostConfig,
     listener: AuthorityListener,
     journal_validator: JournalInventoryValidator | None = None,
+    network_listener: AuthorityNetworkListener | None = None,
 ) -> None:
     """Reconstruct every static, journal, database, provider, socket, and TLS fact."""
     await _check_static_authority_host(config, journal_validator)
     try:
         listener.validate()
+        if network_listener is not None:
+            network_listener.validate()
     except OSError, ValueError:
         raise HostReadinessError("listener", "invalid-evidence") from None
 
 
-async def check_tls_health(listener: AuthorityListener, config: AuthorityHostConfig) -> None:
+async def check_tls_health(
+    listener: AuthorityListener | AuthorityNetworkListener,
+    config: AuthorityHostConfig,
+) -> None:
     """Perform a real authority-owned mutual-TLS handshake without an application frame."""
+    await _check_tls_connection(
+        config,
+        listener.address
+        if isinstance(listener, AuthorityNetworkListener)
+        else str(listener.socket_path),
+    )
+
+
+async def _check_tls_connection(
+    config: AuthorityHostConfig,
+    address: str | tuple[str, int],
+) -> None:
+    writer: asyncio.StreamWriter | None = None
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(
-                str(listener.socket_path),
-                ssl=health_tls_context(config),
-                server_hostname=authority_server_name(config.authority_instance),
-            ),
-            timeout=5,
-        )
+        context = health_tls_context(config)
+        server_name = authority_server_name(config.authority_instance)
+        if isinstance(address, tuple):
+            host, port = address
+            connection = asyncio.open_connection(
+                "127.0.0.1" if host == "0.0.0.0" else host,
+                port,
+                family=socket.AF_INET,
+                ssl=context,
+                server_hostname=server_name,
+                ssl_handshake_timeout=5,
+                ssl_shutdown_timeout=5,
+            )
+        else:
+            connection = asyncio.open_unix_connection(
+                address,
+                ssl=context,
+                server_hostname=server_name,
+                ssl_handshake_timeout=5,
+                ssl_shutdown_timeout=5,
+            )
+        reader, writer = await asyncio.wait_for(connection, timeout=5)
         try:
             result = await asyncio.wait_for(reader.read(1), timeout=_HEALTH_ACCEPT_TIMEOUT_SECONDS)
         except TimeoutError:
             result = None
         if result is not None:
             raise HostReadinessError("tls-health", "handshake-failed")
-        writer.close()
-        await writer.wait_closed()
     except Exception:
         raise HostReadinessError("tls-health", "handshake-failed") from None
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=5)
+            except Exception:
+                raise HostReadinessError("tls-health", "handshake-failed") from None
 
 
 def _notify_systemd(message: str) -> None:
@@ -995,7 +1055,7 @@ def _notify_systemd(message: str) -> None:
         raise HostReadinessError("systemd-notify", "failed") from None
 
 
-async def _close_listener(listener: AuthorityListener) -> None:
+async def _close_listener(listener: AuthorityListener | AuthorityNetworkListener) -> None:
     try:
         await listener.close()
     except Exception:
@@ -1021,6 +1081,7 @@ async def _bounded_readiness_check(check: Awaitable[None]) -> None:
 async def run_authority_host(config: AuthorityHostConfig) -> None:
     """Validate, publish readiness, and retract it before exiting on any later drift."""
     listener: AuthorityListener | None = None
+    network_listener: AuthorityNetworkListener | None = None
     journal_validator = JournalInventoryValidator()
 
     async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
@@ -1030,22 +1091,36 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
         await _bounded_readiness_check(_check_static_authority_host(config, journal_validator))
         try:
             listener = await serve_authority_transport(config, authenticate, service=None)
+            if config.network_address is not None:
+                network_listener = await serve_authority_network_transport(
+                    config,
+                    authenticate,
+                    service=None,
+                )
         except Exception:
             raise HostReadinessError("listener", "bind-failed") from None
         try:
             listener.validate()
+            if network_listener is not None:
+                network_listener.validate()
         except OSError, ValueError:
             raise HostReadinessError("listener", "invalid-evidence") from None
         await listener.start_serving()
+        if network_listener is not None:
+            await network_listener.start_serving()
         await _bounded_readiness_check(check_tls_health(listener, config))
+        if network_listener is not None:
+            await _bounded_readiness_check(check_tls_health(network_listener, config))
         _notify_systemd("READY=1")
         _notify_systemd("WATCHDOG=1")
         while True:
             await asyncio.sleep(READINESS_INTERVAL_SECONDS)
 
             async def periodic_check() -> None:
-                await check_authority_host(config, listener, journal_validator)
+                await check_authority_host(config, listener, journal_validator, network_listener)
                 await check_tls_health(listener, config)
+                if network_listener is not None:
+                    await check_tls_health(network_listener, config)
 
             await _bounded_readiness_check(periodic_check())
             _notify_systemd("WATCHDOG=1")
@@ -1053,8 +1128,12 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
         try:
             _notify_systemd("STOPPING=1")
         finally:
-            if listener is not None:
-                await _close_listener(listener)
+            try:
+                if network_listener is not None:
+                    await _close_listener(network_listener)
+            finally:
+                if listener is not None:
+                    await _close_listener(listener)
 
 
 async def check_authority_host_once(config: AuthorityHostConfig) -> None:
@@ -1084,5 +1163,9 @@ async def check_authority_host_once(config: AuthorityHostConfig) -> None:
             raise HostReadinessError("listener", "invalid-evidence") from None
         await listener.start_serving()
         await _bounded_readiness_check(check_tls_health(listener, probe_config))
+        if config.network_address is not None and config.network_port is not None:
+            await _bounded_readiness_check(
+                _check_tls_connection(config, (config.network_address, config.network_port))
+            )
     finally:
         await _close_listener(listener)
