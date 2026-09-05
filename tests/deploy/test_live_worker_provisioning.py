@@ -53,7 +53,14 @@ def _yaml(path: Path) -> dict[str, object]:
 
 def test_remote_play_owns_authority_and_firewall_before_service_start() -> None:
     plays = yaml.safe_load(_text(ROOT / "deploy/ansible/site.yml"))
-    authority = [play for play in plays if "provider_authority_host" in play.get("roles", [])]
+    authority = [
+        play
+        for play in plays
+        if any(
+            (role.get("role") if isinstance(role, dict) else role) == "provider_authority_host"
+            for role in play.get("roles", [])
+        )
+    ]
     assert len(authority) == 1, "production remote hosts need the authority owner"
     assert authority[0]["hosts"] == "remote_libvirt_hosts"
     tasks = _text(PROVIDER_AUTHORITY / "tasks/main.yml")

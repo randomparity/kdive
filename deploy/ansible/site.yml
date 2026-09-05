@@ -38,7 +38,8 @@
   become: true
   gather_facts: true
   roles:
-    - provider_authority_host
+    - role: provider_authority_host
+      tags: [provider_authority_host]
 
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
