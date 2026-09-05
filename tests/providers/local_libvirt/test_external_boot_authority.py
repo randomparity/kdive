@@ -40,6 +40,7 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    CleanupTombstoneV1,
     FinalizeCleanupProof,
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
@@ -51,6 +52,7 @@ from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ComponentState,
     ExternalBootActivationBinding,
+    KernelIdentity,
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
@@ -125,7 +127,7 @@ def _metadata(phase: RecoveryPhase = "pre-stop-intent") -> LocalRecoveryMetadata
         target_xml_sha256="sha256:"
         + hashlib.sha256(_SOURCE_XML.replace("/old", "/new").encode()).hexdigest(),
         target_xml=_SOURCE_XML.replace("/old", "/new"),
-        expected_running=RunningKernelObservation(
+        expected_running=KernelIdentity(
             architecture="x86_64", release="6.12.0", gnu_build_id="01020304"
         ),
         source_state=ProviderStateIdentity(definition=SOURCE_IDENTITY, modules=SOURCE_MODULES),
@@ -209,6 +211,18 @@ class _FakeIO:
             raise LookupError("libguestfs: /var/lib/kdive/secret.key unreadable")
         return self.metadata
 
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        if not self.tombstone:
+            raise FileNotFoundError("tombstone.json")
+        point = _point(self.metadata)
+        return CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=point,
+            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        )
+
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         del metadata
         self.actions.append("observe-state")
@@ -231,7 +245,11 @@ class _FakeIO:
 
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         self.actions.append("observe-running")
-        return metadata.expected_running
+        return RunningKernelObservation(
+            identity=metadata.expected_running,
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
+        )
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         self.actions.append("recover-modules")
@@ -995,13 +1013,13 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert proof.binding == _BINDING
     assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(_point(io.metadata))
 
-    # Cleanup destroys the record the post-commit observation reads, so the observation is
-    # `unreadable` and the lane terminates `conflict`. ADR-0592 documents that; this pins it.
+    # The tombstone remains observable until the authority has anchored the terminal receipt;
+    # only then may finalization remove the recovery directory.
     terminal = repository.records[-1]
     assert terminal.phase is JournalPhase.TERMINAL
-    assert terminal.outcome == "conflict"
+    assert terminal.outcome == "absent"
     assert terminal.observation is not None
-    assert terminal.observation.category == "unreadable"
+    assert terminal.observation.category == "absent"
 
 
 async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path) -> None:
@@ -1065,6 +1083,23 @@ async def test_a_cleanup_commit_refuses_every_unresolvable_recovery_point(
     assert caught.value.category == "provider_conflict"
     assert "cleanup" not in io.actions
     assert "finalize" not in io.actions
+
+
+async def test_cleanup_restart_reconstructs_exact_durable_tombstone(tmp_path: Path) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    observation = await service.execute_mutation(peer, _cleanup_mutation())
+
+    assert observation.category == "absent"
+    assert "cleanup" not in io.actions
+    assert "finalize" not in io.actions
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+    assert repository.records[-1].outcome == "absent"
 
 
 async def test_a_cleanup_commit_neither_recleans_nor_finalizes_an_accounted_tombstone(

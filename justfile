@@ -32,7 +32,10 @@ install-mermaid-deps:
 
 # Stage and verify attestation for the explicitly selected worker interpreter. This is
 # intentionally unprivileged and never writes /usr; operators install in a separate step.
+# Normalize group-write bits on user-owned source and venv trees so build/verify succeeds
+# under relaxed umasks (0002).
 build-capture-bootstrap-manifest interpreter=".venv/bin/python" output="build/capture-bootstrap-manifest.json":
+    find src .venv -maxdepth 5 -perm -020 -exec chmod g-w {} + 2>/dev/null || true
     {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py build --interpreter {{interpreter}} --source-root src --output {{output}}
     {{interpreter}} scripts/generate/build-capture-bootstrap-manifest.py verify --interpreter {{interpreter}} --source-root src --manifest {{output}}
 

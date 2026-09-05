@@ -158,6 +158,14 @@ def session_owned_tempdir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
         os.environ["TMPDIR"] = previous_env
 
 
+@pytest.fixture(scope="session", autouse=True)
+def standard_test_umask() -> Iterator[None]:
+    """Ensure tests run with standard restrictive umask (0022) across environments."""
+    previous_umask = os.umask(0o022)
+    yield
+    os.umask(previous_umask)
+
+
 @pytest.fixture
 def staged_cleanup() -> Iterator[list[Path]]:
     """The ``cleanup`` list :func:`kdive.images.families.renderers.render_argv` stages files into.

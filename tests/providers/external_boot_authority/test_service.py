@@ -208,6 +208,24 @@ async def test_mutation_requires_promotion_and_anchors_before_provider(tmp_path:
 
 
 @pytest.mark.anyio
+async def test_terminal_operation_retry_returns_receipt_without_provider_access(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    mutation = _mutation(takeover)
+
+    first = await service.execute_mutation(peer, mutation)
+    second = await service.execute_mutation(
+        peer, mutation.model_copy(update={"attempt_id": uuid4()})
+    )
+
+    assert second == first
+    assert adapter.calls == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
 async def test_mutation_reuses_one_validated_journal_scan_across_checkpoints(
     tmp_path: Path,
 ) -> None:

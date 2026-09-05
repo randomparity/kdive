@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -28,6 +29,11 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+)
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -68,10 +74,24 @@ async def _authority_count(conn: AsyncConnection) -> int:
 async def _dispatch(
     dsns: Callable[[str], str], case: SeededCase, operation: str, vehicle: Vehicle
 ) -> None:
+    class Executor:
+        async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+            vehicle.port.calls.append("authority-execute")
+            category = "target" if request.operation.value == "activate" else "source"
+            if request.operation.value in {"cleanup", "teardown"}:
+                category = "absent"
+            return AuthorityObservationV1(
+                observation_id=uuid4(),
+                category=category,  # type: ignore[arg-type]
+                composite_state="sha256:" + "8" * 64,
+            )
+
     ports = ExternalBootHandlerPorts(
         resolver=resolver_for(vehicle),
         incarnation_credential=SecretStr(case.credential),
+        secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+        authority_executor=Executor(),
     )
     handler = build_operations(ports).get(operation)
     assert handler is not None
@@ -189,23 +209,19 @@ def test_a_recovery_point_without_a_materialization_cannot_decode_at_all(
 ) -> None:
     """Why ``release`` can never reach its observation check with a NULL ``materialization``.
 
-    The branch review expected this shape: ``release`` admits ``abandoned``, whose row the table
-    CHECK permits with ``materialization`` NULL, so a row carrying ``recovery_point`` without
-    ``materialization`` would pass step 2b and then be refused inside ``build_result`` —
-    post-allocation, post-port-call, reporting "produced no kernel observation to verify" and
-    blaming the provider for a missing column.
+    ``release`` admits ``abandoned``, whose row the table CHECK permits with ``materialization``
+    NULL. A row carrying ``recovery_point`` without ``materialization`` would otherwise present a
+    partial activation-evidence pair to the handler.
 
     **That row is not constructible, one layer above the CHECK.**
     ``ExternalBootActivation``'s own validator (`domain/external_boot_activation.py:303-311`) lists
     ``self.materialization is None`` among the disjuncts that raise
     ``recovery point ownership does not match activation``, so the repository cannot decode it and
-    no handler ever sees it. The misleading refusal is therefore unreachable rather than merely
-    unproduced.
+    no handler ever sees it.
 
-    ``release`` still names ``materialization`` in its required evidence, which is accurate — it
-    does read ``materialization.kernel_observation`` — and costs one word. This test is what says
-    the requirement is defence in depth rather than a live bug fix, and what would turn red if the
-    model rule were ever relaxed and the reviewer's path became real.
+    ``release`` still names both fields in its required evidence so that complete, ownership-bound
+    activation evidence is checked before allocation. This test says the requirement is defence in
+    depth rather than a live bug fix, and would turn red if the model rule were relaxed.
     """
 
     async def body(seed: AsyncConnection) -> None:

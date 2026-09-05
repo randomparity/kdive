@@ -146,9 +146,8 @@ def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
     assert source.get("file") == "/var/lib/kdive/rootfs/fedora-40.qcow2"
 
 
-# Captured from the pre-ADR-0340 renderer (the x86_64-under-KVM domain). The byte-identity ACs
-# pin the current output so a child-reordering or emulator-gate regression is caught; do NOT
-# regenerate this from the edited renderer, which would make the assertion vacuous.
+# The x86_64-under-KVM System domain, including the standard guest-agent channel used for running
+# identity observation. The byte-identity ACs pin child ordering and the emulator gate.
 _X86_KVM_GOLDEN = (
     '<domain xmlns:kdive="https://kdive.dev/libvirt/1" '
     'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">'
@@ -164,6 +163,7 @@ _X86_KVM_GOLDEN = (
     '<target dev="vda" bus="virtio" /></disk><serial type="pty">'
     '<log file="/var/lib/kdive/console/11111111-1111-1111-1111-111111111111.log" append="on" />'
     '<target port="0" /></serial><console type="pty"><target type="serial" port="0" /></console>'
+    '<channel type="unix"><target type="virtio" name="org.qemu.guest_agent.0" /></channel>'
     "</devices><metadata>"
     "<kdive:system>11111111-1111-1111-1111-111111111111</kdive:system></metadata>"
     '<qemu:commandline><qemu:arg value="-netdev" />'

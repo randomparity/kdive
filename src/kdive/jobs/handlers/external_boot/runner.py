@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Final
 
 from psycopg import AsyncConnection
@@ -30,8 +31,9 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import (
     ExternalBootPorts,
     OpaqueProviderRef,
-    RunningKernelObservation,
 )
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
     "COMMITTABLE_ERROR_CATEGORIES",
@@ -39,6 +41,17 @@ __all__ = [
     "authority_ref",
     "run_operation",
 ]
+
+
+class _CommandLineMismatch(Exception):
+    """Private raw-byte carrier consumed only by ``_bound_failure``."""
+
+    def __init__(self, expected: bytes, observed: bytes, first_differing_byte: int) -> None:
+        super().__init__("external boot command line mismatch")
+        self.expected = expected
+        self.observed = observed
+        self.first_differing_byte = first_differing_byte
+
 
 _ACTIVATIONS = ExternalBootActivationRepository()
 
@@ -112,6 +125,7 @@ class OperationContext:
     port: ExternalBootPorts
     authority: AllocatedAuthority
     acknowledgement: AuthorityAcknowledgementV1
+    secret_registry: SecretRegistry
     prerequisites: Mapping[str, Any] = field(default_factory=dict)
     """Whatever ``require_preconditions`` read, so ``build_result`` need not read it again.
 
@@ -223,7 +237,11 @@ async def _acknowledge(
 
 
 def _bound_failure(
-    context: OperationContext, exc: Exception, *, phase: str
+    context: OperationContext,
+    exc: Exception,
+    *,
+    phase: str,
+    recovery_readiness_deadline: datetime | None = None,
 ) -> ExternalBootAuthorityFailure:
     """Wrap a raise as a failure bound to the same allocation and acknowledgement.
 
@@ -240,11 +258,31 @@ def _bound_failure(
     holds and one that looks like it holds.
     """
     marker, authority = context.marker, context.authority
+    mismatch = exc if isinstance(exc, _CommandLineMismatch) else None
     raised = (
-        exc.category if isinstance(exc, CategorizedError) else ErrorCategory.INFRASTRUCTURE_FAILURE
+        ErrorCategory.READINESS_FAILURE
+        if mismatch is not None
+        else exc.category
+        if isinstance(exc, CategorizedError)
+        else ErrorCategory.INFRASTRUCTURE_FAILURE
     )
     category = raised if raised in COMMITTABLE_ERROR_CATEGORIES else _UNCOMMITTABLE_SUBSTITUTE
-    terminal = exc.terminal if isinstance(exc, CategorizedError) else False
+    terminal = (
+        True
+        if mismatch is not None
+        else exc.terminal
+        if isinstance(exc, CategorizedError)
+        else False
+    )
+    failure_context: dict[str, object] = {"phase": phase}
+    if mismatch is not None:
+        redactor = Redactor(registry=context.secret_registry)
+        failure_context["cmdline_mismatch"] = {
+            "schema": "external-boot-cmdline-mismatch-v1",
+            "expected_cmdline": _render_cmdline(mismatch.expected, redactor),
+            "observed_cmdline": _render_cmdline(mismatch.observed, redactor),
+            "first_differing_byte": mismatch.first_differing_byte,
+        }
     return ExternalBootAuthorityFailure(
         ExternalBootAuthorityFailureV1.model_validate(
             {
@@ -267,12 +305,55 @@ def _bound_failure(
                     "schema": "external-boot-authority-result-v1",
                     "operation": "fail",
                     "error_category": category,
-                    "failure_context": {"phase": phase},
+                    "failure_context": failure_context,
                     "terminal": terminal,
+                    **(
+                        {"recovery_readiness_deadline": recovery_readiness_deadline.isoformat()}
+                        if recovery_readiness_deadline is not None
+                        else {}
+                    ),
                 },
             }
         )
     )
+
+
+def _render_cmdline(value: bytes, redactor: Redactor) -> str:
+    redacted = redactor.redact_text(value.decode(errors="surrogateescape"))
+    pieces: list[str] = []
+    size = 0
+    for character in redacted:
+        codepoint = ord(character)
+        if character == "\\":
+            rendered = "\\\\"
+        elif 0xDC80 <= codepoint <= 0xDCFF:
+            rendered = f"\\x{codepoint - 0xDC00:02X}"
+        elif codepoint < 0x20 or codepoint == 0x7F:
+            rendered = f"\\x{codepoint:02X}"
+        elif character.isprintable():
+            rendered = character
+        elif codepoint <= 0xFFFF:
+            rendered = f"\\u{codepoint:04X}"
+        else:
+            rendered = f"\\U{codepoint:08X}"
+        rendered_size = len(rendered.encode())
+        if size + rendered_size > 8192:
+            break
+        pieces.append(rendered)
+        size += rendered_size
+    return "".join(pieces)
+
+
+def _recovery_deadline(ports: ExternalBootHandlerPorts, exc: Exception) -> datetime | None:
+    if isinstance(exc, _CommandLineMismatch):
+        return ports.clock() + ports.recovery_readiness_timeout
+    if (
+        isinstance(exc, CategorizedError)
+        and exc.category is ErrorCategory.BOOT_TIMEOUT
+        and exc.terminal
+    ):
+        return ports.clock() + ports.recovery_readiness_timeout
+    return None
 
 
 async def run_operation[R: ExternalBootAuthorityResultV1](
@@ -287,8 +368,9 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1],
         Awaitable[Mapping[str, Any]],
     ],
-    call_port: Callable[[OperationContext], RunningKernelObservation | None],
-    build_result: Callable[[OperationContext, RunningKernelObservation | None], R],
+    call_port: Callable[[OperationContext], Any],
+    build_result: Callable[[OperationContext, Any], R],
+    before_port: Callable[[OperationContext], R | None] | None = None,
 ) -> R:
     """Run one authority-bound operation and return its result for the worker to commit.
 
@@ -345,14 +427,36 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         port=port,
         authority=authority,
         acknowledgement=acknowledgement,
+        secret_registry=ports.secret_registry,
         prerequisites=prerequisites,
     )
     try:
-        # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
-        observation = await asyncio.to_thread(call_port, context)
+        if before_port is not None and (intermediate := before_port(context)) is not None:
+            return intermediate
     except Exception as exc:
-        raise _bound_failure(context, exc, phase=_PROVIDER_CALL) from None
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_COMMIT,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+        ) from None
+    try:
+        # ExternalBootPorts is sync, like every other provider surface jobs/handlers/ calls.
+        called = call_port(context)
+        observation = await called if inspect.isawaitable(called) else called
+    except Exception as exc:
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_PROVIDER_CALL,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+        ) from None
     try:
         return build_result(context, observation)
     except Exception as exc:
-        raise _bound_failure(context, exc, phase=_COMMIT) from None
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_COMMIT,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc),
+        ) from None

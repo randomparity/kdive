@@ -21,11 +21,11 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.lifecycle.install import (
     _HELPER_EX_TEMPFAIL,
     RemoteLibvirtInstall,
 )
+from kdive.providers.shared.guest_agent import AgentExecResult
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error

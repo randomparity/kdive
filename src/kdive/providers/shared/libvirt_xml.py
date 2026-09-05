@@ -1,4 +1,4 @@
-"""Shared libvirt XML contract helpers for provider implementations."""
+"""Shared libvirt XML contract helpers for provider implementations (ADR-0598)."""
 
 from __future__ import annotations
 
@@ -242,13 +242,39 @@ def parse_domain_resolved_cpu(domain_xml: str) -> tuple[str | None, ParsedHostCp
 
 
 def parse_metadata_system_id(meta_xml: str) -> str | None:
-    """Read the System id from a kdive metadata XML element; ``None`` if empty/malformed."""
+    """Read the System id from a kdive metadata API fragment; ``None`` if empty/malformed.
+
+    Libvirt strips the selected application namespace from a grouped metadata fragment. Accept
+    that unqualified ``domain/system`` shape and the legacy standalone System element.
+    """
     try:
         element: ET.Element = _safe_fromstring(meta_xml)
     except (ET.ParseError, DefusedXmlException) as _exc:
         return None
-    text = (element.text or "").strip()
+    local_name = element.tag.rpartition("}")[2]
+    if local_name == "domain":
+        system = element.find("./system")
+        if system is None:
+            system = element.find(f"./{{{KDIVE_METADATA_NS}}}system")
+        raw = system.text if system is not None else None
+    elif local_name == "system":
+        raw = element.text
+    else:
+        return None
+    text = (raw or "").strip()
     return text or None
+
+
+def remote_metadata_system_id(root: ET.Element) -> str | None:
+    """Return the System id from a full remote domain's grouped KDIVE metadata."""
+    value = root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}system")
+    return value.strip() if value and value.strip() else None
+
+
+def remote_metadata_storage_identity(root: ET.Element) -> tuple[str | None, str | None] | None:
+    """Return the pool/volume pair from a full remote domain's grouped KDIVE metadata."""
+    storage = root.find(f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}storage")
+    return None if storage is None else (storage.get("pool"), storage.get("volume"))
 
 
 def recorded_gdb_port_from_root(root: ET.Element) -> int | None:

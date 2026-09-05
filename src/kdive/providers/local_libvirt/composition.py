@@ -59,6 +59,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
     LocalPayloadCleanup,
+    LocalRunningObserver,
     open_libguestfs_guest,
 )
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
@@ -238,9 +239,6 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
         pin_lease=LocalOperationLane().pin,
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=open_libguestfs_guest,
-        # Neither probe is bound, and both omissions are explicit at the call site so the
-        # factory's fail-closed defaults are selected on purpose rather than by oversight.
-        #
         # `readiness` (amendment 7): `_real_readiness` reads a console log whose only
         # truncation happens in `LocalLibvirtInstall`'s prepare, and `_ConcreteSession.start()`
         # truncates nothing. On the `prior_power == "running"` arm that reaches it, the source
@@ -250,10 +248,8 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
         # `session.py`. Owner #2212, which cannot ship a live port without one because
         # `_unconfigured_readiness` raises on first call.
         #
-        # `observe_running` (amendment 2): local domains render no qemu-guest-agent channel,
-        # so there is no host-reachable read of a running guest. Owner #2212.
         readiness=None,
-        observe_running=None,
+        observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
     )
     return LocalExternalBootMechanisms(factory=factory, recovery_root=root)
@@ -339,6 +335,7 @@ def build_runtime(
         secret_registry=secret_registry, store=store
     )
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
+    external_boot = build_external_boot(external_boot_io)
     return ProviderRuntime(
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=provisioner,
@@ -350,7 +347,8 @@ def build_runtime(
         crash_postmortem=retrieve,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
-        external_boot=build_external_boot(external_boot_io),
+        external_boot=external_boot,
+        external_boot_preparation=external_boot,
         # ADR-0208: advertise the core-producing capture methods local can actually fetch a vmcore
         # for — KDUMP (host-side overlay harvest, #115/ADR-0203), FADUMP (the pseries firmware-
         # assisted variant sharing that harvest, ADR-0349; host support is gated at admission), and

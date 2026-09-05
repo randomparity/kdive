@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, TypedDict
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from kdive.domain._records import DomainModel
 from kdive.domain.capacity.state import JobState
@@ -176,7 +176,7 @@ class Job(DomainModel):
     current_capture_operation_id: UUID | None = None
     result_ref: str | None = None
     error_category: ErrorCategory | None = None
-    failure_context: dict[str, str] = Field(default_factory=dict)
+    failure_context: dict[str, JsonValue] = Field(default_factory=dict)
     authorizing: JobAuthorizing
     dedup_key: str
 

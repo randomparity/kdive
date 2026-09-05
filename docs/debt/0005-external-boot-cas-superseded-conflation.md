@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-02
+> **Resolved by PR #2229** (2026-09-04)
 
 ## Concern
 
@@ -58,6 +57,35 @@ carries its own recovery action.
 Done when a conflict-resolution call against a stale digest, one against an unready
 reservation, and one against a superseded authority generation return three different
 `reason` values with three different next actions, each covered by a test.
+
+## Resolution
+
+Migration 0128 classifies losing commits while the relevant rows remain locked. It returns
+`observed_identity_stale` for a missing or mismatched activation/System/Run identity,
+`reservation_not_ready` when the required reservation is not `ready`, and
+`authority_superseded` when the operation owner or authority generation no longer matches.
+It also validates the exact reason, next-action, category, and terminal tuple before accepting a
+failure result.
+
+The worker consumes those database outcomes in `_classified_external_boot_failure` and emits the
+closed mappings `systems.get` / `stale_handle` / terminal, `jobs.wait` /
+`infrastructure_failure` / non-terminal, and `jobs.get` / `stale_handle` / terminal. Repository
+statuses remain opaque; the discrimination is confined to the calling transaction and worker
+boundary as this record required.
+
+Executable evidence:
+
+- `tests/db/test_migration_0128_external_boot_reentry_failures.py` pins migration installation,
+  locked-row classification, and the three exact failure shapes.
+- `tests/jobs/test_external_boot_authority_models.py` rejects every mismatched reason/action,
+  category, or terminal combination.
+- `tests/jobs/test_worker.py` proves the worker consumes each classified losing commit with its
+  distinct lifecycle outcome.
+- `tests/jobs/handlers/external_boot/test_lifecycle.py` proves authority supersession is reported
+  distinctly without converting the activation result into success.
+- `tests/jobs/handlers/external_boot/test_runner.py` enumerates every provider failure category,
+  proves every mapped result is accepted by the database commit, pins the committable tuple, and
+  proves serialized failures omit injected raw text and provider identifiers.
 
 ## Provenance
 

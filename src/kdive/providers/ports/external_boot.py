@@ -149,6 +149,8 @@ class ModuleObligation(_ClosedValue):
 def _validate_platform_argument(value: str) -> str:
     if not value or not value.isascii() or len(value.encode()) > _PLATFORM_ARGUMENT_MAX_BYTES:
         raise ValueError("platform argument must be 1 through 256 ASCII bytes")
+    if any(ord(character) < 0x20 and character not in "\t\n\r" for character in value):
+        raise ValueError("platform argument must contain only XML 1.0 characters")
     if "\0" in value or any(character.isspace() for character in value):
         raise ValueError("platform argument must not contain whitespace or NUL")
     if value.startswith("="):
@@ -239,10 +241,16 @@ class MaterializedArtifacts(_ClosedValue):
     initrd: OpaqueProviderRef | None
 
 
-class RunningKernelObservation(_ClosedValue):
+class KernelIdentity(_ClosedValue):
     architecture: Architecture
     release: KernelRelease
     gnu_build_id: Annotated[str, Field(pattern=r"^(?:[0-9a-f]{2}){4,64}$")]
+
+
+class RunningKernelObservation(_ClosedValue):
+    identity: KernelIdentity
+    cmdline: bytes
+    expected_cmdline: bytes
 
 
 class ExternalBootMaterialization(_ClosedValue):
@@ -258,7 +266,7 @@ class ExternalBootMaterialization(_ClosedValue):
     installed_module_tree: Digest
     verified_bundle_sha256: Digest
     verified_initrd_sha256: Digest | None
-    kernel_observation: RunningKernelObservation
+    kernel_observation: KernelIdentity
     artifacts: MaterializedArtifacts
 
     _canonical_provider = field_validator("provider_kind")(_nfc)
@@ -303,6 +311,82 @@ class RecoveryPoint(_ClosedValue):
     recovery_ref: OpaqueProviderRef
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
+
+
+class ExternalBootPreparationRequest(_ClosedValue):
+    """Stable identity and ownership for one server-owned preparation phase."""
+
+    phase: Literal["materialize", "prepare"]
+    plan: ExternalBootPlan
+    binding: ExternalBootActivationBinding
+    authority: OpaqueProviderRef
+    operation_identity: Annotated[str, Field(max_length=255)]
+
+    _canonical_operation = field_validator("operation_identity")(_nfc)
+
+    @model_validator(mode="after")
+    def _owners_match(self) -> ExternalBootPreparationRequest:
+        if (
+            self.plan.ownership.system_id != self.binding.system_id
+            or self.plan.ownership.run_id != self.binding.run_id
+        ):
+            raise ValueError("plan ownership does not match activation binding")
+        return self
+
+
+class ExternalBootPreparationObservation(_ClosedValue):
+    """Closed durable provider receipt for server-owned preparation."""
+
+    state: Literal["absent", "materialized", "prepared"]
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    authority: OpaqueProviderRef
+    operation_identity: Annotated[str, Field(max_length=255)]
+    materialization: ExternalBootMaterialization | None = None
+    recovery_point: RecoveryPoint | None = None
+
+    _canonical_operation = field_validator("operation_identity")(_nfc)
+
+    @model_validator(mode="after")
+    def _receipt_is_exact(self) -> ExternalBootPreparationObservation:
+        required = {
+            "absent": (False, False),
+            "materialized": (True, False),
+            "prepared": (True, True),
+        }[self.state]
+        if (self.materialization is not None, self.recovery_point is not None) != required:
+            raise ValueError(f"{self.state} preparation receipt has invalid values")
+        if self.materialization is not None and (
+            self.materialization.ownership.system_id != self.binding.system_id
+            or self.materialization.ownership.run_id != self.binding.run_id
+            or self.materialization.plan_identity != self.plan_identity
+        ):
+            raise ValueError("materialization ownership does not match preparation binding")
+        materialization = self.materialization
+        recovery_point = self.recovery_point
+        if (
+            recovery_point is not None
+            and materialization is not None
+            and (
+                recovery_point.binding != self.binding
+                or recovery_point.plan_identity != self.plan_identity
+                or recovery_point.materialization_identity != materialization.identity
+            )
+        ):
+            raise ValueError("recovery point does not match preparation binding")
+        return self
+
+
+class ExternalBootPreparationPorts(Protocol):
+    """Provider-owned durable receipt seam for server preparation."""
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation: ...
+
+    def execute_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation: ...
 
 
 class ExternalBootPorts(Protocol):

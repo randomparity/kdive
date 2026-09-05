@@ -4,6 +4,9 @@
 
 Accepted (2026-09-03)
 
+> **Cleanup-retry and tombstone reconstruction conclusions partially superseded by
+> [ADR-0595](0595-external-boot-reentry-uses-provider-receipts.md)** (2026-09-04).
+
 ## Context
 
 ADR-0584 makes the authority journal the evidence of record for what mutation may have

@@ -266,7 +266,12 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_LIVE_VM_GDBMI_MODULE_KO` | — | Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. Unset → that portion of the test skips. |
 | `KDIVE_LIVE_VM_GDBMI_MODULE_NAME` | — | Loaded module name matching KDIVE_LIVE_VM_GDBMI_MODULE_KO for the optional gated gdb-MI module-symbol load smoke. Defaults to the .ko path stem. |
 | `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE` | — | Operator-staged base-image volume name the live_vm_remote provision profile feeds into base_image_volume (#1424, ADR-0425). Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
+| `KDIVE_LIVE_VM_REMOTE_GDB_ADDR` | — | IP-literal GDB listen address for the live_vm_remote external-boot carrier. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
+| `KDIVE_LIVE_VM_REMOTE_INITRD` | — | Readable local initrd supplied to the live_vm_remote external-boot carrier. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
+| `KDIVE_LIVE_VM_REMOTE_KERNEL` | — | Readable local kernel image supplied to the live_vm_remote external-boot carrier. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
 | `KDIVE_LIVE_VM_REMOTE_RECONCILER` | — | Presence marker for a running reconciler (its metrics endpoint, or 1) that the live_vm_remote family needs for its reconciler-resident console collector (#1424, ADR-0425). Presence-checked, not probed. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
+| `KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE` | — | Absolute /dev/ root-device path for the live_vm_remote external-boot carrier. Required once KDIVE_LIVE_VM_REMOTE_URI is set. |
+| `KDIVE_LIVE_VM_REMOTE_SSH` | — | Noninteractive SSH destination for the live_vm_remote AppArmor proof (#2236, ADR-0597). It must identify the same host as KDIVE_LIVE_VM_REMOTE_URI and permit passwordless sudo for the fixed test script. Unset means that carrier skips. |
 | `KDIVE_LIVE_VM_REMOTE_URI` | — | qemu+tls:// control URI of an operator-provided remote-libvirt host for the live_vm_remote family (#1424, ADR-0425); the trigger for require_live_vm_remote. Unset → that family skips; a non-qemu+tls:// URI or one carrying no_verify fails loud (remote mandates mutual TLS). |
 | `KDIVE_LIVE_VM_ROOTFS` | — | Path to a bootable rootfs qcow2 for the gated live_vm throwaway-domain proofs, including snapshot/revert/resume and debug stepping; unset → those tests skip. |
 | `KDIVE_LIVE_VM_SYSTEM_ID` | — | System id of a pre-provisioned live VM for the gated local-libvirt install test. |

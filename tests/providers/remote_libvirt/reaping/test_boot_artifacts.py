@@ -1,42 +1,139 @@
-"""Remote external-boot volume ownership and orphan reaping (ADR-0583/#2119)."""
+"""Remote external-boot volume ownership and orphan reaping (ADR-0599)."""
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
-from typing import Literal, cast
+from typing import cast
 from uuid import UUID
 
+import libvirt
+
+from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
+    BootArtifactKind,
+    BootArtifactName,
+    render_boot_artifact_name,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
-    artifact_partial_volume_name,
-    artifact_volume_name,
     render_boot_artifact_volume_xml,
 )
 from kdive.providers.remote_libvirt.reaping.boot_artifacts import (
     BootArtifactReaperConn,
-    BootArtifactVolume,
     list_owned_boot_artifacts,
     reap_orphaned_boot_artifacts,
+)
+from tests.providers.remote_libvirt.fakes import (
+    FakeStorageConn,
+    FakeStoragePool,
+    FakeStorageVolume,
 )
 
 SYSTEM = UUID("00000000-0000-0000-0000-000000000003")
 RUN = UUID("00000000-0000-0000-0000-000000000002")
 ATTEMPT = UUID("00000000-0000-0000-0000-000000000004")
+POOL = "boot-artifacts"
 
 
-class _Volume:
-    def __init__(self, name: str, xml: str, data: bytes = b"kernel") -> None:
-        self._name = name
-        self._xml = xml
-        self.data = data
+def _digest(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _name(kind: BootArtifactKind, data: bytes, *, partial: bool = False) -> str:
+    return render_boot_artifact_name(
+        kind,
+        SYSTEM,
+        RUN,
+        _digest(data),
+        attempt_id=ATTEMPT if partial else None,
+    )
+
+
+def _put(conn: FakeStorageConn, pool: FakeStoragePool, name: str, data: bytes) -> FakeStorageVolume:
+    volume = pool.createXML(render_boot_artifact_volume_xml(name, capacity_bytes=len(data)))
+    stream = conn.newStream(0)
+    volume.upload(stream, 0, len(data), 0)
+    position = 0
+
+    def send(_stream: object, bound: int, _opaque: object) -> bytes:
+        nonlocal position
+        chunk = data[position : position + bound]
+        position += len(chunk)
+        return chunk
+
+    stream.sendAll(send, None)
+    stream.finish()
+    return volume
+
+
+def test_listing_accepts_metadata_free_name_and_matching_complete_bytes() -> None:
+    pool = FakeStoragePool(name=POOL)
+    conn = FakeStorageConn(pool)
+    name = _name("kernel", b"kernel")
+    final = _put(conn, pool, name, b"kernel")
+    _put(conn, pool, "kdive-boot-v1-foreign", b"kernel")
+    mismatch_name = _name("initrd", b"expected")
+    _put(conn, pool, mismatch_name, b"different")
+
+    result = list_owned_boot_artifacts(cast("BootArtifactReaperConn", conn), POOL)
+
+    assert "metadata" not in final.XMLDesc(0)
+    assert result == [
+        BootArtifactName(
+            name=name,
+            kind="kernel",
+            system_id=SYSTEM,
+            run_id=RUN,
+            digest=_digest(b"kernel"),
+            partial=False,
+            attempt_id=None,
+        )
+    ]
+
+
+def test_reap_removes_matching_orphaned_final_and_partial_only() -> None:
+    pool = FakeStoragePool(name=POOL)
+    conn = FakeStorageConn(pool)
+    orphan_final = _put(conn, pool, _name("kernel", b"kernel"), b"kernel")
+    orphan_partial = _put(conn, pool, _name("initrd", b"initrd", partial=True), b"initrd")
+    mismatch = _put(conn, pool, _name("kernel", b"expected"), b"different")
+    foreign = _put(conn, pool, "operator-volume", b"operator")
+
+    removed = reap_orphaned_boot_artifacts(
+        cast("BootArtifactReaperConn", conn), POOL, live_owners=set()
+    )
+
+    assert removed == 2
+    remaining = pool.listAllVolumes(0)
+    assert orphan_final not in remaining and orphan_partial not in remaining
+    assert mismatch in remaining and foreign in remaining
+
+
+def test_reap_keeps_a_live_owner() -> None:
+    pool = FakeStoragePool(name=POOL)
+    conn = FakeStorageConn(pool)
+    volume = _put(conn, pool, _name("kernel", b"kernel"), b"kernel")
+    owner: tuple[BootArtifactKind, UUID, UUID, str] = (
+        "kernel",
+        SYSTEM,
+        RUN,
+        _digest(b"kernel"),
+    )
+
+    assert (
+        reap_orphaned_boot_artifacts(
+            cast("BootArtifactReaperConn", conn), POOL, live_owners={owner}
+        )
+        == 0
+    )
+    assert volume in pool.listAllVolumes(0)
+
+
+class _UnreadableVolume:
+    def __init__(self, volume: FakeStorageVolume) -> None:
+        self._volume = volume
         self.deleted = False
 
     def name(self) -> str:
-        return self._name
-
-    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
-        del flags
-        return self._xml
+        return self._volume.name()
 
     def delete(self, flags: int = 0) -> int:
         del flags
@@ -44,117 +141,46 @@ class _Volume:
         return 0
 
     def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
-        del offset, length, flags
-        assert isinstance(stream, _Stream)
-        stream.data = self.data
-        return 0
+        del stream, offset, length, flags
+        raise libvirt.libvirtError("unreadable")
 
 
-class _Stream:
-    def __init__(self) -> None:
-        self.data = b""
-
-    def recvAll(self, callback: Callable[[object, bytes, object], None], opaque: object) -> None:  # noqa: N802
-        callback(self, self.data, opaque)
-
-    def finish(self) -> int:
-        return 0
-
-    def abort(self) -> int:
-        return 0
-
-
-class _Pool:
-    def __init__(self, volumes: list[_Volume]) -> None:
-        self.volumes = volumes
-
-    def listAllVolumes(self, flags: int = 0) -> list[_Volume]:  # noqa: N802
-        del flags
-        return self.volumes
+class _UnreadablePool:
+    def __init__(self, volume: _UnreadableVolume) -> None:
+        self._volume = volume
 
     def refresh(self, flags: int = 0) -> int:
         del flags
         return 0
 
-
-class _Conn:
-    def __init__(self, pool: _Pool) -> None:
-        self.pool = pool
-
-    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
-        assert name == "boot-artifacts"
-        return self.pool
-
-    def newStream(self, flags: int = 0) -> _Stream:  # noqa: N802
+    def listAllVolumes(self, flags: int = 0) -> list[_UnreadableVolume]:  # noqa: N802
         del flags
-        return _Stream()
+        return [self._volume]
 
 
-def _xml(kind: str, digest: str, *, attempt: UUID | None = None) -> str:
-    return render_boot_artifact_volume_xml(
-        "ignored",
-        capacity_bytes=5,
-        kind=cast("Literal['kernel', 'initrd']", kind),
-        system_id=SYSTEM,
-        run_id=RUN,
-        payload_digest=digest,
-        attempt_id=attempt,
+class _UnreadableConn:
+    def __init__(self, pool: _UnreadablePool, streams: FakeStorageConn) -> None:
+        self._pool = pool
+        self._streams = streams
+
+    def storagePoolLookupByName(self, name: str) -> _UnreadablePool:  # noqa: N802
+        assert name == POOL
+        return self._pool
+
+    def newStream(self, flags: int = 0) -> object:  # noqa: N802
+        return self._streams.newStream(flags)
+
+
+def test_reap_keeps_a_canonical_but_unreadable_volume() -> None:
+    backing_pool = FakeStoragePool(name=POOL)
+    stream_conn = FakeStorageConn(backing_pool)
+    volume = _UnreadableVolume(
+        _put(stream_conn, backing_pool, _name("kernel", b"kernel"), b"kernel")
     )
-
-
-def test_listing_accepts_only_metadata_matching_the_deterministic_name() -> None:
-    digest = "sha256:" + hashlib.sha256(b"kernel").hexdigest()
-    final = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("kernel", digest))
-    foreign = _Volume("kdive-kernel-foreign", _xml("kernel", digest))
-    malformed = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), "<volume/>")
-
-    result = list_owned_boot_artifacts(
-        cast("BootArtifactReaperConn", _Conn(_Pool([final, foreign, malformed]))), "boot-artifacts"
-    )
-
-    assert result == [
-        BootArtifactVolume(
-            name=final.name(),
-            kind="kernel",
-            system_id=SYSTEM,
-            run_id=RUN,
-            digest=digest,
-            partial=False,
-            attempt_id=None,
-        )
-    ]
-
-
-def test_reap_removes_orphaned_owned_final_and_partial_but_preserves_mismatch() -> None:
-    digest = "sha256:" + hashlib.sha256(b"kernel").hexdigest()
-    orphan_final = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("kernel", digest))
-    orphan_partial = _Volume(
-        artifact_partial_volume_name("kernel", SYSTEM, RUN, b"kernel", ATTEMPT),
-        _xml("kernel", digest, attempt=ATTEMPT),
-    )
-    mismatch = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("initrd", digest))
-    pool = _Pool([orphan_final, orphan_partial, mismatch])
-
-    removed = reap_orphaned_boot_artifacts(
-        cast("BootArtifactReaperConn", _Conn(pool)), "boot-artifacts", live_owners=set()
-    )
-
-    assert removed == 2
-    assert orphan_final.deleted and orphan_partial.deleted
-    assert not mismatch.deleted
-
-
-def test_reap_keeps_a_live_owner_and_a_foreign_name() -> None:
-    digest = "sha256:" + hashlib.sha256(b"kernel").hexdigest()
-    volume = _Volume(artifact_volume_name("kernel", SYSTEM, RUN), _xml("kernel", digest))
-    pool = _Pool([volume])
+    conn = _UnreadableConn(_UnreadablePool(volume), stream_conn)
 
     assert (
-        reap_orphaned_boot_artifacts(
-            cast("BootArtifactReaperConn", _Conn(pool)),
-            "boot-artifacts",
-            live_owners={("kernel", SYSTEM, RUN, digest)},
-        )
+        reap_orphaned_boot_artifacts(cast("BootArtifactReaperConn", conn), POOL, live_owners=set())
         == 0
     )
     assert not volume.deleted

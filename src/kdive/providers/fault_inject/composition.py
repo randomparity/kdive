@@ -96,6 +96,7 @@ def build_runtime(
     retrieve = FaultInjectRetrieve(store_factory=lambda: store)
     introspect = FaultInjectIntrospect()
     faulted_install = FaultedInstall(install, engine) if engine is not None else install
+    external_boot = FaultInjectExternalBoot()
     return ProviderRuntime(
         profile_policy=FaultInjectProfilePolicy(),
         provisioner=FaultedProvisioning(provisioner, engine) if engine is not None else provisioner,
@@ -121,5 +122,6 @@ def build_runtime(
             attach_seam=fault_inject_attach_seam,
             engine=FaultInjectDebugEngine(),
         ),
-        external_boot=FaultInjectExternalBoot(),
+        external_boot=external_boot,
+        external_boot_preparation=external_boot,
     )

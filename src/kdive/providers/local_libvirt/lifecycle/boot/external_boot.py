@@ -12,7 +12,7 @@ import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - edits trusted domain structure after safe parse
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -52,6 +52,9 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    KernelIdentity,
     KernelRelease,
     OpaqueProviderRef,
     PresentComponentState,
@@ -119,7 +122,7 @@ class LocalRecoveryMetadataV1(_ClosedValue):
     target_projection_sha256: Digest
     target_xml_sha256: Digest
     target_xml: str
-    expected_running: RunningKernelObservation
+    expected_running: KernelIdentity
     source_state: ProviderStateIdentity
     target_state: ProviderStateIdentity
     prior_power: Literal["running", "inactive"]
@@ -163,7 +166,7 @@ class LocalPreStopIntentV1(_ClosedValue):
     target_projection_sha256: Digest
     target_xml_sha256: Digest
     target_xml: str
-    expected_running: RunningKernelObservation
+    expected_running: KernelIdentity
     prior_power: Literal["running", "inactive"]
 
     @model_validator(mode="after")
@@ -206,8 +209,17 @@ class CleanupTombstoneV1(_ClosedValue):
         "local-libvirt-cleanup-tombstone-v1", alias="schema"
     )
     binding: ExternalBootActivationBinding
+    recovery_point: RecoveryPoint
     point_digest: Digest
     payload_absent: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _receipt_matches_point(self) -> CleanupTombstoneV1:
+        if self.recovery_point.binding != self.binding:
+            raise ValueError("cleanup tombstone recovery point has different ownership")
+        if LocalLibvirtExternalBoot.point_digest(self.recovery_point) != self.point_digest:
+            raise ValueError("cleanup tombstone recovery point digest does not match")
+        return self
 
 
 class TargetProjectionV1(_ClosedValue):
@@ -734,6 +746,9 @@ class LocalExternalBootOperation(Protocol):
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef: ...
     def reopen(self, recovery: RecoveryPoint) -> LocalRecoveryMetadataV1: ...
     def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1: ...
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1: ...
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState: ...
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
@@ -757,6 +772,15 @@ class LocalExternalBootIO(Protocol):
         expected: ExpectedOperationOwnership,
     ) -> AbstractContextManager[LocalExternalBootOperation]: ...
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation: ...
+    def publish_preparation(
+        self, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation: ...
+    def preparation_materialization(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootMaterialization: ...
 
 
 class LocalExternalBootMaterializer(Protocol):
@@ -822,6 +846,24 @@ class RealLocalExternalBootIO:
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         with RecoveryMetadataStore(self._recovery_root) as store:
             store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.observe_preparation(request)
+
+    def publish_preparation(
+        self, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.publish_preparation(receipt)
+
+    def preparation_materialization(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootMaterialization:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.preparation_materialization(request)
 
 
 class _RealLocalExternalBootOperation:
@@ -908,6 +950,12 @@ class _RealLocalExternalBootOperation:
     def reopen_binding(self, binding: ExternalBootActivationBinding) -> LocalRecoveryMetadataV1:
         with RecoveryMetadataStore(self._recovery_root) as store:
             return store.reopen(_recovery_ref(binding), binding)
+
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            return store.reopen_tombstone(_recovery_ref(binding), binding)
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         # Each half is read independently so a readable definition still classifies when
@@ -1006,7 +1054,7 @@ class _RealLocalExternalBootOperation:
         if self._host_state(metadata) != ("target", True):
             raise ValueError("external-boot observation requires exact running target XML/power")
         observed = self._session.observe_running()
-        if observed != metadata.expected_running:
+        if observed.identity != metadata.expected_running:
             raise ValueError("external-boot running kernel does not match recovery metadata")
         return observed
 
@@ -1394,6 +1442,36 @@ class LocalLibvirtExternalBoot:
             ).hexdigest()
         )
 
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        return self._io.observe_preparation(request)
+
+    def execute_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        observed = self.observe_preparation(request)
+        if observed.state != "absent":
+            return observed
+        if request.phase == "materialize":
+            materialization = self.materialize(request.plan, request.authority)
+            receipt = observed.model_copy(
+                update={"state": "materialized", "materialization": materialization}
+            )
+        else:
+            materialization = self._io.preparation_materialization(request)
+            recovery = self.prepare(materialization, request.binding, request.authority)
+            receipt = ExternalBootPreparationObservation(
+                state="prepared",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+                materialization=materialization,
+                recovery_point=recovery,
+            )
+        return self._io.publish_preparation(receipt)
+
     def materialize(
         self, plan: ExternalBootPlan, authority: OpaqueProviderRef
     ) -> ExternalBootMaterialization:
@@ -1561,6 +1639,19 @@ class LocalLibvirtExternalBoot:
                 target_state=metadata.target_state,
             )
 
+    def cleanup_receipt(
+        self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
+    ) -> RecoveryPoint | None:
+        """Reconstruct an exact accounted-cleanup receipt after authority restart."""
+        with self._io.open(authority, _expected_binding(binding)) as operation:
+            try:
+                tombstone = operation.reopen_cleanup_tombstone(binding)
+            except FileNotFoundError:
+                return None
+            if tombstone.binding != binding:
+                raise ValueError("cleanup tombstone does not match requested binding")
+            return tombstone.recovery_point
+
     def observe_state(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef
     ) -> LocalObservedState:
@@ -1632,7 +1723,44 @@ def recovery_directory_name(
 _INTENT_NAME = "intent.json"
 _INITIAL_INTENT_TEMPORARY_NAME = ".intent.initial"
 _TOMBSTONE_NAME = "tombstone.json"
+_PREPARATION_NAME = "preparation-result.json"
 _MAX_METADATA_BYTES = 262_144
+
+
+class LocalPreparationReceiptsV1(BaseModel):
+    """Both phase receipts retained in one owner-bound canonical record."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_: Literal["local-preparation-results-v1"] = Field(
+        "local-preparation-results-v1", alias="schema"
+    )
+    materialize: ExternalBootPreparationObservation | None = None
+    prepare: ExternalBootPreparationObservation | None = None
+
+    @model_validator(mode="after")
+    def _consistent_owner(self) -> LocalPreparationReceiptsV1:
+        receipts = [item for item in (self.materialize, self.prepare) if item is not None]
+        if not receipts:
+            raise ValueError("preparation result must contain a receipt")
+        first = receipts[0]
+        if any(
+            item.binding != first.binding
+            or item.plan_identity != first.plan_identity
+            or item.authority != first.authority
+            for item in receipts[1:]
+        ):
+            raise ValueError("preparation receipts have conflicting ownership")
+        if self.materialize is not None and self.materialize.state != "materialized":
+            raise ValueError("materialize preparation receipt has invalid state")
+        if self.prepare is not None and self.prepare.state != "prepared":
+            raise ValueError("prepare preparation receipt has invalid state")
+        if (
+            self.materialize is not None
+            and self.prepare is not None
+            and self.materialize.materialization != self.prepare.materialization
+        ):
+            raise ValueError("prepare receipt changed materialization")
+        return self
 
 
 def _metadata_bytes(metadata: LocalRecoveryMetadataV1) -> bytes:
@@ -1656,6 +1784,15 @@ def _pre_stop_bytes(intent: LocalPreStopIntentV1) -> bytes:
 def _tombstone_bytes(tombstone: CleanupTombstoneV1) -> bytes:
     return json.dumps(
         tombstone.model_dump(mode="json", by_alias=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+def _preparation_bytes(receipts: LocalPreparationReceiptsV1) -> bytes:
+    return json.dumps(
+        receipts.model_dump(mode="json", by_alias=True),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -1703,6 +1840,88 @@ class RecoveryMetadataStore:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        """Read one exact phase receipt or return the request-bound absent value."""
+        self._require_open()
+        receipts = self._try_preparation(request.binding)
+        if receipts is None:
+            return ExternalBootPreparationObservation(
+                state="absent",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+            )
+        receipt = getattr(receipts, request.phase)
+        if receipt is None:
+            return ExternalBootPreparationObservation(
+                state="absent",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+            )
+        if (
+            receipt.binding != request.binding
+            or receipt.plan_identity != request.plan.identity
+            or receipt.authority != request.authority
+            or receipt.operation_identity != request.operation_identity
+        ):
+            raise ValueError("preparation receipt identity conflicts with request")
+        return receipt
+
+    def preparation_materialization(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootMaterialization:
+        """Return the owner-bound materialization needed by the prepare phase."""
+        receipts = self._try_preparation(request.binding)
+        receipt = receipts.materialize if receipts is not None else None
+        if (
+            receipt is None
+            or receipt.materialization is None
+            or receipt.binding != request.binding
+            or receipt.plan_identity != request.plan.identity
+            or receipt.authority != request.authority
+        ):
+            raise ValueError("prepare requires a matching durable materialization receipt")
+        return receipt.materialization
+
+    def publish_preparation(
+        self, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation:
+        """Atomically publish one phase into the activation's preparation record."""
+        self._require_open()
+        phase = "materialize" if receipt.state == "materialized" else "prepare"
+        if receipt.state not in {"materialized", "prepared"}:
+            raise ValueError("only completed preparation receipts may be published")
+        existing = self._try_preparation(receipt.binding)
+        if existing is not None and getattr(existing, phase) is not None:
+            if getattr(existing, phase) != receipt:
+                raise ValueError("existing preparation receipt conflicts with result")
+            return receipt
+        updated = (existing or LocalPreparationReceiptsV1(materialize=receipt)).model_copy(
+            update={phase: receipt}
+        )
+        updated = LocalPreparationReceiptsV1.model_validate(updated.model_dump(by_alias=True))
+        directory_fd = self._open_preparation_directory(receipt.binding, create=True)
+        try:
+            _replace_private_file(
+                directory_fd,
+                ".preparation.next",
+                _PREPARATION_NAME,
+                _preparation_bytes(updated),
+            )
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.fsync(self._root_fd)
+        reopened = self._try_preparation(receipt.binding)
+        if reopened != updated:
+            raise ValueError("published preparation receipt failed exact reopen")
+        return receipt
 
     def publish(self, metadata: LocalRecoveryMetadataV1) -> OpaqueProviderRef:
         """Publish canonical intent with file, directory, rename, and parent fsyncs."""
@@ -1885,7 +2104,19 @@ class RecoveryMetadataStore:
         self._require_open()
         name = recovery_directory_name(reference, binding)
         directory_fd = _open_private_directory(self._root_fd, name)
-        tombstone = CleanupTombstoneV1(binding=binding, point_digest=point_digest)
+        recovery_point = RecoveryPoint(
+            binding=expected.binding,
+            plan_identity=expected.plan_identity,
+            materialization_identity=expected.materialization_identity,
+            recovery_ref=reference,
+            source_state=expected.source_state,
+            target_state=expected.target_state,
+        )
+        tombstone = CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=recovery_point,
+            point_digest=point_digest,
+        )
         try:
             if expected.binding != binding or self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before cleanup")
@@ -1899,6 +2130,8 @@ class RecoveryMetadataStore:
                 _tombstone_bytes(tombstone),
             )
             os.unlink(_INTENT_NAME, dir_fd=directory_fd)
+            with suppress(FileNotFoundError):
+                os.unlink(_PREPARATION_NAME, dir_fd=directory_fd)
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
@@ -1917,6 +2150,7 @@ class RecoveryMetadataStore:
             return False
         expected = CleanupTombstoneV1(
             binding=recovery.binding,
+            recovery_point=recovery,
             point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
         )
         if actual != expected:
@@ -1934,6 +2168,7 @@ class RecoveryMetadataStore:
         name = recovery_directory_name(reference, recovery.binding)
         expected = CleanupTombstoneV1(
             binding=recovery.binding,
+            recovery_point=recovery,
             point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
         )
         if proof.binding != recovery.binding or proof.point_digest != expected.point_digest:
@@ -1972,6 +2207,37 @@ class RecoveryMetadataStore:
             pass
         return _open_private_directory(self._root_fd, name)
 
+    def _open_preparation_directory(
+        self, binding: ExternalBootActivationBinding, *, create: bool
+    ) -> int:
+        name = recovery_directory_name(_recovery_ref(binding), binding)
+        try:
+            return _open_private_directory(self._root_fd, name)
+        except FileNotFoundError:
+            partial = f".{name}.partial"
+            if create:
+                return self._open_or_create_partial(partial)
+            return _open_private_directory(self._root_fd, partial)
+
+    def _try_preparation(
+        self, binding: ExternalBootActivationBinding
+    ) -> LocalPreparationReceiptsV1 | None:
+        try:
+            directory_fd = self._open_preparation_directory(binding, create=False)
+        except FileNotFoundError:
+            return None
+        try:
+            try:
+                data = _read_private_file(directory_fd, _PREPARATION_NAME)
+            except FileNotFoundError:
+                return None
+            receipts = LocalPreparationReceiptsV1.model_validate_json(data)
+            if _preparation_bytes(receipts) != data:
+                raise ValueError("preparation result is not canonical JSON")
+            return receipts
+        finally:
+            os.close(directory_fd)
+
     def _try_read(self, name: str) -> LocalRecoveryMetadataV1 | None:
         try:
             return self._read_named(name)
@@ -1991,6 +2257,16 @@ class RecoveryMetadataStore:
             return self._read_tombstone(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def reopen_tombstone(
+        self, reference: OpaqueProviderRef, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        """Read one canonical owner-bound cleanup receipt without requiring intent metadata."""
+        self._require_open()
+        tombstone = self._read_tombstone_named(recovery_directory_name(reference, binding))
+        if tombstone.binding != binding or tombstone.recovery_point.recovery_ref != reference:
+            raise ValueError("cleanup tombstone does not match requested recovery object")
+        return tombstone
 
     @staticmethod
     def _read_tombstone(directory_fd: int) -> CleanupTombstoneV1:
@@ -2103,8 +2379,8 @@ def _replace_private_file(directory_fd: int, temporary: str, final: str, data: b
 
 def _publish_initial_intent(directory_fd: int, data: bytes, *, conflict: str) -> None:
     entries = set(os.listdir(directory_fd))
-    expected = {_INTENT_NAME, _INITIAL_INTENT_TEMPORARY_NAME}
-    if entries - expected or len(entries) > 1:
+    expected = {_INTENT_NAME, _INITIAL_INTENT_TEMPORARY_NAME, _PREPARATION_NAME}
+    if entries - expected or len(entries - {_PREPARATION_NAME}) > 1:
         raise ValueError(conflict)
     if _INTENT_NAME in entries:
         if _read_private_file(directory_fd, _INTENT_NAME) != data:

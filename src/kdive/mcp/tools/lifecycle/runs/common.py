@@ -454,8 +454,10 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
     if failing_job is not None and not no_leak:
         data["failing_job_id"] = str(failing_job.id)
         context = failing_job.failure_context
-        detail = context.get("failure_message") or None
-        build_log_ref = context.get(_BUILD_LOG_FAILURE_DETAIL) or None
+        message = context.get("failure_message")
+        detail = message if isinstance(message, str) and message else None
+        log_ref = context.get(_BUILD_LOG_FAILURE_DETAIL)
+        build_log_ref = log_ref if isinstance(log_ref, str) and log_ref else None
         for key, value in context.items():
             if key.startswith("failure_detail_"):
                 data[key] = value

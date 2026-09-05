@@ -167,12 +167,48 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "base_image_volume (#1424, ADR-0425). Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_KERNEL",
+        "test",
+        None,
+        "Readable local kernel image supplied to the live_vm_remote external-boot carrier. "
+        "Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_INITRD",
+        "test",
+        None,
+        "Readable local initrd supplied to the live_vm_remote external-boot carrier. Required "
+        "once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE",
+        "test",
+        None,
+        "Absolute /dev/ root-device path for the live_vm_remote external-boot carrier. Required "
+        "once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_GDB_ADDR",
+        "test",
+        None,
+        "IP-literal GDB listen address for the live_vm_remote external-boot carrier. Required "
+        "once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_REMOTE_RECONCILER",
         "test",
         None,
         "Presence marker for a running reconciler (its metrics endpoint, or 1) that the "
         "live_vm_remote family needs for its reconciler-resident console collector (#1424, "
         "ADR-0425). Presence-checked, not probed. Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_SSH",
+        "test",
+        None,
+        "Noninteractive SSH destination for the live_vm_remote AppArmor proof (#2236, ADR-0597). "
+        "It must identify the same host as KDIVE_LIVE_VM_REMOTE_URI and permit passwordless sudo "
+        "for the fixed test script. Unset means that carrier skips.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_VM_VMCORE",

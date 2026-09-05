@@ -9,8 +9,9 @@ handler returns its result and the worker commits it under ``_authority_binding_
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from datetime import UTC, datetime
+from typing import Any, Final, cast
+from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -25,9 +26,13 @@ from kdive.jobs.handlers.external_boot.evidence import (
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperationHandler
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.ports import (
+    ExternalBootAuthorityExecutor,
+    ExternalBootHandlerPorts,
+)
 from kdive.jobs.handlers.external_boot.runner import (
     OperationContext,
+    _CommandLineMismatch,
     authority_ref,
     run_operation,
 )
@@ -35,10 +40,14 @@ from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
 )
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+    RecoveryObjectBindingV1,
+)
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 
 __all__ = [
-    "ACTIVATION_READINESS_WINDOW",
     "activate_handler",
     "cleanup_handler",
     "recover_handler",
@@ -46,19 +55,6 @@ __all__ = [
     "resolve_conflict_handler",
     "teardown_handler",
 ]
-
-ACTIVATION_READINESS_WINDOW: Final[timedelta] = timedelta(minutes=15)
-"""How far ahead of ``now(UTC)`` an ``activate`` result reports its readiness deadline.
-
-Unit: a wall-clock interval. Reference clock: the worker's ``now(UTC)``, which the commit stores
-verbatim after a parse check only (``0122_external_boot_authority.sql:1471-1488``).
-
-**Nothing reads this value today.** The schema bounds it in no way and no reader exists in ``src/``
-outside the model definition, so stating a consequence of violation or a recovery action would
-document a feature that does not exist. Enforcing it is #2202's, which the charter excludes as
-"deadline reuse". The value must still be emitted because
-``_ActivateResult.activation_readiness_deadline`` is required.
-"""
 
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
 _RECOVERY_STATES: Final = frozenset(
@@ -87,8 +83,8 @@ def _recovery(context: OperationContext) -> RecoveryPoint:
     return recovery
 
 
-def _require_observed_kernel_matches(
-    context: OperationContext, observation: RunningKernelObservation | None
+def _require_category(
+    context: OperationContext, observation: AuthorityObservationV1, expected: str
 ) -> None:
     """The ``observe`` call is a post-mutation liveness precondition, and this is its whole point.
 
@@ -98,16 +94,90 @@ def _require_observed_kernel_matches(
     persisted ``materialization.kernel_observation`` records. The value is discarded after this
     comparison.
     """
+    if observation.category != expected:
+        raise _refuse(
+            f"authority observed {observation.category!r} for {context.marker.operation!r}; "
+            f"expected {expected!r}"
+        )
+
+
+def _require_observed_kernel_matches(
+    context: OperationContext, observation: RunningKernelObservation | None
+) -> None:
     materialization = context.activation.materialization
     if observation is None or materialization is None:
         raise _refuse(
             f"activation {context.marker.activation_id} produced no kernel observation to verify"
         )
-    if observation != materialization.kernel_observation:
+    if observation.identity != materialization.kernel_observation:
         raise _refuse(
             f"the running kernel observed for activation {context.marker.activation_id} is not the "
             "one its persisted materialization records"
         )
+    if observation.cmdline != observation.expected_cmdline:
+        limit = min(len(observation.cmdline), len(observation.expected_cmdline))
+        offset = next(
+            (
+                index
+                for index in range(limit)
+                if observation.cmdline[index] != observation.expected_cmdline[index]
+            ),
+            limit,
+        )
+        raise _CommandLineMismatch(
+            observation.expected_cmdline[:2048], observation.cmdline[:2048], offset
+        )
+
+
+def _mutation_request(context: OperationContext) -> AuthorityMutationRequestV1:
+    recovery = _recovery(context)
+    attempt_id = context.activation.current_attempt_id or uuid5(
+        NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
+    )
+    objects = ()
+    if context.marker.operation in {"cleanup", "teardown"}:
+        objects = (
+            RecoveryObjectBindingV1(
+                system_id=context.marker.system_id,
+                activation_id=context.marker.activation_id,
+                reference=recovery.recovery_ref.ref,
+            ),
+        )
+    return AuthorityMutationRequestV1.model_validate(
+        {
+            "authority_id": context.authority.authority_id,
+            "generation": context.authority.generation,
+            "system_id": context.marker.system_id,
+            "activation_id": context.marker.activation_id,
+            "run_id": context.marker.run_id,
+            "plan_identity": context.marker.plan_identity,
+            "purpose": context.marker.purpose,
+            "operation": context.marker.operation,
+            "provider_kind": context.marker.provider_kind,
+            "authority_instance": context.marker.authority_instance,
+            "operation_identity": context.marker.operation_identity,
+            "operation_digest": context.authority.operation_digest,
+            "attempt_id": attempt_id,
+            "expected_source_identity": recovery.source_state.definition,
+            "intended_target_identity": recovery.target_state.definition,
+            "recovery_objects": objects,
+        }
+    )
+
+
+async def _execute(
+    context: OperationContext,
+) -> tuple[AuthorityObservationV1, RunningKernelObservation | None]:
+    executor = context.prerequisites.get("authority_executor")
+    if executor is None:
+        raise _refuse("no external-boot authority executor is configured")
+    authority_observation = await cast(ExternalBootAuthorityExecutor, executor).execute(
+        _mutation_request(context)
+    )
+    kernel_observation = None
+    if authority_observation.category == "target":
+        kernel_observation = context.port.observe(_recovery(context), authority_ref(context))
+    return authority_observation, kernel_observation
 
 
 async def _no_preconditions(
@@ -118,16 +188,21 @@ async def _no_preconditions(
     return {}
 
 
-async def _attempt_state(conn: AsyncConnection, activation: ExternalBootActivation) -> str | None:
+async def _attempt_state(
+    conn: AsyncConnection, activation: ExternalBootActivation
+) -> tuple[str, datetime | None] | None:
     if activation.current_attempt_id is None:
         return None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT state FROM external_boot_recovery_attempts WHERE attempt_id = %s",
+            "SELECT state, recovery_readiness_deadline "
+            "FROM external_boot_recovery_attempts WHERE attempt_id = %s",
             (activation.current_attempt_id,),
         )
         row = await cur.fetchone()
-    return None if row is None else str(row["state"])
+    if row is None:
+        return None
+    return str(row["state"]), row["recovery_readiness_deadline"]
 
 
 def _require_attempt_state(expected: str) -> Callable[..., Awaitable[Mapping[str, Any]]]:
@@ -145,13 +220,14 @@ def _require_attempt_state(expected: str) -> Callable[..., Awaitable[Mapping[str
         activation: ExternalBootActivation,
         marker: ExternalBootAuthorityMarkerV1,
     ) -> Mapping[str, Any]:
-        state = await _attempt_state(conn, activation)
+        attempt = await _attempt_state(conn, activation)
+        state = None if attempt is None else attempt[0]
         if state != expected:
             raise _refuse(
                 f"{marker.operation!r} requires the current recovery attempt in {expected!r}, "
                 f"not {state!r}"
             )
-        return {}
+        return {"attempt_deadline": attempt[1] if attempt is not None else None}
 
     return check
 
@@ -233,14 +309,25 @@ def _handler(
     require_activation_state: frozenset[State],
     require_activation_evidence: frozenset[str],
     require_preconditions: Callable[..., Awaitable[Mapping[str, Any]]],
-    call_port: Callable[[OperationContext], RunningKernelObservation | None],
+    expected_observation: str,
     build_result: Callable[
-        [OperationContext, RunningKernelObservation | None], ExternalBootAuthoritySuccessV1
+        [OperationContext, AuthorityObservationV1], ExternalBootAuthoritySuccessV1
     ],
+    before_port: Callable[[OperationContext], ExternalBootAuthoritySuccessV1 | None] | None = None,
 ) -> ExternalBootOperationHandler:
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
     ) -> ExternalBootAuthoritySuccessV1:
+        def checked_build(
+            context: OperationContext,
+            observations: tuple[AuthorityObservationV1, RunningKernelObservation | None],
+        ) -> ExternalBootAuthoritySuccessV1:
+            authority_observation, kernel_observation = observations
+            _require_category(context, authority_observation, expected_observation)
+            if expected_observation == "target":
+                _require_observed_kernel_matches(context, kernel_observation)
+            return build_result(context, authority_observation)
+
         return await run_operation(
             conn,
             job,
@@ -248,12 +335,27 @@ def _handler(
             ports=ports,
             require_activation_state=require_activation_state,
             require_activation_evidence=require_activation_evidence,
-            require_preconditions=require_preconditions,
-            call_port=call_port,
-            build_result=build_result,
+            require_preconditions=lambda conn, activation, marker: _with_executor(
+                require_preconditions, ports, conn, activation, marker
+            ),
+            call_port=_execute,
+            build_result=checked_build,
+            before_port=before_port,
         )
 
     return handler
+
+
+async def _with_executor(
+    preconditions: Callable[..., Awaitable[Mapping[str, Any]]],
+    ports: ExternalBootHandlerPorts,
+    conn: AsyncConnection,
+    activation: ExternalBootActivation,
+    marker: ExternalBootAuthorityMarkerV1,
+) -> Mapping[str, Any]:
+    values = dict(await preconditions(conn, activation, marker))
+    values["authority_executor"] = ports.authority_executor
+    return values
 
 
 def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
@@ -266,17 +368,12 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
     refused at commit.
     """
 
-    def call(context: OperationContext) -> RunningKernelObservation:
-        recovery = _recovery(context)
-        reference = authority_ref(context)
-        context.port.activate(recovery, reference)
-        return context.port.observe(recovery, reference)
-
     def build(
-        context: OperationContext, observation: RunningKernelObservation | None
+        context: OperationContext, observation: AuthorityObservationV1
     ) -> ExternalBootAuthoritySuccessV1:
-        _require_observed_kernel_matches(context, observation)
-        deadline = datetime.now(UTC) + ACTIVATION_READINESS_WINDOW
+        deadline = context.activation.activation_readiness_deadline
+        if deadline is None:
+            raise _refuse("activating row has no activation readiness deadline")
         return authority_result(
             context,
             {
@@ -288,31 +385,49 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             },
         )
 
+    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+        if context.activation.state is not State.PREPARED:
+            deadline = context.activation.activation_readiness_deadline
+            if deadline is not None and ports.clock() >= deadline:
+                raise CategorizedError(
+                    "activation readiness deadline expired",
+                    category=ErrorCategory.BOOT_TIMEOUT,
+                    terminal=True,
+                )
+            return None
+        deadline = ports.clock() + ports.activation_readiness_timeout
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "deadline",
+                "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
     return _handler(
         ports,
-        require_activation_state=frozenset({State.ACTIVATING}),
+        require_activation_state=frozenset({State.PREPARED, State.ACTIVATING}),
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_no_preconditions,
-        call_port=call,
+        expected_observation="target",
         build_result=build,
+        before_port=before_port,
     )
 
 
 def _recovering_handler(
-    ports: ExternalBootHandlerPorts, *, operation: str, state: State, attempt_state: str
+    ports: ExternalBootHandlerPorts,
+    *,
+    operation: str,
+    state: State,
+    attempt_state: str,
 ) -> ExternalBootOperationHandler:
     """``recover`` and ``resolve-conflict`` differ in three parameters, so they share a body."""
 
-    def call(context: OperationContext) -> RunningKernelObservation:
-        recovery = _recovery(context)
-        reference = authority_ref(context)
-        context.port.recover(recovery, reference)
-        return context.port.observe(recovery, reference)
-
     def build(
-        context: OperationContext, observation: RunningKernelObservation | None
+        context: OperationContext, observation: AuthorityObservationV1
     ) -> ExternalBootAuthoritySuccessV1:
-        _require_observed_kernel_matches(context, observation)
         return authority_result(
             context,
             {
@@ -328,25 +443,131 @@ def _recovering_handler(
         require_activation_state=frozenset({state}),
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_require_attempt_state(attempt_state),
-        call_port=call,
+        expected_observation="source",
         build_result=build,
     )
 
 
 def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
     """Re-run the recovery point and confirm the kernel, under a ``recovering`` attempt row."""
-    return _recovering_handler(
-        ports, operation="recover", state=State.RECOVERING, attempt_state="recovering"
+
+    def build(
+        context: OperationContext, _observation: AuthorityObservationV1
+    ) -> ExternalBootAuthoritySuccessV1:
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recover",
+                "result_ref": None,
+                "evidence": terminal_evidence(context, "recovered"),
+            },
+        )
+
+    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+        if context.activation.state is not State.ACTIVE:
+            deadline = context.prerequisites.get("attempt_deadline")
+            if deadline is not None and ports.clock() >= deadline:
+                raise CategorizedError(
+                    "recovery readiness deadline expired",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    terminal=True,
+                )
+            return None
+        deadline = ports.clock() + ports.recovery_readiness_timeout
+        attempt_id = uuid5(
+            NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
+        )
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recovery-attempt",
+                "attempt_id": str(attempt_id),
+                "recovery_basis": "recovery_point",
+                "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    async def require_attempt(
+        conn: AsyncConnection,
+        activation: ExternalBootActivation,
+        marker: ExternalBootAuthorityMarkerV1,
+    ) -> Mapping[str, Any]:
+        if activation.state is State.ACTIVE:
+            return {}
+        return await _require_attempt_state("recovering")(conn, activation, marker)
+
+    return _handler(
+        ports,
+        require_activation_state=frozenset({State.ACTIVE, State.RECOVERING}),
+        require_activation_evidence=_ACTIVATION_EVIDENCE,
+        require_preconditions=require_attempt,
+        expected_observation="source",
+        build_result=build,
+        before_port=before_port,
     )
 
 
 def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
-    """The same recovery, from ``recovery_conflict`` under an attempt row in ``conflict``."""
-    return _recovering_handler(
+    """Start a new recovery window before resolving a parked conflict."""
+
+    def build(
+        context: OperationContext, _observation: AuthorityObservationV1
+    ) -> ExternalBootAuthoritySuccessV1:
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "resolve-conflict",
+                "result_ref": None,
+                "evidence": terminal_evidence(context, "recovered"),
+            },
+        )
+
+    def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
+        if context.activation.state is State.RECOVERING:
+            deadline = context.prerequisites.get("attempt_deadline")
+            if deadline is not None and ports.clock() >= deadline:
+                raise CategorizedError(
+                    "recovery readiness deadline expired",
+                    category=ErrorCategory.READINESS_FAILURE,
+                    terminal=True,
+                )
+            return None
+        deadline = ports.clock() + ports.recovery_readiness_timeout
+        attempt_id = uuid5(
+            NAMESPACE_URL, f"kdive/external-boot/{context.marker.operation_identity}"
+        )
+        return authority_result(
+            context,
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "recovery-attempt",
+                "attempt_id": str(attempt_id),
+                "recovery_basis": "pre_recovery",
+                "deadline": deadline.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    async def require_attempt(
+        conn: AsyncConnection,
+        activation: ExternalBootActivation,
+        marker: ExternalBootAuthorityMarkerV1,
+    ) -> Mapping[str, Any]:
+        if activation.state is State.RECOVERY_CONFLICT:
+            await _require_attempt_state("conflict")(conn, activation, marker)
+            return {}
+        return await _require_attempt_state("recovering")(conn, activation, marker)
+
+    return _handler(
         ports,
-        operation="resolve-conflict",
-        state=State.RECOVERY_CONFLICT,
-        attempt_state="conflict",
+        require_activation_state=frozenset({State.RECOVERY_CONFLICT, State.RECOVERING}),
+        require_activation_evidence=_ACTIVATION_EVIDENCE,
+        require_preconditions=require_attempt,
+        expected_observation="source",
+        build_result=build,
+        before_port=before_port,
     )
 
 
@@ -368,14 +589,9 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     that is deferral record 0010, which this handler neither introduces nor resolves.
     """
 
-    def call(context: OperationContext) -> RunningKernelObservation:
-        recovery = _recovery(context)
-        return context.port.observe(recovery, authority_ref(context))
-
     def build(
-        context: OperationContext, observation: RunningKernelObservation | None
+        context: OperationContext, observation: AuthorityObservationV1
     ) -> ExternalBootAuthoritySuccessV1:
-        _require_observed_kernel_matches(context, observation)
         reservation = context.prerequisites["reservation"]
         evidence = {
             "schema": "external-boot-release-evidence-v1",
@@ -402,15 +618,12 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     return _handler(
         ports,
         require_activation_state=_RECOVERY_STATES,
-        # `materialization` as well as `recovery_point`, because this operation observes: it admits
-        # `abandoned`, whose row is legal with `materialization` NULL, and the observation check
-        # reads `materialization.kernel_observation`. Without it the refusal lands in build_result,
-        # *after* allocation and the port call, and reports "produced no kernel observation to
-        # verify" — blaming the provider for a missing persisted column. Listing the column here
-        # moves the same refusal to step 2b, pre-allocation, with the accurate message.
+        # Require the complete persisted activation evidence pair before releasing its reservation.
+        # Only `recovery_point` feeds the source-authority observation, but the domain model binds
+        # it to `materialization`; checking both keeps a partial row from reaching allocation.
         require_activation_evidence=_ACTIVATION_EVIDENCE,
         require_preconditions=_require_releasable,
-        call_port=call,
+        expected_observation="source",
         build_result=build,
     )
 
@@ -442,14 +655,8 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     for the first.
     """
 
-    def call(context: OperationContext) -> None:
-        # cleanup has no observation control: its port call is `cleanup`, and ExternalBootPorts
-        # offers nothing to observe a deletion with. Stated rather than left to be inferred.
-        context.port.cleanup(_recovery(context), authority_ref(context))
-        return None
-
     def build(
-        context: OperationContext, _observation: RunningKernelObservation | None
+        context: OperationContext, _observation: AuthorityObservationV1
     ) -> ExternalBootAuthoritySuccessV1:
         ordinary = context.activation.state in _ORDINARY_CLEANUP_STATES
         return authority_result(
@@ -472,7 +679,7 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         require_activation_state=_CLEANUP_STATES,
         require_activation_evidence=frozenset({"recovery_point"}),
         require_preconditions=_require_cleanable,
-        call_port=call,
+        expected_observation="absent",
         build_result=build,
     )
 
@@ -489,12 +696,8 @@ def _teardown_evidence(context: OperationContext) -> dict[str, Any]:
 def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
     """The only operation on the ``teardown`` kind; carries both evidences in one result."""
 
-    def call(context: OperationContext) -> None:
-        context.port.cleanup(_recovery(context), authority_ref(context))
-        return None
-
     def build(
-        context: OperationContext, _observation: RunningKernelObservation | None
+        context: OperationContext, _observation: AuthorityObservationV1
     ) -> ExternalBootAuthoritySuccessV1:
         # Built once and digested, so `teardown_identity` names the exact document this result
         # carries. The commit persists that document verbatim
@@ -522,6 +725,6 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         require_activation_state=_TEARDOWN_STATES,
         require_activation_evidence=frozenset({"recovery_point"}),
         require_preconditions=_require_torn_down_system,
-        call_port=call,
+        expected_observation="absent",
         build_result=build,
     )

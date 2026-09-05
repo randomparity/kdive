@@ -186,7 +186,7 @@
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
   changed_when: true
 
-# --- Install the in-guest helpers: chown root:root + restorecon per helper
+# --- Install the in-guest helpers: chown root:root + optional restorecon per helper
 # --- (ENOENT-not-EACCES gotcha -- chmod alone does not fix it). Build the argv
 # --- list with a fact loop, then run virt-customize once. ---
 #
@@ -205,7 +205,9 @@
          + ['--copy-in', guest_base_image_helper_dir ~ '/' ~ item ~ ':/usr/local/sbin/',
             '--run-command', 'chown root:root /usr/local/sbin/' ~ item,
             '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
-            '--run-command', 'restorecon -v /usr/local/sbin/' ~ item] }}
+            '--run-command',
+            'if command -v restorecon >/dev/null 2>&1; then '
+            ~ 'restorecon -v /usr/local/sbin/' ~ item ~ '; fi'] }}
   loop: "{{ guest_base_image_helpers }}"
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
 

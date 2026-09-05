@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import BinaryIO, Literal, cast
 from uuid import UUID
 
 import pytest
@@ -65,6 +65,9 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    KernelIdentity,
     MaterializedArtifacts,
     OpaqueProviderRef,
     PresentComponentState,
@@ -873,6 +876,7 @@ def test_recovery_metadata_store_retries_interrupted_temporary_replacement(
             else:
                 expected_model = CleanupTombstoneV1(
                     binding=metadata.binding,
+                    recovery_point=_point(metadata),
                     point_digest=LocalLibvirtExternalBoot.point_digest(_point(metadata)),
                 )
                 temporary_name = ".tombstone.next"
@@ -1335,6 +1339,7 @@ class _ExternalIO:
         self.close_fault = close_fault
         self.opened: list[ExpectedOperationOwnership] = []
         self.close_attempts = 0
+        self.preparation_receipts: dict[str, ExternalBootPreparationObservation] = {}
 
     def open(
         self,
@@ -1344,6 +1349,34 @@ class _ExternalIO:
         assert authority == OpaqueProviderRef(ref="authority/current")
         self.opened.append(expected)
         return _ExternalContext(self)
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        return self.preparation_receipts.get(
+            request.phase,
+            ExternalBootPreparationObservation(
+                state="absent",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+            ),
+        )
+
+    def publish_preparation(
+        self, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation:
+        phase = "materialize" if receipt.state == "materialized" else "prepare"
+        self.preparation_receipts[phase] = receipt
+        return receipt
+
+    def preparation_materialization(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootMaterialization:
+        receipt = self.preparation_receipts["materialize"]
+        assert receipt.materialization is not None
+        return receipt.materialization
 
     def materialize(self, plan: ExternalBootPlan) -> ExternalBootMaterialization:
         self.actions.append("materialize")
@@ -1384,6 +1417,18 @@ class _ExternalIO:
             raise LookupError("operation primary")
         return self.metadata
 
+    def reopen_cleanup_tombstone(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupTombstoneV1:
+        if not self.tombstone:
+            raise FileNotFoundError("tombstone.json")
+        point = _point(self.metadata)
+        return CleanupTombstoneV1(
+            binding=binding,
+            recovery_point=point,
+            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        )
+
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
         self.actions.append("observe-state")
         if self.operation_fault:
@@ -1405,7 +1450,13 @@ class _ExternalIO:
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         self.actions.append("observe-running")
         return RunningKernelObservation(
-            architecture="x86_64", release=metadata.release, gnu_build_id="01020304"
+            identity={
+                "architecture": "x86_64",
+                "release": metadata.release,
+                "gnu_build_id": "01020304",
+            },
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
         )
 
     def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
@@ -1618,9 +1669,13 @@ class _RealSession:
 
     def observe_running(self) -> RunningKernelObservation:
         return RunningKernelObservation(
-            architecture="x86_64",
-            release=self.preparation.metadata.release,
-            gnu_build_id="01020304",
+            identity={
+                "architecture": "x86_64",
+                "release": self.preparation.metadata.release,
+                "gnu_build_id": "01020304",
+            },
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
         )
 
     def define_xml(self, xml: str) -> None:
@@ -1776,9 +1831,13 @@ class _RestartSession(_RealSession):
         self.artifact = artifact
         self.readiness_result = ReadinessResult(True, True, None)
         self.running_observation = RunningKernelObservation(
-            architecture="x86_64",
-            release=preparation.metadata.release,
-            gnu_build_id="01020304",
+            identity={
+                "architecture": "x86_64",
+                "release": preparation.metadata.release,
+                "gnu_build_id": "01020304",
+            },
+            cmdline=b"root=UUID=x",
+            expected_cmdline=b"root=UUID=x",
         )
 
     def inspect_closed(self) -> ClosedDomainInspection:
@@ -2802,9 +2861,21 @@ def test_activation_rejects_unexpected_xml_or_power_before_module_mutation(
 @pytest.mark.parametrize(
     "observation",
     [
-        RunningKernelObservation(architecture="ppc64le", release="6.12.0", gnu_build_id="01020304"),
-        RunningKernelObservation(architecture="x86_64", release="6.12.1", gnu_build_id="01020304"),
-        RunningKernelObservation(architecture="x86_64", release="6.12.0", gnu_build_id="deadbeef"),
+        RunningKernelObservation(
+            identity={"architecture": "ppc64le", "release": "6.12.0", "gnu_build_id": "01020304"},
+            cmdline=b"",
+            expected_cmdline=b"",
+        ),
+        RunningKernelObservation(
+            identity={"architecture": "x86_64", "release": "6.12.1", "gnu_build_id": "01020304"},
+            cmdline=b"",
+            expected_cmdline=b"",
+        ),
+        RunningKernelObservation(
+            identity={"architecture": "x86_64", "release": "6.12.0", "gnu_build_id": "deadbeef"},
+            cmdline=b"",
+            expected_cmdline=b"",
+        ),
     ],
 )
 def test_observe_rejects_running_kernel_mismatch(
@@ -2823,6 +2894,27 @@ def test_observe_rejects_running_kernel_mismatch(
 
     with pytest.raises(ValueError, match="running kernel"):
         ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+
+def test_observe_returns_command_line_mismatch_for_core_to_compare(tmp_path: Path) -> None:
+    metadata_template = _metadata("target-defined")
+    ports, metadata, session, _guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=metadata_template.target_xml,
+        active=True,
+    )
+    observation = RunningKernelObservation(
+        identity=metadata.expected_running,
+        cmdline=b"root=observed",
+        expected_cmdline=b"root=expected",
+    )
+    session.running_observation = observation
+
+    assert (
+        ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current")) == observation
+    )
 
 
 @pytest.mark.parametrize(
@@ -3240,7 +3332,7 @@ def test_real_adapter_retry_rejects_substituted_expected_kernel_before_host_acce
     metadata = _metadata().model_copy(update={"materialization_identity": materialization.identity})
     crossed = _pre_stop(metadata).model_copy(
         update={
-            "expected_running": RunningKernelObservation(
+            "expected_running": KernelIdentity(
                 architecture="x86_64",
                 release="6.12.0",
                 gnu_build_id="deadbeef",
@@ -3393,6 +3485,26 @@ def test_real_adapter_cleanup_retry_accepts_only_exact_tombstone(tmp_path: Path)
     assert session.close_attempts == 3
 
 
+def test_real_adapter_restart_reconstructs_cleanup_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    host = _RealPreparation(metadata, root)
+    io, _session = _real_io(root, host)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    LocalLibvirtExternalBoot(io).cleanup(point, OpaqueProviderRef(ref="authority/current"))
+    restarted = LocalLibvirtExternalBoot(io)
+
+    assert (
+        restarted.cleanup_receipt(point.binding, OpaqueProviderRef(ref="authority/current"))
+        == point
+    )
+    assert host.actions == ["cleanup"]
+
+
 def test_real_adapter_rechecks_exact_metadata_before_cleanup_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3528,6 +3640,97 @@ def test_real_adapter_finalization_replays_exact_proof_without_session(tmp_path:
     assert not (root / recovery_directory_name(point.recovery_ref, point.binding)).exists()
 
 
+def _preparation_request(phase: str) -> ExternalBootPreparationRequest:
+    return ExternalBootPreparationRequest(
+        phase=cast(Literal["materialize", "prepare"], phase),
+        plan=_plan(),
+        binding=_BINDING,
+        authority=OpaqueProviderRef(ref="authority/current"),
+        operation_identity=f"{phase}-operation",
+    )
+
+
+def test_preparation_receipt_store_reopens_canonical_partial_and_complete_records(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=request.binding,
+        plan_identity=request.plan.identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": request.plan.identity}
+        ),
+    )
+    assert receipt.materialization is not None
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        assert store.observe_preparation(request) == receipt
+        store.publish_pre_stop(
+            _pre_stop(_metadata()).model_copy(
+                update={
+                    "plan_identity": receipt.plan_identity,
+                    "materialization_identity": receipt.materialization.identity,
+                }
+            )
+        )
+        assert store.observe_preparation(request) == receipt
+
+
+def test_local_preparation_receipt_replay_avoids_second_provider_mutation() -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    request = _preparation_request("materialize")
+
+    first = ports.execute_preparation(request)
+    second = ports.execute_preparation(request)
+
+    assert first == second == ports.observe_preparation(request)
+    assert io.actions == ["materialize"]
+
+
+def test_local_prepare_receipt_replay_avoids_second_provider_mutation() -> None:
+    io = _ExternalIO(_metadata())
+    ports = LocalLibvirtExternalBoot(io)
+    ports.execute_preparation(_preparation_request("materialize"))
+    request = _preparation_request("prepare")
+
+    first = ports.execute_preparation(request)
+    second = ports.execute_preparation(request)
+
+    assert first == second == ports.observe_preparation(request)
+    assert io.actions == ["materialize", "prepare"]
+
+
+def test_accounted_cleanup_removes_preparation_receipt(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("recovered")
+    point = _point(metadata)
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=_materialization().model_copy(
+            update={"plan_identity": metadata.plan_identity}
+        ),
+    )
+    with RecoveryMetadataStore(root) as store:
+        reference = store.publish(metadata)
+        store.publish_preparation(receipt)
+        store.publish_tombstone(
+            reference, metadata.binding, metadata, LocalLibvirtExternalBoot.point_digest(point)
+        )
+        assert store.observe_preparation(request).state == "absent"
+
+
 def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
     io = _ExternalIO(_metadata())
     ports = LocalLibvirtExternalBoot(io)
@@ -3544,7 +3747,7 @@ def test_six_port_activation_recovery_and_cleanup_ordering() -> None:
         "phase:target-defined",
     ]
     io.actions.clear()
-    assert ports.observe(point, authority).release == "6.12.0"
+    assert ports.observe(point, authority).identity.release == "6.12.0"
     assert io.actions == ["reopen", "observe-running"]
 
     io.actions.clear()

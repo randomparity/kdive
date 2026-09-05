@@ -40,7 +40,6 @@ from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_libvirt_connections,
 )
-from kdive.providers.remote_libvirt.guest.agent import GuestDomain
 from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
 from kdive.providers.remote_libvirt.lifecycle.port_allocation import (
     DOMAIN_PREFIX,
@@ -54,6 +53,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.volume_upload import (
     upload_qcow2_volume,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import (
+    OverlayPool,
     Pool,
     PreparedOverlay,
     VolumeStaging,
@@ -76,6 +76,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool_strict as _disk_pool_strict,
 )
+from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
@@ -256,7 +257,7 @@ class RemoteLibvirtProvisioning:
             # created (ADR-0435). The upload primitive already cleans up its own mid-stream partial.
             overlay: PreparedOverlay | None = None
             try:
-                overlay = ensure_overlay(pool, base_volume, system_id)
+                overlay = ensure_overlay(cast("OverlayPool", pool), base_volume, system_id)
                 self._define_and_start(
                     conn,
                     system_id,
@@ -264,6 +265,8 @@ class RemoteLibvirtProvisioning:
                     config=config,
                     gdb_addr=gdb_addr,
                     overlay_name=overlay.name,
+                    overlay_path=overlay.path,
+                    backing_path=overlay.backing_path,
                     ssh_forward=ssh_forward,
                 )
             except CategorizedError:
@@ -417,6 +420,8 @@ class RemoteLibvirtProvisioning:
         config: RemoteLibvirtConfig,
         gdb_addr: str,
         overlay_name: str,
+        overlay_path: str,
+        backing_path: str,
         ssh_forward: tuple[str, int, int] | None,
     ) -> None:
         """Define+start with a bounded port advance on start failure (ADR-0080 §2, ADR-0291).
@@ -451,6 +456,8 @@ class RemoteLibvirtProvisioning:
                 config,
                 gdb_addr=gdb_addr,
                 overlay_name=overlay_name,
+                overlay_path=overlay_path,
+                backing_path=backing_path,
                 gdb_port=gdb_port,
                 ssh_forward=ssh_forward,
                 ssh_port=ssh_port,
@@ -496,6 +503,8 @@ class RemoteLibvirtProvisioning:
         *,
         gdb_addr: str,
         overlay_name: str,
+        overlay_path: str,
+        backing_path: str,
         gdb_port: int,
         ssh_forward: tuple[str, int, int] | None,
         ssh_port: int | None,
@@ -506,6 +515,8 @@ class RemoteLibvirtProvisioning:
             profile,
             pool=config.storage_pool,
             volume=overlay_name,
+            overlay_path=overlay_path,
+            backing_path=backing_path,
             gdb_addr=gdb_addr,
             gdb_port=gdb_port,
             network=config.network,

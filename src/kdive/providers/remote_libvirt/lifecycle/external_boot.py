@@ -1,4 +1,4 @@
-"""Remote-libvirt external Run-boot activation primitives (ADR-0583, #2110, #2120).
+"""Remote-libvirt external Run-boot activation primitives (ADR-0583, ADR-0598, #2110, #2120).
 
 Three layers, each testable alone: the pure direct-kernel XML projection and the two ADR-0583
 definition identities; a closed ``RemoteExternalBootDefinition`` built by a pure
@@ -39,14 +39,16 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    KernelIdentity,
     RunningKernelObservation,
 )
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
+from kdive.providers.shared.guest_agent import AgentExecResult, GuestDomain
 from kdive.providers.shared.libvirt_xml import (
-    KDIVE_METADATA_NS,
     register_kdive_namespace,
     register_qemu_namespace,
+    remote_metadata_storage_identity,
+    remote_metadata_system_id,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 
@@ -59,6 +61,7 @@ _BOOT_PROJECTION_PREFIX = b"kdive-libvirt-boot-projection-v1"
 MAX_DEFINITION_BYTES = 65_536
 MAX_ARTIFACT_PATH_BYTES = 1_024
 MAX_GUEST_READ_BYTES = 65_536
+MAX_CMDLINE_BYTES = 2_048
 
 UNAME_PROGRAM = "/usr/bin/uname"
 CAT_PROGRAM = "/usr/bin/cat"
@@ -187,23 +190,33 @@ def _conflict(reason: str, *, system_id: UUID, rule: str) -> CategorizedError:
     )
 
 
-def _is_expected_overlay(disk: ET.Element, *, pool: str, volume: str) -> bool:
+def _is_expected_overlay(
+    disk: ET.Element,
+    *,
+    pool: str,
+    volume: str,
+    overlay_path: str,
+    storage: tuple[str | None, str | None] | None,
+) -> bool:
     source = disk.find("source")
     driver = disk.find("driver")
     target = disk.find("target")
     return (
-        source is not None
+        disk.get("type") == "file"
+        and source is not None
         and driver is not None
         and target is not None
-        and source.get("pool") == pool
-        and source.get("volume") == volume
+        and source.get("file") == overlay_path
+        and storage == (pool, volume)
         and driver.get("type") == "qcow2"
         and target.get("dev") == "vda"
         and target.get("bus") == "virtio"
     )
 
 
-def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> None:
+def require_disk_grub_source(
+    domain_xml: str, *, system_id: UUID, pool: str, overlay_path: str
+) -> None:
     """Prove an inactive definition is this System's owned disk/GRUB baseline (ADR-0583).
 
     Raises ``CONFLICT`` on the first failed rule, with the rule name in ``details``. A source
@@ -225,14 +238,21 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
         raise _conflict(
             "it already carries external-boot fields", system_id=system_id, rule="boot-projection"
         )
-    recorded = root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
+    recorded = remote_metadata_system_id(root)
     if recorded != str(system_id):
         raise _conflict(
             "its kdive metadata names another System", system_id=system_id, rule="system-metadata"
         )
     disks = root.findall("./devices/disk[@device='disk']")
+    storage = remote_metadata_storage_identity(root)
     expected_volume = overlay_volume_name(system_id)
-    if len(disks) != 1 or not _is_expected_overlay(disks[0], pool=pool, volume=expected_volume):
+    if len(disks) != 1 or not _is_expected_overlay(
+        disks[0],
+        pool=pool,
+        volume=expected_volume,
+        overlay_path=overlay_path,
+        storage=storage,
+    ):
         raise _conflict(
             "its boot disk is not the System overlay volume", system_id=system_id, rule="boot-disk"
         )
@@ -291,7 +311,7 @@ class RemoteExternalBootDefinition(BaseModel):
     target_xml: Annotated[str, Field(min_length=1)]
     target_definition: Digest
     target_boot: Digest
-    expected_running: RunningKernelObservation
+    expected_running: KernelIdentity
     expected_cmdline: Annotated[str, Field(min_length=1)]
 
     _bounded = field_validator("source_xml", "target_xml")(_bounded_definition)
@@ -370,6 +390,7 @@ def prepare_target_definition(
     materialization: ExternalBootMaterialization,
     binding: ExternalBootActivationBinding,
     pool: str,
+    overlay_path: str,
     kernel_path: str,
     initrd_path: str | None,
 ) -> RemoteExternalBootDefinition:
@@ -435,7 +456,7 @@ def prepare_target_definition(
     _require_artifact_path(kernel_path, system_id=system_id, what="kernel")
     if initrd_path is not None:
         _require_artifact_path(initrd_path, system_id=system_id, what="initrd")
-    require_disk_grub_source(source_xml, system_id=system_id, pool=pool)
+    require_disk_grub_source(source_xml, system_id=system_id, pool=pool, overlay_path=overlay_path)
     target_xml = render_target_xml(
         source_xml, kernel=kernel_path, initrd=initrd_path, cmdline=plan.cmdline
     )
@@ -806,15 +827,6 @@ def recover_disk_grub_baseline(
         )
 
 
-class RemoteGuestIdentity(BaseModel):
-    """What one guest actually reports: the shared observation plus the saved command line."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    running: RunningKernelObservation
-    cmdline: bytes
-
-
 class _AgentRunner(Protocol):
     def run(
         self, domain: GuestDomain, argv: list[str], *, input_data: str | None = None
@@ -851,6 +863,7 @@ def _guest_read(
     *,
     what: str,
     definition: RemoteExternalBootDefinition,
+    max_bytes: int = MAX_GUEST_READ_BYTES,
 ) -> bytes:
     """Run one read. A CategorizedError from the seam propagates with its own category."""
     result = agent_exec.run(domain, argv)
@@ -861,7 +874,7 @@ def _guest_read(
             read=what,
             exit_status=result.exit_status,
         )
-    if len(result.stdout) > MAX_GUEST_READ_BYTES:
+    if len(result.stdout) > max_bytes:
         raise _identity_failure(
             f"the guest returned an oversized {what} capture", definition=definition, read=what
         )
@@ -895,17 +908,17 @@ def observe_guest_identity(
     agent_exec: _AgentRunner,
     domain: GuestDomain,
     definition: RemoteExternalBootDefinition,
-) -> RemoteGuestIdentity:
-    """Prove the running kernel and command line are exactly the ones the plan named.
+) -> RunningKernelObservation:
+    """Return the running kernel identity and exact saved command-line bytes.
 
     One bounded attempt, no waiting: an agent that is not yet answering raises a retryable
     ``TRANSPORT_FAILURE`` from the seam, and the caller's readiness deadline and its retry are the
     wait (#2118 owns both).
 
     ADR-0583 requires the observation to return the newline-stripped ``/proc/cmdline`` bytes and
-    core to compare them. They are returned, and this function also compares them and fails closed.
-    Do not read the return value as core enforcement: ``ExternalBootPorts.observe`` cannot carry a
-    command line today, so this comparison is the only one that runs.
+    core to compare them with the target definition's expected bytes. This provider validates the
+    expected value against the target XML when the definition is constructed; it does not perform
+    the command-line comparison itself.
 
     Reads go through ``GuestAgentExec`` — the ``guest-exec`` RPC is the only one the repository
     records as available on every catalog image — with the two-program allowlist
@@ -949,6 +962,7 @@ def observe_guest_identity(
         [CAT_PROGRAM, PROC_CMDLINE_PATH],
         what="the kernel command line",
         definition=definition,
+        max_bytes=MAX_CMDLINE_BYTES + 1,
     )
     # ADR-0583 removes exactly one trailing newline and treats truncation as terminal. A
     # /proc/cmdline read that does not end in a newline is truncated, not merely unterminated.
@@ -959,9 +973,9 @@ def observe_guest_identity(
             mismatch="cmdline",
         )
     cmdline = cmdline[:-1]
-    if cmdline != definition.expected_cmdline.encode():
+    if len(cmdline) > MAX_CMDLINE_BYTES:
         raise _identity_failure(
-            "the running command line is not the plan's",
+            "the guest returned an oversized kernel command line capture",
             definition=definition,
             mismatch="cmdline",
         )
@@ -991,7 +1005,9 @@ def observe_guest_identity(
         )
     try:
         running = RunningKernelObservation(
-            architecture=machine, release=release, gnu_build_id=build_id
+            identity={"architecture": machine, "release": release, "gnu_build_id": build_id},
+            cmdline=cmdline,
+            expected_cmdline=definition.expected_cmdline.encode(),
         )
     except ValidationError:
         # Deliberately not chained: pydantic's message embeds the rejected guest value verbatim,
@@ -999,15 +1015,15 @@ def observe_guest_identity(
         raise _identity_failure(
             "the guest reported an out-of-contract kernel identity", definition=definition
         ) from None
-    if running != definition.expected_running:
+    if running.identity != definition.expected_running:
         mismatch = next(
             field
             for field in ("architecture", "release", "gnu_build_id")
-            if getattr(running, field) != getattr(definition.expected_running, field)
+            if getattr(running.identity, field) != getattr(definition.expected_running, field)
         )
         raise _identity_failure(
             "the running kernel is not the materialized kernel",
             definition=definition,
             mismatch=mismatch,
         )
-    return RemoteGuestIdentity(running=running, cmdline=cmdline)
+    return running

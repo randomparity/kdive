@@ -18,7 +18,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
+from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
 

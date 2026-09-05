@@ -25,6 +25,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootMaterialization,
     ExternalBootPlan,
     InitrdSource,
+    KernelIdentity,
     MaterializedArtifacts,
     ModuleObligation,
     OpaqueProviderRef,
@@ -33,7 +34,6 @@ from kdive.providers.ports.external_boot import (
     RootSpecV1,
     RunningKernelObservation,
 )
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     MAX_DEFINITION_BYTES,
     MAX_GUEST_READ_BYTES,
@@ -49,6 +49,8 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     require_disk_grub_source,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name, render_domain_xml
+from kdive.providers.shared.guest_agent import AgentExecResult
+from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 _SYSTEM_ID = UUID("00000000-0000-0000-0000-00000000beef")
@@ -91,6 +93,8 @@ def _source_xml(
         _remote_profile(),
         pool=pool,
         volume=volume if volume is not None else overlay_volume_name(system_id),
+        overlay_path="/pool/overlay.qcow2",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=1234,
         ssh_addr="10.0.0.5",
@@ -122,9 +126,9 @@ def test_projection_preserves_every_remote_device_and_the_preserved_digest() -> 
         source, kernel="kernel.img", initrd="initrd.img", cmdline="root=/dev/vda1 console=ttyS0"
     )
     for fragment in (
-        '<disk type="volume" device="disk">',
+        '<disk type="file" device="disk">',
         '<driver name="qemu" type="qcow2" />',
-        f'<source pool="kdive" volume="{overlay_volume_name(_SYSTEM_ID)}" />',
+        '<source file="/pool/overlay.qcow2" />',
         '<target dev="vda" bus="virtio" />',
         '<interface type="network">',
         '<serial type="pty">',
@@ -135,6 +139,7 @@ def test_projection_preserves_every_remote_device_and_the_preserved_digest() -> 
         'value="tcp:10.0.0.5:1234"',
         "hostfwd=tcp:10.0.0.5:2222-:22",
         f"<kdive:system>{_SYSTEM_ID}</kdive:system>",
+        f'<kdive:storage pool="kdive" volume="{overlay_volume_name(_SYSTEM_ID)}" />',
     ):
         assert fragment in projected, fragment
     assert preserved_definition_identity(projected) == preserved_definition_identity(source)
@@ -189,7 +194,23 @@ def test_projection_rejects_malformed_forbidden_or_non_nfc_sources(
 
 
 def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
-    require_disk_grub_source(_source_xml(), system_id=_SYSTEM_ID, pool="kdive")
+    require_disk_grub_source(
+        _source_xml(), system_id=_SYSTEM_ID, pool="kdive", overlay_path="/pool/overlay.qcow2"
+    )
+
+
+def _add_conflicting_source_identities(xml: str) -> str:
+    root = ET.fromstring(xml)
+    source = root.find("./devices/disk/source")
+    assert source is not None
+    source.set("file", "/unrelated/attacker.qcow2")
+    source.set("pool", "kdive")
+    source.set("volume", overlay_volume_name(_SYSTEM_ID))
+    storage = root.find(f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}storage")
+    assert storage is not None
+    storage.set("pool", "other")
+    storage.set("volume", "other.qcow2")
+    return ET.tostring(root, encoding="unicode")
 
 
 @pytest.mark.parametrize(
@@ -201,6 +222,14 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         ),
         (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
         (lambda xml: xml.replace('pool="kdive"', 'pool="other"'), "boot-disk"),
+        (
+            lambda xml: xml.replace(
+                f'volume="{overlay_volume_name(_SYSTEM_ID)}"', 'volume="other-overlay.qcow2"'
+            ),
+            "boot-disk",
+        ),
+        (_add_conflicting_source_identities, "boot-disk"),
+        (lambda xml: xml.replace("/pool/overlay.qcow2", "/unrelated/attacker.qcow2"), "boot-disk"),
         (lambda xml: xml.replace('dev="vda"', 'dev="sda"'), "boot-disk"),
         (lambda xml: xml.replace('type="qcow2"', 'type="raw"'), "boot-disk"),
         (
@@ -214,6 +243,9 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         "external-boot-fields",
         "other-system",
         "wrong-pool",
+        "wrong-volume",
+        "conflicting-file-and-volume-identities",
+        "wrong-overlay-path",
         "wrong-target-dev",
         "wrong-driver-type",
         "extra-boot-selection",
@@ -225,7 +257,12 @@ def test_admission_rejects_a_source_that_is_not_the_owned_baseline(
     mutate: Callable[[str], str], rule: str
 ) -> None:
     with pytest.raises(CategorizedError) as caught:
-        require_disk_grub_source(mutate(_source_xml()), system_id=_SYSTEM_ID, pool="kdive")
+        require_disk_grub_source(
+            mutate(_source_xml()),
+            system_id=_SYSTEM_ID,
+            pool="kdive",
+            overlay_path="/pool/overlay.qcow2",
+        )
     assert caught.value.category is ErrorCategory.CONFLICT
     assert caught.value.details["rule"] == rule
 
@@ -243,9 +280,19 @@ _KERNEL_PATH = "/var/lib/kdive/boot/kernel.img"
 _INITRD_PATH = "/var/lib/kdive/boot/initrd.img"
 
 
-def _observation() -> RunningKernelObservation:
+def _kernel_identity() -> KernelIdentity:
+    return KernelIdentity(architecture="x86_64", release="6.9.0-kdive", gnu_build_id="ab" * 8)
+
+
+def _observation(
+    *,
+    cmdline: bytes = b"root=/dev/vda1 console=ttyS0",
+    expected_cmdline: bytes = b"root=/dev/vda1 console=ttyS0",
+) -> RunningKernelObservation:
     return RunningKernelObservation(
-        architecture="x86_64", release="6.9.0-kdive", gnu_build_id="ab" * 8
+        identity=_kernel_identity(),
+        cmdline=cmdline,
+        expected_cmdline=expected_cmdline,
     )
 
 
@@ -306,7 +353,7 @@ def _materialization(
         installed_module_tree=_TREE,
         verified_bundle_sha256=_SHA,
         verified_initrd_sha256=_INITRD_SHA if with_initrd else None,
-        kernel_observation=_observation(),
+        kernel_observation=_kernel_identity(),
         artifacts=MaterializedArtifacts(
             kernel=OpaqueProviderRef(ref="kernel/abc"),
             modules=OpaqueProviderRef(ref="modules/abc"),
@@ -330,6 +377,7 @@ def _prepare(**overrides: Any) -> RemoteExternalBootDefinition:
         "materialization": overrides.pop("materialization", None) or _materialization(plan=plan),
         "binding": overrides.pop("binding", None) or _binding(),
         "pool": "kdive",
+        "overlay_path": "/pool/overlay.qcow2",
         "kernel_path": _KERNEL_PATH,
         "initrd_path": _INITRD_PATH,
     }
@@ -351,7 +399,7 @@ def test_prepare_records_both_definitions_and_the_expected_identity() -> None:
     assert f"<kernel>{_KERNEL_PATH}</kernel>" in definition.target_xml
     assert f"<initrd>{_INITRD_PATH}</initrd>" in definition.target_xml
     assert definition.expected_cmdline == "root=/dev/vda1 console=ttyS0"
-    assert definition.expected_running == _observation()
+    assert definition.expected_running == _kernel_identity()
 
 
 def test_prepare_round_trips_through_pydantic_json() -> None:
@@ -729,9 +777,8 @@ def _rendered_chain(error: BaseException) -> str:
 def test_observation_returns_the_running_identity_and_the_command_line() -> None:
     definition = _prepare()
     agent = _FakeAgentExec(_replies())
-    identity = observe_guest_identity(agent, _guest(), definition)
-    assert identity.running == _observation()
-    assert identity.cmdline == b"root=/dev/vda1 console=ttyS0"
+    observation = observe_guest_identity(agent, _guest(), definition)
+    assert observation == _observation()
     assert agent.argvs == [
         ["/usr/bin/uname", "-r"],
         ["/usr/bin/uname", "-m"],
@@ -757,9 +804,7 @@ def test_observation_refuses_a_domain_handle_for_another_system() -> None:
         {"machine": b"ppc64le\n"},
         {"notes": b""},
         {"notes": b"\x00\x01\x02"},
-        {"cmdline": b"root=/dev/vda1 console=ttyS1\n"},
         {"cmdline": b"root=/dev/vda1 console=ttyS0"},
-        {"cmdline": b"root=/dev/vda1 console=ttyS0\n\n"},
         # The shape a combined `uname -r -m` would have produced: one space-separated line.
         {"release": b"6.9.0-kdive x86_64\n"},
     ],
@@ -769,9 +814,7 @@ def test_observation_refuses_a_domain_handle_for_another_system() -> None:
         "unnamed-architecture",
         "empty-notes",
         "malformed-notes",
-        "cmdline-one-byte-differs",
         "cmdline-no-trailing-newline",
-        "cmdline-two-trailing-newlines",
         "uname-combined-output",
     ],
 )
@@ -784,6 +827,67 @@ def test_observation_fails_closed_and_terminal_on_an_identity_mismatch(kwargs: A
     rendered = _rendered_chain(caught.value)
     for leak in (b"aarch64", b"ttyS1", b"6.9.0-other"):
         assert leak.decode() not in rendered
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (b"root=/dev/vda1 console=ttyS1\n", b"root=/dev/vda1 console=ttyS1"),
+        (b"root=/dev/vda1 console=ttyS0\n\n", b"root=/dev/vda1 console=ttyS0\n"),
+        (b"root=/dev/vda1 value=\xff\n", b"root=/dev/vda1 value=\xff"),
+    ],
+    ids=["different-from-plan", "second-newline-is-data", "invalid-utf8"],
+)
+def test_observation_returns_exact_command_line_bytes_without_comparing_them(
+    raw: bytes, expected: bytes
+) -> None:
+    observation = observe_guest_identity(
+        _FakeAgentExec(_replies(cmdline=raw)), _guest(), _prepare()
+    )
+
+    assert observation.cmdline == expected
+    assert observation.expected_cmdline == b"root=/dev/vda1 console=ttyS0"
+
+
+def test_observation_accepts_the_2048_byte_command_line_content_bound() -> None:
+    content = b"x" * 2048
+
+    observation = observe_guest_identity(
+        _FakeAgentExec(_replies(cmdline=content + b"\n")), _guest(), _prepare()
+    )
+
+    assert observation.cmdline == content
+
+
+@pytest.mark.parametrize("size", [4136, 65536, 65540])
+def test_observation_bounds_kernel_notes_separately(size: int) -> None:
+    descriptor_size = size - len(_NOTES) - 16
+    notes = (
+        bytes.fromhex("04000000")
+        + descriptor_size.to_bytes(4, "little")
+        + bytes.fromhex("0100000054455354")
+        + b"x" * descriptor_size
+        + _NOTES
+    )
+    assert len(notes) == size
+    agent = _FakeAgentExec(_replies(notes=notes))
+    if size <= 65536:
+        observation = observe_guest_identity(agent, _guest(), _prepare())
+        assert observation.identity.gnu_build_id == "ab" * 8
+    else:
+        with pytest.raises(CategorizedError, match="oversized.*kernel notes") as caught:
+            observe_guest_identity(agent, _guest(), _prepare())
+        assert caught.value.category is ErrorCategory.READINESS_FAILURE
+        assert caught.value.terminal is True
+
+
+def test_observation_rejects_command_line_content_over_2048_bytes() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        observe_guest_identity(
+            _FakeAgentExec(_replies(cmdline=b"x" * 2049 + b"\n")), _guest(), _prepare()
+        )
+
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
 
 
 @pytest.mark.parametrize(
@@ -854,23 +958,13 @@ def test_prepare_rejects_a_non_nfc_plan_command_line_naming_itself() -> None:
     assert caught.value.details["system_id"] == str(_SYSTEM_ID)
 
 
-def test_prepare_rejects_a_command_line_xml_cannot_represent() -> None:
-    """`_validate_platform_argument` rejects only NUL and whitespace, so a C0 control gets through.
-
-    Built through `ExternalBootPlan`'s own validators rather than `model_copy`, because the point
-    is that the shared contract admits this value, not that a corrupted one can be forced past it.
-    Left alone it composes a target XML that `parse_domain_xml` reports as a malformed domain XML
-    — a retryable `INFRASTRUCTURE_FAILURE` naming neither the rule nor the System.
-    """
+def test_plan_rejects_a_command_line_xml_cannot_represent() -> None:
+    """The shared port refuses XML-illegal input before either provider can render it."""
     payload = _plan().model_dump(mode="json", by_alias=True)
     payload["platform_arguments"] = ["root=/dev/vda1", "console=ttyS0\x01"]
     payload["cmdline"] = "root=/dev/vda1 console=ttyS0\x01"
-    plan = ExternalBootPlan.model_validate(payload)
-    with pytest.raises(CategorizedError) as caught:
-        _prepare(plan=plan, materialization=_materialization(plan=plan))
-    assert caught.value.category is ErrorCategory.CONFLICT
-    assert caught.value.details["rule"] == "cmdline-xml"
-    assert caught.value.details["system_id"] == str(_SYSTEM_ID)
+    with pytest.raises(ValidationError, match="XML 1.0"):
+        ExternalBootPlan.model_validate(payload)
 
 
 def test_definition_rejects_an_expected_cmdline_the_target_xml_does_not_carry() -> None:

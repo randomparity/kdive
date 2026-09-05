@@ -60,6 +60,15 @@ class JobRecyclePolicy(StrEnum):
     TERMINAL_OR_CANCELED = "terminal_or_canceled"
 
 
+class ExternalBootCommitStatus(StrEnum):
+    """A non-applied authority-result outcome classified by the database transaction."""
+
+    SUPERSEDED = "superseded"
+    OBSERVED_IDENTITY_STALE = "observed_identity_stale"
+    RESERVATION_NOT_READY = "reservation_not_ready"
+    AUTHORITY_SUPERSEDED = "authority_superseded"
+
+
 async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
@@ -70,6 +79,29 @@ async def enqueue(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
 ) -> Job:
+    """Admit a job idempotently and return its durable row."""
+    job, _inserted = await enqueue_with_status(
+        conn,
+        kind,
+        payload,
+        authorizing,
+        dedup_key,
+        max_attempts=max_attempts,
+        recycle=recycle,
+    )
+    return job
+
+
+async def enqueue_with_status(
+    conn: AsyncConnection,
+    kind: JobKind,
+    payload: ActivePayloadModel,
+    authorizing: Authorizing | JobAuthorizing,
+    dedup_key: str,
+    *,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
+) -> tuple[Job, bool]:
     """Admit a job idempotently, returning the row for ``dedup_key``.
 
     Recycling resets eligible terminal rows to a fresh queued attempt with the new payload and
@@ -96,7 +128,7 @@ async def enqueue(
             "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key, "
             " created_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp()) "
-            "ON CONFLICT (dedup_key) DO NOTHING",
+            "ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
             (
                 kind,
                 dispatch_lane,
@@ -107,6 +139,7 @@ async def enqueue(
                 dedup_key,
             ),
         )
+        inserted = await cur.fetchone() is not None
         if recycle is not JobRecyclePolicy.NEVER:
             recyclable = [JobState.FAILED.value, JobState.SUCCEEDED.value]
             if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
@@ -140,7 +173,7 @@ async def enqueue(
         )
     if row is None:  # Invariant: we just inserted the row, or it already existed.
         raise RuntimeError(f"enqueue found no job for dedup_key {dedup_key!r}")
-    return Job.model_validate(row)
+    return Job.model_validate(row), inserted or recycled_id is not None
 
 
 async def get_by_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | None:
@@ -270,8 +303,8 @@ async def commit_external_boot_authority_result(
     result: ExternalBootAuthorityResultV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | None:
-    """Commit an authority-bound provider result atomically, or drop a stale result."""
+) -> Job | ExternalBootCommitStatus:
+    """Commit an authority result or return its database-classified losing outcome."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT status, job_state FROM public.commit_external_boot_authority_result("
@@ -299,11 +332,18 @@ async def commit_external_boot_authority_result(
             ),
         )
         status_row = await cur.fetchone()
-        if status_row is None or status_row["status"] != "applied":
-            return None
+        if status_row is None:
+            return ExternalBootCommitStatus.SUPERSEDED
+        if status_row["job_state"] in {JobState.FAILED.value, JobState.QUEUED.value}:
+            await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
+            classified_row = await cur.fetchone()
+            if classified_row is not None:
+                return Job.model_validate(classified_row)
+        if status_row["status"] != "applied":
+            return ExternalBootCommitStatus(status_row["status"])
         await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
         row = await cur.fetchone()
-    return None if row is None else Job.model_validate(row)
+    return ExternalBootCommitStatus.SUPERSEDED if row is None else Job.model_validate(row)
 
 
 async def complete_external_boot(
@@ -312,7 +352,7 @@ async def complete_external_boot(
     result: ExternalBootAuthoritySuccessV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | None:
+) -> Job | ExternalBootCommitStatus:
     """Complete an external boot only through its exact authority binding."""
     return await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential
@@ -325,7 +365,7 @@ async def fail_external_boot(
     result: ExternalBootAuthorityFailureV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | None:
+) -> Job | ExternalBootCommitStatus:
     """Fail or requeue an external boot only through its exact authority binding."""
     return await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential

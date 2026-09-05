@@ -159,17 +159,89 @@ class _RecoveryAttemptResult(_ResultBase):
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
-class _FailureContext(_ClosedModel):
+class ExternalBootCmdlineMismatchV1(_ClosedModel):
+    schema_: Literal["external-boot-cmdline-mismatch-v1"] = Field(
+        "external-boot-cmdline-mismatch-v1", alias="schema"
+    )
+    expected_cmdline: str
+    observed_cmdline: str
+    first_differing_byte: Annotated[int, Field(ge=0, le=2048)]
+
+    @field_validator("expected_cmdline", "observed_cmdline")
+    @classmethod
+    def _bounded_text(cls, value: str) -> str:
+        if len(value.encode()) > 8192:
+            raise ValueError("rendered command line exceeds 8192 UTF-8 bytes")
+        return value
+
+
+class ExternalBootAuthorityFailureContext(_ClosedModel):
     phase: Literal["admission", "preparation", "provider-call", "observation", "commit"] | None = (
         None
     )
+    reason: (
+        Literal["observed_identity_stale", "reservation_not_ready", "authority_superseded"] | None
+    ) = None
+    next_action: Literal["systems.get", "jobs.wait", "jobs.get"] | None = None
+    cmdline_mismatch: ExternalBootCmdlineMismatchV1 | None = None
+
+    @model_validator(mode="after")
+    def _reason_action_pair_is_closed(self) -> ExternalBootAuthorityFailureContext:
+        if self.reason is None and self.next_action is None:
+            return self
+        pairs = {
+            "observed_identity_stale": "systems.get",
+            "reservation_not_ready": "jobs.wait",
+            "authority_superseded": "jobs.get",
+        }
+        if self.reason is None or pairs[self.reason] != self.next_action:
+            raise ValueError("failure reason and next action do not match")
+        return self
 
 
 class _FailureResult(_ResultBase):
     operation: Literal["fail"]
     error_category: ErrorCategory
-    failure_context: _FailureContext
+    failure_context: ExternalBootAuthorityFailureContext
     terminal: bool
+    recovery_readiness_deadline: datetime | None = None
+
+    _normalize_timestamp = field_validator("recovery_readiness_deadline")(_utc_datetime)
+
+    @model_validator(mode="after")
+    def _cas_failure_shape_is_closed(self) -> _FailureResult:
+        reason = self.failure_context.reason
+        if reason is None:
+            cmdline_mismatch = self.failure_context.cmdline_mismatch is not None
+            if cmdline_mismatch and self.recovery_readiness_deadline is None:
+                raise ValueError("command-line mismatch requires a recovery deadline")
+            if self.recovery_readiness_deadline is not None and not (
+                self.terminal
+                and (
+                    self.error_category is ErrorCategory.BOOT_TIMEOUT
+                    or (self.error_category is ErrorCategory.READINESS_FAILURE and cmdline_mismatch)
+                )
+            ):
+                raise ValueError("only a terminal recovery failure carries a recovery deadline")
+            return self
+        if self.recovery_readiness_deadline is not None:
+            raise ValueError("classified CAS failure cannot carry a recovery deadline")
+        expected = {
+            "observed_identity_stale": ("stale_handle", True),
+            "reservation_not_ready": ("infrastructure_failure", False),
+            "authority_superseded": ("stale_handle", True),
+        }[reason]
+        if (self.error_category, self.terminal) != expected:
+            raise ValueError("failure reason, category, and terminal flag do not match")
+        return self
+
+    @model_validator(mode="after")
+    def _diagnostic_matches_failure(self) -> _FailureResult:
+        if self.failure_context.cmdline_mismatch is not None and (
+            self.error_category is not ErrorCategory.READINESS_FAILURE or not self.terminal
+        ):
+            raise ValueError("command-line mismatch requires terminal readiness failure")
+        return self
 
 
 type ExternalBootResultPayload = Annotated[
@@ -269,13 +341,13 @@ class ExternalBootAuthorityResultV1(BaseModel):
         allowed = {
             "activate": {"activate", "deadline", "fail"},
             "recover": {"recover", "deadline", "recovery-attempt", "fail"},
-            "resolve-conflict": {"resolve-conflict", "fail"},
+            "resolve-conflict": {"resolve-conflict", "recovery-attempt", "fail"},
             "release": {"release", "cleanup", "fail"},
             "teardown": {"teardown", "fail"},
         }
         if admitted_operation not in allowed[self.purpose]:
             raise ValueError("admitted operation does not match authority purpose")
-        if operation != "fail" and operation != admitted_operation:
+        if operation not in allowed[self.purpose]:
             raise ValueError("result operation does not match authority purpose")
         result_ref = getattr(self.result, "result_ref", None)
         if result_ref is not None:

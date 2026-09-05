@@ -40,6 +40,15 @@ from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
 
+def test_external_boot_commit_status_preserves_database_classification() -> None:
+    assert {status.value for status in queue.ExternalBootCommitStatus} == {
+        "superseded",
+        "observed_identity_stale",
+        "reservation_not_ready",
+        "authority_superseded",
+    }
+
+
 def _build_payload() -> InstallPayload:
     return InstallPayload(run_id=str(uuid4()))
 

@@ -268,7 +268,8 @@ def _failed_system_envelope(
     """
     category, failing_job, fallback = _resolve_failure_verdict(system, failing_job)
     failure_data: dict[str, JsonValue] = {"current_status": system.state.value, **data}
-    detail = failing_job.failure_context.get("failure_message") if failing_job else None
+    message = failing_job.failure_context.get("failure_message") if failing_job else None
+    detail = message if isinstance(message, str) else None
     if not detail:
         detail = fallback if attributed else None
     if failing_job is not None:

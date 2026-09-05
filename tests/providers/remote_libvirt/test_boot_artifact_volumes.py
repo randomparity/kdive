@@ -1,4 +1,4 @@
-"""Tests for deterministic remote external-boot artifact volumes (ADR-0583)."""
+"""Tests for deterministic remote external-boot artifact volumes (ADR-0583, ADR-0599)."""
 
 from __future__ import annotations
 
@@ -9,15 +9,22 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
+    parse_boot_artifact_name,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
+    artifact_partial_volume_name,
     materialize_boot_artifacts,
+    render_boot_artifact_volume_xml,
     require_boot_artifact_capacity,
 )
 from tests.providers.remote_libvirt.conftest import libvirt_error
+from tests.providers.remote_libvirt.fakes import FakeStorageConn, FakeStoragePool
 
 SYSTEM = UUID("00000000-0000-0000-0000-000000000003")
 RUN = UUID("00000000-0000-0000-0000-000000000002")
+ATTEMPT = UUID("00000000-0000-0000-0000-000000000004")
 
 
 class _Stream:
@@ -119,10 +126,52 @@ def test_materializes_kernel_and_optional_initrd_with_opaque_deterministic_refs(
     assert result.initrd is not None
     assert result.initrd.ref == f"initrd/{SYSTEM}/{RUN}"
     assert len(pool.created_xml) == 4
-    assert "kdive-kernel" in pool.created_xml[0]
+    assert "kdive-boot-v1-kernel" in pool.created_xml[0]
     assert "-partial-" in pool.created_xml[0]
-    assert "kdive-kernel" in pool.created_xml[1]
+    assert "metadata" not in pool.created_xml[0]
+    assert "kdive-boot-v1-kernel" in pool.created_xml[1]
     assert "-partial-" not in pool.created_xml[1]
+
+
+def test_materialization_survives_metadata_free_dir_pool_readback() -> None:
+    pool = FakeStoragePool(name="images")
+
+    result = materialize_boot_artifacts(
+        FakeStorageConn(pool),
+        "images",
+        system_id=SYSTEM,
+        run_id=RUN,
+        kernel=b"kernel",
+        initrd=b"initrd",
+        attempt_id=ATTEMPT,
+    )
+
+    assert result.kernel.ref == f"kernel/{SYSTEM}/{RUN}"
+    assert result.initrd is not None
+    volumes = pool.listAllVolumes(0)
+    assert len(volumes) == 2
+    identities = [parse_boot_artifact_name(volume.name()) for volume in volumes]
+    assert identities[0] is not None and identities[0].kind == "kernel"
+    assert identities[1] is not None and identities[1].kind == "initrd"
+    assert all("metadata" not in volume.XMLDesc(0) for volume in volumes)
+
+
+def test_changed_bytes_use_a_distinct_final_name_without_overwriting_prior_bytes() -> None:
+    pool = FakeStoragePool(name="images")
+    conn = FakeStorageConn(pool)
+    materialize_boot_artifacts(
+        conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"first", initrd=None
+    )
+
+    materialize_boot_artifacts(
+        conn, "images", system_id=SYSTEM, run_id=RUN, kernel=b"second", initrd=None
+    )
+
+    volumes = pool.listAllVolumes(0)
+    assert len(volumes) == 2
+    parsed = [parse_boot_artifact_name(volume.name()) for volume in volumes]
+    assert all(identity is not None for identity in parsed)
+    assert len({identity.digest for identity in parsed if identity is not None}) == 2
 
 
 def test_retry_rehashes_existing_volume_and_reuses_matching_identity() -> None:
@@ -151,6 +200,34 @@ def test_retry_mismatch_is_conflict_and_leaves_existing_volume() -> None:
     assert exc.value.category is ErrorCategory.CONFLICT
     assert pool.existing is not None
     assert not pool.existing.deleted
+
+
+def test_retry_mismatched_partial_is_conflict_and_preserves_evidence() -> None:
+    pool = FakeStoragePool(name="images")
+    conn = FakeStorageConn(pool)
+    partial_name = artifact_partial_volume_name("kernel", SYSTEM, RUN, b"kernel", ATTEMPT)
+    partial = pool.createXML(
+        render_boot_artifact_volume_xml(partial_name, capacity_bytes=len(b"different"))
+    )
+    stream = conn.newStream(0)
+    partial.upload(stream, 0, len(b"different"), 0)
+    chunks = iter((b"different", b""))
+    stream.sendAll(lambda *_args: next(chunks), None)
+    stream.finish()
+
+    with pytest.raises(CategorizedError) as exc:
+        materialize_boot_artifacts(
+            conn,
+            "images",
+            system_id=SYSTEM,
+            run_id=RUN,
+            kernel=b"kernel",
+            initrd=None,
+            attempt_id=ATTEMPT,
+        )
+
+    assert exc.value.category is ErrorCategory.CONFLICT
+    assert pool.listVolumes() == [partial_name]
 
 
 def test_failed_attempt_deletes_only_its_partial_volume() -> None:

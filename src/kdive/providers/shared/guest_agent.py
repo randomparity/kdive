@@ -1,7 +1,6 @@
-"""Constrained qemu-guest-agent in-target exec over the qemu+tls connection (ADR-0078).
+"""Constrained qemu-guest-agent in-target exec for libvirt providers (ADR-0078).
 
-The in-target execution seam M2 realizes for the object-store artifact channel: the
-worker composes a **constrained, allowlisted** command (never a shell string trusted to
+The worker composes a **constrained, allowlisted** command (never a shell string trusted to
 the guest) and runs it in-guest through the guest agent's two-phase
 ``guest-exec``/``guest-exec-status`` protocol, capturing stdout/stderr. The agent
 round-trip is an injected ``agent_command`` callable matching
@@ -9,9 +8,9 @@ round-trip is an injected ``agent_command`` callable matching
 touch a real host; :func:`qemu_agent_command` is the production opener.
 
 Enforcement is worker-side: ``argv[0]`` must be in the operator/worker-fixed
-``allowed_programs`` set, so a later provider seam cannot smuggle an arbitrary program
-into the guest. The TLS client cert is consumed by the libvirt transport layer and never
-reaches this seam, so it cannot appear in a captured transcript (ADR-0077/0078).
+``allowed_programs`` set, so a provider seam cannot smuggle an arbitrary program into the guest.
+For remote libvirt, the TLS client cert is consumed by the transport layer and never reaches this
+seam, so it cannot appear in a captured transcript (ADR-0077/0078).
 """
 
 from __future__ import annotations
