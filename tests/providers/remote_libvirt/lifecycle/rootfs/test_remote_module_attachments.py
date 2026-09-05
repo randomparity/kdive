@@ -5,6 +5,7 @@ import posixpath
 import stat
 import subprocess
 import sys
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -563,6 +564,22 @@ def test_identity_operational_failure_is_redacted_infrastructure_failure() -> No
         )
     assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "private-host-path" not in str(raised.value)
+    rendered = "".join(
+        traceback.format_exception(type(raised.value), raised.value, raised.value.__traceback__)
+    )
+    assert "private-host-path" not in rendered
+
+
+def test_direct_path_identity_calls_are_bounded() -> None:
+    state = expected()
+    sources = "".join(
+        f"<disk type='file'><source file='/unmanaged/{index}'/></disk>" for index in range(4097)
+    )
+    tenant = foreign_xml("tenant", sources)
+
+    with pytest.raises(CategorizedError, match="budget exceeded") as raised:
+        inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_volume_reference_through_alias_pool_is_rejected() -> None:

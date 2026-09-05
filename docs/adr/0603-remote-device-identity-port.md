@@ -19,6 +19,8 @@ Given one validated absolute host path, the port returns a strictly discriminate
 after following host filesystem aliases: `inode(st_dev, st_ino)` for inode-backed paths, or
 `block(st_rdev)` for block-special paths. Inputs are bounded to 4,096 encoded bytes. Identity
 components are non-negative bounded integers; paths never appear in the result or in errors.
+Inspection makes at most 4,096 distinct direct-path identity calls per domain definition. The
+server-preparation adapter bounds every call by its enclosing preparation deadline.
 
 The inspector resolves both the protected managed-volume paths and every direct file/block source
 through this port. Equal same-kind identities conflict regardless of their lexical names; distinct

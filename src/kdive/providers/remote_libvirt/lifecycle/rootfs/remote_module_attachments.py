@@ -27,6 +27,7 @@ _DOMAIN_UUID = re.compile(
 )
 _MAX_STORAGE_PATH_BYTES = 4096
 _MAX_IDENTITY_COMPONENT = (1 << 64) - 1
+_MAX_PATH_IDENTITIES = 4096
 
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (
@@ -118,7 +119,11 @@ class RemoteDeviceIdentity:
 
 
 class RemoteDeviceIdentityPort(Protocol):
-    """Resolve one remote-host path without returning or logging that path."""
+    """Resolve one remote-host path within the preparation deadline.
+
+    Implementations return no path and must bound each call by their enclosing preparation
+    deadline; an operational timeout raises a redacted ``INFRASTRUCTURE_FAILURE``.
+    """
 
     def identity(self, path: str) -> RemoteDeviceIdentity | None: ...
 
@@ -135,11 +140,11 @@ class HostStatDeviceIdentity:
             result = self._stat_path(normalized, follow_symlinks=True)
         except FileNotFoundError:
             return None
-        except OSError as exc:
+        except OSError:
             raise CategorizedError(
                 "remote device identity lookup failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            ) from exc
+            ) from None
         if stat.S_ISBLK(result.st_mode):
             return RemoteDeviceIdentity(kind="block", primary=result.st_rdev, secondary=0)
         return RemoteDeviceIdentity(kind="inode", primary=result.st_dev, secondary=result.st_ino)
@@ -268,8 +273,8 @@ def _device_identity(identity_port: RemoteDeviceIdentityPort, path: str) -> Remo
     normalized = _normalize_storage_path(path)
     try:
         identity = identity_port.identity(normalized)
-    except Exception as exc:
-        raise _infrastructure("remote device identity lookup failed") from exc
+    except Exception:
+        raise _infrastructure("remote device identity lookup failed") from None
     if identity is None:
         raise _conflict("remote device identity is unavailable")
     if (
@@ -318,7 +323,10 @@ def _inspect_definition(
     if len(sources) != len(set(sources)):
         raise _conflict("duplicate volume reference in domain", domain=name)
     referenced = {volume for pool, volume in sources if pool == expected.pool}
-    direct_identities = {_device_identity(identity_port, path) for path in _path_references(root)}
+    paths = _path_references(root)
+    if len(paths) > _MAX_PATH_IDENTITIES:
+        raise _infrastructure("remote device identity lookup budget exceeded")
+    direct_identities = {_device_identity(identity_port, path) for path in paths}
     system_tags = root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
     if len(system_tags) > 1:
         raise _conflict("duplicate System ownership metadata", domain=name)

@@ -22,6 +22,8 @@ The port receives at most 4,096 encoded path bytes and returns a strict discrimi
 non-negative integer components. Missing or malformed identity is a closed conflict. Operational
 libvirt or identity-port failures are `INFRASTRUCTURE_FAILURE`; ownership and malformed-input
 findings remain `CONFLICT`. No path is included in a returned identity or error detail.
+Each definition can trigger at most 4,096 distinct direct-path lookups, and the server-preparation
+adapter must bound every lookup by the enclosing preparation deadline.
 
 The server-preparation implementation supplies the remote-host adapter. This issue defines and
 tests the provider contract and inspection policy; it does not add a generic provider capability,
