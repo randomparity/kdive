@@ -1234,6 +1234,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require native refresh rejection proof
 - Bind live proof control channel
 - Register remote live SSH control
+- Design grouped ownership metadata
+- Close metadata design gaps
+- Fix metadata plan reference
+- Correct metadata test evidence
 
 ### Fixed
 
@@ -2001,6 +2005,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve overlay DAC identity
 - Render exact overlay file chain
 - Bind external boot overlay path
+- Group ownership metadata
+- Bind every disk identity
+- Prefer recorded cleanup pool
 
 ### Security
 
