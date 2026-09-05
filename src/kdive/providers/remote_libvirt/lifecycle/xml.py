@@ -1,4 +1,4 @@
-"""Remote-libvirt provisioning XML rendering and tolerant host-XML parsing."""
+"""Remote-libvirt provisioning XML rendering and tolerant host-XML parsing (ADR-0598)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port_from_root,
     register_kdive_namespace,
     register_qemu_namespace,
+    remote_metadata_storage_identity,
 )
 from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port as recorded_gdb_port,  # re-exported facade for remote provisioning + tests
@@ -165,8 +166,9 @@ def render_domain_xml(
     channel = ET.SubElement(devices, "channel", type="unix")
     ET.SubElement(channel, "target", type="virtio", name=_GUEST_AGENT_CHANNEL)
     metadata = ET.SubElement(domain, "metadata")
-    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
-    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}storage", pool=pool, volume=volume)
+    ownership = ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}domain")
+    ET.SubElement(ownership, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
+    ET.SubElement(ownership, f"{{{KDIVE_METADATA_NS}}}storage", pool=pool, volume=volume)
     commandline = ET.SubElement(domain, f"{{{QEMU_NS}}}commandline")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-gdb")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{gdb_addr}:{gdb_port}")
@@ -251,8 +253,8 @@ def disk_pool_strict(domain_xml: str, *, operation: str, domain: str) -> str | N
 
 
 def _disk_pool(root: ET.Element) -> str | None:
+    storage = remote_metadata_storage_identity(root)
+    if storage is not None:
+        return storage[0]
     source = root.find("./devices/disk/source")
-    if source is not None and source.get("pool") is not None:
-        return source.get("pool")
-    storage = root.find(f"./metadata/{{{KDIVE_METADATA_NS}}}storage")
-    return None if storage is None else storage.get("pool")
+    return None if source is None else source.get("pool")

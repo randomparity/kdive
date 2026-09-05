@@ -50,6 +50,7 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name, render_domain_xml
 from kdive.providers.shared.guest_agent import AgentExecResult
+from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 _SYSTEM_ID = UUID("00000000-0000-0000-0000-00000000beef")
@@ -198,6 +199,20 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
     )
 
 
+def _add_conflicting_source_identities(xml: str) -> str:
+    root = ET.fromstring(xml)
+    source = root.find("./devices/disk/source")
+    assert source is not None
+    source.set("file", "/unrelated/attacker.qcow2")
+    source.set("pool", "kdive")
+    source.set("volume", overlay_volume_name(_SYSTEM_ID))
+    storage = root.find(f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}storage")
+    assert storage is not None
+    storage.set("pool", "other")
+    storage.set("volume", "other.qcow2")
+    return ET.tostring(root, encoding="unicode")
+
+
 @pytest.mark.parametrize(
     ("mutate", "rule"),
     [
@@ -207,6 +222,13 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         ),
         (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
         (lambda xml: xml.replace('pool="kdive"', 'pool="other"'), "boot-disk"),
+        (
+            lambda xml: xml.replace(
+                f'volume="{overlay_volume_name(_SYSTEM_ID)}"', 'volume="other-overlay.qcow2"'
+            ),
+            "boot-disk",
+        ),
+        (_add_conflicting_source_identities, "boot-disk"),
         (lambda xml: xml.replace("/pool/overlay.qcow2", "/unrelated/attacker.qcow2"), "boot-disk"),
         (lambda xml: xml.replace('dev="vda"', 'dev="sda"'), "boot-disk"),
         (lambda xml: xml.replace('type="qcow2"', 'type="raw"'), "boot-disk"),
@@ -221,6 +243,8 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         "external-boot-fields",
         "other-system",
         "wrong-pool",
+        "wrong-volume",
+        "conflicting-file-and-volume-identities",
         "wrong-overlay-path",
         "wrong-target-dev",
         "wrong-driver-type",

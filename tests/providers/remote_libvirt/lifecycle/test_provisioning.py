@@ -102,11 +102,14 @@ def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
         arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
     ]
     assert args == ["-gdb", "tcp:10.0.0.5:47001"]
-    assert root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system") == str(SYSTEM_ID)
+    metadata_children = root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}*")
+    assert [child.tag for child in metadata_children] == [f"{{{KDIVE_METADATA_NS}}}domain"]
+    metadata_root = metadata_children[0]
+    assert metadata_root.findtext(f"./{{{KDIVE_METADATA_NS}}}system") == str(SYSTEM_ID)
     disk_source = root.find("./devices/disk/source")
     assert disk_source is not None
     assert disk_source.get("file") == "/pool/overlay.qcow2"
-    storage = root.find(f"./metadata/{{{KDIVE_METADATA_NS}}}storage")
+    storage = metadata_root.find(f"./{{{KDIVE_METADATA_NS}}}storage")
     assert storage is not None
     assert storage.get("pool") == "kdive-pool"
     assert storage.get("volume") == overlay_volume_name(SYSTEM_ID)
