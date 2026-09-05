@@ -1,10 +1,14 @@
 """Fail-closed remote module attachment inspection."""
 
+import os
 import posixpath
+import stat
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Literal, cast
 
 import libvirt
 import pytest
@@ -77,7 +81,9 @@ class IdentityPort:
 
     def identity(self, path: str) -> RemoteDeviceIdentity | None:
         canonical = self.aliases.get(posixpath.normpath(path), posixpath.normpath(path))
-        return self.identities.setdefault(canonical, RemoteDeviceIdentity(1, len(self.identities)))
+        return self.identities.setdefault(
+            canonical, RemoteDeviceIdentity("inode", 1, len(self.identities))
+        )
 
 
 def inspect_module_attachments(
@@ -494,10 +500,12 @@ def test_protected_volume_roles_must_have_distinct_physical_identities(
     "malformed",
     [
         (1, 2),
-        RemoteDeviceIdentity(True, 2),
-        RemoteDeviceIdentity(1, False),
-        RemoteDeviceIdentity(cast("int", "1"), 2),
-        RemoteDeviceIdentity(1, cast("int", "2")),
+        RemoteDeviceIdentity(cast("Literal['inode', 'block']", "other"), 1, 2),
+        RemoteDeviceIdentity("inode", True, 2),
+        RemoteDeviceIdentity("inode", 1, False),
+        RemoteDeviceIdentity("inode", cast("int", "1"), 2),
+        RemoteDeviceIdentity("inode", 1, cast("int", "2")),
+        RemoteDeviceIdentity("block", 1, 2),
     ],
 )
 def test_malformed_device_identity_fails_as_redacted_conflict(malformed: object) -> None:
@@ -512,6 +520,21 @@ def test_malformed_device_identity_fails_as_redacted_conflict(malformed: object)
         )
     assert raised.value.category is ErrorCategory.CONFLICT
     assert "/pool" not in str(raised.value)
+
+
+@pytest.mark.parametrize(("first_rdev", "second_rdev", "equal"), [(7, 7, True), (7, 8, False)])
+def test_block_node_identity_uses_underlying_device_number(
+    first_rdev: int, second_rdev: int, equal: bool
+) -> None:
+    results: Iterator[SimpleNamespace] = iter(
+        [
+            SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=first_rdev, st_dev=1, st_ino=10),
+            SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=second_rdev, st_dev=1, st_ino=11),
+        ]
+    )
+    identity = HostStatDeviceIdentity(lambda *args, **kwargs: cast("os.stat_result", next(results)))
+
+    assert (identity.identity("/dev/first") == identity.identity("/dev/second")) is equal
 
 
 def test_unavailable_device_identity_fails_closed_without_path_detail() -> None:

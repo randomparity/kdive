@@ -15,14 +15,15 @@ disk as a conflict would block unrelated tenants.
 ## Decision
 
 The remote-libvirt attachment inspector consumes a provider-local `RemoteDeviceIdentityPort`.
-Given one validated absolute host path, the port returns an opaque `(device, inode)` identity after
-following host filesystem aliases. Inputs are bounded to 4,096 encoded bytes. Device and inode are
-non-negative bounded integers; paths never appear in the result or in errors.
+Given one validated absolute host path, the port returns a strictly discriminated opaque identity
+after following host filesystem aliases: `inode(st_dev, st_ino)` for inode-backed paths, or
+`block(st_rdev)` for block-special paths. Inputs are bounded to 4,096 encoded bytes. Identity
+components are non-negative bounded integers; paths never appear in the result or in errors.
 
 The inspector resolves both the protected managed-volume paths and every direct file/block source
-through this port. Equal identities conflict regardless of their lexical names; distinct identities
-remain unrelated. An absent or invalid identity fails closed as a conflict. A host lookup operation
-that cannot complete raises `INFRASTRUCTURE_FAILURE` with a redacted message.
+through this port. Equal same-kind identities conflict regardless of their lexical names; distinct
+identities remain unrelated. An absent or invalid identity fails closed as a conflict. A host lookup
+operation that cannot complete raises `INFRASTRUCTURE_FAILURE` with a redacted message.
 
 The port is intentionally provider-local. The server-preparation adapter that can execute at the
 remote host supplies it; the generic lifecycle provider interface does not expose host filesystem
@@ -30,10 +31,11 @@ details.
 
 ## Consequences
 
-Attachment inspection detects symlink, hard-link, and bind-mount aliases without disclosing remote
-paths. Every path-bearing disk source must be observable from the remote host during preparation;
-an unobservable source blocks the destructive operation. Existing unrelated unmanaged disks remain
-allowed when their identity is established and differs from the protected identities.
+Attachment inspection detects symlink, hard-link, bind-mount, and duplicate block-device-node
+aliases without disclosing remote paths. Every path-bearing disk source must be observable from the
+remote host during preparation; an unobservable source blocks the destructive operation. Existing
+unrelated unmanaged disks remain allowed when their identity is established and differs from the
+protected identities.
 
 ## Considered & rejected
 

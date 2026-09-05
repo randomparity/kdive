@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+import stat
 import xml.etree.ElementTree as ET
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import libvirt
 from defusedxml.common import DefusedXmlException
@@ -111,8 +112,9 @@ class AttachmentConn(Protocol):
 class RemoteDeviceIdentity:
     """Opaque physical identity returned by the remote host."""
 
-    device: int
-    inode: int
+    kind: Literal["inode", "block"]
+    primary: int
+    secondary: int
 
 
 class RemoteDeviceIdentityPort(Protocol):
@@ -124,10 +126,13 @@ class RemoteDeviceIdentityPort(Protocol):
 class HostStatDeviceIdentity:
     """Server-side ADR-0603 adapter backed by a following ``stat(2)`` lookup."""
 
+    def __init__(self, stat_path: Callable[..., os.stat_result] = os.stat) -> None:
+        self._stat_path = stat_path
+
     def identity(self, path: str) -> RemoteDeviceIdentity | None:
         normalized = _normalize_storage_path(path)
         try:
-            result = os.stat(normalized, follow_symlinks=True)
+            result = self._stat_path(normalized, follow_symlinks=True)
         except FileNotFoundError:
             return None
         except OSError as exc:
@@ -135,7 +140,9 @@ class HostStatDeviceIdentity:
                 "remote device identity lookup failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             ) from exc
-        return RemoteDeviceIdentity(device=result.st_dev, inode=result.st_ino)
+        if stat.S_ISBLK(result.st_mode):
+            return RemoteDeviceIdentity(kind="block", primary=result.st_rdev, secondary=0)
+        return RemoteDeviceIdentity(kind="inode", primary=result.st_dev, secondary=result.st_ino)
 
 
 def _conflict(message: str, **details: object) -> CategorizedError:
@@ -267,10 +274,12 @@ def _device_identity(identity_port: RemoteDeviceIdentityPort, path: str) -> Remo
         raise _conflict("remote device identity is unavailable")
     if (
         type(identity) is not RemoteDeviceIdentity
-        or type(identity.device) is not int
-        or type(identity.inode) is not int
-        or not 0 <= identity.device <= _MAX_IDENTITY_COMPONENT
-        or not 0 <= identity.inode <= _MAX_IDENTITY_COMPONENT
+        or identity.kind not in {"inode", "block"}
+        or type(identity.primary) is not int
+        or type(identity.secondary) is not int
+        or not 0 <= identity.primary <= _MAX_IDENTITY_COMPONENT
+        or not 0 <= identity.secondary <= _MAX_IDENTITY_COMPONENT
+        or (identity.kind == "block" and identity.secondary != 0)
     ):
         raise _conflict("remote device identity is invalid")
     return identity

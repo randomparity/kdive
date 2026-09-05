@@ -12,14 +12,16 @@ the root, source, or scratch storage through any supported libvirt storage spell
 ## Design
 
 The existing bounded XML walk remains the source of disk paths and pool/volume references. A new
-provider-local `RemoteDeviceIdentityPort` maps each validated absolute remote-host path to an opaque
-device/inode pair. The inspector compares identities rather than path strings, so symlinks, hard
-links, and bind mounts converge while unrelated unmanaged disks remain valid.
+provider-local `RemoteDeviceIdentityPort` maps each validated absolute remote-host path to a strictly
+discriminated opaque identity: filesystem device/inode for inode-backed objects and the underlying
+device number for block-special objects. The inspector compares identities rather than path strings,
+so symlinks, hard links, bind mounts, and duplicate block-device nodes converge while unrelated
+unmanaged disks remain valid.
 
-The port receives at most 4,096 encoded path bytes and returns only two bounded non-negative
-integers. Missing or malformed identity is a closed conflict. Operational libvirt or identity-port
-failures are `INFRASTRUCTURE_FAILURE`; ownership and malformed-input findings remain `CONFLICT`.
-No path is included in a returned identity or error detail.
+The port receives at most 4,096 encoded path bytes and returns a strict discriminator plus bounded
+non-negative integer components. Missing or malformed identity is a closed conflict. Operational
+libvirt or identity-port failures are `INFRASTRUCTURE_FAILURE`; ownership and malformed-input
+findings remain `CONFLICT`. No path is included in a returned identity or error detail.
 
 The server-preparation implementation supplies the remote-host adapter. This issue defines and
 tests the provider contract and inspection policy; it does not add a generic provider capability,
@@ -30,7 +32,8 @@ persistence, migration, or agent-facing API.
 - Unit regressions prove unrelated unmanaged identities pass and unavailable identities fail
   closed.
 - Controlled faults prove the new tests fail when identity comparison is bypassed.
-- Real-host filesystem tests prove symlink, hard-link, and bind-mount aliases share identity.
+- Real-host filesystem tests prove symlink, hard-link, bind-mount, and block-node aliases share
+  identity while distinct block devices remain distinct.
 - Existing active/inactive, nested backing/data/mirror, pool alias, and lexical alias cases remain
   green.
 - Focused tests, lint, type checking, and the repository CI recipe pass before delivery.
