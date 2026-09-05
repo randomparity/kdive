@@ -19,23 +19,26 @@ schema and requires no native ppc64le proof.
 `RemoteLibvirtInstance` gains six optional fields that form one all-or-none binding:
 
 - `authority_instance`: non-empty authority identity;
-- `authority_address`: a canonical numeric IPv4 or IPv6 address, not unspecified, multicast, or a
-  URI/hostname;
+- `authority_address`: a canonical numeric IPv4 address, not unspecified, multicast, or a
+  URI/hostname; IPv6 values are rejected explicitly;
 - `authority_port`: integer 1–65535;
 - `authority_server_ca_ref`, `authority_client_cert_ref`, and `authority_client_key_ref`: distinct
   non-empty secret references.
 
-The numeric-address rule makes endpoint parsing unambiguous and keeps DNS out of route selection.
+The IPv4-address rule makes endpoint parsing unambiguous, keeps DNS out of route selection, and
+matches the existing source-CIDR firewall owner. Dual-stack and IPv6-only routing are outside this
+version rather than accepted without family-aware firewall enforcement.
 The authority certificate is still checked against
 `authority_server_name(authority_instance)`. Pydantic validates all-or-none configuration and
 rejects extra fields. `_build_config` maps a complete declaration to frozen
 `RemoteAuthorityBinding`; absent configuration remains `None`. `RemoteLibvirtConfig` never accepts
 raw request-time overrides.
 
-The provider-host settings add an opt-in numeric listen address and port. Both must be present or
-absent. The address may be unspecified for a server bind, because firewall and operator
-configuration constrain exposure; clients still reject unspecified destinations. A configured
-listener uses the same authority instance and server certificate as AF_UNIX.
+The provider-host settings add an opt-in numeric IPv4 listen address and port. Both must be present
+or absent. The address may be IPv4-unspecified for a server bind, because firewall and operator
+configuration constrain exposure; clients still reject unspecified destinations. IPv6 is rejected
+on both sides. A configured listener uses the same authority instance and server certificate as
+AF_UNIX.
 
 ## Transport and composition
 
@@ -51,26 +54,30 @@ readiness, starts both, proves both TLS handshakes, and closes both on every exi
 reconstruct listener identity and credential fingerprints; any drift raises a bounded
 `HostReadinessError`, causing readiness withdrawal and service restart.
 
-`AuthorityNetworkRoute` is constructed from exactly one `RemoteAuthorityBinding` and a resolved TLS
-material owner. It retains no incarnation credential. Its request method receives only an
-already-authenticated closed envelope and a positive absolute monotonic deadline. The remaining
-budget covers TCP connect, TLS handshake, write, response read, and close. It uses TLS 1.3, verifies
-the server certificate and derived name, and maps all errors to bounded redacted categories. It
-exposes no raw reader/writer, host, port, TLS, command, path, argument, or environment input.
+`_AuthorityNetworkTransport` is a private implementation detail constructed from exactly one
+`RemoteAuthorityBinding` and a resolved TLS material owner. It retains no incarnation credential.
+It accepts only an encoder-produced frame from its owning typed sender and a positive absolute
+monotonic deadline. The remaining budget covers TCP connect, TLS handshake, write, response read,
+and close. It uses TLS 1.3, verifies the server certificate and derived name, and maps all errors to
+bounded redacted categories. No public object exposes raw bytes, a reader/writer, host, port, TLS,
+command, path, argument, or environment input.
 
 `WorkerHandlerAssembly` remains the sole process-lifetime incarnation-credential owner. It creates
-a worker-owned request sender that references that existing field, reads it only while calling
-`encode_request_envelope`, drops the method-local plaintext after encoding, and passes the encoded
-frame to the route. The route object has no credential field, and cancellation or worker
-replacement leaves no copied `SecretStr`. Resource rebinding selects one config by Resource name
-and creates the route only from that config's closed binding. Secret values resolve through
-`SecretBackend` and register with `SecretRegistry`; temporary certificate files follow the existing
-remote-libvirt TLS material pattern and are removed after context construction.
+a worker-owned `AuthorityRequestSender` from a borrowing accessor over that existing field and the
+private transport. The sender exposes only typed `health` and operation-specific methods, reads the
+credential accessor only while calling `encode_request_envelope`, drops the method-local plaintext
+after encoding, and gives the resulting frame to its private transport. Neither sender nor
+transport has a credential field, and cancellation or worker replacement leaves no copied
+`SecretStr`. Resource rebinding selects one config by Resource name and creates the pair only from
+that config's closed binding. Secret values resolve through `SecretBackend` and register with
+`SecretRegistry`; temporary certificate files follow the existing remote-libvirt TLS material
+pattern and are removed after context construction.
 
 ## Authentication-only readiness
 
 The network envelope gains a closed `health` operation with an empty versioned request and a
-versioned acknowledgement. The authority authenticates TLS and the incarnation credential, checks
+versioned acknowledgement. `AuthorityRequestSender.health` borrows and encodes the credential, then
+uses the private transport. The authority authenticates TLS and the incarnation credential, checks
 that the credential names a currently active worker, returns the acknowledgement, and invokes no
 provider service. AF_UNIX accepts the same additive operation so dispatch behavior is identical;
 existing acknowledgement and mutation operations remain byte-compatible.
@@ -90,11 +97,13 @@ by `live_vm_host`, but runner-specific provisioning does not own production remo
 role's preflight requires the complete listener tuple and rejects unsafe or empty values.
 
 The existing `gdbstub_acl` role remains the cross-distribution firewall owner. It accepts the
-optional authority port as another protected TCP port, adds source-CIDR allow and lower-priority
-deny rules on firewalld and ordered allow/deny rules on ufw, and prunes rules for stale sources and
-ports. Disabling the authority listener removes its formerly managed allow/deny rules without
-touching libvirt TLS, gdbstub, or management access. The systemd unit continues to permit only
-AF_UNIX/AF_INET/AF_INET6 and gains no executable or filesystem authority.
+optional authority port as another IPv4 protected TCP port, uses the existing validated IPv4 worker
+CIDR, adds source-CIDR allow and lower-priority deny rules on firewalld and ordered allow/deny rules
+on ufw, and prunes rules for stale sources and ports. Disabling the authority listener removes its
+formerly managed allow/deny rules without touching libvirt TLS, gdbstub, or management access. The
+systemd unit continues to permit only AF_UNIX/AF_INET/AF_INET6 because existing local and library
+behavior requires those families, but the new listener binds AF_INET only and gains no executable
+or filesystem authority.
 
 Role verification proves `site.yml` applies both owners, idempotent configuration, listener
 ownership, service readiness, Debian and Red Hat firewall shape, and enable-then-disable stale-rule
@@ -139,8 +148,9 @@ authority remain trusted existing boundaries.
   incarnation credential; failure occurs before operation dispatch.
 - Stale workers fail database-backed active-incarnation authentication even when their TLS
   certificate remains valid.
-- Inputs have closed shapes, bounded frames and credentials, numeric addresses, bounded ports,
-  TLS 1.3, certificate-name verification, and one deadline spanning every IO stage.
+- Inputs have closed shapes, bounded frames and credentials, canonical IPv4 addresses, explicit
+  IPv6 rejection, bounded ports, TLS 1.3, certificate-name verification, and one deadline spanning
+  every IO stage.
 - Secret material is by reference, registered for redaction, short-lived in temporary files where
   required, never serialized into config, and absent from diagnostics. The route does not retain
   the incarnation credential; its worker-owned sender borrows the assembly-owned value only while

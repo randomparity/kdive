@@ -14,24 +14,25 @@ and credential-forwarding boundary.
 
 ## Decision
 
-Each remote-libvirt Resource may carry one optional, complete `RemoteAuthorityBinding`: a numeric
-network address, port, authority instance, and distinct server-CA, worker-certificate, and
-worker-key secret references. Inventory validates this binding as a closed value and runtime
-composition closes over the selected Resource's value. Requests cannot supply or replace any
-destination, TLS identity, or credential.
+Each remote-libvirt Resource may carry one optional, complete `RemoteAuthorityBinding`: a canonical
+numeric IPv4 address, port, authority instance, and distinct server-CA, worker-certificate, and
+worker-key secret references. IPv6 is rejected explicitly in this version. Inventory validates
+this binding as a closed value and runtime composition closes over the selected Resource's value.
+Requests cannot supply or replace any destination, TLS identity, or credential.
 
 The provider-host authority may opt into an additive TCP listener beside its existing AF_UNIX
 listener. Both listeners share the closed framed protocol, TLS 1.3 server context, mandatory client
 certificate verification, active-incarnation authentication, bounded sessions, and dispatcher.
-The network listener binds only an operator-configured numeric address and port. Its certificate is
+The network listener binds only an operator-configured IPv4 address and port. Its certificate is
 verified against the stable name derived from the configured authority instance.
 
 Worker construction resolves the selected binding's three TLS values through the existing secret
-backend. A resource-bound connector accepts only an already-authenticated closed envelope and a
-deadline and retains no incarnation credential. The worker assembly, which already owns the active
-process credential, wraps that connector with a request sender that reads its existing credential
-reference only while encoding each envelope. No second standing copy is placed in inventory,
-provider runtime state, logs, or results.
+backend. A private resource-bound byte transport accepts one encoder-produced frame and a deadline
+and retains no incarnation credential. It is reachable only through a typed worker-owned request
+sender whose methods correspond to closed protocol operations. The worker assembly, which already
+owns the active process credential, supplies a borrowing accessor; the sender reads it only while
+encoding each envelope. No second standing copy is placed in inventory, provider runtime state,
+logs, or results.
 
 Authority-host readiness reconstructs both listeners and performs an authority-owned TLS health
 handshake when the network listener is configured. Worker readiness constructs the selected route
@@ -47,6 +48,8 @@ Remote workers can reach the exact authority paired with their allocated Resourc
 a general network connector. The AF_UNIX route and its protocol remain compatible. Network
 deployment adds certificate, firewall, readiness, and rotation obligations; drift retracts
 readiness. #2250 and #2200 can add closed operations over this route without changing its binding.
+IPv6-only provider hosts remain unsupported until a separately designed family-aware firewall
+contract exists.
 
 ## Considered & rejected
 
@@ -58,3 +61,6 @@ readiness. #2250 and #2200 can add closed operations over this route without cha
   a closed provider protocol and explicitly denies generic execution.
 - **Replace AF_UNIX with TCP.** judgment: local deployments need no network exposure, and removing
   the existing route would break the accepted colocated deployment contract.
+- **Support IPv4 and IPv6 in the first route.** verified: the existing cross-distribution firewall
+  owner emits IPv4 firewalld rules and has one IPv4 worker CIDR; dual-stack support would require a
+  separate address-family and stale-rule lifecycle rather than a transport-only field extension.

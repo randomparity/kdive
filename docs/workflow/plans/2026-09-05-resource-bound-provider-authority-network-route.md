@@ -17,7 +17,8 @@ their trust-boundary tests, deployment carrier, and live-proof harness.
 ## Global constraints
 
 - Preserve the existing AF_UNIX listener and both existing operation envelopes byte-for-byte.
-- TLS is exactly version 1.3 with mandatory client certificates and derived server-name checking.
+- TLS is exactly version 1.3 with mandatory client certificates and derived server-name checking;
+  authority endpoints are IPv4-only and reject IPv6 explicitly.
 - Routing is selected only from the allocated Resource; callers cannot provide an endpoint,
   credential, command, path, arguments, environment, or generic stream.
 - The active worker-incarnation credential is supplied at request time and never persisted.
@@ -42,16 +43,16 @@ Interfaces:
 
 Verification:
 
-- Mode: focused-test — complete/all-absent binding, partial tuple, numeric destination, port,
-  secret-ref and extra-field validation in the named test files; observe new cases fail before the
-  models change, then pass with `just test-verbose tests/inventory/test_loader.py
+- Mode: focused-test — complete/all-absent binding, partial tuple, canonical IPv4 destination,
+  explicit IPv6/hostname/URI rejection, port, secret-ref and extra-field validation in the named
+  test files; observe new cases fail before the models change, then pass with `just test-verbose tests/inventory/test_loader.py
   tests/providers/remote_libvirt/test_config.py`.
 
 Steps:
 
 1. Add failing table-driven inventory and config-mapping tests, including two Resources whose
    authority endpoints cannot be substituted.
-2. Add strict all-or-none fields and canonical numeric-address validation to
+2. Add strict all-or-none fields and canonical IPv4-address validation to
    `RemoteLibvirtInstance`.
 3. Add `RemoteAuthorityBinding` and map it in `_build_config` without changing unbound behavior.
 4. Run the focused command; expect all selected tests to pass.
@@ -97,22 +98,23 @@ Files: new `src/kdive/providers/external_boot_authority/network_client.py`, new
 
 Interfaces:
 
-- `AuthorityNetworkRoute(binding, tls_material)` closes over destination and TLS authority only and
-  has no credential field.
-- `async request(envelope: bytes, *, deadline: float) -> bytes` accepts a closed encoded envelope,
-  no endpoint, and no credential object.
-- `async health(*, deadline: float) -> None` is the worker readiness probe.
+- Private `_AuthorityNetworkTransport(binding, tls_material)` closes over destination and TLS
+  authority only and has no credential field.
+- Private `_request_frame(envelope: bytes, *, deadline: float) -> bytes` is called only by the typed
+  sender defined in Task 4; no module export accepts raw bytes.
 
 Verification:
 
-- Mode: focused-test — fixed destination, TLS/name validation, active/inactive credential, one
-  deadline over connect/write/read/close, stalled peer, malformed response, cleanup, and redaction;
-  observe the new file fail first, then pass `just test-verbose
+- Mode: focused-test — fixed IPv4 destination, explicit IPv6 rejection, TLS/name validation, one
+  deadline over connect/write/read/close, stalled peer, malformed response, cleanup, and redaction
+  through a test-only typed harness rather than a public raw-byte API; observe the new file fail
+  first, then pass `just test-verbose
   tests/providers/external_boot_authority/test_network_client.py`.
 
 Steps:
 
-1. Add a real-loopback TLS fixture with anonymous certificate metadata and failing route cases.
+1. Add a real IPv4-loopback TLS fixture with anonymous certificate metadata and failing transport
+   cases, including IPv6 rejection.
 2. Implement strict TLS material loading using the existing secret backend/redaction registry and
    temporary-file ownership pattern.
 3. Implement the connector with one remaining-budget calculation and guaranteed writer cleanup.
@@ -130,27 +132,30 @@ Interfaces:
 
 - `WorkerHandlerAssembly` remains the sole process-lifetime owner of the current `SecretStr`;
   server and reconciler builds remain credential-free.
-- A worker-owned `AuthorityRequestSender` reads the existing assembly field only inside `send`,
-  encodes the closed envelope, and gives bytes to a credential-free route.
-- Resource rebinding constructs `AuthorityNetworkRoute` only from
-  `RemoteLibvirtConfig.authority` and the existing `SecretBackend`.
+- A worker-owned `AuthorityRequestSender` exposes only `health` and typed operation methods; it
+  reads the existing assembly field only inside those methods, encodes the closed envelope, and
+  gives bytes to its private credential-free transport.
+- Resource rebinding constructs the private transport and sender only from
+  `RemoteLibvirtConfig.authority`, the existing `SecretBackend`, and the assembly-owned borrowing
+  accessor.
 - Remote worker diagnostics expose a closed readiness result and no network identity.
 
 Verification:
 
-- Mode: focused-test — process-role separation, route objects without credential fields, exact
-  active credential borrowing only during send, cancellation/replacement without a copied secret,
-  per-Resource rebinding, missing binding/credential, inactive authentication and redacted
-  diagnostics; observe new assertions fail, then pass `just test-verbose
+- Mode: focused-test — process-role separation, sender/transport objects without credential fields,
+  no exported raw-byte call, exact active credential borrowing during typed `health`,
+  active/inactive authentication, cancellation/replacement without a copied secret, per-Resource
+  rebinding, missing binding/credential and redacted diagnostics; observe new assertions fail, then
+  pass `just test-verbose
   tests/jobs/test_assembly.py tests/providers/remote_libvirt tests/diagnostics`.
 
 Steps:
 
 1. Add assembly tests proving only `WorkerHandlerAssembly` owns the credential and route instances
    retain no credential before, during, or after request cancellation and worker replacement.
-2. Add a worker-owned request sender that borrows the assembly field during envelope construction;
-   extend provider-composition inputs with a credential-free route factory, failing closed when a
-   bound operation lacks the sender.
+2. Add a worker-owned typed request sender that borrows the assembly field during envelope
+   construction; keep the byte transport private and extend provider-composition inputs with the
+   sender factory, failing closed when a bound operation lacks it.
 3. Add the remote worker readiness builder and health call without exposing an application action.
 4. Run the focused command; expect all selected tests to pass.
 5. Commit as `feat(providers): compose worker authority routes`.
@@ -168,14 +173,15 @@ Interfaces:
 
 - `provider_authority_host` owns opt-in listen address/port, authority service installation,
   credentials, environment, readiness and disabled cleanup on `remote_libvirt_hosts`.
-- `gdbstub_acl` consumes an optional authority port and owns source-scoped allow/deny creation plus
-  stale source/port removal on firewalld and ufw.
+- `gdbstub_acl` consumes an optional authority port and its existing IPv4 worker CIDR and owns
+  source-scoped allow/deny creation plus stale source/port removal on firewalld and ufw.
 
 Verification:
 
 - Mode: focused-test — `site.yml` role application, defaults disabled, partial input rejection,
-  rendered environment, Debian and Red Hat firewall source/port/protocol, service confinement,
-  drift, idempotence, and enable-then-disable stale-rule removal; observe assertions fail, then pass
+  rendered environment, IPv6 rejection, Debian and Red Hat IPv4 firewall source/port/protocol,
+  service confinement, drift, idempotence, and enable-then-disable stale-rule removal; observe
+  assertions fail, then pass
   `just test-verbose tests/deploy/test_live_worker_provisioning.py` and the existing
   `deploy/ansible/tests` firewall harness.
 
