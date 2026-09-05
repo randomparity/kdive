@@ -1,4 +1,8 @@
 ---
+- name: Reconcile the optional authority firewall ownership
+  ansible.builtin.import_tasks: authority.yml
+  tags: [authority_firewall]
+
 # --- Fedora / RHEL: firewalld rich rules with explicit source address. A plain
 # --- port-open would open the port to the whole zone; rich rules restrict the source. ---
 - name: Configure firewalld rich-rule ACL (RedHat)

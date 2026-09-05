@@ -1058,7 +1058,102 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",
     }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        ",",
+        "operator,",
+        ",operator",
+        "operator,operator",
+        " operator",
+        "op erator",
+        "Operator",
+        "0operator",
+        "operátor",
+        "operator\n",
+        "a" * 33,
+        ",".join(f"account{index}" for index in range(33)),
+    ],
+)
+def test_denied_identity_setting_rejects_malformed_values_without_disclosure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str
+) -> None:
+    from kdive import config as registry
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_UID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_GID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID": "1002",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES": raw,
+        }
+    )
+    with pytest.raises(HostReadinessError) as caught:
+        AuthorityHostConfig.from_environment()
+    assert str(caught.value) == "configuration: invalid"
+    assert caught.value.details == {"component": "configuration", "reason": "invalid"}
+
+
+@pytest.mark.parametrize(
+    "names",
+    [("operator",), tuple(f"account{n}" for n in range(32)), ("_operator", "a" * 32, "account-2")],
+)
+def test_denied_identity_setting_selects_existing_host_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, names: tuple[str, ...]
+) -> None:
+    from kdive import config as registry
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_UID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_GID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID": "1002",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES": ",".join(names),
+        }
+    )
+    assert AuthorityHostConfig.from_environment().denied_identities == names
+
+
+def test_denied_host_account_must_exist_and_failure_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_access_boundary_config(tmp_path), denied_identities=("missing-account",))
+
+    def missing(name: str) -> None:
+        raise KeyError(name)
+
+    monkeypatch.setattr(host.pwd, "getpwnam", missing)
+    with pytest.raises(HostReadinessError) as caught:
+        host._validate_access_boundary(config)  # noqa: SLF001
+    assert str(caught.value) == "access-boundary: identity-missing"
+    assert "missing-account" not in repr(caught.value.details)
+
+
+@pytest.mark.parametrize("unsafe_uid", [0, None])
+def test_host_specific_denied_identity_cannot_be_root_or_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_uid: int | None
+) -> None:
+    config = replace(_access_boundary_config(tmp_path), denied_identities=("operator",))
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(
+            pw_uid=config.authority_uid if unsafe_uid is None else unsafe_uid,
+            pw_gid=config.authority_gid + 10000,
+        ),
+    )
+    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
+    with pytest.raises(HostReadinessError, match="access-boundary: denied-identity"):
+        host._validate_access_boundary(config)  # noqa: SLF001
 
 
 @pytest.mark.parametrize(

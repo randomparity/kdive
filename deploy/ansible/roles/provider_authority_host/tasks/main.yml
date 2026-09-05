@@ -1,0 +1,38 @@
+---
+- name: Validate production authority inputs
+  ansible.builtin.import_tasks: preflight.yml
+
+- name: Quiesce changed authority routes before firewall reconciliation
+  ansible.builtin.import_tasks: prepare.yml
+
+- name: Apply the shared protected-port firewall owner
+  ansible.builtin.include_role:
+    name: gdbstub_acl
+  vars:
+    gdbstub_acl_authority_port: "{{ provider_authority_host_network_port if provider_authority_host_enabled else none }}"
+
+- name: Converge the production authority
+  block:
+    - name: Install the enabled production authority
+      ansible.builtin.include_tasks: install.yml
+      when: provider_authority_host_enabled | bool
+
+    - name: Remove disabled production authority execution material
+      ansible.builtin.include_tasks: disable.yml
+      when: not provider_authority_host_enabled | bool
+  rescue:
+    - name: Inspect the authority unit after failed convergence
+      ansible.builtin.stat:
+        path: /etc/systemd/system/kdive-external-boot-authority.service
+        follow: false
+      register: provider_authority_host_failed_unit
+
+    - name: Keep failed authority readiness withdrawn
+      ansible.builtin.systemd_service:
+        name: kdive-external-boot-authority.service
+        state: stopped
+      when: provider_authority_host_failed_unit.stat.exists
+
+    - name: Fail the authority deployment with bounded diagnostics
+      ansible.builtin.fail:
+        msg: Provider authority convergence or readiness failed; the service remains stopped.

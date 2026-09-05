@@ -1,0 +1,221 @@
+---
+- name: Install native authority build prerequisites for the selected distribution
+  ansible.builtin.package:
+    name: "{{ provider_authority_host_packages[ansible_os_family] }}"
+    state: present
+
+- name: Read the staged authority source revision
+  ansible.builtin.command:
+    argv: [git, -C, "{{ provider_authority_host_source_root }}", rev-parse, HEAD]
+  register: provider_authority_host_source_revision
+  changed_when: false
+
+- name: Require a clean staged authority checkout
+  ansible.builtin.command:
+    argv: [git, -C, "{{ provider_authority_host_source_root }}", status, --porcelain, --untracked-files=no]
+  register: provider_authority_host_source_status
+  changed_when: false
+  failed_when: provider_authority_host_source_status.stdout | length > 0
+
+- name: Create the fixed authority groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+  loop: [kdive-provider-authority, kdive-provider-authority-client]
+
+- name: Create the fixed authority account with no additional privilege
+  ansible.builtin.user:
+    name: kdive-provider-authority
+    system: true
+    create_home: false
+    home: /var/lib/kdive/provider-authority
+    shell: /usr/sbin/nologin
+    group: kdive-provider-authority
+    groups: [kdive-provider-authority-client]
+    append: false
+
+- name: Read the authority account and group identities
+  ansible.builtin.getent:
+    database: "{{ item }}"
+  loop: [passwd, group]
+
+- name: Resolve fixed authority ids
+  ansible.builtin.set_fact:
+    provider_authority_host_uid: "{{ ansible_facts.getent_passwd['kdive-provider-authority'][1] }}"
+    provider_authority_host_gid: "{{ ansible_facts.getent_group['kdive-provider-authority'][1] }}"
+    provider_authority_host_client_gid: "{{ ansible_facts.getent_group['kdive-provider-authority-client'][1] }}"
+
+- name: Create root-owned shared parents without changing existing modes
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+    follow: false
+  loop: [/etc/kdive, /var/lib/kdive, /run/kdive]
+
+- name: Create the credential parent without granting directory enumeration
+  ansible.builtin.file:
+    path: /etc/kdive/credentials
+    state: directory
+    owner: root
+    group: root
+    mode: "0711"
+    follow: false
+
+- name: Inspect protected authority directories without following links
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /opt/kdive-provider-authority
+    - /etc/kdive/credentials/provider-authority
+    - /var/lib/kdive/provider-authority
+    - /var/lib/kdive/provider-authority/journal
+    - /run/kdive/provider-authority
+    - /run/kdive/provider-authority/request
+    - /run/kdive/provider-authority/libvirt
+  register: provider_authority_host_paths
+
+- name: Refuse substituted authority directory paths
+  ansible.builtin.assert:
+    that: not item.stat.exists or (item.stat.isdir and not item.stat.islnk)
+    quiet: true
+  loop: "{{ provider_authority_host_paths.results }}"
+
+- name: Create private authority directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: kdive-provider-authority
+    group: "{{ item.group | default('kdive-provider-authority') }}"
+    mode: "{{ item.mode | default('0700') }}"
+    follow: false
+  loop:
+    - {path: /opt/kdive-provider-authority}
+    - {path: /etc/kdive/credentials/provider-authority}
+    - {path: /var/lib/kdive/provider-authority}
+    - {path: /var/lib/kdive/provider-authority/journal}
+    - {path: /run/kdive/provider-authority, mode: "0710", group: kdive-provider-authority-client}
+    - {path: /run/kdive/provider-authority/request, mode: "2750", group: kdive-provider-authority-client}
+    - {path: /run/kdive/provider-authority/libvirt}
+
+- name: Install the boot-persistent authority runtime directory policy
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/kdive-provider-authority.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      d /run/kdive 0755 root root -
+      d /run/kdive/provider-authority 0710 kdive-provider-authority kdive-provider-authority-client -
+      d /run/kdive/provider-authority/request 2750 kdive-provider-authority kdive-provider-authority-client -
+      d /run/kdive/provider-authority/libvirt 0700 kdive-provider-authority kdive-provider-authority -
+  notify: Restart provider authority after deployed changes
+
+- name: Install the authority from the staged checkout and frozen dependency lock
+  ansible.builtin.command:
+    argv:
+      - "{{ provider_authority_host_uv_bin }}"
+      - sync
+      - --locked
+      - --no-editable
+      - --no-dev
+      - --project
+      - "{{ provider_authority_host_source_root }}"
+      - --python
+      - "{{ provider_authority_host_python }}"
+  environment:
+    UV_PROJECT_ENVIRONMENT: /opt/kdive-provider-authority/.venv
+    UV_PYTHON_DOWNLOADS: never
+  register: provider_authority_host_install_result
+  changed_when: >-
+    provider_authority_host_install_result.stderr is search('(?m)^(Installed|Uninstalled|Creating virtual environment) ')
+  notify: Restart provider authority after deployed changes
+
+- name: Record the installed authority revision after successful installation
+  ansible.builtin.copy:
+    dest: /opt/kdive-provider-authority/revision
+    content: "{{ provider_authority_host_source_revision.stdout }}\n"
+    owner: root
+    group: kdive-provider-authority
+    mode: "0440"
+
+- name: Install protected authority database and TLS material
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "/etc/kdive/credentials/provider-authority/{{ item.name }}"
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0400"
+  loop:
+    - {name: database-dsn, source: "{{ provider_authority_host_database_dsn_source }}"}
+    - {name: service-credential, source: "{{ provider_authority_host_server_key_source }}"}
+    - {name: server-certificate, source: "{{ provider_authority_host_server_certificate_source }}"}
+    - {name: server-ca, source: "{{ provider_authority_host_server_ca_source }}"}
+    - {name: worker-client-ca, source: "{{ provider_authority_host_worker_client_ca_source }}"}
+    - {name: health-client-certificate, source: "{{ provider_authority_host_health_client_certificate_source }}"}
+    - {name: health-client-key, source: "{{ provider_authority_host_health_client_key_source }}"}
+  no_log: true
+  notify: Restart provider authority after deployed changes
+
+- name: Install the optional-listener authority environment
+  ansible.builtin.template:
+    src: environment.j2
+    dest: /etc/kdive/provider-authority.env
+    owner: root
+    group: kdive-provider-authority
+    mode: "0640"
+  no_log: true
+  notify: Restart provider authority after deployed changes
+
+- name: Install the unchanged confined authority service
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../systemd/system/kdive-external-boot-authority.service"
+    dest: /etc/systemd/system/kdive-external-boot-authority.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart provider authority after deployed changes
+
+- name: Install the private authority libvirt configuration
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../../systemd/libvirtd-external-boot-authority.conf"
+    dest: /etc/kdive/libvirtd-external-boot-authority.conf
+    owner: root
+    group: kdive-provider-authority
+    mode: "0640"
+  notify: Restart provider authority libvirt after deployed changes
+
+- name: Enable boot-persistent authority user services
+  ansible.builtin.command:
+    argv: [loginctl, enable-linger, kdive-provider-authority]
+    creates: /var/lib/systemd/linger/kdive-provider-authority
+
+- name: Consume the shared private authority libvirt endpoint tasks
+  ansible.builtin.import_tasks: libvirt.yml
+
+- name: Start the configured authority after firewall and protected inputs converge
+  ansible.builtin.systemd_service:
+    name: kdive-external-boot-authority.service
+    enabled: true
+    daemon_reload: true
+    state: started
+
+- name: Apply deployed-input restarts before proving readiness
+  ansible.builtin.meta: flush_handlers
+
+- name: Run the configured authority one-shot readiness probe
+  ansible.builtin.shell: |
+    set -eu
+    set -a
+    . /etc/kdive/provider-authority.env
+    set +a
+    exec /opt/kdive-provider-authority/.venv/bin/python -m kdive check-external-boot-authority-host
+  environment:
+    CREDENTIALS_DIRECTORY: /etc/kdive/credentials/provider-authority
+  become: true
+  become_user: kdive-provider-authority
+  changed_when: false
+  no_log: true

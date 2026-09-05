@@ -29,6 +29,7 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import record_digest
 from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_CLIENT_GID,
+    AUTHORITY_DENIED_IDENTITIES,
     AUTHORITY_GID,
     AUTHORITY_INSTANCE,
     AUTHORITY_JOURNAL_DIR,
@@ -37,6 +38,7 @@ from kdive.providers.external_boot_authority.settings import (
     AUTHORITY_PROVIDER_SOCKET,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_UID,
+    DEFAULT_DENIED_IDENTITIES,
 )
 from kdive.providers.external_boot_authority.transport import (
     AuthorityListener,
@@ -72,17 +74,6 @@ _DATABASE_CONNECTION_OPTIONS = (
 _AUTHORITY_INSTALL_DIR = Path("/opt/kdive-provider-authority")
 _AUTHORITY_CREDENTIALS_SOURCE_DIR = Path("/etc/kdive/credentials/provider-authority")
 _AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
-_FIXED_DENIED_IDENTITIES = (
-    "kdive-worker-1",
-    "kdive-worker-2",
-    "kdive-worker-3",
-    "kdive-worker-4",
-    "kdive-worker-5",
-    "kdive-worker-6",
-    "kdive-worker-7",
-    "kdive-worker-8",
-    "kdive",
-)
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 
@@ -123,7 +114,7 @@ class AuthorityHostConfig:
     install_dir: Path = _AUTHORITY_INSTALL_DIR
     credentials_source_dir: Path = _AUTHORITY_CREDENTIALS_SOURCE_DIR
     state_dir: Path = _AUTHORITY_STATE_DIR
-    denied_identities: tuple[str, ...] = _FIXED_DENIED_IDENTITIES
+    denied_identities: tuple[str, ...] = DEFAULT_DENIED_IDENTITIES
     network_address: str | None = None
     network_port: int | None = None
 
@@ -156,6 +147,7 @@ class AuthorityHostConfig:
             journal_dir = config_registry.require(AUTHORITY_JOURNAL_DIR)
             request_socket = config_registry.require(AUTHORITY_REQUEST_SOCKET)
             provider_socket = config_registry.require(AUTHORITY_PROVIDER_SOCKET)
+            denied_identities = config_registry.require(AUTHORITY_DENIED_IDENTITIES)
             network_address = config_registry.get(AUTHORITY_NETWORK_ADDRESS)
             network_port = config_registry.get(AUTHORITY_NETWORK_PORT)
         except CategorizedError:
@@ -177,6 +169,7 @@ class AuthorityHostConfig:
             health_client_key=credentials / "health-client-key",
             network_address=network_address,
             network_port=network_port,
+            denied_identities=denied_identities,
         )
 
 

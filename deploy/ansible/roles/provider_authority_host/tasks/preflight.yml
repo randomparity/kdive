@@ -1,0 +1,138 @@
+---
+- name: Gather the existing Ansible control identity without privilege escalation
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', user]
+    filter: [ansible_user_id]
+  become: false
+  no_log: true
+  when: provider_authority_host_enabled | bool
+  tags: [provider_authority_preflight]
+
+- name: Select the actual control identity and explicitly configured exclusions
+  ansible.builtin.set_fact:
+    provider_authority_host_denied_identities: "{{ [ansible_user_id] + provider_authority_host_additional_denied_identities }}"
+  when: provider_authority_host_enabled | bool
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Validate the closed authority deployment inputs before any host mutation
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
+      - -c
+      - |
+        import grp, ipaddress, json, os, pwd, re, sys
+        try:
+            value = json.load(sys.stdin)
+            assert type(value['enabled']) is bool
+            address, port = value['address'], value['port']
+            assert type(address) is str and bool(address) == (port is not None)
+            if address:
+                assert value['enabled']
+                parsed = ipaddress.IPv4Address(address)
+                assert str(parsed) == address and not parsed.is_multicast
+                assert type(port) is int and 1024 <= port <= 65535
+                source = ipaddress.IPv4Network(value['source'], strict=True)
+                assert str(source) == value['source'] and source.prefixlen > 0
+                assert not source.is_multicast and not source.is_unspecified
+                assert port != int(value['management_port']) and port != 16514
+                start, end = map(int, value['gdb_range'].split(':'))
+                assert not start <= port <= end
+            if value['enabled']:
+                assert value['family'] in ('Debian', 'RedHat')
+                assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', value['instance'])
+                names = value['denied']
+                assert type(names) is list and 1 <= len(names) <= 32
+                assert all(type(name) is str for name in names) and len(set(names)) == len(names)
+                assert all(re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', name) for name in names)
+                forbidden_uids, forbidden_groups = {0}, set()
+                try:
+                    forbidden_uids.add(pwd.getpwnam('kdive-provider-authority').pw_uid)
+                except KeyError:
+                    pass
+                for group in ('kdive-provider-authority', 'kdive-provider-authority-client'):
+                    try:
+                        forbidden_groups.add(grp.getgrnam(group).gr_gid)
+                    except KeyError:
+                        pass
+                for name in names:
+                    account = pwd.getpwnam(name)
+                    assert account.pw_uid not in forbidden_uids
+                    assert not forbidden_groups.intersection(os.getgrouplist(name, account.pw_gid))
+                for path in value['paths']:
+                    assert type(path) is str and path.startswith('/') and '\n' not in path
+                    assert '\r' not in path and '\x00' not in path
+        except Exception:
+            sys.exit('invalid or incomplete provider authority deployment inputs')
+    stdin: >-
+      {{ {'enabled': provider_authority_host_enabled,
+          'address': provider_authority_host_network_address,
+          'port': provider_authority_host_network_port,
+          'source': worker_cidr | default(''), 'gdb_range': gdbstub_range | default('47000:47099'),
+          'management_port': ansible_port | default(22), 'family': ansible_os_family,
+          'instance': provider_authority_host_instance,
+          'denied': provider_authority_host_denied_identities | default([]),
+          'paths': [provider_authority_host_source_root, provider_authority_host_python,
+                    provider_authority_host_uv_bin, provider_authority_host_database_dsn_source,
+                    provider_authority_host_server_key_source,
+                    provider_authority_host_server_certificate_source,
+                    provider_authority_host_server_ca_source,
+                    provider_authority_host_worker_client_ca_source,
+                    provider_authority_host_health_client_certificate_source,
+                    provider_authority_host_health_client_key_source]} | to_json }}
+  changed_when: false
+  check_mode: false
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Inspect authority credential sources on the controller
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ provider_authority_host_database_dsn_source }}"
+    - "{{ provider_authority_host_server_key_source }}"
+    - "{{ provider_authority_host_server_certificate_source }}"
+    - "{{ provider_authority_host_server_ca_source }}"
+    - "{{ provider_authority_host_worker_client_ca_source }}"
+    - "{{ provider_authority_host_health_client_certificate_source }}"
+    - "{{ provider_authority_host_health_client_key_source }}"
+  delegate_to: localhost
+  become: false
+  register: provider_authority_host_sources
+  when: provider_authority_host_enabled | bool
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Require protected regular authority credential sources
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - not item.stat.islnk
+      - item.stat.mode in ['0400', '0600']
+      - item.stat.size > 0
+    quiet: true
+  loop: "{{ provider_authority_host_sources.results }}"
+  when: provider_authority_host_enabled | bool
+  no_log: true
+  tags: [provider_authority_preflight]
+
+- name: Require the configured target Python ABI
+  ansible.builtin.command:
+    argv:
+      - "{{ provider_authority_host_python }}"
+      - -c
+      - "import sys; assert sys.version_info[:2] == (3, 14), 'authority requires Python 3.14'"
+  changed_when: false
+  check_mode: false
+  when: provider_authority_host_enabled | bool
+  tags: [provider_authority_preflight]
+
+- name: Require the installed lock-aware package tool
+  ansible.builtin.command:
+    argv: ["{{ provider_authority_host_uv_bin }}", --version]
+  changed_when: false
+  check_mode: false
+  when: provider_authority_host_enabled | bool
+  tags: [provider_authority_preflight]

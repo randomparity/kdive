@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
+import re
 from ipaddress import IPv4Address
 from pathlib import Path
 
 from kdive.config.registry import Setting
+
+DEFAULT_DENIED_IDENTITIES = tuple([f"kdive-worker-{slot}" for slot in range(1, 9)] + ["kdive"])
+
+
+def _denied_identities(raw: str) -> tuple[str, ...]:
+    names = tuple(raw.split(","))
+    if (
+        not 1 <= len(names) <= 32
+        or len(set(names)) != len(names)
+        or any(re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", name) is None for name in names)
+    ):
+        raise ValueError("must contain 1 through 32 unique canonical account names")
+    return names
 
 
 def _nonempty(raw: str) -> str:
@@ -54,6 +68,14 @@ AUTHORITY_INSTANCE = Setting(
     required_when=_always,
     help="Stable authority-instance identifier bound into the local TLS server identity.",
     suggest="a nonblank stable provider-host authority identifier",
+)
+AUTHORITY_DENIED_IDENTITIES = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",
+    parse=_denied_identities,
+    default=",".join(DEFAULT_DENIED_IDENTITIES),
+    group="external-boot-authority",
+    help="Comma-separated list of 1 through 32 unique canonical local account names whose "
+    "exclusion the authority proves; each must exist and be outside the authority UID and groups.",
 )
 AUTHORITY_UID = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_UID",
@@ -116,6 +138,7 @@ AUTHORITY_NETWORK_PORT = Setting(
 
 SETTINGS = [
     AUTHORITY_INSTANCE,
+    AUTHORITY_DENIED_IDENTITIES,
     AUTHORITY_UID,
     AUTHORITY_GID,
     AUTHORITY_CLIENT_GID,

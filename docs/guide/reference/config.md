@@ -55,6 +55,7 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID` | — | — | yes | Unix gid allowed to traverse the external-boot authority request endpoint. |
+| `KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES` | — | `kdive-worker-1,kdive-worker-2,kdive-worker-3,kdive-worker-4,kdive-worker-5,kdive-worker-6,kdive-worker-7,kdive-worker-8,kdive` | no | Comma-separated list of 1 through 32 unique canonical local account names whose exclusion the authority proves; each must exist and be outside the authority UID and groups. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_GID` | — | — | yes | Unix gid that owns the external-boot authority provider endpoint. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE` | — | — | yes | Stable authority-instance identifier bound into the local TLS server identity. |
 | `KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR` | — | `/var/lib/kdive/provider-authority/journal` | no | Private root containing one exact external-boot authority journal lane per System. |

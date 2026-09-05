@@ -1,0 +1,65 @@
+---
+- name: Validate current and retained authority firewall tuples before changing rules
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
+      - -c
+      - |
+        import ipaddress, json, os, pathlib, stat, sys
+        try:
+            value = json.load(sys.stdin)
+            path = pathlib.Path(value['path'])
+            assert path.is_absolute()
+            for parent in path.parents:
+                try:
+                    mode = parent.lstat()
+                except FileNotFoundError:
+                    continue
+                assert stat.S_ISDIR(mode.st_mode) and mode.st_uid in (0, os.geteuid())
+                assert not stat.S_IMODE(mode.st_mode) & 0o022
+                if parent == path.parent:
+                    assert mode.st_uid == os.geteuid() and stat.S_IMODE(mode.st_mode) == 0o700
+            def validate(item):
+                assert type(item) is dict and set(item) == {'port', 'source'}
+                assert type(item['port']) is int and 1024 <= item['port'] <= 65535
+                assert item['port'] != int(value['tls_port'])
+                start, end = map(int, value['gdb_range'].split(':'))
+                assert not start <= item['port'] <= end
+                assert item['port'] != int(value['management_port'])
+                source = ipaddress.IPv4Network(item['source'], strict=True)
+                assert str(source) == item['source'] and source.prefixlen > 0
+                assert not source.is_multicast and not source.is_unspecified
+                return item
+            current = None
+            if value['port'] is not None:
+                assert value['family'] in ('Debian', 'RedHat')
+                current = validate({'port': value['port'], 'source': value['source']})
+            previous = None
+            try:
+                fd = os.open(value['path'], os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                pass
+            else:
+                with os.fdopen(fd) as stream:
+                    mode = os.fstat(stream.fileno())
+                    assert stat.S_ISREG(mode.st_mode) and mode.st_uid == os.geteuid()
+                    assert stat.S_IMODE(mode.st_mode) == 0o600 and mode.st_size <= 256
+                    previous = validate(json.load(stream))
+                assert value['family'] in ('Debian', 'RedHat')
+            print(json.dumps({'previous': previous, 'current': current}))
+        except Exception:
+            sys.exit('invalid authority firewall configuration or retained ownership')
+    stdin: >-
+      {{ {'port': gdbstub_acl_authority_port, 'source': worker_cidr,
+          'family': ansible_os_family, 'path': gdbstub_acl_authority_state_path,
+          'tls_port': gdbstub_acl_tls_port, 'gdb_range': gdbstub_range,
+          'management_port': ansible_port | default(22)} | to_json }}
+  register: gdbstub_acl_authority_validation
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Retain validated authority firewall targets for this invocation
+  ansible.builtin.set_fact:
+    gdbstub_acl_authority_targets: "{{ gdbstub_acl_authority_validation.stdout | from_json }}"
+  no_log: true
