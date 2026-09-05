@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import ssl
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
@@ -25,6 +28,8 @@ from kdive.providers.remote_libvirt.config import (
     TlsCertRefs,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.secrets import FileRefBackend
+from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain, FakeStoragePool
 
 pytestmark = pytest.mark.anyio
 
@@ -33,7 +38,7 @@ def _sender(backend: object, borrow: object):
     from kdive.jobs.authority_sender import AuthorityRequestSender
 
     return AuthorityRequestSender(
-        cast(_AuthorityNetworkTransport, backend), cast(Callable[[], SecretStr], borrow)
+        lambda: cast(_AuthorityNetworkTransport, backend), cast(Callable[[], SecretStr], borrow)
     )
 
 
@@ -155,6 +160,112 @@ def test_resource_rebinding_selects_its_own_closed_route(monkeypatch: pytest.Mon
         .authority
         is None
     )
+
+
+@pytest.mark.parametrize("material", ["missing", "malformed"])
+async def test_authority_material_failure_does_not_block_rebinding_power_or_teardown(
+    material: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.domain.operations.jobs import PowerAction
+    from kdive.jobs.authority_sender import authority_sender_factory
+    from kdive.providers.remote_libvirt.connection import transport as libvirt_transport
+    from kdive.providers.remote_libvirt.diagnostics.authority import AuthorityReadinessCheck
+    from kdive.providers.remote_libvirt.lifecycle import control
+
+    registry = SecretRegistry()
+    backend = FileRefBackend(tmp_path, registry)
+    config = RemoteLibvirtConfig(
+        uri="qemu+tls://example.invalid/system",
+        cert_refs=TlsCertRefs("libvirt-cert", "libvirt-key", "libvirt-ca"),
+        concurrent_allocation_cap=1,
+        authority=RemoteAuthorityBinding("authority-a", "192.0.2.1", 9443, "ca", "cert", "key"),
+    )
+    if material == "malformed":
+        for name in ("ca", "cert", "key"):
+            (tmp_path / name).write_text("private-malformed-material")
+    monkeypatch.setattr(composition, "remote_config_for_resource", lambda _: config)
+
+    class Domain(FakeDomain):
+        def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt binding name
+            return "<domain/>"
+
+        def undefine(self) -> int:
+            self.calls.append("undefine")
+            return 0
+
+    domain = Domain("kdive-test")
+
+    class Connection(FakeControlConn):
+        def storagePoolLookupByName(self, name: str):  # noqa: N802 - libvirt binding name
+            return FakeStoragePool()
+
+    def connection(selected, *_args, **_kwargs):
+        assert selected is config
+        return nullcontext(Connection({domain.name(): domain}))
+
+    monkeypatch.setattr(control, "remote_connection", connection)
+    monkeypatch.setattr(libvirt_transport, "remote_connection", connection)
+    runtime = composition.build_runtime(
+        secret_registry=registry,
+        authority_sender_factory=authority_sender_factory(
+            backend, lambda: SecretStr("lifecycle-test-incarnation")
+        ),
+    ).for_resource("resource-a")
+    runtime.controller.power(domain.name(), PowerAction.ON)
+    runtime.provisioner.teardown(domain.name())
+    assert domain.calls == ["create", "destroy", "undefine"]
+    assert runtime.authority is not None
+    with pytest.raises(
+        CategorizedError, match="^authority: tls-(secret-unavailable|material-invalid)$"
+    ):
+        await runtime.authority.health(deadline=asyncio.get_running_loop().time() + 1)
+    result = await AuthorityReadinessCheck(lambda: runtime.authority).run()
+    assert result.failure_category is ErrorCategory.READINESS_FAILURE
+    assert result.data == {"readiness": "unavailable"}
+    assert "private" not in str(result)
+    runtime.controller.power(domain.name(), PowerAction.ON)
+    assert domain.calls[-1] == "create"
+
+
+async def test_standing_route_retains_only_references_and_materializes_each_typed_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.jobs import authority_sender
+
+    backend = FileRefBackend(tmp_path, SecretRegistry())
+    binding = RemoteAuthorityBinding("authority-a", "192.0.2.1", 9443, "ca", "cert", "key")
+    resolved = []
+    transports = []
+
+    def resolve(selected, secrets):
+        assert selected is binding and secrets is backend
+        resolved.append(selected)
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+    async def request(self, envelope, *, deadline):
+        transports.append(self)
+        assert (self._address, self._port) == (binding.address, binding.port)
+        assert json.loads(envelope)["credential"] == "standing-test-incarnation"
+        return b'{"status":"ok","value":{"schema":"external-boot-authority-health-v1"}}'
+
+    monkeypatch.setattr(authority_sender, "_resolve_tls_material", resolve)
+    monkeypatch.setattr(_AuthorityNetworkTransport, "_request_frame", request)
+    sender = authority_sender.authority_sender_factory(
+        backend, lambda: SecretStr("standing-test-incarnation")
+    )(binding)
+    assert resolved == [], "generic route construction must not materialize authority secrets"
+    for _ in range(2):
+        await sender.health(deadline=asyncio.get_running_loop().time() + 1)
+        for name in sender.__slots__:
+            value = getattr(sender, name)
+            assert callable(value)
+            if inspect.isfunction(value):
+                captures = inspect.getclosurevars(value).nonlocals.values()
+                assert all(item is binding or item is backend for item in captures)
+        assert not hasattr(sender, "_transport")
+    assert resolved == [binding, binding]
+    assert transports[0] is not transports[1]
+    assert transports[0]._tls_material is not transports[1]._tls_material
 
 
 async def test_missing_credential_fails_before_transport() -> None:

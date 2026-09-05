@@ -71,14 +71,16 @@ def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Va
 
 
 class AuthorityRequestSender:
-    """Worker-owned typed sender with no standing credential copy or public byte API."""
+    """Reference-only route; TLS and transport exist only during typed authority calls."""
 
-    __slots__ = ("_transport", "_borrow")
+    __slots__ = ("_transport_factory", "_borrow")
 
     def __init__(
-        self, transport: _AuthorityNetworkTransport, borrow: Callable[[], SecretStr]
+        self,
+        transport_factory: Callable[[], _AuthorityNetworkTransport],
+        borrow: Callable[[], SecretStr],
     ) -> None:
-        self._transport = transport
+        self._transport_factory = transport_factory
         self._borrow = borrow
 
     def _encode(self, operation: Operation, request: BaseModel) -> bytes:
@@ -95,7 +97,7 @@ class AuthorityRequestSender:
             raise _failure("invalid-request") from None
 
     async def health(self, *, deadline: float) -> AuthorityHealthAcknowledgementV1:
-        response = await self._transport._request_frame(
+        response = await self._transport_factory()._request_frame(
             self._encode("health", AuthorityHealthRequestV1()), deadline=deadline
         )
         return _decode_response(response, AuthorityHealthAcknowledgementV1)
@@ -103,7 +105,7 @@ class AuthorityRequestSender:
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float
     ) -> AuthorityAcknowledgementV1:
-        response = await self._transport._request_frame(
+        response = await self._transport_factory()._request_frame(
             self._encode("acknowledge-takeover", request), deadline=deadline
         )
         return _decode_response(response, AuthorityAcknowledgementV1)
@@ -111,7 +113,7 @@ class AuthorityRequestSender:
     async def execute_mutation(
         self, request: AuthorityMutationRequestV1, *, deadline: float
     ) -> AuthorityObservationV1:
-        response = await self._transport._request_frame(
+        response = await self._transport_factory()._request_frame(
             self._encode("execute-mutation", request), deadline=deadline
         )
         return _decode_response(response, AuthorityObservationV1)
@@ -120,11 +122,13 @@ class AuthorityRequestSender:
 def authority_sender_factory(
     secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
 ) -> Callable[[RemoteAuthorityBinding], AuthorityRequestSender]:
-    """Bind worker ownership without reading the active credential or resolving TLS yet."""
+    """Capture the selected binding and existing owners; resolve no authority material."""
 
     def build(binding: RemoteAuthorityBinding) -> AuthorityRequestSender:
         return AuthorityRequestSender(
-            _AuthorityNetworkTransport(binding, _resolve_tls_material(binding, secret_backend)),
+            lambda: _AuthorityNetworkTransport(
+                binding, _resolve_tls_material(binding, secret_backend)
+            ),
             borrow,
         )
 

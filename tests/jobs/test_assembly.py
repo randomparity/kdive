@@ -73,7 +73,7 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
         for worker in workers
     ]
     assert all(sender is not None for sender in senders)
-    assert resolved == [config.authority, config.authority]
+    assert resolved == []
     seen = []
 
     async def request(self, envelope, *, deadline):
@@ -84,8 +84,8 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
     for sender in senders:
         assert isinstance(sender, authority_sender.AuthorityRequestSender)
         await sender.health(deadline=asyncio.get_running_loop().time() + 1)
-        for node in (sender, sender._transport):
-            assert all(not isinstance(getattr(node, slot), SecretStr) for slot in node.__slots__)
+        assert all(callable(getattr(sender, slot)) for slot in sender.__slots__)
+    assert resolved == [config.authority, config.authority]
     assert seen == [worker.incarnation_credential.get_secret_value() for worker in workers]
     assert (
         owner.build_provider_resolver()
