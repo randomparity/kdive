@@ -47,11 +47,13 @@ synchronous retained-owner callback bridges back to the reconciler event loop wi
 `asyncio.run_coroutine_threadsafe`; the event loop remains free while awaiting the worker thread,
 so the callback can query Postgres at the exact point required by ADR-0588. This avoids a pre-read,
 a second enumeration, and a new synchronous database connection. Once started, the adapter shields
-the worker task from cancellation and drains it to a terminal result before propagating
-`CancelledError`; repeated cancellation requests remain recorded but cannot orphan the destructive
-thread or its retained-owner future. A reachable-host operation error aborts the lane;
-connection-open failures retain the existing fleet behavior of logging and skipping only that
-unreachable host.
+the worker task from cancellation. After the first `CancelledError`, it repeatedly awaits that same
+shielded task and catches every later `CancelledError` until the worker is terminal; it never calls
+`Task.uncancel`, so the caller task's cancellation count remains intact. It retrieves the worker's
+result or exception, logging a terminal worker exception, and then propagates cancellation. Thus a
+second or later cancellation cannot orphan the destructive thread or its retained-owner future. A
+reachable-host operation error aborts the lane; connection-open failures retain the existing fleet
+behavior of logging and skipping only that unreachable host.
 
 The provider-neutral `ModuleVolumeReaper` port accepts an async callback returning immutable
 `ModuleVolumeKey` values. The remote adapter converts those values to its provider-specific
@@ -122,7 +124,8 @@ The provider tests cover the eleven named Task 5 behaviors, including foreign-na
 both obligation classes, the enumeration/read interleaving, unresolved references, attachment
 conflicts, mixed attached/orphan pools, active and inactive lexical aliases, managed direct-path
 aliases, and idempotent disappearance. Fleet-adapter tests prove the callback crosses from the
-worker thread at the required point, cancellation waits for the worker and callback to finish, and
-unreachable-host handling remains inherited. Lane tests prove obligation expansion, catalog
-registration, reporting, failure isolation, and disabled composition. Focused lint and whole-tree
-typing cover the protocol boundary; `just ci` is the pre-push gate.
+worker thread at the required point, two cancellation requests cannot finish the adapter before
+the worker and callback finish, the cancellation count is preserved, and unreachable-host handling
+remains inherited. Lane tests prove obligation expansion, catalog registration, reporting, failure
+isolation, and disabled composition. Focused lint and whole-tree typing cover the protocol
+boundary; `just ci` is the pre-push gate.

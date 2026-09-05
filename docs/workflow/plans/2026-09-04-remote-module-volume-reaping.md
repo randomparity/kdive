@@ -81,7 +81,7 @@ def reap_orphaned_module_volumes(
 3. Implement one complete enumeration, retention filtering, a complete reference/conflict
    preflight, then deletion. Translate libvirt errors with bounded details and count
    `VIR_ERR_NO_STORAGE_VOL` as removed.
-4. Run the focused command and expect eleven passing tests. Commit the task.
+4. Run the focused command and require every named and added regression to pass. Commit the task.
 
 Acceptance: only whole-name matches can reach `delete`; `retained_owners` is first invoked after
 `listAllVolumes` returns; the complete protected set exists before the first delete; attached
@@ -128,9 +128,12 @@ bridges each synchronous retention read to the owning asyncio loop.
 2. Implement the provider-neutral key/port and null port.
 3. Implement the remote fleet adapter using `asyncio.to_thread` and
    `asyncio.run_coroutine_threadsafe`; convert immutable keys to `ModuleVolumeOwner` inside the
-   provider boundary and aggregate per-host removal counts. Hold a task for the offload, shield it
-   from cancellation, and on cancellation continue awaiting shielded completion before re-raising;
-   add a controlled worker/callback test that proves cancellation cannot return first.
+   provider boundary and aggregate per-host removal counts. Hold a task for the offload and shield
+   it. After cancellation, loop on the same shielded task, catching every subsequent
+   `CancelledError` without calling `Task.uncancel`, until the worker is done; retrieve and log any
+   terminal worker exception, then re-raise cancellation. Add a controlled test that cancels twice
+   during the drain and proves the adapter remains pending until both callback and worker finish,
+   after which it raises cancellation with the cancellation count preserved.
 4. Add the remote factory to the provider descriptor and expose
    `ProviderComposition.build_reconciler_module_volume_reaper`, returning the null port when remote
    libvirt is disabled.
