@@ -38,17 +38,22 @@ preparation receipt or pre-stop intent, then asks the provider-local operation t
 A receipt-only partial is removed directly because no guest operation has begun. A pre-stop partial
 first verifies that the domain still has its recorded source definition and has not reached a
 target/mutated state; it restores recorded prior power, then removes only its known files and
-directory. A normal prepare retry instead resumes the same matching partial. Any malformed,
+directory. After it removes the partial, or when a retry proves it already absent, the adapter uses
+the exact service-constructed `mutation-started` context to return a stable terminal `absent`
+observation without entering recovery-point-dependent categorization. Absence without that exact
+journal proof does not authorize deletion or a terminal result. A normal prepare retry instead resumes the same matching partial. Any malformed,
 foreign, symlinked, wide-mode, non-directory, or ambiguous partial is retained and reported.
 
 Host-artifact cleanup is separated from guest mutation. Opening or changing the overlay, module
 tree, or guest remains behind `require_inactive`; removal of already-materialized host files does
 not inspect guest power.
 
-Provisioning passes the resolved per-slot recovery root through the fixed-worker allowlist and
-defines a per-worker minimum-free-byte gate. The default is calculated for every admitted
-concurrent activation as one complete kernel, initrd, modules, recovery archive, and projection
-set plus one in-flight recovery-archive partial overlap. The reference state is
+Provisioning passes the resolved per-slot recovery root and one positive per-activation capacity
+ceiling through the fixed-worker allowlist. Runtime computes a reservation before materialization
+from the plan's bounded kernel/initrd/module declarations plus fixed projection, metadata, recovery
+archive, and in-flight partial overhead, and refuses a plan whose reservation exceeds that ceiling.
+Ansible derives minimum free bytes from the same provisioned ceiling multiplied by admitted
+concurrency; runtime has no independent default to drift from it. The reference state is
 free bytes observed after the per-slot roots exist and before worker release. Insufficient space
 fails provisioning, so external boot is not advertised; the recovery action is to increase the
 filesystem or lower admitted concurrency and rerun provisioning.
@@ -64,8 +69,8 @@ using v1 are replaced; no compatibility reader or data migration is needed becau
 remains unbound until #2246.
 
 The cleanup callback and session method now carry recovery metadata. Deployment defaults must
-track the source bounds deliberately; raising a payload or archive bound requires reconsidering
-the provisioned minimum. The capacity gate reserves for a worst-case envelope and may require
+track the source bounds deliberately; raising a payload or archive bound changes runtime's computed
+reservation but not the operator-selected ceiling. The capacity gate reserves for a worst-case admitted envelope and may require
 operators to allocate substantially more storage than typical activations consume.
 
 ## Considered & rejected
@@ -82,3 +87,6 @@ operators to allocate substantially more storage than typical activations consum
   reach tombstone finalization under that gate.
 - **Treat capacity as operator guidance only.** judgment: documentation does not prevent a clean
   host from advertising a port whose first bounded worst-case write can fail with `ENOSPC`.
+- **Duplicate fixed byte totals in Python and YAML.** judgment: two literals can pass their local
+  tests while disagreeing; a single provisioned ceiling consumed by both runtime and Ansible makes
+  divergence observable at startup.

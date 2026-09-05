@@ -12,7 +12,7 @@ guards stay unchanged. The fixed-worker and Ansible seams pass and validate one 
 Design: [spec](../specs/2026-09-05-local-external-boot-storage-lifecycle-design.md),
 [ADR-0602](../../adr/0602-local-external-boot-storage-is-reclaimed-by-owned-identities.md).
 
-Expected implementation size: 750–1050 changed lines (L) — derived from four production/deployment
+Expected implementation size: 850–1150 changed lines (L) — derived from production/deployment
 surfaces and focused destructive-path, gate, and provisioning regressions.
 
 ## Global Constraints
@@ -93,7 +93,7 @@ Steps:
 **Files:** `external_boot.py`, `external_boot_authority.py`, and their focused tests.
 
 **Interfaces:** add provider-local
-`LocalLibvirtExternalBoot.abort_preparation(binding, request identities, authority) -> bool`; add
+`LocalLibvirtExternalBoot.abort_preparation(binding, request identities, authority) -> PartialAbortResult`; add
 store inspection/deletion helpers that accept only canonical matching receipts/intents. No shared
 `ExternalBootPorts` method changes.
 
@@ -109,8 +109,11 @@ Steps:
 2. Implement canonical partial inspection and explicit bounded unlink/rmdir helpers.
 3. Implement abort preparation, including source-state verification and prior-power restoration.
 4. Route TEARDOWN to abort preparation only when complete recovery-point resolution is absent.
-5. Inject interruption at each removal and prove request retry converges.
-6. Run focused tests and commit `feat(local-libvirt): reclaim interrupted preparation`.
+5. Return stable terminal `absent` directly from the adapter for an authenticated `removed` or
+   `absent` result; keep `not-partial` on normal RecoveryPoint handling and failures nonterminal.
+6. Add first-call, lost-response, already-absent, malformed, and I/O-failure observation tests.
+7. Inject interruption at each removal and prove request retry converges.
+8. Run focused tests and commit `feat(local-libvirt): reclaim interrupted preparation`.
 
 ## Task 5 — propagate the per-slot recovery root
 
@@ -134,11 +137,14 @@ Steps:
 
 ## Task 6 — enforce and document capacity
 
-**Files:** Ansible defaults/tasks/verify files, deployment tests, and
+**Files:** local-libvirt settings/materializer/capacity module and tests; fixed-worker gate; Ansible
+defaults/tasks/verify files; deployment tests; generated config docs; and
 `docs/operating/runbooks/live-testing.md`.
 
-**Interfaces:** positive integer defaults define admitted activations, bytes per activation, and
-minimum free bytes. An argv-form filesystem probe feeds a pre-release assertion.
+**Interfaces:** `KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES` is a positive per-activation byte
+ceiling written once per slot and consumed by runtime admission and Ansible's
+`ceiling * concurrent activations` minimum. An argv-form filesystem probe feeds a pre-release
+assertion. Local materialization reservation uses closed plan sizes and fixed recovery overhead.
 
 **Verification:** Mode: focused-test. Add structural tests for formula inputs, argv use, positive
 validation, insufficient-capacity failure, and ordering before worker release. First expect missing
@@ -147,10 +153,14 @@ variables/tasks; run
 
 Steps:
 
-1. Add failing capacity-default, validation, probe, and ordering tests.
-2. Implement defaults and preflight/verify tasks; keep paths out of diagnostics.
-3. Document unit, reference state, per-worker scope, failure consequence, and recovery action.
-4. Run `just lint-ansible`, the focused tests, and a clean-host Ansible check/syntax proof.
-5. Run the authorized x86_64 local-libvirt provisioning proof and verify each slot's environment and
+1. Add runtime equality/one-byte-over tests and assert failure precedes artifact creation.
+2. Implement the setting, reservation calculation, metadata upper bounds, and runtime admission.
+3. Add failing capacity-default, validation, probe, and ordering tests.
+4. Implement defaults and preflight/verify tasks; pass the same ceiling to the worker and keep paths
+   out of diagnostics.
+5. Regenerate config docs and document unit, reference state, per-worker scope, failure consequence,
+   and recovery action.
+6. Run `just lint-ansible`, the focused tests, and a clean-host Ansible check/syntax proof.
+7. Run the authorized x86_64 local-libvirt provisioning proof and verify each slot's environment and
    available-byte gate; clean any fixtures created by the proof.
-6. Run changed tests and guardrails, then commit `feat(deploy): gate external-boot recovery capacity`.
+8. Run changed tests and guardrails, then commit `feat(deploy): gate external-boot recovery capacity`.

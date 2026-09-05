@@ -66,6 +66,17 @@ readiness mechanism required by #2243 before deleting evidence. It then removes 
 intent, archive, and archive-temporary names and the exact partial directory. Every step is
 idempotent; teardown retries this arm until it returns absent.
 
+`abort_preparation` returns a closed result: `removed`, `absent`, or `not-partial`. `removed` and
+`absent` are terminal only when the adapter has verified that `context.phase` is
+`mutation-started`, its commit point is TEARDOWN, and its operation identity and attempt match the
+request already admitted by the authority service. The adapter then constructs a stable `absent`
+`AuthorityObservationV1` from the request's closed identities and the absence token; it does not
+call `_resolve_point`, `_require_matching_identities`, or the RecoveryPoint-dependent state
+categorizer. A present malformed/foreign partial raises `provider_conflict`; an I/O failure is
+bounded to `provider_conflict` and is never converted to absence. `not-partial` falls through to
+normal complete-recovery teardown. Lost response and already-absent retries return the same
+observation id and category.
+
 A partial with competing ownership records, unexpected entries, noncanonical bytes, or conflicting
 identity is ambiguous. Symlinked, non-directory, wrong-owner, or non-0700 entries are likewise
 refused. Refusal leaves the partial untouched and uses a fixed diagnostic with symbolic errno only.
@@ -75,21 +86,28 @@ foreign residues are reported for operator handling.
 
 ## Provisioning contract
 
-The worker gate allowlist includes `KDIVE_LIBVIRT_RECOVERY_ROOT`, and Ansible writes the exact
-per-slot value into each slot's worker environment. Tests execute the gate and prove the child
-receives that value without inheriting unrelated ambient variables.
+The worker gate allowlist includes `KDIVE_LIBVIRT_RECOVERY_ROOT` and
+`KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES`. Ansible writes each exact per-slot value into the
+slot's worker environment. Tests execute the gate and prove the child receives them without
+inheriting unrelated ambient variables.
 
 Defaults expose:
 
 - maximum simultaneous activations per worker, unit `activations`, scope one worker;
-- minimum free capacity, unit bytes, measured from filesystem free bytes after provisioning;
-- the derived worst-case bytes per activation.
+- per-activation capacity ceiling, unit bytes, shared unchanged with runtime;
+- minimum free capacity, unit bytes, measured from filesystem free bytes after provisioning.
 
-The formula is `(kernel + initrd + modules + recovery archive + projection + in-flight recovery
-archive partial) * admitted concurrent activations`, using source-code bounds. Provisioning checks
-the configured minimum is at least that derived floor, reads the filesystem's available bytes with
+Before its first write, the local materializer computes
+`kernel declared bytes + initrd declared bytes + module archive bound from declared uncompressed
+bytes/member count + fixed recovery archive maximum + fixed projection/metadata overhead + one
+fixed in-flight recovery-archive maximum`. Existing closed plan fields bound every variable term;
+the local metadata models gain corresponding upper bounds for materialized bytes. If the result is
+greater than the configured per-activation ceiling, materialization fails without writing.
+
+Provisioning computes `capacity ceiling * admitted concurrent activations`. It validates both
+inputs as positive integers, reads the filesystem's available bytes with
 an argv-safe command, and fails before worker release when observed space is below the configured
-minimum. The failure names the byte requirement and recovery action but not private host identity.
+derived minimum. The failure names the byte requirement and recovery action but not private host identity.
 The live-testing runbook carries unit, reference state, scope, consequence, and recovery action.
 
 ## Threat model
@@ -122,3 +140,9 @@ guardrails remain the final gate.
 The partial proof drives the real adapter teardown path for three crash windows: preparation receipt
 only, pre-stop intent before stop, and published archive before completion rename. It also proves a
 same-Run/same-digest sibling remains openable after the first activation's terminal cleanup.
+First execution, lost-response retry, already-absent retry, malformed partial, and read failure each
+assert the exact terminal/nonterminal authority observation contract.
+
+Capacity tests exercise equality and one-byte-over cases against the real local materializer before
+any artifact file exists, then prove the Ansible-derived minimum uses the same environment value the
+worker parses. A changed ceiling therefore affects admission and provisioning together.
