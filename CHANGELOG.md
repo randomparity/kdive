@@ -1242,6 +1242,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct artifact name bound
 - Register remote boot test inputs
 - Refresh configuration reference
+- Design restart-finalizable cleanup
+- Keep observations read-only
+- Correct cleanup finalization contract
+- Conform cleanup decision record
 
 ### Fixed
 
@@ -2014,6 +2018,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prefer recorded cleanup pool
 - Encode boot artifact ownership
 - Preserve mismatched partials
+- Finalize durable cleanup receipts
 
 ### Security
 
