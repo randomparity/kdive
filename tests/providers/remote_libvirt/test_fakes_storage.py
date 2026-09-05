@@ -17,7 +17,7 @@ import libvirt
 import pytest
 
 from kdive.providers.remote_libvirt.lifecycle.xml import render_volume_xml
-from tests.providers.remote_libvirt.fakes import FakeStoragePool
+from tests.providers.remote_libvirt.fakes import FakeStorageConn, FakeStoragePool
 
 POOL_TARGET = "/pool/target"
 
@@ -355,3 +355,39 @@ def test_created_xml_records_every_submitted_document(pool: FakeStoragePool) -> 
     pool.createXML(first)
     pool.createXML(second)
     assert pool.created_xml == [first, second]
+
+
+def test_stream_upload_download_and_clone_preserve_exact_bytes(pool: FakeStoragePool) -> None:
+    conn = FakeStorageConn(pool)
+    source = pool.createXML(volume_document("source.raw", capacity="4"))
+    upload = conn.newStream(0)
+    source.upload(upload, 0, 4, 0)
+    chunks = iter((b"da", b"ta", b""))
+    upload.sendAll(lambda _stream, _bound, _opaque: next(chunks), None)
+    upload.finish()
+
+    clone = pool.createXMLFrom(volume_document("clone.raw", capacity="4"), source, 0)
+    download = conn.newStream(0)
+    clone.download(download, 0, 0, 0)
+    received: list[bytes] = []
+    download.recvAll(lambda _stream, chunk, _opaque: received.append(chunk), None)
+    download.finish()
+
+    assert b"".join(received) == b"data"
+    assert [volume.name() for volume in pool.listAllVolumes(0)] == ["source.raw", "clone.raw"]
+
+
+def test_aborted_upload_does_not_publish_partial_bytes(pool: FakeStoragePool) -> None:
+    conn = FakeStorageConn(pool)
+    volume = pool.createXML(volume_document("source.raw", capacity="4"))
+    stream = conn.newStream(0)
+    volume.upload(stream, 0, 4, 0)
+    chunks = iter((b"part", b""))
+    stream.sendAll(lambda _stream, _bound, _opaque: next(chunks), None)
+    stream.abort()
+
+    download = conn.newStream(0)
+    volume.download(download, 0, 0, 0)
+    received: list[bytes] = []
+    download.recvAll(lambda _stream, chunk, _opaque: received.append(chunk), None)
+    assert received == []
