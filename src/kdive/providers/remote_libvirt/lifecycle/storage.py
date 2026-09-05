@@ -54,6 +54,16 @@ class Pool(Protocol):
     def createXML(self, xml: str, flags: int = 0) -> Volume: ...  # noqa: N802
 
 
+class _InspectableVolume(Volume, Protocol):
+    def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802
+
+
+class OverlayPool(Pool, Protocol):
+    def storageVolLookupByName(self, name: str) -> _InspectableVolume: ...  # noqa: N802
+    def createXML(self, xml: str, flags: int = 0) -> _InspectableVolume: ...  # noqa: N802
+    def refresh(self, flags: int = 0) -> int: ...
+
+
 class StorageConn(Protocol):
     """The connection slice storage lifecycle uses."""
 
@@ -63,6 +73,8 @@ class StorageConn(Protocol):
 @dataclass(frozen=True, slots=True)
 class PreparedOverlay:
     name: str
+    path: str
+    backing_path: str
     created: bool
 
 
@@ -118,19 +130,21 @@ def lookup_volume_staged(conn: StorageConn, pool_name: str, volume_name: str) ->
     return VolumeStaging.STAGED
 
 
-def ensure_overlay(pool: Pool, base_volume: str, system_id: UUID) -> PreparedOverlay:
+def ensure_overlay(pool: OverlayPool, base_volume: str, system_id: UUID) -> PreparedOverlay:
     """Create the per-System overlay volume when absent; reuse it when present."""
     return ensure_named_overlay(pool, base_volume, overlay_volume_name(system_id))
 
 
-def ensure_named_overlay(pool: Pool, base_volume: str, name: str) -> PreparedOverlay:
+def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> PreparedOverlay:
     """Create the named overlay volume over ``base_volume`` when absent; reuse it when present.
 
     The volume name is supplied by the caller so a build VM can use an overlay name disjoint
     from the per-System scheme (ADR-0100); :func:`ensure_overlay` is the System-scheme wrapper.
     """
-    if _volume_exists(pool, name):
-        return PreparedOverlay(name=name, created=False)
+    try:
+        pool.refresh()
+    except libvirt.libvirtError as exc:
+        raise _infra("refreshing storage pool") from exc
     try:
         base = pool.storageVolLookupByName(base_volume)
     except libvirt.libvirtError as exc:
@@ -142,16 +156,95 @@ def ensure_named_overlay(pool: Pool, base_volume: str, name: str) -> PreparedOve
             ) from exc
         raise _infra("looking up base image volume", volume=base_volume) from exc
     try:
+        backing_path = base.path()
+    except libvirt.libvirtError as exc:
+        raise _infra("resolving base image volume path", volume=base_volume) from exc
+    base_xml = _require_backing_path(base, expected=None, volume=base_volume)
+    from kdive.providers.remote_libvirt.lifecycle.xml import volume_target_identity
+
+    try:
+        owner_id, group_id = volume_target_identity(base_xml)
+    except ValueError as exc:
+        raise CategorizedError(
+            "remote base volume has invalid target ownership metadata",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"volume": base_volume},
+        ) from exc
+    if _volume_exists(pool, name):
+        try:
+            overlay = pool.storageVolLookupByName(name)
+        except libvirt.libvirtError as exc:
+            raise _infra("reading existing overlay volume", volume=name) from exc
+        _require_backing_path(overlay, expected=backing_path, volume=name)
+        return PreparedOverlay(
+            name=name,
+            path=_volume_path(overlay, volume=name),
+            backing_path=backing_path,
+            created=False,
+        )
+    created: Volume | None = None
+    try:
         capacity = int(base.info()[1])
-        xml = render_volume_xml(name, capacity_bytes=capacity, backing_path=base.path())
-        pool.createXML(xml)
+        xml = render_volume_xml(
+            name,
+            capacity_bytes=capacity,
+            backing_path=backing_path,
+            owner_id=owner_id,
+            group_id=group_id,
+        )
+        created = pool.createXML(xml)
     except libvirt.libvirtError as exc:
         raise CategorizedError(
             "could not create the per-System overlay volume",
             category=ErrorCategory.PROVISIONING_FAILURE,
             details={"volume": name},
         ) from exc
-    return PreparedOverlay(name=name, created=True)
+    try:
+        _require_backing_path(created, expected=backing_path, volume=name)
+    except CategorizedError:
+        try:
+            created.delete()
+        except libvirt.libvirtError:
+            _log.warning("failed to remove invalid newly created overlay volume %s", name)
+        raise
+    return PreparedOverlay(
+        name=name,
+        path=_volume_path(created, volume=name),
+        backing_path=backing_path,
+        created=True,
+    )
+
+
+def _volume_path(item: Volume, *, volume: str) -> str:
+    try:
+        return item.path()
+    except libvirt.libvirtError as exc:
+        raise _infra("resolving storage volume path", volume=volume) from exc
+
+
+def _require_backing_path(item: _InspectableVolume, *, expected: str | None, volume: str) -> str:
+    """Require terminal bases or an overlay's exact immediate backing path."""
+    from kdive.providers.remote_libvirt.lifecycle.xml import volume_backing_path
+
+    try:
+        volume_xml = item.XMLDesc()
+    except libvirt.libvirtError as exc:
+        raise _infra("reading storage volume metadata", volume=volume) from exc
+    try:
+        actual = volume_backing_path(volume_xml)
+    except ValueError as exc:
+        raise CategorizedError(
+            "remote storage volume has invalid backing metadata",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"volume": volume},
+        ) from exc
+    if actual != expected:
+        raise CategorizedError(
+            "remote storage volume has unexpected backing metadata",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"volume": volume},
+        )
+    return volume_xml
 
 
 def cleanup_overlay_if_created(pool: Pool, overlay: PreparedOverlay) -> None:

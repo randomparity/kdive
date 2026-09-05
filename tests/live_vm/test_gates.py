@@ -32,9 +32,14 @@ _REMOTE_URI = "qemu+tls://host.example/system"
 def _set_remote_companions(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set every remote companion env (base image, S3 endpoint+bucket, reconciler) to valid data."""
     monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_BASE_IMAGE", "kdive-base-fedora.qcow2")
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_KERNEL", __file__)
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_INITRD", __file__)
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE", "/dev/vda1")
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_GDB_ADDR", "192.0.2.1")
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://s3.example:9000")
     monkeypatch.setenv("KDIVE_S3_BUCKET", "kdive-artifacts")
     monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", "http://127.0.0.1:9466/metrics")
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_SSH", "operator@host.example")
 
 
 def test_throwaway_absent_when_rootfs_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,6 +357,69 @@ def test_remote_misconfigured_when_reconciler_unset(monkeypatch: pytest.MonkeyPa
     assert "KDIVE_LIVE_VM_REMOTE_RECONCILER" in result.reason
 
 
+@pytest.mark.parametrize(
+    "missing",
+    (
+        "KDIVE_LIVE_VM_REMOTE_KERNEL",
+        "KDIVE_LIVE_VM_REMOTE_INITRD",
+        "KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE",
+        "KDIVE_LIVE_VM_REMOTE_GDB_ADDR",
+    ),
+)
+def test_remote_misconfigured_when_live_companion_is_missing(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.delenv(missing)
+
+    result = resolve_remote_contract()
+
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert missing in result.reason
+
+
+@pytest.mark.parametrize("name", ("KDIVE_LIVE_VM_REMOTE_KERNEL", "KDIVE_LIVE_VM_REMOTE_INITRD"))
+def test_remote_misconfigured_when_live_artifact_is_not_a_file(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.setenv(name, "/nonexistent/live-artifact")
+
+    result = resolve_remote_contract()
+
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert name in result.reason
+
+
+@pytest.mark.parametrize("root", ("vda1", "/tmp/root", "/dev/vda 1"))
+def test_remote_misconfigured_when_root_device_is_not_absolute_dev_path(
+    monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE", root)
+
+    result = resolve_remote_contract()
+
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE" in result.reason
+
+
+def test_remote_misconfigured_when_gdb_address_is_not_an_ip_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_GDB_ADDR", "host.example")
+
+    result = resolve_remote_contract()
+
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_LIVE_VM_REMOTE_GDB_ADDR" in result.reason
+
+
 def test_remote_available_resolves_full_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
     _set_remote_companions(monkeypatch)
@@ -360,6 +428,10 @@ def test_remote_available_resolves_full_contract(monkeypatch: pytest.MonkeyPatch
     assert result.contract is not None
     assert result.contract.libvirt_uri == _REMOTE_URI
     assert result.contract.base_image == "kdive-base-fedora.qcow2"
+    assert result.contract.kernel == Path(__file__)
+    assert result.contract.initrd == Path(__file__)
+    assert result.contract.root_device == "/dev/vda1"
+    assert result.contract.gdb_addr == "192.0.2.1"
     assert result.contract.s3_endpoint_url == "http://s3.example:9000"
     assert result.contract.s3_bucket == "kdive-artifacts"
     assert result.contract.reconciler == "http://127.0.0.1:9466/metrics"

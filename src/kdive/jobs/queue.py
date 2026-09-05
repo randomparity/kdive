@@ -79,6 +79,29 @@ async def enqueue(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
 ) -> Job:
+    """Admit a job idempotently and return its durable row."""
+    job, _inserted = await enqueue_with_status(
+        conn,
+        kind,
+        payload,
+        authorizing,
+        dedup_key,
+        max_attempts=max_attempts,
+        recycle=recycle,
+    )
+    return job
+
+
+async def enqueue_with_status(
+    conn: AsyncConnection,
+    kind: JobKind,
+    payload: ActivePayloadModel,
+    authorizing: Authorizing | JobAuthorizing,
+    dedup_key: str,
+    *,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
+) -> tuple[Job, bool]:
     """Admit a job idempotently, returning the row for ``dedup_key``.
 
     Recycling resets eligible terminal rows to a fresh queued attempt with the new payload and
@@ -105,7 +128,7 @@ async def enqueue(
             "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key, "
             " created_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp()) "
-            "ON CONFLICT (dedup_key) DO NOTHING",
+            "ON CONFLICT (dedup_key) DO NOTHING RETURNING id",
             (
                 kind,
                 dispatch_lane,
@@ -116,6 +139,7 @@ async def enqueue(
                 dedup_key,
             ),
         )
+        inserted = await cur.fetchone() is not None
         if recycle is not JobRecyclePolicy.NEVER:
             recyclable = [JobState.FAILED.value, JobState.SUCCEEDED.value]
             if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
@@ -149,7 +173,7 @@ async def enqueue(
         )
     if row is None:  # Invariant: we just inserted the row, or it already existed.
         raise RuntimeError(f"enqueue found no job for dedup_key {dedup_key!r}")
-    return Job.model_validate(row)
+    return Job.model_validate(row), inserted or recycled_id is not None
 
 
 async def get_by_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | None:

@@ -1736,6 +1736,8 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
         image_store=cast(loop.ImageSweepStore, object()),
         system_object_hosting_gate=cast(loop.SystemObjectHostingGate, object()),
         resource_probe=cast(loop.ResourceProbe, object()),
+        provider_resolver=cast(loop.ProviderResolver, object()),
+        external_boot_authority_instance="authority-1",
     )
     plan = loop._repair_plan(
         reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)

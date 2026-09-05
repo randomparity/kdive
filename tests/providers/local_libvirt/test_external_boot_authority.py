@@ -163,6 +163,7 @@ class _FakeIO:
         self.observe_fault = observe_fault
         self.actions: list[str] = []
         self.tombstone = False
+        self.tombstone_error: BaseException | None = None
         # `publish_tombstone` writes the tombstone and then unlinks `intent.json`. Modelling
         # both lets `finalize_tombstone` below refuse exactly where the real store refuses.
         self.intent_present = True
@@ -181,10 +182,8 @@ class _FakeIO:
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         del recovery
         if self.tombstone and self.intent_present:
-            # What `RecoveryMetadataStore.finalize_tombstone` does when the recovery
-            # directory holds anything besides the tombstone — the interrupted-publish state.
-            # Modelled so the double cannot report a success the store refuses.
-            raise ValueError("cleanup tombstone directory contains unexpected payload")
+            self.intent_present = False
+        self.tombstone = False
         self.finalized_proof = proof
         self.actions.append("finalize")
 
@@ -214,6 +213,8 @@ class _FakeIO:
     def reopen_cleanup_tombstone(
         self, binding: ExternalBootActivationBinding
     ) -> CleanupTombstoneV1:
+        if self.tombstone_error is not None:
+            raise self.tombstone_error
         if not self.tombstone:
             raise FileNotFoundError("tombstone.json")
         point = _point(self.metadata)
@@ -1022,7 +1023,7 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert terminal.observation.category == "absent"
 
 
-async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path) -> None:
+async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:
     io = _FakeIO(_metadata("recovered"))
     peer = AuthenticatedPeer(uuid4())
     takeover = _cleanup_takeover().model_copy(
@@ -1047,7 +1048,7 @@ async def test_a_teardown_commit_does_not_finalize_the_tombstone(tmp_path: Path)
     )
 
     assert io.actions.count("cleanup") == 1
-    assert "finalize" not in io.actions
+    assert io.actions.count("finalize") == 1
 
 
 @pytest.mark.parametrize(
@@ -1097,12 +1098,107 @@ async def test_cleanup_restart_reconstructs_exact_durable_tombstone(tmp_path: Pa
 
     assert observation.category == "absent"
     assert "cleanup" not in io.actions
-    assert "finalize" not in io.actions
+    assert io.actions.count("finalize") == 1
     assert repository.records[-1].phase is JournalPhase.TERMINAL
     assert repository.records[-1].outcome == "absent"
 
 
-async def test_a_cleanup_commit_neither_recleans_nor_finalizes_an_accounted_tombstone(
+async def test_teardown_restart_reconstructs_exact_durable_tombstone(tmp_path: Path) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _cleanup_takeover().model_copy(
+        update={"purpose": "teardown", "operation": AuthorityOperation.TEARDOWN}
+    )
+    repository = _Repository(peer, takeover)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_adapter(io),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    mutation = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    observation = await service.execute_mutation(peer, mutation)
+
+    assert observation.category == "absent"
+    assert "cleanup" not in io.actions
+    assert io.actions.count("finalize") == 1
+
+
+@pytest.mark.parametrize("operation", [AuthorityOperation.CLEANUP, AuthorityOperation.TEARDOWN])
+async def test_deleting_operation_terminal_replay_is_idempotent(
+    tmp_path: Path,
+    operation: AuthorityOperation,
+) -> None:
+    purpose = "release" if operation is AuthorityOperation.CLEANUP else "teardown"
+    io = _FakeIO(_metadata("recovered"))
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _cleanup_takeover().model_copy(update={"purpose": purpose, "operation": operation})
+    repository = _Repository(peer, takeover)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=_adapter(io),
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    mutation = _request(
+        purpose=purpose,
+        operation=operation,
+        recovery_objects=(_owned_object(),),
+    )
+
+    first = await service.execute_mutation(peer, mutation)
+    second = await service.execute_mutation(peer, mutation)
+
+    assert second == first
+    assert io.actions.count("cleanup") == 1
+    assert io.actions.count("finalize") == 1
+
+
+async def test_restart_finalization_refuses_a_malformed_cleanup_receipt(tmp_path: Path) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    io.tombstone_error = ValueError("malformed cleanup receipt")
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, _cleanup_mutation())
+
+    assert caught.value.category == "provider_conflict"
+    assert "cleanup" not in io.actions
+    assert "finalize" not in io.actions
+
+
+async def test_durable_receipt_reconstruction_is_required_after_restart(tmp_path: Path) -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    io.tombstone_error = FileNotFoundError("receipt path disabled by controlled fault")
+    service, repository, peer, takeover = _cleanup_service(io, tmp_path)
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, _cleanup_mutation())
+
+    assert caught.value.category == "provider_conflict"
+    assert io.tombstone is True
+    assert "cleanup" not in io.actions
+    assert "finalize" not in io.actions
+
+
+async def test_a_cleanup_commit_finishes_an_interrupted_tombstone_without_recleaning(
     tmp_path: Path,
 ) -> None:
     """Positive-evidence idempotency, on the durable tombstone rather than on an absence.
@@ -1114,11 +1210,8 @@ async def test_a_cleanup_commit_neither_recleans_nor_finalizes_an_accounted_tomb
     No second provider mutation: the coordinator's `cleanup_complete` early return fires.
     Removing that early return makes a second `cleanup` action appear.
 
-    And no finalization: `RecoveryMetadataStore.finalize_tombstone` refuses a directory
-    holding anything besides the tombstone, so finalizing here would raise and turn a harmless
-    retry into a permanent `provider_conflict`. `_FakeIO.finalize_tombstone` reproduces that
-    refusal, so removing the adapter's `cleanup_is_accounted` guard turns this red rather than
-    quietly passing.
+    Finalization is required after the terminal record is anchored. The real store validates
+    and removes only matching producer residue before removing the tombstone.
     """
     io = _FakeIO(_metadata("recovered"))
     io.tombstone = True  # a cleanup that published its tombstone and did not finalize
@@ -1130,4 +1223,4 @@ async def test_a_cleanup_commit_neither_recleans_nor_finalizes_an_accounted_tomb
     await service.execute_mutation(peer, _cleanup_mutation())
 
     assert "cleanup" not in io.actions
-    assert "finalize" not in io.actions
+    assert io.actions.count("finalize") == 1

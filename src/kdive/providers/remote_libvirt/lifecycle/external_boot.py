@@ -1,4 +1,4 @@
-"""Remote-libvirt external Run-boot activation primitives (ADR-0583, #2110, #2120).
+"""Remote-libvirt external Run-boot activation primitives (ADR-0583, ADR-0598, #2110, #2120).
 
 Three layers, each testable alone: the pure direct-kernel XML projection and the two ADR-0583
 definition identities; a closed ``RemoteExternalBootDefinition`` built by a pure
@@ -45,9 +45,10 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
 from kdive.providers.shared.guest_agent import AgentExecResult, GuestDomain
 from kdive.providers.shared.libvirt_xml import (
-    KDIVE_METADATA_NS,
     register_kdive_namespace,
     register_qemu_namespace,
+    remote_metadata_storage_identity,
+    remote_metadata_system_id,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 
@@ -189,23 +190,33 @@ def _conflict(reason: str, *, system_id: UUID, rule: str) -> CategorizedError:
     )
 
 
-def _is_expected_overlay(disk: ET.Element, *, pool: str, volume: str) -> bool:
+def _is_expected_overlay(
+    disk: ET.Element,
+    *,
+    pool: str,
+    volume: str,
+    overlay_path: str,
+    storage: tuple[str | None, str | None] | None,
+) -> bool:
     source = disk.find("source")
     driver = disk.find("driver")
     target = disk.find("target")
     return (
-        source is not None
+        disk.get("type") == "file"
+        and source is not None
         and driver is not None
         and target is not None
-        and source.get("pool") == pool
-        and source.get("volume") == volume
+        and source.get("file") == overlay_path
+        and storage == (pool, volume)
         and driver.get("type") == "qcow2"
         and target.get("dev") == "vda"
         and target.get("bus") == "virtio"
     )
 
 
-def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> None:
+def require_disk_grub_source(
+    domain_xml: str, *, system_id: UUID, pool: str, overlay_path: str
+) -> None:
     """Prove an inactive definition is this System's owned disk/GRUB baseline (ADR-0583).
 
     Raises ``CONFLICT`` on the first failed rule, with the rule name in ``details``. A source
@@ -227,14 +238,21 @@ def require_disk_grub_source(domain_xml: str, *, system_id: UUID, pool: str) -> 
         raise _conflict(
             "it already carries external-boot fields", system_id=system_id, rule="boot-projection"
         )
-    recorded = root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
+    recorded = remote_metadata_system_id(root)
     if recorded != str(system_id):
         raise _conflict(
             "its kdive metadata names another System", system_id=system_id, rule="system-metadata"
         )
     disks = root.findall("./devices/disk[@device='disk']")
+    storage = remote_metadata_storage_identity(root)
     expected_volume = overlay_volume_name(system_id)
-    if len(disks) != 1 or not _is_expected_overlay(disks[0], pool=pool, volume=expected_volume):
+    if len(disks) != 1 or not _is_expected_overlay(
+        disks[0],
+        pool=pool,
+        volume=expected_volume,
+        overlay_path=overlay_path,
+        storage=storage,
+    ):
         raise _conflict(
             "its boot disk is not the System overlay volume", system_id=system_id, rule="boot-disk"
         )
@@ -372,6 +390,7 @@ def prepare_target_definition(
     materialization: ExternalBootMaterialization,
     binding: ExternalBootActivationBinding,
     pool: str,
+    overlay_path: str,
     kernel_path: str,
     initrd_path: str | None,
 ) -> RemoteExternalBootDefinition:
@@ -437,7 +456,7 @@ def prepare_target_definition(
     _require_artifact_path(kernel_path, system_id=system_id, what="kernel")
     if initrd_path is not None:
         _require_artifact_path(initrd_path, system_id=system_id, what="initrd")
-    require_disk_grub_source(source_xml, system_id=system_id, pool=pool)
+    require_disk_grub_source(source_xml, system_id=system_id, pool=pool, overlay_path=overlay_path)
     target_xml = render_target_xml(
         source_xml, kernel=kernel_path, initrd=initrd_path, cmdline=plan.cmdline
     )

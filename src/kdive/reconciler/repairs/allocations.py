@@ -224,6 +224,12 @@ async def _expire_one(conn: AsyncConnection, allocation_id: UUID, project: str) 
             return False
         if not await _lease_elapsed(conn, allocation_id):
             return False
+        try:
+            await allocation_release.guard_external_boot_release(
+                conn, allocation_id, project=project
+            )
+        except allocation_release.ExternalBootDenied:
+            return False
         alloc = await accounting.stamp_active_ended(conn, alloc, datetime.now(UTC))
         await ALLOCATIONS.update_state(conn, allocation_id, _EXPIRED_ALLOCATION_STATE)
         await audit.record_system(
