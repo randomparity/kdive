@@ -3,10 +3,11 @@
 Goal: add an opt-in Resource-bound mTLS route to the provider-host authority while preserving its
 AF_UNIX behavior and closed protocol.
 
-Architecture: inventory produces one frozen route binding per remote-libvirt Resource. Worker
-composition closes a deadline-bound connector over that binding, secret material, and the active
-incarnation credential. The authority optionally serves the same closed dispatcher over TCP and
-publishes readiness only after both listeners and their TLS evidence pass.
+Architecture: inventory produces one frozen route binding per remote-libvirt Resource. A private
+deadline-bound transport closes only over that binding and resolved TLS material. A typed
+worker-owned sender is its sole caller and borrows the assembly-owned incarnation credential only
+while encoding one closed envelope. The authority optionally serves the same closed dispatcher over
+TCP and publishes readiness only after both listeners and their TLS evidence pass.
 
 Tech stack: Python 3.14, asyncio streams, `ssl`, Pydantic, Ansible, systemd, nftables/ufw-compatible
 host firewall ownership already used by the role, pytest, `just`.
