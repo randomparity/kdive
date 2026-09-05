@@ -4,6 +4,7 @@ import posixpath
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import libvirt
 import pytest
@@ -472,6 +473,45 @@ def test_physical_alias_of_protected_volume_is_rejected() -> None:
         inspect_module_attachments(
             Conn([Domain(system_xml(state.system_id)), tenant]), state, identities
         )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("root", "source"), ("root", "scratch"), ("source", "scratch")],
+)
+def test_protected_volume_roles_must_have_distinct_physical_identities(
+    first: str, second: str
+) -> None:
+    state = expected()
+    identities = IdentityPort({f"/pool/{second}": f"/pool/{first}"})
+
+    with pytest.raises(CategorizedError, match="identities are not distinct") as raised:
+        inspect_module_attachments(Conn([Domain(system_xml(state.system_id))]), state, identities)
+    assert raised.value.category is ErrorCategory.CONFLICT
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        (1, 2),
+        RemoteDeviceIdentity(True, 2),
+        RemoteDeviceIdentity(1, False),
+        RemoteDeviceIdentity(cast("int", "1"), 2),
+        RemoteDeviceIdentity(1, cast("int", "2")),
+    ],
+)
+def test_malformed_device_identity_fails_as_redacted_conflict(malformed: object) -> None:
+    class MalformedIdentity(IdentityPort):
+        def identity(self, path: str) -> RemoteDeviceIdentity | None:
+            return cast("RemoteDeviceIdentity", malformed)
+
+    state = expected()
+    with pytest.raises(CategorizedError, match="identity is invalid") as raised:
+        inspect_module_attachments(
+            Conn([Domain(system_xml(state.system_id))]), state, MalformedIdentity()
+        )
+    assert raised.value.category is ErrorCategory.CONFLICT
+    assert "/pool" not in str(raised.value)
 
 
 def test_unavailable_device_identity_fails_closed_without_path_detail() -> None:

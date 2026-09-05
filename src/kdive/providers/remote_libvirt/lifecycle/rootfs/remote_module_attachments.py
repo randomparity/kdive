@@ -266,7 +266,10 @@ def _device_identity(identity_port: RemoteDeviceIdentityPort, path: str) -> Remo
     if identity is None:
         raise _conflict("remote device identity is unavailable")
     if (
-        not 0 <= identity.device <= _MAX_IDENTITY_COMPONENT
+        type(identity) is not RemoteDeviceIdentity
+        or type(identity.device) is not int
+        or type(identity.inode) is not int
+        or not 0 <= identity.device <= _MAX_IDENTITY_COMPONENT
         or not 0 <= identity.inode <= _MAX_IDENTITY_COMPONENT
     ):
         raise _conflict("remote device identity is invalid")
@@ -278,10 +281,13 @@ def _protected_volume_identities(
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
 ) -> dict[str, RemoteDeviceIdentity]:
-    return {
+    identities = {
         volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
         for volume in (expected.root_volume, expected.source_volume, expected.scratch_volume)
     }
+    if len(set(identities.values())) != len(identities):
+        raise _conflict("protected remote module identities are not distinct")
+    return identities
 
 
 def _inspect_definition(
