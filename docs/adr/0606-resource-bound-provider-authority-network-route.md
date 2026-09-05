@@ -27,16 +27,19 @@ The network listener binds only an operator-configured numeric address and port.
 verified against the stable name derived from the configured authority instance.
 
 Worker construction resolves the selected binding's three TLS values through the existing secret
-backend. A resource-bound connector accepts only an operation payload and deadline; it supplies the
-active process incarnation credential at send time. No standing copy is placed in inventory,
+backend. A resource-bound connector accepts only an already-authenticated closed envelope and a
+deadline and retains no incarnation credential. The worker assembly, which already owns the active
+process credential, wraps that connector with a request sender that reads its existing credential
+reference only while encoding each envelope. No second standing copy is placed in inventory,
 provider runtime state, logs, or results.
 
 Authority-host readiness reconstructs both listeners and performs an authority-owned TLS health
 handshake when the network listener is configured. Worker readiness constructs the selected route
 and performs an authentication-only health exchange that dispatches no provider operation.
-Provisioning owns the opt-in listener variables, credentials, service policy, and source-scoped
-firewall rule. Partial configuration fails closed and the default deployment exposes no network
-listener.
+The remote-provider-host play installs a narrow provider-authority role owning the opt-in listener,
+credentials, service policy, and readiness. The existing cross-distribution `gdbstub_acl` role owns
+the additional source-scoped firewall rule and stale-rule removal. Partial configuration fails
+closed and the default deployment exposes no network listener.
 
 ## Consequences
 

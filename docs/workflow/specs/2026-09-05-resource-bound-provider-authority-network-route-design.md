@@ -51,19 +51,21 @@ readiness, starts both, proves both TLS handshakes, and closes both on every exi
 reconstruct listener identity and credential fingerprints; any drift raises a bounded
 `HostReadinessError`, causing readiness withdrawal and service restart.
 
-`AuthorityNetworkRoute` is constructed from exactly one `RemoteAuthorityBinding`, a resolved TLS
-material owner, and the active `SecretStr` incarnation credential. Its request method receives only
-the existing closed operation plus typed request and a positive absolute monotonic deadline. The
-remaining budget covers TCP connect, TLS handshake, write, response read, and close. It uses TLS
-1.3, verifies the server certificate and derived name, injects the credential into the envelope at
-send time, and maps all errors to bounded redacted categories. It exposes no raw reader/writer,
-host, port, TLS, command, path, argument, or environment input.
+`AuthorityNetworkRoute` is constructed from exactly one `RemoteAuthorityBinding` and a resolved TLS
+material owner. It retains no incarnation credential. Its request method receives only an
+already-authenticated closed envelope and a positive absolute monotonic deadline. The remaining
+budget covers TCP connect, TLS handshake, write, response read, and close. It uses TLS 1.3, verifies
+the server certificate and derived name, and maps all errors to bounded redacted categories. It
+exposes no raw reader/writer, host, port, TLS, command, path, argument, or environment input.
 
-The worker assembly passes its existing `incarnation_credential` into remote-provider composition.
-Resource rebinding selects one config by Resource name and creates the route only from that
-config's closed binding. Secret values resolve through `SecretBackend` and register with
-`SecretRegistry`; temporary certificate files follow the existing remote-libvirt TLS material
-pattern and are removed after context construction.
+`WorkerHandlerAssembly` remains the sole process-lifetime incarnation-credential owner. It creates
+a worker-owned request sender that references that existing field, reads it only while calling
+`encode_request_envelope`, drops the method-local plaintext after encoding, and passes the encoded
+frame to the route. The route object has no credential field, and cancellation or worker
+replacement leaves no copied `SecretStr`. Resource rebinding selects one config by Resource name
+and creates the route only from that config's closed binding. Secret values resolve through
+`SecretBackend` and register with `SecretRegistry`; temporary certificate files follow the existing
+remote-libvirt TLS material pattern and are removed after context construction.
 
 ## Authentication-only readiness
 
@@ -81,18 +83,25 @@ credential, TLS diagnostic, or peer output enters errors or durable state.
 
 ## Provisioning and live proof
 
-The `live_vm_host` role adds opt-in variables for network bind address/port, a source CIDR, and the
-already-required TLS sources. Its preflight requires a complete tuple and rejects unsafe or empty
-values. The role renders the authority environment, installs an input-chain firewall rule limited
-to TCP, the configured port, and the configured worker source, and leaves the rule absent when the
-listener is disabled. The systemd unit continues to permit only AF_UNIX/AF_INET/AF_INET6 and gains
-no executable or filesystem authority.
+The remote-provider-host play in `deploy/ansible/site.yml` gains a narrow
+`provider_authority_host` role owning the authority account, install, credentials, environment,
+systemd unit, listener readiness, and clean removal when disabled. Shared task files may be reused
+by `live_vm_host`, but runner-specific provisioning does not own production remote hosts. The
+role's preflight requires the complete listener tuple and rejects unsafe or empty values.
 
-Role verification proves idempotent configuration, listener ownership, service readiness, and
-firewall shape. The authorized Ubuntu host is provisioned from the role, not manually. A redacted
-live carrier proves a configured worker route succeeds, a client without the trusted certificate
-fails, a client aimed at a non-configured destination fails, and the local AF_UNIX route still
-works. No endpoint, certificate, credential, host identifier, or private network detail is posted.
+The existing `gdbstub_acl` role remains the cross-distribution firewall owner. It accepts the
+optional authority port as another protected TCP port, adds source-CIDR allow and lower-priority
+deny rules on firewalld and ordered allow/deny rules on ufw, and prunes rules for stale sources and
+ports. Disabling the authority listener removes its formerly managed allow/deny rules without
+touching libvirt TLS, gdbstub, or management access. The systemd unit continues to permit only
+AF_UNIX/AF_INET/AF_INET6 and gains no executable or filesystem authority.
+
+Role verification proves `site.yml` applies both owners, idempotent configuration, listener
+ownership, service readiness, Debian and Red Hat firewall shape, and enable-then-disable stale-rule
+removal. The authorized Ubuntu host is provisioned from `site.yml`, not manually. A redacted live
+carrier proves a configured worker route succeeds, a client without the trusted certificate fails,
+a client aimed at a non-configured destination fails, and the local AF_UNIX route still works. No
+endpoint, certificate, credential, host identifier, or private network detail is posted.
 
 ## Error contract
 
@@ -133,7 +142,9 @@ authority remain trusted existing boundaries.
 - Inputs have closed shapes, bounded frames and credentials, numeric addresses, bounded ports,
   TLS 1.3, certificate-name verification, and one deadline spanning every IO stage.
 - Secret material is by reference, registered for redaction, short-lived in temporary files where
-  required, never serialized into config, and absent from diagnostics.
+  required, never serialized into config, and absent from diagnostics. The route does not retain
+  the incarnation credential; its worker-owned sender borrows the assembly-owned value only while
+  constructing one envelope.
 - The listener is opt-in, source-firewalled, minimally confined, periodically revalidated, and
   removed from readiness on drift.
 

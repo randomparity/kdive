@@ -97,9 +97,10 @@ Files: new `src/kdive/providers/external_boot_authority/network_client.py`, new
 
 Interfaces:
 
-- `AuthorityNetworkRoute(binding, tls_material, incarnation_credential)` closes over all authority.
-- `async request(operation: Operation, request: dict[str, object], *, deadline: float) -> bytes`
-  accepts no endpoint or credential.
+- `AuthorityNetworkRoute(binding, tls_material)` closes over destination and TLS authority only and
+  has no credential field.
+- `async request(envelope: bytes, *, deadline: float) -> bytes` accepts a closed encoded envelope,
+  no endpoint, and no credential object.
 - `async health(*, deadline: float) -> None` is the worker readiness probe.
 
 Verification:
@@ -118,7 +119,7 @@ Steps:
 4. Run the focused command; expect all selected tests to pass.
 5. Commit as `feat(authority): add a resource-bound network client`.
 
-## Task 4: Compose the current worker credential and readiness
+## Task 4: Compose a non-retaining worker sender and readiness
 
 Files: `src/kdive/assembly.py`, `src/kdive/jobs/assembly.py`,
 `src/kdive/providers/assembly/composition.py`,
@@ -127,56 +128,65 @@ assembly/diagnostic tests.
 
 Interfaces:
 
-- Provider composition receives the current `SecretStr` only in worker assembly; server and
-  reconciler builds remain credential-free.
+- `WorkerHandlerAssembly` remains the sole process-lifetime owner of the current `SecretStr`;
+  server and reconciler builds remain credential-free.
+- A worker-owned `AuthorityRequestSender` reads the existing assembly field only inside `send`,
+  encodes the closed envelope, and gives bytes to a credential-free route.
 - Resource rebinding constructs `AuthorityNetworkRoute` only from
   `RemoteLibvirtConfig.authority` and the existing `SecretBackend`.
 - Remote worker diagnostics expose a closed readiness result and no network identity.
 
 Verification:
 
-- Mode: focused-test — process-role separation, exact active credential identity, per-Resource
-  rebinding, missing binding/credential, inactive authentication and redacted diagnostics; observe
-  new assertions fail, then pass `just test-verbose tests/jobs/test_assembly.py
-  tests/providers/remote_libvirt tests/diagnostics`.
+- Mode: focused-test — process-role separation, route objects without credential fields, exact
+  active credential borrowing only during send, cancellation/replacement without a copied secret,
+  per-Resource rebinding, missing binding/credential, inactive authentication and redacted
+  diagnostics; observe new assertions fail, then pass `just test-verbose
+  tests/jobs/test_assembly.py tests/providers/remote_libvirt tests/diagnostics`.
 
 Steps:
 
-1. Add assembly tests proving only worker construction receives the credential and it reaches the
-   route unchanged.
-2. Extend provider-composition inputs with a role-specific optional route factory, failing closed
-   when a bound operation lacks worker authority.
+1. Add assembly tests proving only `WorkerHandlerAssembly` owns the credential and route instances
+   retain no credential before, during, or after request cancellation and worker replacement.
+2. Add a worker-owned request sender that borrows the assembly field during envelope construction;
+   extend provider-composition inputs with a credential-free route factory, failing closed when a
+   bound operation lacks the sender.
 3. Add the remote worker readiness builder and health call without exposing an application action.
 4. Run the focused command; expect all selected tests to pass.
 5. Commit as `feat(providers): compose worker authority routes`.
 
 ## Task 5: Provision and verify the opt-in route
 
-Files: `deploy/ansible/roles/live_vm_host/defaults/main.yml`,
-`deploy/ansible/roles/live_vm_host/tasks/authority_preflight.yml`,
-`deploy/ansible/roles/live_vm_host/tasks/main.yml`,
-`deploy/ansible/roles/live_vm_host/tasks/verify.yml`, role handlers/templates as needed,
+Files: new `deploy/ansible/roles/provider_authority_host/`, `deploy/ansible/site.yml`,
+`deploy/ansible/roles/gdbstub_acl/defaults/main.yml`,
+`deploy/ansible/roles/gdbstub_acl/tasks/main.yml`, shared authority task files where extraction is
+needed, `deploy/ansible/roles/live_vm_host/` only as a consumer of shared ownership,
 `deploy/systemd/system/kdive-external-boot-authority.service`,
 `tests/deploy/test_live_worker_provisioning.py`.
 
 Interfaces:
 
-- Add opt-in listen address, port, worker source, and firewall variables.
-- Render both network settings only for a complete opt-in tuple.
-- Install exactly one source-scoped TCP allow rule owned by the role.
+- `provider_authority_host` owns opt-in listen address/port, authority service installation,
+  credentials, environment, readiness and disabled cleanup on `remote_libvirt_hosts`.
+- `gdbstub_acl` consumes an optional authority port and owns source-scoped allow/deny creation plus
+  stale source/port removal on firewalld and ufw.
 
 Verification:
 
-- Mode: focused-test — defaults disabled, partial input rejection, rendered environment, firewall
-  source/port/protocol, service confinement, drift and idempotence structure; observe assertions
-  fail, then pass `just test-verbose tests/deploy/test_live_worker_provisioning.py`.
+- Mode: focused-test — `site.yml` role application, defaults disabled, partial input rejection,
+  rendered environment, Debian and Red Hat firewall source/port/protocol, service confinement,
+  drift, idempotence, and enable-then-disable stale-rule removal; observe assertions fail, then pass
+  `just test-verbose tests/deploy/test_live_worker_provisioning.py` and the existing
+  `deploy/ansible/tests` firewall harness.
 
 Steps:
 
-1. Add deployment contract tests for disabled, complete, partial, unsafe, drift, and idempotent
-   configurations.
-2. Add defaults and preflight assertions, then render the conditional listener environment.
-3. Add the source-scoped firewall rule and verification without widening systemd privileges.
+1. Add deployment contract tests for production play application, disabled, complete, partial,
+   unsafe, drift, idempotent, Debian/Red Hat, and disable-after-enable configurations.
+2. Extract the smallest shared authority-host tasks from `live_vm_host`, build the narrow production
+   role, apply it to `remote_libvirt_hosts`, and render the conditional listener environment.
+3. Extend `gdbstub_acl` with the source-scoped authority-port rules and explicit stale-rule removal
+   without widening systemd privileges or disturbing its existing protected ports.
 4. Run the focused command; expect all selected tests to pass.
 5. Commit as `feat(provisioning): deploy authority network routes`.
 
@@ -201,8 +211,9 @@ Steps:
 
 1. Add a redaction-safe proof carrier and a structural test for its fixed output vocabulary.
 2. Run `just lint`, `just type`, and all focused commands above; expect zero failures.
-3. Provision the authorized Ubuntu host with the owning role and run the proof; expect four true
-   outcomes and no identifying values in retained/public evidence.
+3. Provision the authorized Ubuntu host through `deploy/ansible/site.yml`, run it again to prove
+   idempotence, run the proof, then disable and re-enable the listener to prove firewall cleanup;
+   expect the four fixed proof outcomes and no identifying values in retained/public evidence.
 4. Run `just ci > /tmp/kdive-2252-ci.log 2>&1 < /dev/null`; expect exit 0.
 5. Commit any proof-carrier source as `test(providers): prove authority network isolation`.
 
