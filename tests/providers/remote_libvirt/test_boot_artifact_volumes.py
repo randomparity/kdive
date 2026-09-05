@@ -20,25 +20,11 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes impor
     require_boot_artifact_capacity,
 )
 from tests.providers.remote_libvirt.conftest import libvirt_error
-from tests.providers.remote_libvirt.fakes import FakeStorageConn, FakeStoragePool, FakeStorageVolume
+from tests.providers.remote_libvirt.fakes import FakeStorageConn, FakeStoragePool
 
 SYSTEM = UUID("00000000-0000-0000-0000-000000000003")
 RUN = UUID("00000000-0000-0000-0000-000000000002")
 ATTEMPT = UUID("00000000-0000-0000-0000-000000000004")
-
-
-def _store_bytes(conn: FakeStorageConn, volume: FakeStorageVolume, payload: bytes) -> None:
-    stream = conn.newStream(0)
-    volume.upload(stream, 0, len(payload), 0)
-    remaining = payload
-
-    def send(_stream: object, nbytes: int, _opaque: object) -> bytes:
-        nonlocal remaining
-        chunk, remaining = remaining[:nbytes], remaining[nbytes:]
-        return chunk
-
-    stream.sendAll(send, None)
-    stream.finish()
 
 
 class _Stream:
@@ -223,7 +209,11 @@ def test_retry_mismatched_partial_is_conflict_and_preserves_evidence() -> None:
     partial = pool.createXML(
         render_boot_artifact_volume_xml(partial_name, capacity_bytes=len(b"different"))
     )
-    _store_bytes(conn, partial, b"different")
+    stream = conn.newStream(0)
+    partial.upload(stream, 0, len(b"different"), 0)
+    chunks = iter((b"different", b""))
+    stream.sendAll(lambda *_args: next(chunks), None)
+    stream.finish()
 
     with pytest.raises(CategorizedError) as exc:
         materialize_boot_artifacts(
