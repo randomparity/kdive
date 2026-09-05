@@ -158,7 +158,30 @@ def test_console_readiness_window_rejects_path_replacement(tmp_path: Path) -> No
 
     with pytest.raises(RuntimeError, match="window changed"):
         window.read()
-    window.close()
+        window.close()
+
+
+def test_console_readiness_window_rejects_replacement_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"kdive-ready\n")
+    window = ConsoleReadinessWindow(path, os.open(path, os.O_RDWR), deadline=10.0, max_bytes=64)
+    real_pread = os.pread
+
+    def replace_then_read(descriptor: int, size: int, offset: int) -> bytes:
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"different\n")
+        replacement.replace(path)
+        return real_pread(descriptor, size, offset)
+
+    monkeypatch.setattr(readiness_module.os, "pread", replace_then_read)
+    try:
+        assert LocalExternalBootReadiness(clock=lambda: 0.0)(SYSTEM_ID, window) == ReadinessResult(
+            True, False
+        )
+    finally:
+        window.close()
 
 
 def test_console_readiness_window_rejects_divergent_truncate_regrow(tmp_path: Path) -> None:

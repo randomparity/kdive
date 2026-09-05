@@ -91,14 +91,11 @@ class ConsoleReadinessWindow:
     def read(self) -> bytes:
         descriptor = self._require_open()
         try:
-            current = os.fstat(descriptor)
-            named = os.stat(self._path, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) != self._identity or (
-                named.st_dev,
-                named.st_ino,
-            ) != self._identity:
+            if not self._identity_matches(descriptor):
                 raise _ConsoleWindowFailure("console readiness window changed")
             data = os.pread(descriptor, self._max_bytes + 1, 0)
+            if not self._identity_matches(descriptor):
+                raise _ConsoleWindowFailure("console readiness window changed")
         except OSError as exc:
             raise _ConsoleWindowFailure("console readiness window changed") from exc
         if len(data) > self._max_bytes:
@@ -107,6 +104,18 @@ class ConsoleReadinessWindow:
             raise _ConsoleWindowFailure("console readiness window changed")
         self._observed = data
         return data
+
+    def _identity_matches(self, descriptor: int) -> bool:
+        current = os.fstat(descriptor)
+        named = os.stat(self._path, follow_symlinks=False)
+        return (
+            (current.st_dev, current.st_ino)
+            == self._identity
+            == (
+                named.st_dev,
+                named.st_ino,
+            )
+        )
 
     def close(self) -> None:
         descriptor, self._descriptor = self._descriptor, None
