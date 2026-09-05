@@ -89,22 +89,30 @@ Start retry and teardown remain unchanged.
 
 ## Task 3 — Prove Ubuntu/AppArmor behavior and ship
 
-Files: extend the focused provider test if the live observation exposes an uncovered assertion; no
-host policy file is expected.
+Files: add `tests/live_vm/test_remote_overlay_apparmor.py`; no host policy file is expected.
 
-Verification (`focused-test`): on the authorized clean native Ubuntu host, use the production
-storage and XML functions to create a test-owned overlay/domain, start it with AppArmor enforcing,
-create a same-pool decoy, verify the generated per-domain file rules contain the selected base but
-not the decoy or a pool wildcard, and clean up in a `finally` path. Expected result: non-skipped
-boot/start success and no residual test domain, overlay, or decoy.
+Verification (`focused-test`): on the authorized clean native Ubuntu host, create test-owned chained
+operator-style and pre-existing supplied-style base volumes outside libvirt metadata, then call
+production `ensure_overlay` for each. Both must reject after their internal pool refresh and before
+overlay/domain mutation; the supplied case replaces its local source fixture before retry. Next,
+use production storage and XML functions with a standalone catalog base, start under enforcing
+AppArmor, create a same-pool decoy, and verify the generated per-domain file rules contain the
+selected base but not the decoy or a pool wildcard. A `finally` path removes every fixture.
+Expected result: two non-skipped negative admissions, one boot/start success, and no residual test
+domain, volume, or file.
 
 Implementation steps:
 
-1. Run `just test-ansible` to prove repository host provisioning stays green.
-2. Run the clean-host proof and inspect only redacted success/failure facts.
-3. Run `just format`, stage intended paths, run `prek run`, re-add only those paths if rewritten,
+1. Add the native `live_vm` test using the production storage/XML functions and a fixture whose
+   cleanup owns every test domain, volume, and file; gate it on the existing remote-live contract.
+2. Run both negative remote-byte cases and assert the pool contains no derived overlay after each
+   rejection.
+3. Run the standalone AppArmor boot plus exact positive and decoy/wildcard-negative profile checks.
+4. Run `just test-ansible` to prove repository host provisioning stays green.
+5. Inspect and retain only redacted live success/failure facts.
+6. Run `just format`, stage intended paths, run `prek run`, re-add only those paths if rewritten,
    and commit any hook-only correction separately.
-4. Run focused tests, `just lint`, `just type`, and bare
+7. Run focused tests, `just lint`, `just type`, and bare
    `just ci > /tmp/kdive-2236-ci.log 2>&1 < /dev/null`.
 
 Acceptance: the clean host starts the production-shaped domain under AppArmor, every gate is green,

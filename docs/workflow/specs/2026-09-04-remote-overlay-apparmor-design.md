@@ -70,11 +70,17 @@ the host path.
   XML metacharacters encoded rather than becoming structure.
 - Provisioning tests capture the exact definition passed before `domain.create()` and prove it
   contains the overlay volume and matching base path.
-- A native clean Ubuntu proof uses production `ensure_overlay` and `render_domain_xml`, starts the
-  domain under an enforcing generated AppArmor profile, and verifies the generated `.files` entry
-  names the base without disabling the security driver. A test-owned decoy file in the same pool
-  must be absent from the profile, as must any pool-wide wildcard rule. Cleanup removes the test
-  domain, overlay, and decoy.
+- A native clean Ubuntu proof first creates two test-owned chained base volumes outside libvirt's
+  metadata path: one operator-style catalog name and one deterministic pre-existing supplied-style
+  name. Each case calls production `ensure_overlay`, proves its internal refresh reconstructs the
+  embedded backing record, receives `CONFIGURATION_ERROR`, and observes no overlay or domain
+  mutation. The supplied case deliberately changes the worker-side source fixture before retry so
+  the verdict can only come from remote bytes. Cleanup removes both negative fixtures.
+- The same proof then uses a standalone catalog base with production `ensure_overlay` and
+  `render_domain_xml`, starts the domain under an enforcing generated AppArmor profile, and verifies
+  the generated `.files` entry names the base without disabling the security driver. A test-owned
+  decoy file in the same pool must be absent from the profile, as must any pool-wide wildcard rule.
+  Cleanup removes the test domain, overlay, base, and decoy.
 - `just lint`, `just type`, focused provider tests, `just test-ansible`, and `just ci` remain green.
 
 Native ppc64le execution is excluded by the campaign. No Ansible policy change is expected: the
