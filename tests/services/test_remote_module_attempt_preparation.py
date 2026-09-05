@@ -306,12 +306,11 @@ def test_production_mutation_discharge_sql_is_repository_mediated() -> None:
             for node in ast.walk(ast.parse(path.read_text()))
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
         )
-        if any(
-            update.search(normalized := " ".join(value.lower().split()))
-            and "mutation_discharged_at" in normalized
-            for value in constants
-        ):
-            hits.append(path)
+        for value in constants:
+            normalized = " ".join(value.lower().split())
+            if update.search(normalized) and "mutation_discharged_at" in normalized:
+                hits.append(path)
+                break
 
     assert [path.relative_to(root).as_posix() for path in hits] == [
         "db/remote_module_attempt_obligations.py"
