@@ -36,8 +36,7 @@ The `live_vm` tier spans four families (below); `just test-live` runs all of the
 (each gated), and one — the remote-libvirt family, which drives a remote
 `qemu+tls://` host rather than local silicon — additionally has a focused
 `just test-live-remote` recipe (`-m live_vm_remote`) for driving it on its own —
-which has no carriers yet and so fails by design (see the `live_vm_remote`
-section below).
+see the `live_vm_remote` section below.
 
 `live_vm_tcg` is deliberately **not** a throwaway-domain test: by ADR-0353 every
 `live_vm_tcg` proof also carries the `live_stack` marker and runs the spine over
@@ -62,7 +61,7 @@ gates distinguish them from ordinary throwaway tests; stepping also consumes
 | Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
 | gdbstub debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` + matching `KDIVE_LIVE_VM_VMLINUX`; the stepping proof also needs `KDIVE_LIVE_VM_ROOTFS` | `qemu:///session` | `boot_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
 | Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
-| Remote (`live_vm_remote`) | `KDIVE_LIVE_VM_REMOTE_URI` (a `qemu+tls://` host) + `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE` + `KDIVE_LIVE_VM_REMOTE_SSH` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` + `KDIVE_LIVE_VM_REMOTE_RECONCILER` | `qemu+tls://` (operator-named; no default host) | direct provider ops against a genuinely remote libvirt host (ADR-0425) |
+| Remote (`live_vm_remote`) | `KDIVE_LIVE_VM_REMOTE_URI`, `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE`, `KDIVE_LIVE_VM_REMOTE_SSH`, `KDIVE_LIVE_VM_REMOTE_KERNEL`, `KDIVE_LIVE_VM_REMOTE_INITRD`, `KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE`, `KDIVE_LIVE_VM_REMOTE_GDB_ADDR`, `KDIVE_S3_ENDPOINT_URL`, `KDIVE_S3_BUCKET`, and `KDIVE_LIVE_VM_REMOTE_RECONCILER` | `qemu+tls://` (operator-named; no default host) | direct provider ops against a genuinely remote libvirt host (ADR-0425) |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the
 ADR-0087 config-env guard is not tripped by test-only vars). That module also
@@ -179,6 +178,13 @@ just test-live-remote  # -m live_vm_remote; a carrier skips cleanly with no remo
 
 The AppArmor overlay carrier is the first test in this family. It skips when the remote trigger is
 unset; once configured, a failed SSH, privilege, AppArmor, boot, or cleanup operation is red.
+The external-boot carrier provisions a fresh System overlay, boots the staged disk image, and then activates
+the supplied kernel and initrd through the production remote-libvirt primitives. Immediately
+after guest-agent readiness it reads `/proc/cmdline` and compares its exact bytes before invoking
+the general kernel-identity observer. A mismatch reports the expected value, observed value, and
+first differing byte offset. It also proves preservation of the disk, network, guest-agent,
+console, gdbstub, and capture definition components, reconnects to simulate worker-handle loss,
+restores disk/GRUB boot twice to prove idempotence, and removes its domain and volumes.
 
 Call `require_live_vm_remote()` **inside** the test function, as the other families
 do. A gate at module level (`pytest.skip(..., allow_module_level=True)`) also yields
@@ -188,10 +194,14 @@ cleanly; gated inside the test, it is a reported skip and exit 0.
 This drives the remote-libvirt family (a sub-selection of `live_vm`, also run by
 `just test-live`) directly against an operator-provided `qemu+tls://` host. Set
 `KDIVE_LIVE_VM_REMOTE_URI` to the host's control URI, `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE`
-to the staged base-image volume name, `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`
+to the staged base-image volume name, `KDIVE_LIVE_VM_REMOTE_KERNEL` and
+`KDIVE_LIVE_VM_REMOTE_INITRD` to the matching local boot artifacts,
+`KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE` to the base image's root block device, and
+`KDIVE_LIVE_VM_REMOTE_GDB_ADDR` to the remote host's ACL'd GDB listen address. Set
+`KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`
 to the **guest-routable** object store, and `KDIVE_LIVE_VM_REMOTE_RECONCILER` to a
-presence marker for a running reconciler (its metrics endpoint, or `1`). Standing
-The AppArmor carrier additionally uses `KDIVE_LIVE_VM_REMOTE_SSH` as the noninteractive SSH
+presence marker for a running reconciler (its metrics endpoint, or `1`). The AppArmor carrier
+additionally uses `KDIVE_LIVE_VM_REMOTE_SSH` as the noninteractive SSH
 destination for the same host. It skips when that carrier-specific variable is unset. Once set,
 the account must have key-based SSH and passwordless `sudo` for the fixed proof script; failures
 are red. The proof creates only unique scratch volumes beside the staged base, inspects the
@@ -201,6 +211,13 @@ object-store reachability — is the [remote live-stack runbook](remote-live-sta
 The URI must be `qemu+tls://` and must not carry `no_verify` (remote mandates
 verified mutual TLS, ADR-0076); a wrong scheme or a missing companion fails loud
 rather than skipping.
+
+Provision the host from the repository Ansible roles before the first run; do not repair a live
+host by hand. Confirm that the configured storage pool contains the named base image and that its
+guest has qemu-guest-agent enabled. Run `just test-live-remote` from the exact checkout under test.
+An absent URI skips the carrier; a set URI with any missing or malformed companion fails before
+libvirt is contacted. After either success or failure, confirm that no `kdive-<uuid>` domain,
+overlay, kernel volume, or initrd volume from the invocation remains.
 
 ### `live_vm_tcg` — the emulated foreign-arch spine
 
