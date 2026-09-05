@@ -75,11 +75,19 @@ Exactly one locked verification context encloses the helper's single operation t
 source and scratch volumes. #2170 will enter it before its first lookup/create sequence and leave it
 after both creates or failure cleanup. This issue does not implement or call libvirt.
 
-Every path that discharges or deletes an attempt obligation must acquire the same transaction-
-scoped System advisory lock. This is already the repository's cross-cutting lifecycle invariant;
-#2172 owns applying it to the future discharge services. A concurrent discharge waits until the
-verification context and both creates finish. The low-level repository remains lock-agnostic for
-composition inside those services.
+`RemoteModuleAttemptObligationRepository.discharge_mutation_obligation` acquires the same
+transaction-scoped System advisory lock before updating the row. The method already owns the only
+production mutation-discharge operation; putting the fence there makes every current and future
+caller participate without a cross-issue calling convention. A concurrent discharge waits until
+the verification context and both creates finish. Callers continue to own the transaction, so the
+repository-acquired lock survives through their commit or rollback.
+
+The production boundary is repository-mediated access. Direct SQL by a process already holding
+the server database credential can bypass application invariants and is outside this contract, as
+it is for the repository's state validation generally. A source inventory regression rejects any
+production mutation-discharge SQL outside this repository module. Foreign-key cascade remains a
+deployment-owned database operation; normal System teardown changes durable state and uses the
+repository rather than deleting System rows.
 
 ## Failure and replay behavior
 
@@ -117,8 +125,8 @@ admitted work.
 - Closed, strict, versioned canonical models reject payload shape substitution and ambiguity.
 - The receipt binds all three attempt fields; the verifier compares and queries all three exactly.
 - Verification requires an open committed row, not receipt possession.
-- The existing System advisory lock spans verification and the complete consuming helper; every
-  discharge/delete consumer takes the same lock.
+- The existing System advisory lock spans verification and the complete consuming helper; the
+  mutation-discharge repository method takes the same lock automatically.
 - Migration 0126 remains the enforcement for server write and worker read-only privileges; this
   change adds no grant or migration.
 - The server transaction exits before returning the request, making commit a prerequisite for
@@ -145,11 +153,14 @@ remain #2172 and #2168.
    the obligation.
 5. Missing, mismatched, discharged, and unreadable rows fail verification with the same redacted
    error before any supplied volume-operation probe can run.
-6. A concurrent discharge using the System lock remains blocked while the verification context's
-   two-create probe runs, then proceeds after context exit; failure releases the lock as well.
+6. A concurrent call to the ordinary mutation-discharge repository method remains blocked while
+   the verification context's two-create probe runs, then proceeds after context exit. Rollback
+   and task cancellation release the worker-held lock and leave no reusable authorization.
 7. A focused composition test calls the production runtime gate before a two-create probe. One
    verified authorization precedes both creates, while a raw request, receipt, boolean, callback,
    or coroutine is rejected by that exact gate. #2170 reuses it in the final libvirt helper.
+8. A source inventory test rejects production mutation-discharge SQL outside the repository module
+   and proves every production caller reaches the self-fencing method.
 
 The new tests run on the ordinary disposable-Postgres tier. Native ppc64le live tests are excluded
 by the campaign and no live provider is needed for this contract-only prerequisite.
@@ -168,6 +179,9 @@ by the campaign and no live provider is needed for this contract-only prerequisi
 - **Release verification state before calling the helper.** Rejected: a concurrent terminal path
   could discharge the row before either create; the existing per-System serialization lock must
   cover both the check and its consuming operation.
+- **Use an exact PostgreSQL row lock.** Rejected: all four row-lock modes require authority the
+  existing select-only worker login does not hold. A narrowly granted function would add schema
+  and permission surface; the self-fencing repository method uses the existing advisory mechanism.
 - **Do nothing until #2173 adds a job payload.** Rejected: #2173 would then have to invent the
   cross-role contract while also orchestrating it, recreating the scope collision that split
   #2251 from #2170.

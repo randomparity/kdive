@@ -13,7 +13,8 @@ service module, one small repository read method, and ~180 lines of focused unit
 
 - Python 3.14 with strict whole-tree `ty`; Ruff line length 100.
 - No schema migration or privilege change. Migration 0126 remains authoritative.
-- No `JobKind`, handler, libvirt call, discharge, or reaping changes.
+- No `JobKind`, handler, libvirt call, new discharge event/orchestration, or reaping changes. The
+  existing mutation-discharge repository operation gains only its serialization fence.
 - Guardrails: focused pytest, `just lint`, `just type`, `just test`, and
   `just ci > <file> 2>&1 < /dev/null`.
 - Public GitHub bodies are file-backed and pass `just check-pr-body`.
@@ -24,7 +25,7 @@ service module, one small repository read method, and ~180 lines of focused unit
 | Path | Action | Responsibility |
 |---|---|---|
 | `src/kdive/domain/remote_module_attempt_preparation.py` | create | strict canonical receipt/request models and verified authorization value |
-| `src/kdive/db/remote_module_attempt_obligations.py` | modify | exact open-state read used by both roles |
+| `src/kdive/db/remote_module_attempt_obligations.py` | modify | exact open-state read and automatic mutation-discharge fence |
 | `src/kdive/services/remote_module_attempt_preparation.py` | create | server commit-before-return and worker verification services |
 | `tests/domain/test_remote_module_attempt_preparation.py` | create | closed/canonical model and typed-authorization contracts |
 | `tests/services/test_remote_module_attempt_preparation.py` | create | real-role commit, replay, lock lifetime, failure, and verification behavior |
@@ -62,8 +63,8 @@ the unknown-field test fail, restore strict config, and rerun green.
 ## Task 2 — implement server and worker services with TDD
 
 Verification: `focused-test` for the repository open-state query, commit-before-return service,
-exact expected-attempt comparison, read-only worker verification, System-lock lifetime, redacted
-failures, replay, and typed authorization handoff. Red command:
+exact expected-attempt comparison, read-only worker verification, self-fenced mutation discharge,
+System-lock lifetime, redacted failures, replay, and typed authorization handoff. Red command:
 `uv run python -m pytest tests/services/test_remote_module_attempt_preparation.py -q`; expected red
 failure: import/collection fails because the new service module and repository read method do not
 exist. Green command: the same command; expected green result: every real-role, transaction,
@@ -83,8 +84,10 @@ Cover:
 - worker verification succeeds only when the receipt, expected operation tuple, and open row match;
 - missing, mismatched, discharged, and unreadable state return the same redacted failure;
 - the worker role cannot insert/update the obligation; and
-- a competing discharge holding the same System lock cannot run until the verification context's
-  two-create probe exits; and
+- the ordinary mutation-discharge repository call cannot run until the verification context's
+  two-create probe exits;
+- rollback and cancellation release the lock without yielding reusable authorization;
+- a production-source inventory rejects direct mutation-discharge SQL outside the repository; and
 - only the verified value passes the production runtime gate and reaches a two-create probe once.
 
 Run:
@@ -99,7 +102,9 @@ Then add the exact open-state repository read:
 
 Add `mutation_obligation_is_open(conn, attempt) -> bool`. One exact-key query returns true only for
 an existing row with `mutation_discharged_at IS NULL`; missing and discharged rows return false.
-It performs no write and is valid under both server and worker roles.
+It performs no write and is valid under both server and worker roles. Make the existing
+`discharge_mutation_obligation` acquire `advisory_xact_lock` at `LockScope.SYSTEM` before its
+update, while retaining caller-owned transaction boundaries and discharge semantics.
 
 Implement the commit and verification services:
 
@@ -109,7 +114,8 @@ request. The worker async context manager owns a read-only transaction, acquires
 `advisory_xact_lock(..., LockScope.SYSTEM, expected_attempt.system_id)`, validates the typed request,
 checks exact open state, maps missing/discharged/database failures to one redacted verification
 error, and yields the verified authorization while retaining the lock. Add the production runtime
-gate beside the authorization type; #2170's helper will reuse it.
+gate beside the authorization type; #2170's helper will reuse it. Add the source inventory test to
+hold repository mediation and document privileged direct SQL as outside the trusted contract.
 
 Run both focused test files. Use a controlled fault that constructs/returns inside a transaction
 test double before its commit marker; require the ordering assertion to fail, restore, and rerun
