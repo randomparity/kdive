@@ -262,6 +262,7 @@ sudo -u libvirt-qemu test -w "$overlay"
                 _profile(),
                 pool=_POOL,
                 volume=overlay.name,
+                overlay_path=overlay.path,
                 backing_path=overlay.backing_path,
                 gdb_addr="127.0.0.1",
                 gdb_port=55997,

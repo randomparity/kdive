@@ -73,6 +73,7 @@ class StorageConn(Protocol):
 @dataclass(frozen=True, slots=True)
 class PreparedOverlay:
     name: str
+    path: str
     backing_path: str
     created: bool
 
@@ -175,7 +176,12 @@ def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> Prep
         except libvirt.libvirtError as exc:
             raise _infra("reading existing overlay volume", volume=name) from exc
         _require_backing_path(overlay, expected=backing_path, volume=name)
-        return PreparedOverlay(name=name, backing_path=backing_path, created=False)
+        return PreparedOverlay(
+            name=name,
+            path=_volume_path(overlay, volume=name),
+            backing_path=backing_path,
+            created=False,
+        )
     created: Volume | None = None
     try:
         capacity = int(base.info()[1])
@@ -201,7 +207,19 @@ def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> Prep
         except libvirt.libvirtError:
             _log.warning("failed to remove invalid newly created overlay volume %s", name)
         raise
-    return PreparedOverlay(name=name, backing_path=backing_path, created=True)
+    return PreparedOverlay(
+        name=name,
+        path=_volume_path(created, volume=name),
+        backing_path=backing_path,
+        created=True,
+    )
+
+
+def _volume_path(item: Volume, *, volume: str) -> str:
+    try:
+        return item.path()
+    except libvirt.libvirtError as exc:
+        raise _infra("resolving storage volume path", volume=volume) from exc
 
 
 def _require_backing_path(item: _InspectableVolume, *, expected: str | None, volume: str) -> str:

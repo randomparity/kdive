@@ -92,6 +92,7 @@ def _source_xml(
         _remote_profile(),
         pool=pool,
         volume=volume if volume is not None else overlay_volume_name(system_id),
+        overlay_path="/pool/overlay.qcow2",
         backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=1234,
@@ -124,9 +125,9 @@ def test_projection_preserves_every_remote_device_and_the_preserved_digest() -> 
         source, kernel="kernel.img", initrd="initrd.img", cmdline="root=/dev/vda1 console=ttyS0"
     )
     for fragment in (
-        '<disk type="volume" device="disk">',
+        '<disk type="file" device="disk">',
         '<driver name="qemu" type="qcow2" />',
-        f'<source pool="kdive" volume="{overlay_volume_name(_SYSTEM_ID)}" />',
+        '<source file="/pool/overlay.qcow2" />',
         '<target dev="vda" bus="virtio" />',
         '<interface type="network">',
         '<serial type="pty">',
@@ -137,6 +138,7 @@ def test_projection_preserves_every_remote_device_and_the_preserved_digest() -> 
         'value="tcp:10.0.0.5:1234"',
         "hostfwd=tcp:10.0.0.5:2222-:22",
         f"<kdive:system>{_SYSTEM_ID}</kdive:system>",
+        f'<kdive:storage pool="kdive" volume="{overlay_volume_name(_SYSTEM_ID)}" />',
     ):
         assert fragment in projected, fragment
     assert preserved_definition_identity(projected) == preserved_definition_identity(source)

@@ -188,7 +188,10 @@ def test_ensure_overlay_reuses_existing_overlay() -> None:
     overlay = ensure_overlay(pool, _BASE_VOLUME, _SYSTEM_ID)
 
     assert overlay == PreparedOverlay(
-        name=overlay_name, backing_path=f"/pool/{_BASE_VOLUME}", created=False
+        name=overlay_name,
+        path=f"/pool/{overlay_name}",
+        backing_path=f"/pool/{_BASE_VOLUME}",
+        created=False,
     )
     assert pool.created_xml == []
 
@@ -201,6 +204,7 @@ def test_ensure_overlay_creates_overlay_from_base_volume() -> None:
 
     assert overlay == PreparedOverlay(
         name=overlay_volume_name(_SYSTEM_ID),
+        path=f"/pool/{overlay_volume_name(_SYSTEM_ID)}",
         backing_path=f"/pool/{_BASE_VOLUME}",
         created=True,
     )
@@ -314,8 +318,12 @@ def test_cleanup_overlay_only_deletes_created_overlay() -> None:
     overlay_name = overlay_volume_name(_SYSTEM_ID)
     pool = _Pool({overlay_name: _Volume(overlay_name), "existing": _Volume("existing")})
 
-    cleanup_overlay_if_created(pool, PreparedOverlay(overlay_name, "/pool/base", created=True))
-    cleanup_overlay_if_created(pool, PreparedOverlay("existing", "/pool/base", created=False))
+    cleanup_overlay_if_created(
+        pool, PreparedOverlay(overlay_name, f"/pool/{overlay_name}", "/pool/base", created=True)
+    )
+    cleanup_overlay_if_created(
+        pool, PreparedOverlay("existing", "/pool/existing", "/pool/base", created=False)
+    )
 
     assert overlay_name not in pool.volumes
     assert "existing" in pool.volumes

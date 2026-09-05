@@ -105,6 +105,7 @@ def render_domain_xml(
     *,
     pool: str,
     volume: str,
+    overlay_path: str,
     backing_path: str,
     gdb_addr: str,
     gdb_port: int,
@@ -146,9 +147,9 @@ def render_domain_xml(
     ET.SubElement(features, "acpi")
     ET.SubElement(features, "vmcoreinfo", state="on")
     devices = ET.SubElement(domain, "devices")
-    disk = ET.SubElement(devices, "disk", type="volume", device="disk")
+    disk = ET.SubElement(devices, "disk", type="file", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")
-    ET.SubElement(disk, "source", pool=pool, volume=volume)
+    ET.SubElement(disk, "source", file=overlay_path)
     backing = ET.SubElement(disk, "backingStore", type="file")
     ET.SubElement(backing, "format", type="qcow2")
     ET.SubElement(backing, "source", file=backing_path)
@@ -165,6 +166,7 @@ def render_domain_xml(
     ET.SubElement(channel, "target", type="virtio", name=_GUEST_AGENT_CHANNEL)
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
+    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}storage", pool=pool, volume=volume)
     commandline = ET.SubElement(domain, f"{{{QEMU_NS}}}commandline")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-gdb")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{gdb_addr}:{gdb_port}")
@@ -250,6 +252,7 @@ def disk_pool_strict(domain_xml: str, *, operation: str, domain: str) -> str | N
 
 def _disk_pool(root: ET.Element) -> str | None:
     source = root.find("./devices/disk/source")
-    if source is None:
-        return None
-    return source.get("pool")
+    if source is not None and source.get("pool") is not None:
+        return source.get("pool")
+    storage = root.find(f"./metadata/{{{KDIVE_METADATA_NS}}}storage")
+    return None if storage is None else storage.get("pool")

@@ -31,9 +31,12 @@ pool. It then reads the selected remote base volume's reconstructed XML and requ
 supplied volumes, and existing supplied volumes on retry, independent of a mutable worker-local
 source path. It also copies the base target's numeric owner and group into the new overlay's
 volume XML with mode `0600`; libvirt's default root-owned `0600` volume is not usable by the
-configured QEMU account. `ensure_overlay` returns the observed base path together with the overlay name. The
-remote domain renderer keeps the top disk as `type="volume"` and adds one explicit file-backed
-`backingStore` node for that path, terminated by an empty `backingStore` node.
+configured QEMU account. `ensure_overlay` returns the observed base and overlay paths together with
+the overlay name. The remote domain renderer uses the overlay as a file-backed top disk and adds
+one explicit file-backed `backingStore` node for the base, terminated by an empty `backingStore`
+node. The pool and volume identity remain in kdive metadata for teardown and external-boot checks.
+This is required because Ubuntu's AppArmor helper emits the base but omits the top grant when a
+volume source is combined with an input backing store.
 
 The path is never assembled from configuration or a volume name: it is the path returned by the
 already-resolved base volume. A reused overlay reads its recorded backing path from volume XML and
@@ -45,7 +48,7 @@ path unrelated to the overlay.
 
 - Ubuntu's ordinary libvirt AppArmor helper sees both layers and grants the base read access in the
   per-domain profile; the security driver remains enabled.
-- The domain continues to record its storage pool for teardown and keeps ADR-0080's volume-backed
+- The domain continues to record its storage pool for teardown while using exact file-backed
   lifecycle.
 - Provider fakes must retain the volume path and backing metadata that production now consumes.
 - Each provision performs one storage-pool refresh before inspecting the base and overlay. A

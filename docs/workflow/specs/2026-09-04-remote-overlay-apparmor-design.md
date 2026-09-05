@@ -21,8 +21,9 @@ Remote base volumes are required to be standalone qcow2 images, but neither the 
 definition nor a mutable worker-local source proves the bytes of an existing remote volume. A
 directory-pool refresh makes libvirt reconstruct volume metadata from the actual remote files.
 Admission will use that observation to enforce the terminal-base contract on both lanes. The
-supported chain is therefore provably overlay then base. This change must retain the volume source,
-storage pool identity, security driver, and cleanup behavior.
+supported chain is therefore provably overlay then base. The domain uses both validated paths
+because Ubuntu's AppArmor helper omits the top grant when a volume source is combined with an
+input backing store. Kdive metadata retains storage-pool and volume identity for teardown.
 
 ## Components and flow
 
@@ -35,10 +36,11 @@ storage pool identity, security driver, and cleanup behavior.
    overlay XML and verifies that its immediate backing path equals the observed base path. New
    overlays copy the base target's numeric owner/group and use mode `0600`, avoiding libvirt's
    root-owned default without granting group or world write access.
-3. `PreparedOverlay` carries `name`, `backing_path`, and `created`. A missing or malformed backing
+3. `PreparedOverlay` carries `name`, `path`, `backing_path`, and `created`. A missing or malformed backing
    record, or a mismatch on reuse, is a configuration failure before domain definition.
-4. Provisioning passes `backing_path` to `render_domain_xml`.
-5. The disk remains `type="volume"` with the existing pool/volume source. The renderer adds
+4. Provisioning passes both paths to `render_domain_xml`.
+5. The disk uses `type="file"` with the exact overlay path; kdive metadata records the existing
+   pool/volume identity. The renderer adds
    `<backingStore type="file"><format type="qcow2"/><source file="..."/><backingStore/>
    </backingStore>`.
 6. Libvirt's existing `virt-aa-helper` processes the definition and emits an exact read grant for
