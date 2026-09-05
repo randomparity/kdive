@@ -237,6 +237,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compare external boot command lines
 - Return exact guest command line bytes
 - Inspect module attachments
+- Anchor external boot readiness
 
 ### Changed
 
@@ -1249,6 +1250,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conform cleanup decision record
 - Define device identity port
 - Conform device identity record
+- Design external boot readiness window
+- Plan readiness window implementation
+- Correct readiness window design
+- Define readiness descriptor ownership
 
 ### Fixed
 
@@ -2031,6 +2036,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validate attachment identities
 - Identify block device aliases
 - Bound identity inspection
+- Gate legacy external boot domains
+- Detect console replacement races
 
 ### Security
 
