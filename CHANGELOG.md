@@ -227,14 +227,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Confine the external-boot artifact root
 - Remove the activation recovery archive on cleanup
 - Build the external-boot session mechanisms
-- Compare external boot command lines
-- Return exact guest command line bytes
 - Define durable reentry receipts
 - Resume server preparation from receipts
 - Route lifecycle through authority
 - Persist retry deadlines
 - Terminalize expired retries
 - Persist external boot operation receipts
+- Recover stranded external boots
+- Compare external boot command lines
+- Return exact guest command line bytes
 
 ### Changed
 
@@ -1207,13 +1208,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record that readiness is not bound here
 - Say the recovery root stages boot payloads
 - State the recovery root's operator preconditions
-- Design command-line readiness proof
-- Ground readiness comparison in materialization
-- Resolve readiness design findings
-- Design authority failure diagnostics
-- Harden command-line diagnostic encoding
-- Order readiness redaction before encoding
-- Record overlapping secret redaction debt
 - Design idempotent re-entry
 - Record design blockers
 - Authorize provider receipts
@@ -1221,8 +1215,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve external boot CAS classification
 - Reconcile cleanup receipt decision
 - Satisfy decision record schema
+- Design reconciler recovery lanes
+- Close design review gaps
+- Design command-line readiness proof
+- Ground readiness comparison in materialization
+- Resolve readiness design findings
+- Design authority failure diagnostics
+- Harden command-line diagnostic encoding
+- Order readiness redaction before encoding
+- Record overlapping secret redaction debt
 - Correct release evidence commentary
 - Remove stale refusal wording
+- State job lookup budget
 
 ### Fixed
 
@@ -1966,16 +1970,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the mechanism count and the lane's claim
 - Refuse an absent or symlinked recovery root
 - Set the artifact directory mode after creating it
-- Retain fault injection command line
-- Preserve notes bounds and diagnostic persistence
 - Classify losing authority commits
 - Close reviewed reentry gaps
 - Replay terminal authority receipts
 - Retain cleanup receipt through authority
 - Renew recovery deadline after timeout
 - Reconstruct cleanup tombstones
-- Recover from command line mismatch
+- Bound and validate repair sources
+- Validate successor suppression
 - Handle group-writable trees during setup manifest build
+- Retain fault injection command line
+- Preserve notes bounds and diagnostic persistence
+- Recover from command line mismatch
+- Close recovery review gaps
+- Bound authority job discovery
+- Isolate repair transactions
+- Count committed repair jobs
 
 ### Security
 
