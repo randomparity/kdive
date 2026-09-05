@@ -9,7 +9,7 @@ import pytest
 from kdive.domain.catalog.images import Capability
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory, load_inventory_optional
-from kdive.inventory.model import StagedPathSource
+from kdive.inventory.model import InventoryDoc, StagedPathSource
 
 GOOD = """
 schema_version = 2
@@ -40,6 +40,47 @@ visibility = "public"
 kind = "ftp"
 url = "x"
 """
+
+REMOTE_LIBVIRT = {
+    "name": "remote-a",
+    "uri": "qemu+tls://remote-a.example/system",
+    "gdb_addr": "192.0.2.10",
+    "gdbstub_range": "47000:47099",
+    "client_cert_ref": "remote/client-cert",
+    "client_key_ref": "remote/client-key",  # pragma: allowlist secret
+    "ca_cert_ref": "remote/ca",
+    "base_image": "base",
+    "cost_class": "remote",
+    "vcpus": 4,
+    "memory_mb": 4096,
+}
+
+AUTHORITY_BINDING = {
+    "authority_instance": "authority-a",
+    "authority_address": "192.0.2.20",
+    "authority_port": 47001,
+    "authority_server_ca_ref": "authority/server-ca",
+    "authority_client_cert_ref": "authority/client-cert",
+    "authority_client_key_ref": "authority/client-key",  # pragma: allowlist secret
+}
+
+
+def _inventory_with_remote(instance: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "image": [
+            {
+                "provider": "remote-libvirt",
+                "name": "base",
+                "arch": "x86_64",
+                "format": "qcow2",
+                "root_device": "/dev/vda",
+                "visibility": "public",
+                "source": {"kind": "staged", "volume": "base.qcow2"},
+            }
+        ],
+        "remote_libvirt": [instance],
+    }
 
 
 def test_inventory_error_records_entry_field_and_message() -> None:
@@ -110,6 +151,96 @@ def test_load_optional_still_raises_on_present_malformed_file(tmp_path: Path) ->
     p.write_text(BAD_TOML)
     with pytest.raises(InventoryError):
         load_inventory_optional(p)
+
+
+@pytest.mark.parametrize(
+    ("authority_fields", "expected_address"),
+    [
+        ({}, None),
+        (AUTHORITY_BINDING, "192.0.2.20"),
+    ],
+    ids=["absent", "complete"],
+)
+def test_remote_authority_binding_is_all_absent_or_complete(
+    authority_fields: dict[str, object], expected_address: str | None
+) -> None:
+    instance = {**REMOTE_LIBVIRT, **authority_fields}
+    doc = InventoryDoc.parse(_inventory_with_remote(instance))
+    assert doc.remote_libvirt[0].authority_address == expected_address
+
+
+@pytest.mark.parametrize("missing", sorted(AUTHORITY_BINDING))
+def test_remote_authority_binding_rejects_partial_tuple(missing: str) -> None:
+    authority_fields = dict(AUTHORITY_BINDING)
+    del authority_fields[missing]
+    with pytest.raises(InventoryError, match="authority binding fields"):
+        InventoryDoc.parse(_inventory_with_remote({**REMOTE_LIBVIRT, **authority_fields}))
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "::1",
+        "authority.example",
+        "qemu+tls://authority.example/system",
+        "192.0.2.020",
+        "0.0.0.0",
+        "224.0.0.1",
+    ],
+)
+def test_remote_authority_binding_rejects_noncanonical_or_unsafe_destination(address: str) -> None:
+    with pytest.raises(InventoryError, match="authority_address"):
+        InventoryDoc.parse(
+            _inventory_with_remote(
+                {**REMOTE_LIBVIRT, **AUTHORITY_BINDING, "authority_address": address}
+            )
+        )
+
+
+@pytest.mark.parametrize("port", [0, 65536, "47001"])
+def test_remote_authority_binding_rejects_invalid_port(port: object) -> None:
+    with pytest.raises(InventoryError, match="authority_port"):
+        InventoryDoc.parse(
+            _inventory_with_remote({**REMOTE_LIBVIRT, **AUTHORITY_BINDING, "authority_port": port})
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "authority_instance",
+        "authority_server_ca_ref",
+        "authority_client_cert_ref",
+        "authority_client_key_ref",
+    ],
+)
+def test_remote_authority_binding_rejects_empty_identity_and_secret_refs(field: str) -> None:
+    with pytest.raises(InventoryError, match=field):
+        InventoryDoc.parse(
+            _inventory_with_remote({**REMOTE_LIBVIRT, **AUTHORITY_BINDING, field: " "})
+        )
+
+
+def test_remote_authority_binding_rejects_duplicate_secret_refs() -> None:
+    with pytest.raises(InventoryError, match="distinct"):
+        InventoryDoc.parse(
+            _inventory_with_remote(
+                {
+                    **REMOTE_LIBVIRT,
+                    **AUTHORITY_BINDING,
+                    "authority_client_key_ref": AUTHORITY_BINDING["authority_client_cert_ref"],
+                }
+            )
+        )
+
+
+def test_remote_authority_binding_rejects_extra_fields() -> None:
+    with pytest.raises(InventoryError, match="extra_forbidden"):
+        InventoryDoc.parse(
+            _inventory_with_remote(
+                {**REMOTE_LIBVIRT, **AUTHORITY_BINDING, "authority_uri": "tcp://x"}
+            )
+        )
 
 
 def test_repo_systems_toml_example_parses_with_staged_path_image() -> None:

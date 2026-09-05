@@ -23,9 +23,18 @@ always see one exception type.
 from __future__ import annotations
 
 from decimal import Decimal
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.catalog.image_format import ImageFormat
@@ -231,6 +240,67 @@ class RemoteLibvirtInstance(_Instance):
     # keeps guest-agent-only behavior; exactly one set is a config error.
     ssh_addr: str | None = None
     ssh_range: str | None = None
+    authority_instance: str | None = None
+    authority_address: str | None = None
+    authority_port: int | None = Field(default=None, ge=1, le=65535, strict=True)
+    authority_server_ca_ref: str | None = None
+    authority_client_cert_ref: str | None = None
+    authority_client_key_ref: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator(
+        "authority_instance",
+        "authority_server_ca_ref",
+        "authority_client_cert_ref",
+        "authority_client_key_ref",
+    )
+    @classmethod
+    def _authority_text_is_non_empty(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError(f"{info.field_name} must be non-empty")
+        return value
+
+    @field_validator("authority_address")
+    @classmethod
+    def _authority_address_is_canonical_ipv4(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = ip_address(value)
+        except ValueError as exc:
+            raise ValueError("authority_address must be a canonical numeric IPv4 address") from exc
+        if isinstance(parsed, IPv6Address):
+            raise ValueError("authority_address must be IPv4; IPv6 is unsupported")
+        assert isinstance(parsed, IPv4Address)
+        if str(parsed) != value:
+            raise ValueError("authority_address must be a canonical numeric IPv4 address")
+        if parsed.is_unspecified or parsed.is_multicast:
+            raise ValueError("authority_address must not be unspecified or multicast")
+        return value
+
+    @model_validator(mode="after")
+    def _authority_binding_is_complete(self) -> Self:
+        values = (
+            self.authority_instance,
+            self.authority_address,
+            self.authority_port,
+            self.authority_server_ca_ref,
+            self.authority_client_cert_ref,
+            self.authority_client_key_ref,
+        )
+        if all(value is None for value in values):
+            return self
+        if any(value is None for value in values):
+            raise ValueError("authority binding fields must be all present or all absent")
+        refs = {
+            self.authority_server_ca_ref,
+            self.authority_client_cert_ref,
+            self.authority_client_key_ref,
+        }
+        if len(refs) != 3:
+            raise ValueError("authority secret references must be distinct")
+        return self
 
 
 class LocalLibvirtInstance(_Instance):
