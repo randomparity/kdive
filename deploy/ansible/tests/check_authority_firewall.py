@@ -81,6 +81,7 @@ def main():
         env = os.environ.copy()
         env["ANSIBLE_CONFIG"] = str(HERE.parent / "ansible.cfg")
         env["ANSIBLE_ROLES_PATH"] = str(HERE.parent / "roles")
+        env["ANSIBLE_INJECT_FACT_VARS"] = "False"
         env["FAKE_AUTHORITY_FIREWALL_ROOT"] = str(root)
         env["ANSIBLE_COLLECTIONS_PATH"] = (
             str(root / "collections") + ":" + str(Path.home() / ".ansible/collections")
@@ -97,7 +98,7 @@ def main():
         for family in ("Debian", "RedHat"):
             (root / "rules.json").write_text("[]")
             variables = {
-                "ansible_os_family": family,
+                "ansible_facts": {"os_family": family},
                 "worker_cidr": "192.0.2.0/24",
                 "gdbstub_range": "47000:47099",
                 "gdbstub_acl_authority_port": None,
@@ -141,7 +142,7 @@ def main():
                 f"authority_firewall {family}: enable, drift, idempotence, "
                 "corruption, disable passed"
             )
-        variables = {"ansible_os_family": "Debian"}
+        variables = {}
         play("provider_authority_preflight", variables, env)
         for invalid in (
             {"provider_authority_host_network_address": "127.0.0.1"},

@@ -6,7 +6,7 @@
 # --- Fedora / RHEL: firewalld rich rules with explicit source address. A plain
 # --- port-open would open the port to the whole zone; rich rules restrict the source. ---
 - name: Configure firewalld rich-rule ACL (RedHat)
-  when: ansible_os_family == 'RedHat'
+  when: ansible_facts['os_family'] == 'RedHat'
   block:
     - name: Accept TLS + gdbstub from the worker CIDR
       ansible.posix.firewalld:
@@ -54,7 +54,7 @@
 # --- reporting success with the debug ports world-open. Set gdbstub_acl_ufw_enable=false
 # --- only if you enforce these ports by other means (the assert still guards you).
 - name: Configure ufw ACL (Debian)
-  when: ansible_os_family == 'Debian'
+  when: ansible_facts['os_family'] == 'Debian'
   block:
     - name: Allow the SSH/management port (so enabling ufw cannot lock the host out)
       community.general.ufw:

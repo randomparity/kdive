@@ -1,7 +1,7 @@
 ---
 - name: Install native authority build prerequisites for the selected distribution
   ansible.builtin.package:
-    name: "{{ provider_authority_host_packages[ansible_os_family] }}"
+    name: "{{ provider_authority_host_packages[ansible_facts['os_family']] }}"
     state: present
 
 - name: Read the staged authority source revision

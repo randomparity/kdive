@@ -14,7 +14,7 @@
       rule family="ipv4" source address="{{ gdbstub_acl_authority_rule.source }}"
       port port="{{ gdbstub_acl_authority_rule.port }}" protocol="tcp" accept
   loop: "{{ [authority_allow, authority_drop] if gdbstub_acl_authority_remove else [authority_drop, authority_allow] }}"
-  when: ansible_os_family == 'RedHat'
+  when: ansible_facts['os_family'] == 'RedHat'
   no_log: true
 
 - name: Reconcile authority ufw rules in fail-closed order
@@ -30,5 +30,5 @@
     authority_drop: {rule: deny}
     authority_allow: {rule: allow, source: "{{ gdbstub_acl_authority_rule.source }}"}
   loop: "{{ [authority_allow, authority_drop] if gdbstub_acl_authority_remove else [authority_drop, authority_allow] }}"
-  when: ansible_os_family == 'Debian'
+  when: ansible_facts['os_family'] == 'Debian'
   no_log: true

@@ -46,7 +46,7 @@ run_case() {
   local rc=0
   ansible-playbook "$playbook" -i localhost, \
     --tags gdbstub_acl_prune \
-    -e ansible_os_family=Debian \
+    -e '{"ansible_facts":{"os_family":"Debian"}}' \
     -e "worker_cidr=$worker_cidr" \
     -e gdbstub_range=47000:47099 \
     -e gdbstub_acl_tls_port=16514 \

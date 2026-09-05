@@ -232,6 +232,22 @@ def test_provider_authority_firewall_harness_runs_input_and_drift_contracts() ->
     assert "authority_firewall" in harness
 
 
+def test_selected_authority_roles_do_not_read_injected_top_level_facts() -> None:
+    for role, filename in (
+        ("provider_authority_host", "preflight.yml"),
+        ("provider_authority_host", "install.yml"),
+        ("gdbstub_acl", "authority_validate.yml"),
+        ("gdbstub_acl", "authority_rules.yml"),
+        ("gdbstub_acl", "main.yml"),
+    ):
+        tasks = yaml.safe_load(_text(ROLE.parent / role / "tasks" / filename))
+        # setup's filter names the fact to gather, not an injected-variable read.
+        reads = [task for task in tasks if "ansible.builtin.setup" not in task]
+        assert not re.search(r"\bansible_(user_id|os_family)\b", yaml.safe_dump(reads)), (
+            f"{role}/{filename} must consume gathered ansible_facts directly"
+        )
+
+
 def test_fixed_slot_accounts_and_groups_are_declared() -> None:
     defaults = _yaml(DEFAULTS)
     assert defaults["live_vm_host_worker_accounts"] == [

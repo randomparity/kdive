@@ -10,7 +10,7 @@
 
 - name: Select the actual control identity and explicitly configured exclusions
   ansible.builtin.set_fact:
-    provider_authority_host_denied_identities: "{{ [ansible_user_id] + provider_authority_host_additional_denied_identities }}"
+    provider_authority_host_denied_identities: "{{ [ansible_facts['user_id']] + provider_authority_host_additional_denied_identities }}"
   when: provider_authority_host_enabled | bool
   no_log: true
   tags: [provider_authority_preflight]
@@ -69,7 +69,7 @@
           'address': provider_authority_host_network_address,
           'port': provider_authority_host_network_port,
           'source': worker_cidr | default(''), 'gdb_range': gdbstub_range | default('47000:47099'),
-          'management_port': ansible_port | default(22), 'family': ansible_os_family,
+          'management_port': ansible_port | default(22), 'family': ansible_facts['os_family'],
           'instance': provider_authority_host_instance,
           'denied': provider_authority_host_denied_identities | default([]),
           'paths': [provider_authority_host_source_root, provider_authority_host_python,
