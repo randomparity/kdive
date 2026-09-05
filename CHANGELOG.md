@@ -1227,6 +1227,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct release evidence commentary
 - Remove stale refusal wording
 - State job lookup budget
+- Design exact AppArmor backing grant
+- Close AppArmor design gaps
+- Close supplied retry bypass
+- Inspect refreshed remote backing
+- Require native refresh rejection proof
+- Bind live proof control channel
+- Register remote live SSH control
 
 ### Fixed
 
@@ -1987,6 +1994,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Isolate repair transactions
 - Count committed repair jobs
 - Make guest restorecon optional
+- Bind overlay backing chain
+- Build valid remote live profile
+- Scope AppArmor wildcard assertion
+- Close overlay review findings
+- Preserve overlay DAC identity
+- Render exact overlay file chain
+- Bind external boot overlay path
 
 ### Security
 
