@@ -52,13 +52,19 @@ def supplied_base_volume_name(system_id: UUID | str) -> str:
     return f"kdive-{system_id}-base.qcow2"
 
 
-def render_volume_xml(name: str, *, capacity_bytes: int, backing_path: str) -> str:
+def render_volume_xml(
+    name: str, *, capacity_bytes: int, backing_path: str, owner_id: int, group_id: int
+) -> str:
     """Render the overlay volume XML: qcow2, backed by the base image volume."""
     volume = ET.Element("volume")
     ET.SubElement(volume, "name").text = name
     ET.SubElement(volume, "capacity").text = str(capacity_bytes)
     target = ET.SubElement(volume, "target")
     ET.SubElement(target, "format", type="qcow2")
+    permissions = ET.SubElement(target, "permissions")
+    ET.SubElement(permissions, "owner").text = str(owner_id)
+    ET.SubElement(permissions, "group").text = str(group_id)
+    ET.SubElement(permissions, "mode").text = "0600"
     backing = ET.SubElement(volume, "backingStore")
     ET.SubElement(backing, "path").text = backing_path
     ET.SubElement(backing, "format", type="qcow2")
@@ -78,6 +84,19 @@ def volume_backing_path(volume_xml: str) -> str | None:
     if not path or backing.find("./backingStore") is not None:
         raise ValueError("unsupported storage volume backing metadata")
     return path
+
+
+def volume_target_identity(volume_xml: str) -> tuple[int, int]:
+    """Return the numeric owner/group recorded for a storage volume target."""
+    try:
+        root = _safe_fromstring(volume_xml)
+        owner = int(root.findtext("./target/permissions/owner", ""))
+        group = int(root.findtext("./target/permissions/group", ""))
+    except (ET.ParseError, DefusedXmlException, ValueError) as exc:
+        raise ValueError("invalid storage volume target identity") from exc
+    if owner < 0 or group < 0:
+        raise ValueError("invalid storage volume target identity")
+    return owner, group
 
 
 def render_domain_xml(

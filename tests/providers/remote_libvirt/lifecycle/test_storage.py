@@ -37,6 +37,8 @@ class _Volume:
         xml: str | None = None,
         path_error: libvirt.libvirtError | None = None,
         xml_error: libvirt.libvirtError | None = None,
+        owner_id: int = 64055,
+        group_id: int = 108,
     ) -> None:
         self.name = name
         self.capacity = capacity
@@ -46,6 +48,8 @@ class _Volume:
         self.xml = xml
         self.path_error = path_error
         self.xml_error = xml_error
+        self.owner_id = owner_id
+        self.group_id = group_id
 
     def path(self) -> str:
         if self.path_error is not None:
@@ -75,7 +79,11 @@ class _Volume:
             if self.backing_path is None
             else (f"<backingStore><path>{self.backing_path}</path></backingStore>")
         )
-        return f"<volume><name>{self.name}</name>{backing}</volume>"
+        return (
+            f"<volume><name>{self.name}</name><target><permissions>"
+            f"<owner>{self.owner_id}</owner><group>{self.group_id}</group>"
+            f"</permissions></target>{backing}</volume>"
+        )
 
 
 class _Pool:
@@ -202,6 +210,9 @@ def test_ensure_overlay_creates_overlay_from_base_volume() -> None:
     assert root.findtext("./name") == overlay.name
     assert root.findtext("./capacity") == "42"
     assert root.findtext("./backingStore/path") == "/pool/kdive-base-fedora-42.qcow2"
+    assert root.findtext("./target/permissions/owner") == "64055"
+    assert root.findtext("./target/permissions/group") == "108"
+    assert root.findtext("./target/permissions/mode") == "0600"
 
 
 def test_ensure_overlay_missing_base_volume_is_configuration_error() -> None:

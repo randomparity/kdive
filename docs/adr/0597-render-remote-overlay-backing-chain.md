@@ -29,7 +29,9 @@ Immediately before any overlay lookup or creation, `ensure_overlay` refreshes th
 pool. It then reads the selected remote base volume's reconstructed XML and requires no
 `backingStore`. This checks the actual remote bytes for operator-staged volumes, newly uploaded
 supplied volumes, and existing supplied volumes on retry, independent of a mutable worker-local
-source path. `ensure_overlay` returns the observed base path together with the overlay name. The
+source path. It also copies the base target's numeric owner and group into the new overlay's
+volume XML with mode `0600`; libvirt's default root-owned `0600` volume is not usable by the
+configured QEMU account. `ensure_overlay` returns the observed base path together with the overlay name. The
 remote domain renderer keeps the top disk as `type="volume"` and adds one explicit file-backed
 `backingStore` node for that path, terminated by an empty `backingStore` node.
 

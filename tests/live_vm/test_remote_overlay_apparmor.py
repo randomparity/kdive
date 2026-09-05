@@ -5,10 +5,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import libvirt
@@ -33,6 +34,12 @@ from tests.live_vm import LIVE_VM_REMOTE_SSH_ENV, require_live_vm_remote
 
 _SAFE_TOKEN = re.compile(r"\A[A-Za-z0-9_.@:-]+\Z")
 _POOL = "default"
+
+
+class _CleanupDomain(Protocol):
+    def isActive(self) -> int: ...  # noqa: N802
+    def destroy(self) -> object: ...
+    def undefine(self) -> object: ...
 
 
 def _safe_ssh(destination: str, script: str, *tokens: str) -> subprocess.CompletedProcess[str]:
@@ -61,6 +68,31 @@ def _require_ssh_destination() -> str:
     return destination
 
 
+def _cleanup_remote_proof(
+    domain: _CleanupDomain | None,
+    ssh_destination: str,
+    cleanup_script: str,
+    *tokens: str,
+) -> None:
+    failures: list[str] = []
+    if domain is not None:
+        try:
+            if domain.isActive() == 1:
+                domain.destroy()
+        except libvirt.libvirtError:
+            failures.append("domain destroy")
+        try:
+            domain.undefine()
+        except libvirt.libvirtError:
+            failures.append("domain undefine")
+    try:
+        _safe_ssh(ssh_destination, cleanup_script, *tokens)
+    except AssertionError:
+        failures.append("remote files")
+    if failures:
+        raise AssertionError("remote proof cleanup failed: " + ", ".join(failures))
+
+
 def test_safe_ssh_rejects_shell_metacharacters() -> None:
     with pytest.raises(ValueError):
         _safe_ssh("operator@host", "exit 0", "name;touch-pwned")
@@ -80,6 +112,37 @@ def test_safe_ssh_redacts_failed_command(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "private-host" not in rendered
     assert "private-token" not in rendered
     assert "secret" not in rendered
+
+
+def test_cleanup_attempts_undefine_and_remote_files_after_destroy_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Domain:
+        undefined = False
+
+        def isActive(self) -> int:  # noqa: N802
+            return 1
+
+        def destroy(self) -> None:
+            raise libvirt.libvirtError("failed")
+
+        def undefine(self) -> None:
+            self.undefined = True
+
+    domain = Domain()
+    called = False
+
+    def succeed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        del args, kwargs
+        called = True
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", succeed)
+    with pytest.raises(AssertionError, match="domain destroy"):
+        _cleanup_remote_proof(domain, "operator@host", "exit 0", "safe")
+    assert domain.undefined
+    assert called
 
 
 def _profile() -> ProvisioningProfile:
@@ -147,6 +210,16 @@ test ! -e "$dir/$3"
 test ! -e "$dir/$1-decoy.qcow2"
 test ! -e "$dir/$1-overlay.qcow2"
 """
+    check_overlay_dac = r"""
+base=$(virsh vol-path --pool default --vol "$2")
+dir=${base%/*}
+overlay="$dir/$1-overlay.qcow2"
+test "$(stat -c %a "$overlay")" = 600
+test "$(stat -c %u "$overlay")" = "$(stat -c %u "$base")"
+test "$(stat -c %g "$overlay")" = "$(stat -c %g "$base")"
+sudo -u libvirt-qemu test -r "$overlay"
+sudo -u libvirt-qemu test -w "$overlay"
+"""
     try:
         _safe_ssh(ssh_destination, setup, run, contract.base_image, supplied)
         with closing(libvirt.open(contract.libvirt_uri)) as conn:
@@ -183,6 +256,7 @@ test ! -e "$dir/$1-overlay.qcow2"
                     pool.storageVolLookupByName(rejected)
 
             overlay = ensure_named_overlay(overlay_pool, contract.base_image, overlay_name)
+            _safe_ssh(ssh_destination, check_overlay_dac, run, contract.base_image, supplied)
             xml = render_domain_xml(
                 system_id,
                 _profile(),
@@ -213,20 +287,14 @@ test ! -e "$dir/$1-overlay.qcow2"
             if decoy in profile or pool_wildcard in profile:
                 raise AssertionError("generated AppArmor profile admitted an unrelated pool path")
     finally:
-        cleanup_failures: list[str] = []
-        if domain is not None:
-            try:
-                if domain.isActive() == 1:
-                    domain.destroy()
-            except libvirt.libvirtError:
-                cleanup_failures.append("domain destroy")
-            try:
-                domain.undefine()
-            except libvirt.libvirtError:
-                cleanup_failures.append("domain undefine")
+        primary = sys.exception()
         try:
-            _safe_ssh(ssh_destination, cleanup, run, contract.base_image, supplied)
-        except AssertionError:
-            cleanup_failures.append("remote files")
-        if cleanup_failures:
-            raise AssertionError("remote proof cleanup failed: " + ", ".join(cleanup_failures))
+            _cleanup_remote_proof(
+                domain, ssh_destination, cleanup, run, contract.base_image, supplied
+            )
+        except AssertionError as cleanup_error:
+            if isinstance(primary, Exception):
+                raise ExceptionGroup(
+                    "remote proof and cleanup both failed", [primary, cleanup_error]
+                ) from None
+            raise

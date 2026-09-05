@@ -32,7 +32,9 @@ storage pool identity, security driver, and cleanup behavior.
 2. It resolves the requested base volume from that refreshed view, reads its XML, requires no
    `backingStore`, and obtains its path. This covers operator-staged, newly uploaded supplied,
    legacy supplied, retry, and replaced-worker-source lanes. On reuse, it reads the refreshed
-   overlay XML and verifies that its immediate backing path equals the observed base path.
+   overlay XML and verifies that its immediate backing path equals the observed base path. New
+   overlays copy the base target's numeric owner/group and use mode `0600`, avoiding libvirt's
+   root-owned default without granting group or world write access.
 3. `PreparedOverlay` carries `name`, `backing_path`, and `created`. A missing or malformed backing
    record, or a mismatch on reuse, is a configuration failure before domain definition.
 4. Provisioning passes `backing_path` to `render_domain_xml`.
@@ -80,7 +82,8 @@ the host path.
   `render_domain_xml`, starts the domain under an enforcing generated AppArmor profile, and verifies
   the generated `.files` entry names the base without disabling the security driver. A test-owned
   decoy file in the same pool must be absent from the profile, as must any pool-wide wildcard rule.
-  Cleanup removes the test domain, overlay, base, and decoy.
+  Cleanup removes the test-owned domain, overlay, negative fixtures, and decoy. The borrowed
+  catalog base is unchanged.
 - `just lint`, `just type`, focused provider tests, `just test-ansible`, and `just ci` remain green.
 
 Native ppc64le execution is excluded by the campaign. No Ansible policy change is expected: the

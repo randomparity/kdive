@@ -240,7 +240,11 @@ def test_readback_treats_an_absent_or_empty_capacity_unit_as_bytes(
 def test_readback_accepts_the_document_render_volume_xml_produces(pool: FakeStoragePool) -> None:
     """The double must not refuse the provider's own output."""
     document = render_volume_xml(
-        "overlay.qcow2", capacity_bytes=1048576, backing_path=f"{POOL_TARGET}/base.qcow2"
+        "overlay.qcow2",
+        capacity_bytes=1048576,
+        backing_path=f"{POOL_TARGET}/base.qcow2",
+        owner_id=64055,
+        group_id=108,
     )
     root = readback(pool, document)
     capacity = find(root, "capacity")

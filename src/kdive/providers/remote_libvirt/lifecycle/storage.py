@@ -158,7 +158,17 @@ def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> Prep
         backing_path = base.path()
     except libvirt.libvirtError as exc:
         raise _infra("resolving base image volume path", volume=base_volume) from exc
-    _require_backing_path(base, expected=None, volume=base_volume)
+    base_xml = _require_backing_path(base, expected=None, volume=base_volume)
+    from kdive.providers.remote_libvirt.lifecycle.xml import volume_target_identity
+
+    try:
+        owner_id, group_id = volume_target_identity(base_xml)
+    except ValueError as exc:
+        raise CategorizedError(
+            "remote base volume has invalid target ownership metadata",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"volume": base_volume},
+        ) from exc
     if _volume_exists(pool, name):
         try:
             overlay = pool.storageVolLookupByName(name)
@@ -169,7 +179,13 @@ def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> Prep
     created: Volume | None = None
     try:
         capacity = int(base.info()[1])
-        xml = render_volume_xml(name, capacity_bytes=capacity, backing_path=backing_path)
+        xml = render_volume_xml(
+            name,
+            capacity_bytes=capacity,
+            backing_path=backing_path,
+            owner_id=owner_id,
+            group_id=group_id,
+        )
         created = pool.createXML(xml)
     except libvirt.libvirtError as exc:
         raise CategorizedError(
@@ -188,7 +204,7 @@ def ensure_named_overlay(pool: OverlayPool, base_volume: str, name: str) -> Prep
     return PreparedOverlay(name=name, backing_path=backing_path, created=True)
 
 
-def _require_backing_path(item: _InspectableVolume, *, expected: str | None, volume: str) -> None:
+def _require_backing_path(item: _InspectableVolume, *, expected: str | None, volume: str) -> str:
     """Require terminal bases or an overlay's exact immediate backing path."""
     from kdive.providers.remote_libvirt.lifecycle.xml import volume_backing_path
 
@@ -210,6 +226,7 @@ def _require_backing_path(item: _InspectableVolume, *, expected: str | None, vol
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"volume": volume},
         )
+    return volume_xml
 
 
 def cleanup_overlay_if_created(pool: Pool, overlay: PreparedOverlay) -> None:

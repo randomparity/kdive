@@ -334,7 +334,11 @@ def test_allocate_excludes_tried_ports() -> None:
 
 def test_render_volume_xml_backing_store() -> None:
     xml = render_volume_xml(
-        "kdive-X-overlay.qcow2", capacity_bytes=42, backing_path="/pool/base.qcow2"
+        "kdive-X-overlay.qcow2",
+        capacity_bytes=42,
+        backing_path="/pool/base.qcow2",
+        owner_id=64055,
+        group_id=108,
     )
     root = fromstring(xml)
     assert root.findtext("./name") == "kdive-X-overlay.qcow2"
@@ -677,7 +681,11 @@ class FakeVolume:
             if self.backing_path is None
             else (f"<backingStore><path>{self.backing_path}</path></backingStore>")
         )
-        return f"<volume><name>{self.volume_name}</name>{backing}</volume>"
+        return (
+            f"<volume><name>{self.volume_name}</name><target><permissions>"
+            "<owner>64055</owner><group>108</group></permissions></target>"
+            f"{backing}</volume>"
+        )
 
 
 class FakePool:
