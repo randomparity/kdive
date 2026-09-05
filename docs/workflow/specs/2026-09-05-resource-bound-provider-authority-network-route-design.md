@@ -96,6 +96,17 @@ systemd unit, listener readiness, and clean removal when disabled. Shared task f
 by `live_vm_host`, but runner-specific provisioning does not own production remote hosts. The
 role's preflight requires the complete listener tuple and rejects unsafe or empty values.
 
+The host receives `KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES` as a comma-separated,
+non-empty list of 1 through 32 unique canonical ASCII account names matching
+`[a-z_][a-z0-9_-]{0,31}`. Empty members, duplicates, non-canonical names, and over-limit lists fail
+configuration before readiness. Access-boundary validation continues to require every named
+account to exist and rejects uid 0, the authority uid, and membership in the authority owner or
+client groups without exposing the account name. The setting defaults to `kdive-worker-1` through
+`kdive-worker-8` and `kdive`, preserving `live_vm_host`. `provider_authority_host` renders a
+non-empty list containing the pre-existing `ansible_user_id` followed by any explicitly configured
+additional identities, rejects duplicates before host mutation, and never creates placeholder
+worker accounts.
+
 The existing `gdbstub_acl` role remains the cross-distribution firewall owner. It accepts the
 optional authority port as another IPv4 protected TCP port, uses the existing validated IPv4 worker
 CIDR, adds source-CIDR allow and lower-priority deny rules on firewalld and ordered allow/deny rules
@@ -172,4 +183,6 @@ Tests cover binding completeness and validation; resource rebinding and endpoint
 TLS version, certificate trust, server-name mismatch, expired/untrusted certificates; inactive and
 replaced credentials; deadline and stalled-peer behavior; bounded framing; redaction; AF_UNIX and
 existing-operation compatibility; listener and credential drift; cleanup; worker composition; role
-defaults/preflight/rendering/firewall/idempotence; and the redacted authorized-host live carrier.
+defaults/preflight/rendering/firewall/idempotence; denied-identity default compatibility,
+host-specific parsing, missing-account failure and production rendering; and the redacted
+authorized-host live carrier.

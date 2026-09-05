@@ -42,12 +42,23 @@ credentials, service policy, and readiness. The existing cross-distribution `gdb
 the additional source-scoped firewall rule and stale-rule removal. Partial configuration fails
 closed and the default deployment exposes no network listener.
 
+The authority's denied local identities are a host-specific, non-empty setting rather than an
+assumption that every provider host has the live-runner accounts. It contains 1 through 32 unique
+canonical ASCII account names matching `[a-z_][a-z0-9_-]{0,31}`. Readiness still requires every
+listed account to exist and rejects root, the authority identity, or membership in either authority
+group. `live_vm_host` keeps `kdive-worker-1` through `kdive-worker-8` and `kdive` as its unchanged
+default. `provider_authority_host` supplies its existing Ansible control identity plus any explicit
+additional local identities; it does not create placeholder worker accounts. Parsing, lookup, and
+readiness failures remain bounded and redact account names.
+
 ## Consequences
 
 Remote workers can reach the exact authority paired with their allocated Resource without gaining
 a general network connector. The AF_UNIX route and its protocol remain compatible. Network
 deployment adds certificate, firewall, readiness, and rotation obligations; drift retracts
-readiness. #2250 and #2200 can add closed operations over this route without changing its binding.
+readiness. A provider-host deployment must name the real local identities whose exclusion it
+proves; a missing named identity is a failed deployment, not a skipped check. #2250 and #2200 can
+add closed operations over this route without changing its binding.
 IPv6-only provider hosts remain unsupported until a separately designed family-aware firewall
 contract exists.
 

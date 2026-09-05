@@ -168,6 +168,8 @@ Files: new `deploy/ansible/roles/provider_authority_host/`, `deploy/ansible/site
 `deploy/ansible/roles/gdbstub_acl/tasks/main.yml`, shared authority task files where extraction is
 needed, `deploy/ansible/roles/live_vm_host/` only as a consumer of shared ownership,
 `deploy/systemd/system/kdive-external-boot-authority.service`,
+`src/kdive/providers/external_boot_authority/settings.py`,
+`src/kdive/providers/external_boot_authority/host.py`, corresponding host-setting tests, and
 `tests/deploy/test_live_worker_provisioning.py`.
 
 Interfaces:
@@ -176,11 +178,17 @@ Interfaces:
   credentials, environment, readiness and disabled cleanup on `remote_libvirt_hosts`.
 - `gdbstub_acl` consumes an optional authority port and its existing IPv4 worker CIDR and owns
   source-scoped allow/deny creation plus stale source/port removal on firewalld and ufw.
+- Authority denied identities are 1 through 32 unique canonical ASCII account names. Existing
+  `live_vm_host` deployments retain `kdive-worker-1` through `kdive-worker-8` and `kdive` as the
+  default; `provider_authority_host` supplies its pre-existing `ansible_user_id` plus explicit
+  additional identities and creates no placeholder accounts. Missing identities and unsafe group
+  membership continue to fail closed with redacted readiness diagnostics.
 
 Verification:
 
 - Mode: focused-test — `site.yml` role application, defaults disabled, partial input rejection,
   rendered environment, IPv6 rejection, Debian and Red Hat IPv4 firewall source/port/protocol,
+  denied-identity bounds/default compatibility/production rendering/missing-account failure,
   service confinement, drift, idempotence, and enable-then-disable stale-rule removal; observe
   assertions fail, then pass
   `just test-verbose tests/deploy/test_live_worker_provisioning.py` and the existing
@@ -191,7 +199,8 @@ Steps:
 1. Add deployment contract tests for production play application, disabled, complete, partial,
    unsafe, drift, idempotent, Debian/Red Hat, and disable-after-enable configurations.
 2. Extract the smallest shared authority-host tasks from `live_vm_host`, build the narrow production
-   role, apply it to `remote_libvirt_hosts`, and render the conditional listener environment.
+   role, apply it to `remote_libvirt_hosts`, and render the conditional listener and bounded
+   host-specific denied-identity environment.
 3. Extend `gdbstub_acl` with the source-scoped authority-port rules and explicit stale-rule removal
    without widening systemd privileges or disturbing its existing protected ports.
 4. Run the focused command; expect all selected tests to pass.
