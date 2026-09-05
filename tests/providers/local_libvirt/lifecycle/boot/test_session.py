@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+import libvirt
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
 )
@@ -1718,6 +1720,67 @@ def test_factory_pins_before_open_and_lease_cannot_release_while_session_live() 
     lease.release()
 
 
+@pytest.mark.parametrize("channel", ["absent", "duplicate", "malformed"])
+def test_factory_rejects_legacy_definition_before_resource_mutation(channel: str) -> None:
+    events: list[str] = []
+    domain = Domain(events, inactive_xml=_xml(channel=channel))
+
+    with pytest.raises(CategorizedError, match="reprovision") as caught:
+        _factory(events, domain).open(_lease(), _expected())
+
+    assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    assert caught.value.terminal is True
+    assert caught.value.details == {"system_id": str(SYSTEM_ID)}
+    assert "artifact.open" not in events
+    assert "domain.define" not in events
+    assert "domain.create" not in events
+    assert "domain.destroy" not in events
+
+
+@pytest.mark.parametrize(
+    ("live_channel", "inactive_channel", "accepted"),
+    [("valid", "absent", False), ("absent", "valid", True)],
+)
+def test_factory_uses_inactive_channel_when_live_xml_disagrees(
+    live_channel: str, inactive_channel: str, accepted: bool
+) -> None:
+    events: list[str] = []
+    domain = Domain(
+        events,
+        _xml(channel=live_channel),
+        inactive_xml=_xml(channel=inactive_channel),
+    )
+    if accepted:
+        session = _factory(events, domain).open(_lease(), _expected())
+        session.close()
+        assert "domain.define" not in events
+    else:
+        with pytest.raises(CategorizedError, match="reprovision"):
+            _factory(events, domain).open(_lease(), _expected())
+        assert "artifact.open" not in events
+
+    if accepted:
+        assert events.index("domain.xml:2") < events.index("domain.xml:0")
+
+
+def test_factory_bounds_inactive_xml_failure_before_resource_mutation() -> None:
+    events: list[str] = []
+
+    class UnreadableInactiveDomain(Domain):
+        def XMLDesc(self, flags: int) -> str:  # noqa: N802
+            if flags == 2:
+                raise libvirt.libvirtError("private host path")
+            return super().XMLDesc(flags)
+
+    with pytest.raises(CategorizedError) as caught:
+        _factory(events, UnreadableInactiveDomain(events)).open(_lease(), _expected())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"system_id": str(SYSTEM_ID)}
+    assert "private host path" not in str(caught.value)
+    assert "artifact.open" not in events
+
+
 @pytest.mark.parametrize("lease", [None, object()])
 def test_missing_or_foreign_lease_opens_nothing(lease: object | None) -> None:
     events: list[str] = []
@@ -1746,7 +1809,7 @@ def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     assert inspection.definition_identity.startswith("sha256:")
     assert inspection.source_boot_identity.startswith("sha256:")
     assert inspection.definition_identity == (
-        "sha256:b3a319e84c14ad49042057dab9c8ce445a144e7d4dea7b193674d9a35aef3110"
+        "sha256:c2e059232ae83929abca824acf42ad76f803f4a105dd416e18dcb8f21fb6bc27"
     )
     assert inspection.source_boot_identity == (
         "sha256:af7c3d00f78226cd4b917aa70737e2557cfa5989c5efa9a42b2555992adbe176"

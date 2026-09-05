@@ -1,4 +1,4 @@
-"""Operation-scoped local-libvirt external-boot host capability (ADR-0587)."""
+"""Operation-scoped local-libvirt external-boot host capability (ADRs 0587, 0600)."""
 
 from __future__ import annotations
 
@@ -18,9 +18,11 @@ from dataclasses import dataclass
 from typing import BinaryIO, Literal, Protocol
 from uuid import UUID, uuid4
 
+import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.ports.external_boot import (
@@ -1117,6 +1119,16 @@ class LocalExternalBootSessionFactory:
             expected_name = domain_name_for(system_id)
             domain = connection.lookupByName(expected_name)
             expected_overlay = overlay_path(system_id)
+            try:
+                inactive_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+            except libvirt.libvirtError as exc:
+                raise CategorizedError(
+                    "local-libvirt external-boot inactive definition could not be read",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"system_id": str(system_id)},
+                ) from exc
+            inactive_root = _parse_owned_xml(inactive_xml, system_id, expected_overlay)
+            _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)
             _parse_owned_xml(xml, system_id, expected_overlay)
             overlay_fd = self._open_overlay(expected_overlay)
@@ -1221,6 +1233,18 @@ def _unconfigured_observation(_system_id: UUID, _domain: RunningDomain) -> Runni
 
 def _unconfigured_cleanup(_root_fd: int, _binding: ExternalBootActivationBinding) -> None:
     raise RuntimeError("local external-boot payload cleanup is not configured")
+
+
+def _require_guest_agent_channel(root: ET.Element, system_id: UUID) -> None:
+    targets = root.findall("./devices/channel/target[@name='org.qemu.guest_agent.0']")
+    if len(targets) != 1 or targets[0].get("type") != "virtio":
+        raise CategorizedError(
+            "local-libvirt external-boot requires reprovisioning: "
+            "the qemu-guest-agent channel is absent or malformed",
+            category=ErrorCategory.READINESS_FAILURE,
+            details={"system_id": str(system_id)},
+            terminal=True,
+        )
 
 
 def _parse_owned_xml(xml: str, system_id: UUID, expected_overlay: str) -> ET.Element:
