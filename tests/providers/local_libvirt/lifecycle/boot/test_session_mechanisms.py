@@ -11,12 +11,13 @@ import stat
 import sys
 import types
 from pathlib import Path
-from typing import get_args
+from typing import cast, get_args
 from uuid import UUID
 
 import libvirt
 import pytest
 
+import kdive.providers.local_libvirt.lifecycle.boot.readiness as readiness_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
@@ -24,6 +25,14 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     ModuleArchiveCapture,
     RecoveryMetadataStore,
     TargetProjectionV1,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    ConsoleReadinessWindow,
+    LocalExternalBootReadiness,
+    ProbeFailure,
+    ReadinessResult,
+    _DomainExitProbe,
+    prepare_console_readiness_window,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
@@ -70,6 +79,114 @@ BINDING = ExternalBootActivationBinding(
 )
 OWNERSHIP = OperationOwnership(SYSTEM_ID, BINDING)
 _NOTES = bytes.fromhex("040000000400000003000000474e5500") + bytes.fromhex("01020304")
+
+
+class _ReadinessWindow:
+    def __init__(self, reads: list[bytes], *, deadline: float = 10.0) -> None:
+        self._reads = iter(reads)
+        self.deadline = deadline
+
+    def read(self) -> bytes:
+        return next(self._reads)
+
+    def close(self) -> None:
+        pass
+
+
+def test_external_boot_readiness_allows_ready_after_transient_probe_failure() -> None:
+    times = iter([0.0, 0.0, 5.0])
+    sleeps: list[float] = []
+    probe = LocalExternalBootReadiness(
+        clock=lambda: next(times),
+        sleep=sleeps.append,
+        domain_exit_probe=lambda _name: _DomainExitProbe(False, ProbeFailure.VIRSH_TIMEOUT),
+    )
+    window = cast(ConsoleReadinessWindow, _ReadinessWindow([b"booting\n", b"kdive-ready\n"]))
+
+    assert probe(SYSTEM_ID, window) == ReadinessResult(True, True)
+    assert sleeps == [5.0]
+
+
+def test_external_boot_readiness_delayed_first_call_does_not_renew_deadline() -> None:
+    window = cast(ConsoleReadinessWindow, _ReadinessWindow([b"kdive-ready\n"], deadline=10.0))
+    probe = LocalExternalBootReadiness(clock=lambda: 11.0)
+
+    assert probe(SYSTEM_ID, window) == ReadinessResult(False, False)
+
+
+def test_prepared_window_discards_prior_marker_before_new_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"kdive-ready\n")
+    monkeypatch.setattr(readiness_module, "console_log_path", lambda _system_id: path)
+    monkeypatch.setattr(readiness_module.config, "require", lambda _setting: 10.0)
+
+    window = prepare_console_readiness_window(SYSTEM_ID)
+    try:
+        with path.open("ab") as stream:
+            stream.write(b"Kernel panic - not syncing: new boot failed\n")
+        result = LocalExternalBootReadiness(clock=lambda: 0.0)(SYSTEM_ID, window)
+    finally:
+        window.close()
+
+    assert result == ReadinessResult(True, False)
+
+
+def test_external_boot_readiness_terminal_domain_gets_one_final_read() -> None:
+    window = cast(
+        ConsoleReadinessWindow,
+        _ReadinessWindow([b"booting\n", b"Kernel panic - not syncing\n"]),
+    )
+    probe = LocalExternalBootReadiness(
+        clock=lambda: 0.0,
+        domain_exit_probe=lambda _name: _DomainExitProbe(True),
+    )
+
+    assert probe(SYSTEM_ID, window) == ReadinessResult(True, False)
+
+
+def test_console_readiness_window_rejects_path_replacement(tmp_path: Path) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"booting\n")
+    descriptor = os.open(path, os.O_RDWR)
+    window = ConsoleReadinessWindow(path, descriptor, deadline=10.0, max_bytes=64)
+    assert window.read() == b"booting\n"
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"kdive-ready\n")
+    replacement.replace(path)
+
+    with pytest.raises(RuntimeError, match="window changed"):
+        window.read()
+    window.close()
+
+
+def test_console_readiness_window_rejects_divergent_truncate_regrow(tmp_path: Path) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"booting\n")
+    descriptor = os.open(path, os.O_RDWR)
+    window = ConsoleReadinessWindow(path, descriptor, deadline=10.0, max_bytes=64)
+    assert window.read() == b"booting\n"
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, b"kdive-ready\n")
+
+    with pytest.raises(RuntimeError, match="window changed"):
+        window.read()
+    window.close()
+
+
+def test_console_readiness_window_enforces_exact_byte_bound(tmp_path: Path) -> None:
+    path = tmp_path / "console.log"
+    path.write_bytes(b"x" * 4)
+    descriptor = os.open(path, os.O_RDWR)
+    window = ConsoleReadinessWindow(path, descriptor, deadline=10.0, max_bytes=4)
+    assert window.read() == b"x" * 4
+    os.lseek(descriptor, 0, os.SEEK_END)
+    os.write(descriptor, b"y")
+
+    with pytest.raises(RuntimeError, match="exceeds"):
+        window.read()
+    window.close()
 
 
 def _lease() -> LocalOperationLease:
@@ -908,12 +1025,18 @@ class TestFailClosedDefaults:
     """
 
     def test_unconfigured_readiness_raises(self, tmp_path: Path) -> None:
+        console = tmp_path / "console.log"
+        console.write_bytes(b"")
         session = _session(
             _private_dir(tmp_path / "artifacts"),
+            prepare_console=lambda _sid: ConsoleReadinessWindow(
+                console, os.open(console, os.O_RDWR), deadline=10.0
+            ),
             observe_running=_noop_observation,
             cleanup_payloads=_noop_cleanup,
         )
         try:
+            session.start()
             with pytest.raises(
                 RuntimeError, match="local external-boot readiness is not configured"
             ):

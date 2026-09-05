@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess  # noqa: S404 - virsh domstate uses fixed argv, no shell  # nosec B404
 import time
+from collections.abc import Callable
 from enum import StrEnum
+from pathlib import Path
 from typing import NamedTuple
 from uuid import UUID
 
 import kdive.config as config
 from kdive.domain.lifecycle.crash_signatures import first_crash_signature
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.local_libvirt.lifecycle.storage import _open_validated_console_log
+from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
 
 _POLL_INTERVAL_SECONDS = 5.0
@@ -22,6 +26,7 @@ _TERMINAL_DOMSTATES = frozenset({"shut off", "crashed"})
 _VIRSH = "virsh"
 
 _READINESS_MARKER = "kdive-ready"
+_MAX_CONSOLE_WINDOW_BYTES = 2 * 1024 * 1024
 
 _log = logging.getLogger(__name__)
 
@@ -58,6 +63,73 @@ class _DomainExitProbe(NamedTuple):
 
     exited: bool
     error: ProbeFailure | None = None
+
+
+class _ConsoleWindowFailure(RuntimeError):
+    """The prepared console window no longer proves append continuity."""
+
+
+class ConsoleReadinessWindow:
+    """One bounded retained console inode and its pre-create deadline (ADR-0600)."""
+
+    def __init__(
+        self,
+        path: Path,
+        descriptor: int,
+        *,
+        deadline: float,
+        max_bytes: int = _MAX_CONSOLE_WINDOW_BYTES,
+    ) -> None:
+        identity = os.fstat(descriptor)
+        self._path = path
+        self._descriptor: int | None = descriptor
+        self._identity = (identity.st_dev, identity.st_ino)
+        self._observed = b""
+        self.deadline = deadline
+        self._max_bytes = max_bytes
+
+    def read(self) -> bytes:
+        descriptor = self._require_open()
+        try:
+            current = os.fstat(descriptor)
+            named = os.stat(self._path, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != self._identity or (
+                named.st_dev,
+                named.st_ino,
+            ) != self._identity:
+                raise _ConsoleWindowFailure("console readiness window changed")
+            data = os.pread(descriptor, self._max_bytes + 1, 0)
+        except OSError as exc:
+            raise _ConsoleWindowFailure("console readiness window changed") from exc
+        if len(data) > self._max_bytes:
+            raise _ConsoleWindowFailure("console readiness window exceeds its byte bound")
+        if not data.startswith(self._observed):
+            raise _ConsoleWindowFailure("console readiness window changed")
+        self._observed = data
+        return data
+
+    def close(self) -> None:
+        descriptor, self._descriptor = self._descriptor, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def _require_open(self) -> int:
+        if self._descriptor is None:
+            raise RuntimeError("console readiness window is closed")
+        return self._descriptor
+
+
+def prepare_console_readiness_window(system_id: UUID) -> ConsoleReadinessWindow:
+    """Truncate and retain the validated console inode for one external boot."""
+    path = console_log_path(system_id)
+    descriptor = _open_validated_console_log(path, os.O_RDWR)
+    try:
+        os.ftruncate(descriptor, 0)
+        deadline = time.monotonic() + config.require(LIBVIRT_BOOT_WINDOW_S)
+        return ConsoleReadinessWindow(path, descriptor, deadline=deadline)
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
@@ -133,6 +205,49 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
             stderr or f"virsh domstate exited {proc.returncode}",
         )
     return _DomainExitProbe(False)
+
+
+class LocalExternalBootReadiness:
+    """Poll one prepared external-boot console window to its fixed deadline (ADR-0600)."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        domain_exit_probe: Callable[[str], _DomainExitProbe] = _domain_exit_probe,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._domain_exit_probe = domain_exit_probe
+
+    def __call__(self, system_id: UUID, window: ConsoleReadinessWindow) -> ReadinessResult:
+        first_probe_error: ProbeFailure | None = None
+        domain_name = domain_name_for(system_id)
+        while self._clock() < window.deadline:
+            try:
+                verdict = classify_console(window.read())
+            except _ConsoleWindowFailure:
+                return ReadinessResult(answered=True, ok=False)
+            result = _verdict_to_result(verdict, exited=False)
+            if result is not None:
+                return result
+            probe = self._domain_exit_probe(domain_name)
+            if first_probe_error is None and probe.error is not None:
+                first_probe_error = probe.error
+            if probe.exited:
+                try:
+                    final = classify_console(window.read())
+                except _ConsoleWindowFailure:
+                    return ReadinessResult(True, False, first_probe_error)
+                return _verdict_to_result(final, exited=True) or ReadinessResult(
+                    True, False, first_probe_error
+                )
+            remaining = window.deadline - self._clock()
+            if remaining <= 0:
+                break
+            self._sleep(min(_POLL_INTERVAL_SECONDS, remaining))
+        return ReadinessResult(False, False, first_probe_error)
 
 
 def _domain_exited(domain_name: str) -> bool:  # pragma: no cover - live_vm
