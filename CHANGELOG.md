@@ -1240,6 +1240,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct metadata test evidence
 - Design boot artifact name ownership
 - Correct artifact name bound
+- Register remote boot test inputs
+- Refresh configuration reference
 
 ### Fixed
 
