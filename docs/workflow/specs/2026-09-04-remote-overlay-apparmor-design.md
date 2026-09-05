@@ -17,23 +17,28 @@ domain renderer currently emits only `source pool=... volume=...`. On the affect
 libvirt's generated profile includes the resolved top volume but omits the base, and QEMU fails at
 `domain.create()` with permission denied. DAC access as the QEMU account succeeds.
 
-Remote base volumes are standalone qcow2 images: operator images are staged as full copies and
-supplied images are uploaded into standalone libvirt volumes. The supported chain is therefore
-exactly overlay then base. This change must retain the volume source, storage pool identity,
+Remote base volumes are required to be standalone qcow2 images, but the existing supplied-image
+check proves only magic bytes and an operator can stage a chained file independently. Admission
+will now enforce the terminal-base contract on both lanes. The supported chain is therefore
+provably overlay then base. This change must retain the volume source, storage pool identity,
 security driver, and cleanup behavior.
 
 ## Components and flow
 
-1. `ensure_named_overlay` resolves the requested base volume and obtains its libvirt path before
-   creating an overlay. On reuse, it reads the existing overlay's volume XML and verifies that its
-   immediate backing path equals the resolved requested base path.
-2. `PreparedOverlay` carries `name`, `backing_path`, and `created`. A missing or malformed backing
+1. The supplied upload lane runs bounded `qemu-img info --output=json --backing-chain` before any
+   remote mutation and rejects output containing more than the source image. The executable is an
+   existing `libvirt_stack` prerequisite.
+2. `ensure_named_overlay` resolves the requested base volume, reads its libvirt XML, requires no
+   `backingStore`, and obtains its path before creating an overlay. This covers both operator and
+   supplied remote volumes. On reuse, it reads the existing overlay's volume XML and verifies that
+   its immediate backing path equals the resolved requested base path.
+3. `PreparedOverlay` carries `name`, `backing_path`, and `created`. A missing or malformed backing
    record, or a mismatch on reuse, is a configuration failure before domain definition.
-3. Provisioning passes `backing_path` to `render_domain_xml`.
-4. The disk remains `type="volume"` with the existing pool/volume source. The renderer adds
+4. Provisioning passes `backing_path` to `render_domain_xml`.
+5. The disk remains `type="volume"` with the existing pool/volume source. The renderer adds
    `<backingStore type="file"><format type="qcow2"/><source file="..."/><backingStore/>
    </backingStore>`.
-5. Libvirt's existing `virt-aa-helper` processes the definition and emits an exact read grant for
+6. Libvirt's existing `virt-aa-helper` processes the definition and emits an exact read grant for
    that base. No host-wide AppArmor rule is installed.
 
 The path is libvirt-produced, not constructed from a request or inventory text. XML construction
@@ -43,24 +48,33 @@ the host path.
 ## Failure behavior
 
 - A missing requested base retains the current configuration error.
+- A supplied or operator-staged base carrying any backing store is rejected as a configuration
+  error before overlay/domain mutation. Missing `qemu-img`, timeout, malformed JSON, and execution
+  failure use the existing missing-dependency/infrastructure/provisioning taxonomy without raw
+  path leakage.
 - An unexpected libvirt lookup, path, or XML-read failure is an infrastructure failure.
 - A reused overlay with absent, malformed, or different backing metadata is a configuration error;
   it is neither rewritten nor deleted because another running or recoverable System may own it.
-- A newly created overlay whose readback lacks the expected backing path is reclaimed by the
-  existing failed-provision cleanup path and provisioning fails.
+- The volume returned by overlay creation is read back immediately. Missing, malformed, or
+  divergent backing metadata causes that new overlay to be deleted before provisioning fails.
 - Domain-start retry and port allocation behavior is unchanged.
 
 ## Verification
 
-- Storage tests prove new and reused overlays return the exact libvirt base path, and prove reuse
-  fails closed on absent or divergent backing metadata.
+- Upload tests prove standalone qcow2 output is admitted while a nested backing entry, malformed
+  output, timeout, missing executable, and tool failure are rejected before upload.
+- Storage tests prove new and reused overlays return the exact libvirt base path; base volumes with
+  backing metadata are rejected; and both created/reused overlays fail closed on absent or
+  divergent backing metadata. Created-overlay failures prove deletion.
 - XML tests prove a volume disk renders one file-backed base and an explicit terminal node, with
   XML metacharacters encoded rather than becoming structure.
 - Provisioning tests capture the exact definition passed before `domain.create()` and prove it
   contains the overlay volume and matching base path.
 - A native clean Ubuntu proof uses production `ensure_overlay` and `render_domain_xml`, starts the
   domain under an enforcing generated AppArmor profile, and verifies the generated `.files` entry
-  names the base without disabling the security driver. Cleanup removes the test domain/overlay.
+  names the base without disabling the security driver. A test-owned decoy file in the same pool
+  must be absent from the profile, as must any pool-wide wildcard rule. Cleanup removes the test
+  domain, overlay, and decoy.
 - `just lint`, `just type`, focused provider tests, `just test-ansible`, and `just ci` remain green.
 
 Native ppc64le execution is excluded by the campaign. No Ansible policy change is expected: the
@@ -85,14 +99,14 @@ the volume it has already looked up, and does not trust a requested name to stan
 - Exact volume lookup binds the grant to the selected base; reuse equality binds it to the existing
   overlay. Failure is closed before define/start.
 - ElementTree encodes the path in XML.
-- The terminal backing node bounds the represented chain to the provider's standalone-base
-  contract.
+- The terminal backing node bounds the represented chain to the provider's admission-checked
+  standalone-base contract.
 - Error details and public proof output omit host paths.
 - AppArmor access remains per-domain; no shared abstraction or security-driver default changes.
 
 ### Out of scope
 
-Nested operator base-image chains are unsupported rather than recursively granted. Malicious
+Nested base-image chains are rejected rather than recursively granted. Malicious
 libvirt daemon output is outside the model because the provider already entrusts that daemon with
 domain and storage control. Hot-plug and block-commit chains are unrelated to this provision-time
 definition.

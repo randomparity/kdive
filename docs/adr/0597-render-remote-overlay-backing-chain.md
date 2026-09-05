@@ -11,16 +11,21 @@ top volume path after its first AppArmor profile generation. The translated over
 but the operator-staged base named only inside the volume metadata is absent from the generated
 per-domain profile. QEMU therefore cannot open the qcow2 backing file.
 
-The base volumes accepted by this provider are standalone qcow2 images. The one supported chain is
-the per-System overlay followed by its base. Libvirt's domain schema can represent that chain even
-while the top disk remains a pool volume, and `virt-aa-helper` walks an explicit domain backing
-chain when producing the domain's exact file rules.
+The one supported chain is the per-System overlay followed by a standalone base. Existing supplied
+image admission checks only qcow2 magic, however, and a refreshed operator volume can also carry a
+backing record. The provider therefore has to enforce the terminal-base premise rather than infer
+it from format. Libvirt's domain schema can represent that chain even while the top disk remains a
+pool volume, and `virt-aa-helper` walks an explicit domain backing chain when producing the
+domain's exact file rules.
 
 ## Decision
 
-`ensure_overlay` returns the base path obtained from libvirt together with the overlay name. The
-remote domain renderer keeps the top disk as `type="volume"` and adds one explicit file-backed
-`backingStore` node for that path, terminated by an empty `backingStore` node.
+Before upload, a supplied qcow2 is inspected with the already-provisioned `qemu-img`; any backing
+filename is rejected. Before overlay creation, the selected remote base volume's XML must likewise
+contain no `backingStore`. `ensure_overlay` then returns the base path obtained from libvirt
+together with the overlay name. The remote domain renderer keeps the top disk as `type="volume"`
+and adds one explicit file-backed `backingStore` node for that path, terminated by an empty
+`backingStore` node.
 
 The path is never assembled from configuration or a volume name: it is the path returned by the
 already-resolved base volume. A reused overlay reads its recorded backing path from volume XML and
@@ -35,8 +40,8 @@ path unrelated to the overlay.
 - The domain continues to record its storage pool for teardown and keeps ADR-0080's volume-backed
   lifecycle.
 - Provider fakes must retain the volume path and backing metadata that production now consumes.
-- A base image with its own backing file remains unsupported; the terminal node states that closed
-  chain explicitly.
+- A base image with its own backing file fails admission; the terminal node truthfully states the
+  checked closed chain.
 
 ## Considered & rejected
 
@@ -49,3 +54,6 @@ path unrelated to the overlay.
   running libvirt 12.0.0 admitted the translated overlay but denied the staged base, while
   `/usr/lib/libvirt/virt-aa-helper -c -d` over an explicit domain backing node emitted one exact
   read rule for that base.
+- **Accept nested base chains and recursively render them.** judgment: the existing build and
+  upload model produces standalone bases; admitting arbitrary host paths from a nested chain adds
+  permission and validation surface without serving the issue's catalog-image outcome.
