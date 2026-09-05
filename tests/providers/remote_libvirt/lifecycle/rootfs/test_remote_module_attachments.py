@@ -1,6 +1,9 @@
 """Fail-closed remote module attachment inspection."""
 
 import posixpath
+import subprocess
+import sys
+from pathlib import Path
 
 import libvirt
 import pytest
@@ -9,7 +12,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     ExpectedAppliance,
     ExpectedAttachmentState,
-    inspect_module_attachments,
+    HostStatDeviceIdentity,
+    RemoteDeviceIdentity,
+)
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    inspect_module_attachments as _inspect_module_attachments,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import render_volume_xml
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
@@ -60,6 +67,24 @@ class Conn:
                 if posixpath.normpath(volume.path()) == normalized:
                     return volume
         raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
+
+
+class IdentityPort:
+    def __init__(self, aliases: dict[str, str] | None = None) -> None:
+        self.aliases = aliases or {}
+        self.identities: dict[str, RemoteDeviceIdentity] = {}
+
+    def identity(self, path: str) -> RemoteDeviceIdentity | None:
+        canonical = self.aliases.get(posixpath.normpath(path), posixpath.normpath(path))
+        return self.identities.setdefault(canonical, RemoteDeviceIdentity(1, len(self.identities)))
+
+
+def inspect_module_attachments(
+    conn: Conn,
+    state: ExpectedAttachmentState,
+    identity_port: IdentityPort | HostStatDeviceIdentity | None = None,
+):
+    return _inspect_module_attachments(conn, identity_port or IdentityPort(), state)
 
 
 def storage_pool(*, name: str = "systems", target_path: str = "/pool") -> FakeStoragePool:
@@ -354,18 +379,19 @@ def test_lexical_path_alias_of_protected_volume_is_rejected(attribute: str, acti
         inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
 
 
-def test_managed_path_lookup_error_fails_closed() -> None:
+def test_managed_volume_lookup_error_is_infrastructure_failure() -> None:
     class FailingConn(Conn):
-        def storageVolLookupByPath(self, path: str):  # noqa: N802
+        def storagePoolLookupByName(self, name: str) -> FakeStoragePool:  # noqa: N802
             raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
 
     state = expected()
     tenant = foreign_xml("tenant", "<disk type='file'><source file='/srv/unmanaged'/></disk>")
 
-    with pytest.raises(CategorizedError, match="could not resolve"):
+    with pytest.raises(CategorizedError, match="could not resolve") as raised:
         inspect_module_attachments(
             FailingConn([Domain(system_xml(state.system_id)), tenant]), state
         )
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_unprotected_path_reference_is_ignored() -> None:
@@ -373,6 +399,107 @@ def test_unprotected_path_reference_is_ignored() -> None:
     tenant = foreign_xml("tenant", "<disk type='file'><source file='/srv/other.qcow2'/></disk>")
     result = inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
     assert result.exclusive
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_real_host_alias_has_protected_device_identity(tmp_path: Path, alias_kind: str) -> None:
+    pool_path = tmp_path / "pool"
+    pool_path.mkdir()
+    for volume in ("root", "source", "scratch"):
+        (pool_path / volume).write_bytes(volume.encode())
+    protected = pool_path / "root"
+    alias = tmp_path / "alias"
+    if alias_kind == "symlink":
+        alias.symlink_to(protected)
+    else:
+        alias.hardlink_to(protected)
+    state = expected()
+    tenant = foreign_xml("tenant", f"<disk type='file'><source file='{alias}'/></disk>")
+
+    with pytest.raises(CategorizedError, match="by path"):
+        inspect_module_attachments(
+            Conn(
+                [Domain(system_xml(state.system_id)), tenant],
+                {state.pool: storage_pool(target_path=str(pool_path))},
+            ),
+            state,
+            HostStatDeviceIdentity(),
+        )
+
+
+def test_real_host_bind_alias_has_protected_device_identity(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    alias = tmp_path / "alias"
+    source.mkdir()
+    alias.mkdir()
+    probe = subprocess.run(  # noqa: S603
+        ["unshare", "--user", "--map-root-user", "--mount", "true"],  # noqa: S607
+        check=False,
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("unprivileged mount namespaces are unavailable on this host")
+    script = (
+        "import sys; from kdive.providers.remote_libvirt.lifecycle.rootfs."
+        "remote_module_attachments import HostStatDeviceIdentity; "
+        "p=HostStatDeviceIdentity(); assert p.identity(sys.argv[1]) == p.identity(sys.argv[2])"
+    )
+    subprocess.run(  # noqa: S603
+        [
+            "unshare",
+            "--user",
+            "--map-root-user",
+            "--mount",
+            "sh",
+            "-c",
+            'mount --bind "$1" "$2" && exec "$3" -c "$4" "$1" "$2"',
+            "bind-identity-test",
+            str(source),
+            str(alias),
+            sys.executable,
+            script,
+        ],
+        check=True,
+    )
+
+
+def test_physical_alias_of_protected_volume_is_rejected() -> None:
+    state = expected()
+    tenant = foreign_xml("tenant", "<disk type='file'><source file='/alias/root'/></disk>")
+    identities = IdentityPort({"/alias/root": "/pool/root"})
+
+    with pytest.raises(CategorizedError, match="by path"):
+        inspect_module_attachments(
+            Conn([Domain(system_xml(state.system_id)), tenant]), state, identities
+        )
+
+
+def test_unavailable_device_identity_fails_closed_without_path_detail() -> None:
+    class MissingIdentity(IdentityPort):
+        def identity(self, path: str) -> None:
+            return None
+
+    state = expected()
+    with pytest.raises(CategorizedError, match="identity is unavailable") as raised:
+        inspect_module_attachments(
+            Conn([Domain(system_xml(state.system_id))]), state, MissingIdentity()
+        )
+    assert raised.value.category is ErrorCategory.CONFLICT
+    assert "/pool" not in str(raised.value)
+
+
+def test_identity_operational_failure_is_redacted_infrastructure_failure() -> None:
+    class FailingIdentity(IdentityPort):
+        def identity(self, path: str) -> RemoteDeviceIdentity:
+            raise OSError("private-host-path")
+
+    state = expected()
+    with pytest.raises(CategorizedError, match="identity lookup failed") as raised:
+        inspect_module_attachments(
+            Conn([Domain(system_xml(state.system_id))]), state, FailingIdentity()
+        )
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "private-host-path" not in str(raised.value)
 
 
 def test_volume_reference_through_alias_pool_is_rejected() -> None:
@@ -401,7 +528,7 @@ def test_unresolvable_volume_reference_fails_closed() -> None:
 
     with pytest.raises(CategorizedError, match="could not resolve") as raised:
         inspect_module_attachments(Conn([Domain(system_xml(state.system_id)), tenant]), state)
-    assert raised.value.category is ErrorCategory.CONFLICT
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 @pytest.mark.parametrize(("attribute", "volume"), [("file", "source"), ("dev", "scratch")])

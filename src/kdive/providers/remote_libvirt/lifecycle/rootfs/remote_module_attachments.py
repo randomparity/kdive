@@ -1,7 +1,8 @@
-"""Fail-closed active and inactive attachment inspection (ADR-0585)."""
+"""Fail-closed active and inactive attachment inspection (ADR-0585, ADR-0603)."""
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 import xml.etree.ElementTree as ET
@@ -24,6 +25,7 @@ _DOMAIN_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 _MAX_STORAGE_PATH_BYTES = 4096
+_MAX_IDENTITY_COMPONENT = (1 << 64) - 1
 
 _NORMALIZED_APPLIANCE_DEVICES = {
     "x86_64": (
@@ -103,22 +105,58 @@ class StoragePool(Protocol):
 class AttachmentConn(Protocol):
     def listAllDomains(self, flags: int = 0) -> Sequence[Domain]: ...  # noqa: N802
     def storagePoolLookupByName(self, name: str) -> StoragePool: ...  # noqa: N802
-    def storageVolLookupByPath(self, path: str) -> StorageVolume: ...  # noqa: N802
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteDeviceIdentity:
+    """Opaque physical identity returned by the remote host."""
+
+    device: int
+    inode: int
+
+
+class RemoteDeviceIdentityPort(Protocol):
+    """Resolve one remote-host path without returning or logging that path."""
+
+    def identity(self, path: str) -> RemoteDeviceIdentity | None: ...
+
+
+class HostStatDeviceIdentity:
+    """Server-side ADR-0603 adapter backed by a following ``stat(2)`` lookup."""
+
+    def identity(self, path: str) -> RemoteDeviceIdentity | None:
+        normalized = _normalize_storage_path(path)
+        try:
+            result = os.stat(normalized, follow_symlinks=True)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise CategorizedError(
+                "remote device identity lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
+        return RemoteDeviceIdentity(device=result.st_dev, inode=result.st_ino)
 
 
 def _conflict(message: str, **details: object) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.CONFLICT, details=details)
 
 
+def _infrastructure(message: str) -> CategorizedError:
+    return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
 def inspect_module_attachments(
-    conn: AttachmentConn, expected: ExpectedAttachmentState
+    conn: AttachmentConn,
+    identity_port: RemoteDeviceIdentityPort,
+    expected: ExpectedAttachmentState,
 ) -> AttachmentInspection:
     """Prove the System is stopped and all three volumes have exclusive owners."""
-    protected_paths = _protected_volume_paths(conn, expected)
+    protected_identities = _protected_volume_identities(conn, identity_port, expected)
     try:
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
-        raise _conflict("could not enumerate remote module attachments") from exc
+        raise _infrastructure("could not enumerate remote module attachments") from exc
     owner_domains: set[int] = set()
     xml_budget = XmlEnumerationBudget()
     appliance_present = False
@@ -129,8 +167,8 @@ def inspect_module_attachments(
             documents = [(domain.XMLDesc(0), active, active)]
             if active and domain.isPersistent():
                 documents.append((domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), False, active))
-        except (libvirt.libvirtError, ET.ParseError, DefusedXmlException) as exc:
-            raise _conflict("could not inspect a remote module attachment") from exc
+        except libvirt.libvirtError as exc:
+            raise _infrastructure("could not read a remote module attachment") from exc
         for document, definition_active, domain_active in documents:
             try:
                 root = xml_budget.parse(document)
@@ -144,11 +182,12 @@ def inspect_module_attachments(
             seen_names[name] = domain_index
             if _inspect_definition(
                 conn,
+                identity_port,
                 root,
                 definition_active,
                 domain_active,
                 expected,
-                protected_paths,
+                protected_identities,
             ):
                 owner_domains.add(domain_index)
             if name == expected.appliance.name:
@@ -208,11 +247,7 @@ def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:
         pool = conn.storagePoolLookupByName(pool_name)
         path = pool.storageVolLookupByName(volume_name).path()
     except libvirt.libvirtError as exc:
-        raise _conflict(
-            "could not resolve remote module volume path",
-            pool=pool_name,
-            volume=volume_name,
-        ) from exc
+        raise _infrastructure("could not resolve remote module volume path") from exc
     return _normalize_storage_path(path, pool=pool_name, volume=volume_name)
 
 
@@ -222,37 +257,41 @@ def _normalize_storage_path(path: str, **details: object) -> str:
     return posixpath.normpath("/" + path.lstrip("/"))
 
 
-def _resolve_direct_path(conn: AttachmentConn, path: str) -> str:
-    normalized = _normalize_storage_path(path, source_path=path)
+def _device_identity(identity_port: RemoteDeviceIdentityPort, path: str) -> RemoteDeviceIdentity:
+    normalized = _normalize_storage_path(path)
     try:
-        managed = conn.storageVolLookupByPath(normalized)
-    except libvirt.libvirtError as exc:
-        if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
-            return normalized
-        raise _conflict("could not resolve remote module storage path", path=path) from exc
-    try:
-        managed_path = managed.path()
-    except libvirt.libvirtError as exc:
-        raise _conflict("could not resolve remote module storage path", path=path) from exc
-    return _normalize_storage_path(managed_path, source_path=path)
+        identity = identity_port.identity(normalized)
+    except Exception as exc:
+        raise _infrastructure("remote device identity lookup failed") from exc
+    if identity is None:
+        raise _conflict("remote device identity is unavailable")
+    if (
+        not 0 <= identity.device <= _MAX_IDENTITY_COMPONENT
+        or not 0 <= identity.inode <= _MAX_IDENTITY_COMPONENT
+    ):
+        raise _conflict("remote device identity is invalid")
+    return identity
 
 
-def _protected_volume_paths(
-    conn: AttachmentConn, expected: ExpectedAttachmentState
-) -> dict[str, str]:
+def _protected_volume_identities(
+    conn: AttachmentConn,
+    identity_port: RemoteDeviceIdentityPort,
+    expected: ExpectedAttachmentState,
+) -> dict[str, RemoteDeviceIdentity]:
     return {
-        volume: _volume_path(conn, expected.pool, volume)
+        volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
         for volume in (expected.root_volume, expected.source_volume, expected.scratch_volume)
     }
 
 
 def _inspect_definition(
     conn: AttachmentConn,
+    identity_port: RemoteDeviceIdentityPort,
     root: ET.Element,
     definition_active: bool,
     domain_active: bool,
     expected: ExpectedAttachmentState,
-    protected_paths: dict[str, str],
+    protected_identities: dict[str, RemoteDeviceIdentity],
 ) -> bool:
     name = root.findtext("name")
     protected = {expected.root_volume, expected.source_volume, expected.scratch_volume}
@@ -264,36 +303,49 @@ def _inspect_definition(
     if len(sources) != len(set(sources)):
         raise _conflict("duplicate volume reference in domain", domain=name)
     referenced = {volume for pool, volume in sources if pool == expected.pool}
-    direct_paths = {_resolve_direct_path(conn, path) for path in _path_references(root)}
+    direct_identities = {_device_identity(identity_port, path) for path in _path_references(root)}
     system_tags = root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system")
     if len(system_tags) > 1:
         raise _conflict("duplicate System ownership metadata", domain=name)
     system_tag = system_tags[0].text if system_tags else None
     if system_tag == expected.system_id:
-        resolved_paths = [_volume_path(conn, pool, volume) for pool, volume in sources]
-        protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())
+        resolved_identities = [
+            _device_identity(identity_port, _volume_path(conn, pool, volume))
+            for pool, volume in sources
+        ]
+        protected_references = (set(resolved_identities) | direct_identities) & set(
+            protected_identities.values()
+        )
         if domain_active:
             raise _conflict("owning System is active", domain=name)
         owning_root = (expected.pool, expected.root_volume)
         if _top_level_volume_references(root).count(owning_root) != 1:
             raise _conflict("owning System definition has a different root volume", domain=name)
-        attempt_paths = {
-            protected_paths[expected.source_volume],
-            protected_paths[expected.scratch_volume],
+        attempt_identities = {
+            protected_identities[expected.source_volume],
+            protected_identities[expected.scratch_volume],
         }
         if referenced & {expected.source_volume, expected.scratch_volume} or (
-            protected_references & attempt_paths
+            protected_references & attempt_identities
         ):
             raise _conflict("System references attempt-scoped appliance storage", domain=name)
-        root_path = protected_paths[expected.root_volume]
-        if resolved_paths.count(root_path) + list(direct_paths).count(root_path) != 1:
+        root_identity = protected_identities[expected.root_volume]
+        root_count = resolved_identities.count(root_identity) + list(direct_identities).count(
+            root_identity
+        )
+        if root_count != 1:
             raise _conflict("owning System has duplicate root volume references", domain=name)
         return True
     if name == expected.appliance.name:
         _validate_appliance(root, definition_active, expected)
         return False
-    resolved_paths = [_volume_path(conn, pool, volume) for pool, volume in sources]
-    protected_references = (set(resolved_paths) | direct_paths) & set(protected_paths.values())
+    resolved_identities = [
+        _device_identity(identity_port, _volume_path(conn, pool, volume))
+        for pool, volume in sources
+    ]
+    protected_references = (set(resolved_identities) | direct_identities) & set(
+        protected_identities.values()
+    )
     if referenced & protected:
         raise _conflict("another domain references remote module storage", domain=name)
     if protected_references:
