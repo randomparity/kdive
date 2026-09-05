@@ -1,4 +1,4 @@
-"""Remote-libvirt external-boot kernel and initrd volumes (ADR-0583).
+"""Remote-libvirt external-boot kernel and initrd volumes (ADR-0583, ADR-0599).
 
 The connection passed to this module is already an authenticated libvirt connection.  This module
 owns only the bounded storage-volume transfer: names and references are deterministic from the
@@ -15,17 +15,17 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID, uuid4
 
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.external_boot import OpaqueProviderRef
-
-type BootArtifactKind = Literal["kernel", "initrd"]
-
-BOOT_ARTIFACT_METADATA_NS = "urn:kdive:remote-libvirt:boot-artifact"
+from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
+    BootArtifactKind,
+    render_boot_artifact_name,
+)
 
 
 class _ArtifactStream(Protocol):
@@ -74,17 +74,19 @@ class BootArtifact:
     payload: bytes
 
 
-def artifact_volume_name(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -> str:
-    """Return the deterministic final volume name for one owned boot artifact."""
-    return f"kdive-{kind}-{system_id}-{run_id}"
+def artifact_volume_name(
+    kind: BootArtifactKind, system_id: UUID, run_id: UUID, payload_digest: str
+) -> str:
+    """Return the deterministic final name for one exact owned boot artifact."""
+    return render_boot_artifact_name(kind, system_id, run_id, payload_digest)
 
 
 def artifact_partial_volume_name(
     kind: BootArtifactKind, system_id: UUID, run_id: UUID, payload: bytes, attempt_id: UUID
 ) -> str:
     """Return the attempt-owned staging volume name."""
-    digest = hashlib.sha256(payload).hexdigest()
-    return f"{artifact_volume_name(kind, system_id, run_id)}-partial-{attempt_id}-{digest}"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    return render_boot_artifact_name(kind, system_id, run_id, digest, attempt_id=attempt_id)
 
 
 def artifact_volume_ref(kind: BootArtifactKind, system_id: UUID, run_id: UUID) -> OpaqueProviderRef:
@@ -96,37 +98,11 @@ def render_boot_artifact_volume_xml(
     name: str,
     *,
     capacity_bytes: int,
-    kind: BootArtifactKind | None = None,
-    system_id: UUID | None = None,
-    run_id: UUID | None = None,
-    payload_digest: str | None = None,
-    attempt_id: UUID | None = None,
 ) -> str:
-    """Render a raw volume, optionally carrying its closed ownership identity.
-
-    Ownership metadata is included for boot-artifact volumes so the reconciler can distinguish a
-    KDIVE object from a foreign volume before it attempts a delete.  The four identity fields are
-    all-or-nothing; callers that render a generic volume retain the old minimal XML.
-    """
-    identity = (kind, system_id, run_id, payload_digest)
-    if any(value is not None for value in identity) and not all(
-        value is not None for value in identity
-    ):
-        raise ValueError("boot-artifact metadata requires kind, System, Run, and digest")
-    if attempt_id is not None and kind is None:
-        raise ValueError("boot-artifact attempt metadata requires an artifact identity")
+    """Render the minimum raw-volume document; ownership lives in ``name``."""
     volume = ET.Element("volume")
     ET.SubElement(volume, "name").text = name
     ET.SubElement(volume, "capacity").text = str(capacity_bytes)
-    if kind is not None:
-        metadata = ET.SubElement(volume, "metadata")
-        marker = ET.SubElement(metadata, f"{{{BOOT_ARTIFACT_METADATA_NS}}}artifact")
-        marker.set("kind", kind)
-        marker.set("system-id", str(system_id))
-        marker.set("run-id", str(run_id))
-        marker.set("sha256", payload_digest or "")
-        if attempt_id is not None:
-            marker.set("attempt-id", str(attempt_id))
     target = ET.SubElement(volume, "target")
     ET.SubElement(target, "format", type="raw")
     return ET.tostring(volume, encoding="unicode")
@@ -206,10 +182,6 @@ def _upload_volume(
     *,
     kind: BootArtifactKind,
     pool_name: str,
-    system_id: UUID,
-    run_id: UUID,
-    payload_digest: str,
-    attempt_id: UUID,
 ) -> _ArtifactVolume:
     volume: _ArtifactVolume | None = None
     stream: _ArtifactStream | None = None
@@ -218,11 +190,6 @@ def _upload_volume(
             render_boot_artifact_volume_xml(
                 name,
                 capacity_bytes=len(payload),
-                kind=kind,
-                system_id=system_id,
-                run_id=run_id,
-                payload_digest=payload_digest,
-                attempt_id=attempt_id,
             )
         )
         stream = conn.newStream(0)
@@ -262,7 +229,8 @@ def _materialize_one(
     payload: bytes,
     attempt_id: UUID,
 ) -> tuple[OpaqueProviderRef, bool]:
-    name = artifact_volume_name(kind, system_id, run_id)
+    payload_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    name = artifact_volume_name(kind, system_id, run_id, payload_digest)
     ref = artifact_volume_ref(kind, system_id, run_id)
     try:
         pool = conn.storagePoolLookupByName(pool_name)
@@ -283,10 +251,15 @@ def _materialize_one(
     try:
         partial = _lookup(pool, partial_name)
         if partial is not None:
-            # A partial with this deterministic ownership key can only be from an earlier attempt
-            # of this exact artifact.  It is never a published volume and is safe to replace.
+            try:
+                partial_matches = _rehash_volume(conn, partial, payload)
+            except (libvirt.libvirtError, OSError, RuntimeError) as exc:
+                raise _infra(
+                    "rehashing the existing partial artifact", kind=kind, pool=pool_name
+                ) from exc
+            if not partial_matches:
+                raise _conflict(kind, pool_name)
             partial.delete(0)
-        payload_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
         staged = _upload_volume(
             conn,
             pool,
@@ -294,10 +267,6 @@ def _materialize_one(
             payload,
             kind=kind,
             pool_name=pool_name,
-            system_id=system_id,
-            run_id=run_id,
-            payload_digest=payload_digest,
-            attempt_id=attempt_id,
         )
         if not _rehash_volume(conn, staged, payload):
             raise _infra("verifying the staged artifact", kind=kind, pool=pool_name)
@@ -305,10 +274,6 @@ def _materialize_one(
             render_boot_artifact_volume_xml(
                 name,
                 capacity_bytes=len(payload),
-                kind=kind,
-                system_id=system_id,
-                run_id=run_id,
-                payload_digest=payload_digest,
             ),
             staged,
         )
@@ -385,7 +350,8 @@ def _delete_owned_final(
     """Delete a final volume only while its bytes still prove this attempt owns it."""
     try:
         pool = conn.storagePoolLookupByName(pool_name)
-        volume = _lookup(pool, artifact_volume_name(kind, system_id, run_id))
+        digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        volume = _lookup(pool, artifact_volume_name(kind, system_id, run_id, digest))
         if volume is not None and _rehash_volume(conn, volume, payload):
             volume.delete(0)
     except (libvirt.libvirtError, OSError, RuntimeError) as exc:

@@ -14,6 +14,7 @@ ADR-0076 still governs the *package* boundary above — these doubles are not sh
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import libvirt
@@ -181,6 +182,7 @@ class FakeStorageVolume:
     def __init__(self, state: VolumeState, pool: FakeStoragePool) -> None:
         self._state = state
         self._pool = pool
+        self._data = b""
 
     def name(self) -> str:
         return self._state.name
@@ -194,6 +196,20 @@ class FakeStorageVolume:
     def info(self) -> list[int]:
         # Real libvirt answers info()[2] with the allocation, which is a host fact.
         return [0, self._state.capacity_bytes, 0]
+
+    def upload(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
+        del flags
+        if not isinstance(stream, FakeStorageStream) or offset != 0 or length < 0:
+            raise libvirt_error(libvirt.VIR_ERR_INVALID_ARG)
+        stream.begin_upload(self)
+        return 0
+
+    def download(self, stream: object, offset: int, length: int, flags: int = 0) -> int:
+        del length, flags
+        if not isinstance(stream, FakeStorageStream) or offset != 0:
+            raise libvirt_error(libvirt.VIR_ERR_INVALID_ARG)
+        stream.begin_download(self._data)
+        return 0
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt binding name
         del flags
@@ -289,6 +305,16 @@ class FakeStoragePool:
         self.created_xml.append(xml)
         return volume
 
+    def createXMLFrom(  # noqa: N802 - libvirt binding name
+        self, xml: str, volume: object, flags: int = 0
+    ) -> FakeStorageVolume:
+        del flags
+        if not isinstance(volume, FakeStorageVolume):
+            raise libvirt_error(libvirt.VIR_ERR_INVALID_ARG)
+        clone = self.createXML(xml)
+        clone._data = volume._data
+        return clone
+
     def storageVolLookupByName(self, name: str) -> FakeStorageVolume:  # noqa: N802 - libvirt name
         try:
             return self._volumes[name]
@@ -302,5 +328,65 @@ class FakeStoragePool:
     def listVolumes(self) -> list[str]:  # noqa: N802 - libvirt binding name
         return list(self._volumes)
 
+    def listAllVolumes(self, flags: int = 0) -> list[FakeStorageVolume]:  # noqa: N802
+        del flags
+        return list(self._volumes.values())
+
     def _remove(self, name: str) -> None:
         self._volumes.pop(name, None)
+
+
+class FakeStorageStream:
+    """A libvirt stream double that commits uploads only when ``finish`` succeeds."""
+
+    def __init__(self) -> None:
+        self._upload_target: FakeStorageVolume | None = None
+        self._download_data: bytes | None = None
+        self._sent = bytearray()
+        self._aborted = False
+
+    def begin_upload(self, volume: FakeStorageVolume) -> None:
+        self._upload_target = volume
+
+    def begin_download(self, data: bytes) -> None:
+        self._download_data = data
+
+    def sendAll(  # noqa: N802 - libvirt binding name
+        self, callback: Callable[[object, int, object], bytes], opaque: object
+    ) -> None:
+        while chunk := callback(self, 1 << 20, opaque):
+            self._sent.extend(chunk)
+
+    def recvAll(  # noqa: N802 - libvirt binding name
+        self, callback: Callable[[object, bytes, object], None], opaque: object
+    ) -> None:
+        if self._download_data:
+            callback(self, self._download_data, opaque)
+
+    def finish(self) -> int:
+        if self._aborted:
+            raise libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+        if self._upload_target is not None:
+            self._upload_target._data = bytes(self._sent)
+        return 0
+
+    def abort(self) -> int:
+        self._aborted = True
+        self._sent.clear()
+        return 0
+
+
+class FakeStorageConn:
+    """A connection double exposing one named storage pool and fresh streams."""
+
+    def __init__(self, pool: FakeStoragePool) -> None:
+        self._pool = pool
+
+    def storagePoolLookupByName(self, name: str) -> FakeStoragePool:  # noqa: N802
+        if name != self._pool.name():
+            raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_POOL)
+        return self._pool
+
+    def newStream(self, flags: int = 0) -> FakeStorageStream:  # noqa: N802
+        del flags
+        return FakeStorageStream()
