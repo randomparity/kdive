@@ -65,12 +65,28 @@ def render_volume_xml(name: str, *, capacity_bytes: int, backing_path: str) -> s
     return ET.tostring(volume, encoding="unicode")
 
 
+def volume_backing_path(volume_xml: str) -> str | None:
+    """Return a volume's immediate backing path; reject malformed or nested metadata."""
+    try:
+        root = _safe_fromstring(volume_xml)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise ValueError("malformed storage volume XML") from exc
+    backing = root.find("./backingStore")
+    if backing is None:
+        return None
+    path = backing.findtext("./path")
+    if not path or backing.find("./backingStore") is not None:
+        raise ValueError("unsupported storage volume backing metadata")
+    return path
+
+
 def render_domain_xml(
     system_id: UUID,
     profile: ProvisioningProfile,
     *,
     pool: str,
     volume: str,
+    backing_path: str,
     gdb_addr: str,
     gdb_port: int,
     network: str = _DEFAULT_NETWORK,
@@ -114,6 +130,10 @@ def render_domain_xml(
     disk = ET.SubElement(devices, "disk", type="volume", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")
     ET.SubElement(disk, "source", pool=pool, volume=volume)
+    backing = ET.SubElement(disk, "backingStore", type="file")
+    ET.SubElement(backing, "format", type="qcow2")
+    ET.SubElement(backing, "source", file=backing_path)
+    ET.SubElement(backing, "backingStore")
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
     interface = ET.SubElement(devices, "interface", type="network")
     ET.SubElement(interface, "source", network=network)

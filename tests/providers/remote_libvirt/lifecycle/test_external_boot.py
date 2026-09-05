@@ -92,6 +92,7 @@ def _source_xml(
         _remote_profile(),
         pool=pool,
         volume=volume if volume is not None else overlay_volume_name(system_id),
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=1234,
         ssh_addr="10.0.0.5",

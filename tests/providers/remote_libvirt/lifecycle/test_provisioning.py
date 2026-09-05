@@ -76,6 +76,7 @@ def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
         _remote_profile(),
         pool="kdive-pool",
         volume=overlay_volume_name(SYSTEM_ID),
+        backing_path="/srv/libvirt/images/catalog.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
     )
@@ -105,6 +106,12 @@ def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
     assert disk_source is not None
     assert disk_source.get("pool") == "kdive-pool"
     assert disk_source.get("volume") == overlay_volume_name(SYSTEM_ID)
+    backing = root.find("./devices/disk/backingStore")
+    assert backing is not None
+    assert backing.get("type") == "file"
+    assert backing.find("./format").get("type") == "qcow2"  # type: ignore[union-attr]
+    assert backing.find("./source").get("file") == "/srv/libvirt/images/catalog.qcow2"  # type: ignore[union-attr]
+    assert backing.find("./backingStore") is not None
     driver = root.find("./devices/disk/driver")
     assert driver is not None
     assert driver.get("type") == "qcow2"
@@ -140,6 +147,7 @@ def test_render_domain_xml_pins_host_model_cpu_for_el9_baseline() -> None:
         _remote_profile(),
         pool="kdive-pool",
         volume=overlay_volume_name(SYSTEM_ID),
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
     )
@@ -158,6 +166,7 @@ def test_render_domain_xml_uses_configured_machine() -> None:
         _remote_profile(),
         pool="kdive-pool",
         volume=overlay_volume_name(SYSTEM_ID),
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
         machine="q35",
@@ -173,6 +182,7 @@ def test_render_domain_xml_uses_configured_network() -> None:
         _remote_profile(),
         pool="kdive-pool",
         volume=overlay_volume_name(SYSTEM_ID),
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
         network="lab-net",
@@ -202,7 +212,13 @@ def test_render_domain_xml_requires_remote_section() -> None:
     )
     with pytest.raises(CategorizedError) as excinfo:
         render_domain_xml(
-            SYSTEM_ID, local, pool="p", volume="v", gdb_addr="10.0.0.5", gdb_port=47001
+            SYSTEM_ID,
+            local,
+            pool="p",
+            volume="v",
+            backing_path="/pool/base.qcow2",
+            gdb_addr="10.0.0.5",
+            gdb_port=47001,
         )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
@@ -213,6 +229,7 @@ def test_recorded_gdb_port_roundtrip() -> None:
         _remote_profile(),
         pool="p",
         volume="v",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47007,
     )
@@ -225,6 +242,7 @@ def test_render_appends_ssh_hostfwd_when_both_set() -> None:
         _remote_profile(),
         pool="p",
         volume="v",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47007,
         ssh_addr="10.0.0.9",
@@ -249,6 +267,7 @@ def test_render_omits_ssh_hostfwd_unless_both_set(
         _remote_profile(),
         pool="p",
         volume="v",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47007,
         ssh_addr=ssh_addr,
@@ -349,6 +368,7 @@ def test_used_gdb_ports_reports_only_kdive_domains_with_recorded_ports() -> None
         _remote_profile(),
         pool="default",
         volume="with-port-overlay",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47000,
     )
@@ -358,6 +378,7 @@ def test_used_gdb_ports_reports_only_kdive_domains_with_recorded_ports() -> None
         _remote_profile(),
         pool="default",
         volume="foreign-overlay",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
     ).replace("<name>kdive-", "<name>not-kdive-", 1)
@@ -375,6 +396,7 @@ def test_used_gdb_ports_skips_domain_vanishing_during_enumeration() -> None:
         _remote_profile(),
         pool="default",
         volume="vanished-overlay",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47000,
     )
@@ -383,6 +405,7 @@ def test_used_gdb_ports_skips_domain_vanishing_during_enumeration() -> None:
         _remote_profile(),
         pool="default",
         volume="live-overlay",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
     )
@@ -411,6 +434,7 @@ def test_used_gdb_ports_maps_xml_failure_to_infrastructure_failure() -> None:
             _remote_profile(),
             pool="default",
             volume="broken-overlay",
+            backing_path="/pool/base.qcow2",
             gdb_addr="10.0.0.5",
             gdb_port=47000,
         )
@@ -461,6 +485,7 @@ def test_wait_for_agent_returns_when_live_xml_reports_connected() -> None:
             _remote_profile(),
             pool="default",
             volume=overlay_volume_name(SYSTEM_ID),
+            backing_path="/pool/base.qcow2",
             gdb_addr="10.0.0.5",
             gdb_port=47000,
         )
@@ -489,6 +514,7 @@ def test_wait_for_agent_fails_when_domain_exits_before_agent_connects() -> None:
             _remote_profile(),
             pool="default",
             volume=overlay_volume_name(SYSTEM_ID),
+            backing_path="/pool/base.qcow2",
             gdb_addr="10.0.0.5",
             gdb_port=47000,
         )
@@ -517,6 +543,7 @@ def test_wait_for_agent_times_out_without_connection() -> None:
             _remote_profile(),
             pool="default",
             volume=overlay_volume_name(SYSTEM_ID),
+            backing_path="/pool/base.qcow2",
             gdb_addr="10.0.0.5",
             gdb_port=47000,
         )
@@ -564,6 +591,7 @@ def test_wait_for_agent_maps_xml_failure_to_infrastructure_failure() -> None:
             _remote_profile(),
             pool="default",
             volume=overlay_volume_name(SYSTEM_ID),
+            backing_path="/pool/base.qcow2",
             gdb_addr="10.0.0.5",
             gdb_port=47000,
         )
@@ -618,11 +646,17 @@ def test_wait_for_agent_maps_malformed_domain_xml_to_infrastructure_failure() ->
 
 class FakeVolume:
     def __init__(
-        self, name: str, *, capacity: int = 10 * 2**30, pool: FakePool | None = None
+        self,
+        name: str,
+        *,
+        capacity: int = 10 * 2**30,
+        pool: FakePool | None = None,
+        backing_path: str | None = None,
     ) -> None:
         self.volume_name = name
         self._capacity = capacity
         self.pool = pool
+        self.backing_path = backing_path
 
     def path(self) -> str:
         return f"/pool/{self.volume_name}"
@@ -635,6 +669,15 @@ class FakeVolume:
         self.pool.volumes.pop(self.volume_name, None)
         self.pool.deleted.append(self.volume_name)
         return 0
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+        del flags
+        backing = (
+            ""
+            if self.backing_path is None
+            else (f"<backingStore><path>{self.backing_path}</path></backingStore>")
+        )
+        return f"<volume><name>{self.volume_name}</name>{backing}</volume>"
 
 
 class FakePool:
@@ -656,9 +699,14 @@ class FakePool:
             raise self.create_error
         self.created_xml.append(xml)
         name = fromstring(xml).findtext("./name") or "unnamed"
-        volume = FakeVolume(name, pool=self)
+        backing_path = fromstring(xml).findtext("./backingStore/path")
+        volume = FakeVolume(name, pool=self, backing_path=backing_path)
         self.volumes[name] = volume
         return volume
+
+    def refresh(self, flags: int = 0) -> int:
+        del flags
+        return 0
 
 
 class FakeDomain:
@@ -947,7 +995,9 @@ def test_provision_reuses_existing_overlay(tmp_path: Path) -> None:
     conn = _conn_with_base()
     pool = conn.pools["default"]
     overlay = overlay_volume_name(SYSTEM_ID)
-    pool.volumes[overlay] = FakeVolume(overlay, pool=pool)
+    pool.volumes[overlay] = FakeVolume(
+        overlay, pool=pool, backing_path="/pool/kdive-base-fedora-42.qcow2"
+    )
     provisioner, _ = _provisioner(conn, tmp_path)
 
     provisioner.provision(SYSTEM_ID, _remote_profile())
@@ -962,6 +1012,7 @@ def test_provision_skips_ports_recorded_by_other_domains(tmp_path: Path) -> None
         _remote_profile(),
         pool="default",
         volume="other-overlay",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,  # the assignable floor; the new System must skip past it
     )
@@ -981,6 +1032,7 @@ def test_provision_retry_reuses_own_recorded_port(tmp_path: Path) -> None:
         _remote_profile(),
         pool="default",
         volume=overlay_volume_name(SYSTEM_ID),
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,
     )
@@ -1007,6 +1059,7 @@ def test_provision_does_not_reuse_own_recorded_reserved_probe_port(tmp_path: Pat
         _remote_profile(),
         pool="default",
         volume=overlay_volume_name(SYSTEM_ID),
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47000,
     )
@@ -1090,6 +1143,7 @@ def test_provision_skips_domain_vanishing_during_enumeration(tmp_path: Path) -> 
         _remote_profile(),
         pool="default",
         volume="other-overlay",
+        backing_path="/pool/base.qcow2",
         gdb_addr="10.0.0.5",
         gdb_port=47001,  # an assignable port (47000 is the reserved ACL-probe port)
     )
