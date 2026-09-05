@@ -167,6 +167,34 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "base_image_volume (#1424, ADR-0425). Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_KERNEL",
+        "test",
+        None,
+        "Readable local kernel image supplied to the live_vm_remote external-boot carrier. "
+        "Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_INITRD",
+        "test",
+        None,
+        "Readable local initrd supplied to the live_vm_remote external-boot carrier. Required "
+        "once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_ROOT_DEVICE",
+        "test",
+        None,
+        "Absolute /dev/ root-device path for the live_vm_remote external-boot carrier. Required "
+        "once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_GDB_ADDR",
+        "test",
+        None,
+        "IP-literal GDB listen address for the live_vm_remote external-boot carrier. Required "
+        "once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_REMOTE_RECONCILER",
         "test",
         None,
