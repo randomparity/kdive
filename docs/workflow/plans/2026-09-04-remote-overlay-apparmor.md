@@ -20,42 +20,10 @@ provisioning.
 - Do not add a dependency, migration, host-wide AppArmor rule, or native ppc64le proof.
 - Guardrails: `just lint`, `just type`, `just test-ansible`, focused pytest, and `just ci`.
 
-Expected implementation size: 170–260 changed lines (M) — derived from standalone-base admission,
-the storage carrier and readback validation, XML threading, fakes, and focused regressions.
+Expected implementation size: 130–220 changed lines (M) — derived from pool refresh, remote
+metadata/readback validation, the storage carrier, XML threading, fakes, and focused regressions.
 
-## Task 1 — Enforce standalone supplied bases
-
-Files: modify `src/kdive/providers/remote_libvirt/lifecycle/rootfs/volume_upload.py` and
-`tests/providers/remote_libvirt/test_volume_upload.py`.
-
-Interfaces:
-
-- `_require_standalone_qcow2(path: Path, *, qemu_img: str = "qemu-img") -> None` executes bounded
-  argv-only `qemu-img info --output=json --backing-chain PATH` before pool lookup/create/upload.
-- `upload_qcow2_volume(...)` retains its public signature and calls the new admission check before
-  pool lookup and before both the existing-volume fast path and remote mutation.
-
-Verification (`focused-test`): injected subprocess cases admit exactly one qcow2 record and reject
-a second backing-chain record, missing executable, timeout, nonzero exit, and malformed JSON. Each
-failure must precede `createXML`. Add cases first and observe red with
-`uv run python -m pytest tests/providers/remote_libvirt/test_volume_upload.py -q`;
-then implement and run green.
-
-Implementation steps:
-
-1. Add failing cases with a patched `subprocess.run`; assert argv, timeout, no shell, and no pool
-   lookup or remote create on every rejection. Run every rejection against both absent and already
-   present deterministic remote volumes, proving the retry fast path cannot bypass admission.
-2. Implement the bounded command and require a JSON array of exactly one qcow2 image with no
-   `backing-filename` or `full-backing-filename`.
-3. Map missing executable, timeout, launch failure, tool failure, and malformed output through the
-   repository's existing error categories while logging no path or raw output.
-4. Run the focused tests and `just type`, then commit.
-
-Acceptance: supplied chained images fail before bytes or permission-bearing metadata reach the
-remote host. Rollback is a code revert; no remote state exists on failure.
-
-## Task 2 — Bind prepared overlays to their resolved base
+## Task 1 — Bind refreshed remote overlays to their observed base
 
 Files: modify `src/kdive/providers/remote_libvirt/lifecycle/storage.py` and
 `tests/providers/remote_libvirt/lifecycle/test_storage.py`.
@@ -63,31 +31,36 @@ Files: modify `src/kdive/providers/remote_libvirt/lifecycle/storage.py` and
 Interfaces:
 
 - `Volume.XMLDesc(flags: int = 0) -> str` supplies backing metadata for reuse validation.
+- `Pool.refresh(flags: int = 0) -> int` reconstructs volume metadata from actual remote files.
 - `PreparedOverlay(name: str, backing_path: str, created: bool)` is consumed by provisioning.
 - `ensure_named_overlay(pool, base_volume, name) -> PreparedOverlay` returns the exact base path
   only after the base is terminal and the overlay metadata agrees.
 
-Verification (`focused-test`): storage creation/reuse must return the base path; a non-terminal base
-must be rejected; and create/reuse must reject missing, malformed, and mismatched backing records.
-The created mismatch must delete the new volume. Add those cases first and observe failures with
+Verification (`focused-test`): refresh must precede all volume lookups and mutations. Refreshed
+nested bases must be rejected for operator-staged, newly uploaded supplied, legacy/retry supplied,
+and changed-local-source scenarios. Creation/reuse must return the base path, and both must reject
+missing, malformed, and mismatched backing records; created mismatch must delete the new volume.
+Add those cases first and observe failures with
 `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_storage.py -q`; implement
 safe defused-XML parsing and error mapping, then run the same command green.
 
 Implementation steps:
 
-1. Extend the fake volume XML behavior and write the failing carrier/reuse cases.
-2. Extend `Volume` and `PreparedOverlay`; parse the requested base XML, require no backing node,
-   and resolve its path once.
-3. Parse both a reused overlay and the volume returned by `createXML`; require their immediate
+1. Extend the fake pool/volume XML behavior and write ordering, lane, carrier, and reuse cases.
+2. Add `Pool.refresh`; call it before lookup and map failure to `INFRASTRUCTURE_FAILURE` without
+   exposing a path. Assert no create/define-capable mutation follows a refresh failure.
+3. Extend `Volume` and `PreparedOverlay`; parse the requested base's refreshed XML, require no
+   backing node, and resolve its path once.
+4. Parse both a reused overlay and the volume returned by `createXML`; require their immediate
    backing path to match. Delete a just-created volume before raising on mismatch. Map malformed or
    missing metadata to `CONFIGURATION_ERROR` without leaking either path.
-4. Return the resolved path on validated create and reuse; update cleanup constructors.
-5. Run the focused test and `just type`, then commit.
+5. Return the resolved path on validated create and reuse; update cleanup constructors.
+6. Run the focused test and `just type`, then commit.
 
-Acceptance: no overlay can authorize a base different from the backing metadata it owns. Rollback
-is a code revert; no durable data is changed.
+Acceptance: no overlay can authorize a base different from the refreshed remote metadata it owns.
+On validation failure no new remote mutation occurs; any pre-existing volume remains untouched.
 
-## Task 3 — Render and thread the exact chain
+## Task 2 — Render and thread the exact chain
 
 Files: modify `src/kdive/providers/remote_libvirt/lifecycle/xml.py`,
 `src/kdive/providers/remote_libvirt/lifecycle/provisioning.py`, and their matching provider tests.
@@ -114,7 +87,7 @@ Implementation steps:
 Acceptance: the definition handed to libvirt names only the prepared overlay and its bound base.
 Start retry and teardown remain unchanged.
 
-## Task 4 — Prove Ubuntu/AppArmor behavior and ship
+## Task 3 — Prove Ubuntu/AppArmor behavior and ship
 
 Files: extend the focused provider test if the live observation exposes an uncovered assertion; no
 host policy file is expected.

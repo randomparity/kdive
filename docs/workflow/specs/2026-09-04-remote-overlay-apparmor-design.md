@@ -17,23 +17,22 @@ domain renderer currently emits only `source pool=... volume=...`. On the affect
 libvirt's generated profile includes the resolved top volume but omits the base, and QEMU fails at
 `domain.create()` with permission denied. DAC access as the QEMU account succeeds.
 
-Remote base volumes are required to be standalone qcow2 images, but the existing supplied-image
-check proves only magic bytes and an operator can stage a chained file independently. Admission
-will now enforce the terminal-base contract on both lanes. The supported chain is therefore
-provably overlay then base. This change must retain the volume source, storage pool identity,
-security driver, and cleanup behavior.
+Remote base volumes are required to be standalone qcow2 images, but neither the upload-time volume
+definition nor a mutable worker-local source proves the bytes of an existing remote volume. A
+directory-pool refresh makes libvirt reconstruct volume metadata from the actual remote files.
+Admission will use that observation to enforce the terminal-base contract on both lanes. The
+supported chain is therefore provably overlay then base. This change must retain the volume source,
+storage pool identity, security driver, and cleanup behavior.
 
 ## Components and flow
 
-1. The supplied upload lane runs bounded `qemu-img info --output=json --backing-chain` before pool
-   lookup and before both the existing-volume return and new-volume mutation. It rejects output
-   containing more than the source image. The executable is an existing `libvirt_stack`
-   prerequisite. Every retry therefore revalidates the immutable local source named by the stored
-   profile rather than treating remote volume-definition XML as proof of its embedded qcow2 header.
-2. `ensure_named_overlay` resolves the requested base volume, reads its libvirt XML, requires no
-   `backingStore`, and obtains its path before creating an overlay. This covers both operator and
-   supplied remote volumes. On reuse, it reads the existing overlay's volume XML and verifies that
-   its immediate backing path equals the resolved requested base path.
+1. `ensure_named_overlay` refreshes the pool before looking up either the base or overlay. The
+   refresh is the authority-bearing observation: libvirt reads the actual remote qcow2 headers and
+   reconstructs their volume XML. Failure aborts before overlay/domain mutation.
+2. It resolves the requested base volume from that refreshed view, reads its XML, requires no
+   `backingStore`, and obtains its path. This covers operator-staged, newly uploaded supplied,
+   legacy supplied, retry, and replaced-worker-source lanes. On reuse, it reads the refreshed
+   overlay XML and verifies that its immediate backing path equals the observed base path.
 3. `PreparedOverlay` carries `name`, `backing_path`, and `created`. A missing or malformed backing
    record, or a mismatch on reuse, is a configuration failure before domain definition.
 4. Provisioning passes `backing_path` to `render_domain_xml`.
@@ -50,10 +49,9 @@ the host path.
 ## Failure behavior
 
 - A missing requested base retains the current configuration error.
-- A supplied or operator-staged base carrying any backing store is rejected as a configuration
-  error before overlay/domain mutation. Missing `qemu-img`, timeout, malformed JSON, and execution
-  failure use the existing missing-dependency/infrastructure/provisioning taxonomy without raw
-  path leakage.
+- A supplied or operator-staged base whose refreshed metadata carries any backing store is rejected
+  as a configuration error before overlay/domain mutation. A pool-refresh or XML-read failure is
+  an infrastructure failure without raw path leakage.
 - An unexpected libvirt lookup, path, or XML-read failure is an infrastructure failure.
 - A reused overlay with absent, malformed, or different backing metadata is a configuration error;
   it is neither rewritten nor deleted because another running or recoverable System may own it.
@@ -63,11 +61,11 @@ the host path.
 
 ## Verification
 
-- Upload tests prove standalone qcow2 output is admitted while a nested backing entry, malformed
-  output, timeout, missing executable, and tool failure are rejected before upload.
-- Storage tests prove new and reused overlays return the exact libvirt base path; base volumes with
-  backing metadata are rejected; and both created/reused overlays fail closed on absent or
-  divergent backing metadata. Created-overlay failures prove deletion.
+- Storage tests prove refresh precedes every lookup; refreshed standalone bases are admitted while
+  nested operator, newly uploaded supplied, legacy/retry supplied, and replaced-local-source cases
+  are rejected from the remote metadata. Refresh failure precedes mutation. New and reused overlays
+  return the exact libvirt base path; both created/reused overlays fail closed on absent or
+  divergent backing metadata, and created-overlay failures prove deletion.
 - XML tests prove a volume disk renders one file-backed base and an explicit terminal node, with
   XML metacharacters encoded rather than becoming structure.
 - Provisioning tests capture the exact definition passed before `domain.create()` and prove it
@@ -98,8 +96,8 @@ the volume it has already looked up, and does not trust a requested name to stan
 
 ### Controls
 
-- Exact volume lookup binds the grant to the selected base; reuse equality binds it to the existing
-  overlay. Failure is closed before define/start.
+- Pool refresh plus exact volume lookup binds the grant to the detected remote bytes of the selected
+  base; reuse equality binds it to the existing overlay. Failure is closed before define/start.
 - ElementTree encodes the path in XML.
 - The terminal backing node bounds the represented chain to the provider's admission-checked
   standalone-base contract.

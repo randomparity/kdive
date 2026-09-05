@@ -11,12 +11,13 @@ top volume path after its first AppArmor profile generation. The translated over
 but the operator-staged base named only inside the volume metadata is absent from the generated
 per-domain profile. QEMU therefore cannot open the qcow2 backing file.
 
-The one supported chain is the per-System overlay followed by a standalone base. Existing supplied
-image admission checks only qcow2 magic, however, and a refreshed operator volume can also carry a
-backing record. The provider therefore has to enforce the terminal-base premise rather than infer
-it from format. Libvirt's domain schema can represent that chain even while the top disk remains a
-pool volume, and `virt-aa-helper` walks an explicit domain backing chain when producing the
-domain's exact file rules.
+The one supported chain is the per-System overlay followed by a standalone base. A libvirt volume
+definition supplied at upload time is not evidence about the qcow2 header bytes later stored in
+that volume. Libvirt's directory-pool refresh rescans the actual files and reconstructs detected
+backing metadata. The provider therefore has to refresh and inspect that observed metadata before
+it can enforce the terminal-base premise. Libvirt's domain schema can represent the resulting
+chain even while the top disk remains a pool volume, and `virt-aa-helper` walks an explicit domain
+backing chain when producing the domain's exact file rules.
 
 ## Decision
 
@@ -24,12 +25,13 @@ This decision partially supersedes ADR-0080 §3's statement that a present overl
 without checking its backing store. Existence remains the idempotency gate; reuse now additionally
 requires backing identity to agree before the overlay can supply an AppArmor grant.
 
-Before upload, a supplied qcow2 is inspected with the already-provisioned `qemu-img`; any backing
-filename is rejected. Before overlay creation, the selected remote base volume's XML must likewise
-contain no `backingStore`. `ensure_overlay` then returns the base path obtained from libvirt
-together with the overlay name. The remote domain renderer keeps the top disk as `type="volume"`
-and adds one explicit file-backed `backingStore` node for that path, terminated by an empty
-`backingStore` node.
+Immediately before any overlay lookup or creation, `ensure_overlay` refreshes the selected storage
+pool. It then reads the selected remote base volume's reconstructed XML and requires no
+`backingStore`. This checks the actual remote bytes for operator-staged volumes, newly uploaded
+supplied volumes, and existing supplied volumes on retry, independent of a mutable worker-local
+source path. `ensure_overlay` returns the observed base path together with the overlay name. The
+remote domain renderer keeps the top disk as `type="volume"` and adds one explicit file-backed
+`backingStore` node for that path, terminated by an empty `backingStore` node.
 
 The path is never assembled from configuration or a volume name: it is the path returned by the
 already-resolved base volume. A reused overlay reads its recorded backing path from volume XML and
@@ -44,6 +46,8 @@ path unrelated to the overlay.
 - The domain continues to record its storage pool for teardown and keeps ADR-0080's volume-backed
   lifecycle.
 - Provider fakes must retain the volume path and backing metadata that production now consumes.
+- Each provision performs one storage-pool refresh before inspecting the base and overlay. A
+  refresh failure is an infrastructure failure and no overlay/domain mutation follows.
 - A base image with its own backing file fails admission; the terminal node truthfully states the
   checked closed chain.
 
