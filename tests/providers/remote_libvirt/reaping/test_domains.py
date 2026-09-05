@@ -75,6 +75,15 @@ def test_owned_domain_uses_the_metadata_tag_when_present() -> None:
     assert owned.system_id == _SID
 
 
+def test_owned_domain_uses_grouped_metadata_fragment_before_name_fallback() -> None:
+    tagged = UUID("00000000-0000-0000-0000-0000000000ee")
+    domain = _FakeDomain(_DOMAIN, metadata=f"<domain><system>{tagged}</system></domain>")
+    owned = _owned_domain(domain)
+    assert owned is not None
+    assert owned.name == _DOMAIN
+    assert owned.system_id == tagged
+
+
 def test_owned_domain_falls_back_to_the_naming_convention_without_a_tag() -> None:
     # No kdive metadata element, but the name matches kdive-<uuid>: still ours, system_id
     # deferred to the reconciler's name resolution (surfaced as None here).

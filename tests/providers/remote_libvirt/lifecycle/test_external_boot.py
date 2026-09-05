@@ -207,6 +207,12 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         ),
         (lambda xml: xml.replace(str(_SYSTEM_ID), str(_OTHER_SYSTEM_ID)), "system-metadata"),
         (lambda xml: xml.replace('pool="kdive"', 'pool="other"'), "boot-disk"),
+        (
+            lambda xml: xml.replace(
+                f'volume="{overlay_volume_name(_SYSTEM_ID)}"', 'volume="other-overlay.qcow2"'
+            ),
+            "boot-disk",
+        ),
         (lambda xml: xml.replace("/pool/overlay.qcow2", "/unrelated/attacker.qcow2"), "boot-disk"),
         (lambda xml: xml.replace('dev="vda"', 'dev="sda"'), "boot-disk"),
         (lambda xml: xml.replace('type="qcow2"', 'type="raw"'), "boot-disk"),
@@ -221,6 +227,7 @@ def test_admission_accepts_the_provisioned_disk_grub_baseline() -> None:
         "external-boot-fields",
         "other-system",
         "wrong-pool",
+        "wrong-volume",
         "wrong-overlay-path",
         "wrong-target-dev",
         "wrong-driver-type",
