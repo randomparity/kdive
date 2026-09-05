@@ -128,7 +128,8 @@ virsh pool-refresh default >/dev/null
             ).stdout
             if overlay.backing_path not in profile:
                 raise AssertionError("generated AppArmor profile omitted the selected base")
-            if decoy in profile or "/*" in profile:
+            pool_wildcard = f"{overlay.backing_path.rsplit('/', 1)[0]}/*"
+            if decoy in profile or pool_wildcard in profile:
                 raise AssertionError("generated AppArmor profile admitted an unrelated pool path")
     finally:
         if domain is not None:
