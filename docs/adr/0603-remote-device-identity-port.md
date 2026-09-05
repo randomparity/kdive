@@ -1,8 +1,8 @@
-# ADR-0603: Inspect remote storage by device identity
+# 0603 — Inspect remote storage by device identity
 
 ## Status
 
-Accepted
+Accepted (2026-09-05)
 
 ## Context
 
