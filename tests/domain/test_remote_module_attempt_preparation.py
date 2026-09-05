@@ -75,6 +75,18 @@ def test_request_rejects_noncanonical_or_oversize_bytes(encoded: bytes) -> None:
         ModuleAttemptPreparationRequestV1.from_canonical_json(encoded)
 
 
+def test_malformed_decoder_error_does_not_echo_payload() -> None:
+    marker = "traceable-input-marker"
+
+    with pytest.raises(ValueError) as caught:
+        ModuleAttemptPreparationRequestV1.from_canonical_json(
+            ('{"schema":"' + marker + '"}').encode()
+        )
+
+    assert marker not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
 @pytest.mark.parametrize("nonce", ["A" * 32, "a" * 31, "g" * 32, 1])
 def test_receipt_rejects_malformed_nonce_and_wrong_scalar_type(nonce: object) -> None:
     with pytest.raises(ValidationError):

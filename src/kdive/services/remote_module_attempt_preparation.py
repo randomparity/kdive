@@ -39,8 +39,8 @@ async def open_module_attempt_preparation(
                 raise _verification_failed()
     except ModuleAttemptObligationVerificationError:
         raise
-    except psycopg.Error as error:
-        raise _verification_failed() from error
+    except psycopg.Error:
+        raise _verification_failed() from None
 
     return ModuleAttemptPreparationRequestV1(
         module_attempt_obligation=ModuleAttemptObligationReceiptV1(
@@ -78,5 +78,5 @@ async def run_verified_module_attempt_preparation[ResultT](
                 return await consumer(expected_attempt)
     except ModuleAttemptObligationVerificationError:
         raise
-    except psycopg.Error as error:
-        raise _verification_failed() from error
+    except psycopg.Error:
+        raise _verification_failed() from None

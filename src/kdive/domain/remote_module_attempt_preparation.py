@@ -6,7 +6,7 @@ import json
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 type OperationNonce = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$", strict=True)]
 
@@ -33,7 +33,10 @@ class _ClosedCanonicalValue(BaseModel):
         """Parse one bounded canonical document, rejecting alternate encodings."""
         if len(data) > _CANONICAL_REQUEST_MAX_BYTES:
             raise ValueError("module-attempt preparation value exceeds 4096 bytes")
-        value = cls.model_validate_json(data)
+        try:
+            value = cls.model_validate_json(data)
+        except ValidationError, ValueError:
+            raise ValueError("module-attempt preparation value is invalid") from None
         if value.to_canonical_json() != data:
             raise ValueError("module-attempt preparation value is not canonical JSON")
         return value

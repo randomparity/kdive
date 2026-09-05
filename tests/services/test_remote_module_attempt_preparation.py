@@ -270,6 +270,34 @@ def test_worker_role_cannot_mutate_obligation(
     asyncio.run(_run())
 
 
+def test_worker_database_failure_is_redacted(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    class UnreadableRepository(RemoteModuleAttemptObligationRepository):
+        async def mutation_obligation_is_open(
+            self, conn: psycopg.AsyncConnection, attempt: ModuleAttempt
+        ) -> bool:
+            del conn, attempt
+            raise psycopg.OperationalError("traceable-database-marker")
+
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url) as admin:
+            attempt = await _seed(admin)
+
+        async def consumer(_: ModuleAttempt) -> None:
+            raise AssertionError("consumer must not run")
+
+        async with await _open_pool(authority_role_dsns("kdive_worker")) as worker:
+            with pytest.raises(ModuleAttemptObligationVerificationError) as caught:
+                await run_verified_module_attempt_preparation(
+                    worker, UnreadableRepository(), _request(attempt), attempt, consumer
+                )
+        assert "traceable-database-marker" not in str(caught.value)
+        assert caught.value.__cause__ is None
+
+    asyncio.run(_run())
+
+
 def test_production_mutation_discharge_sql_is_repository_mediated() -> None:
     needle = "SET mutation_discharged_at = now()"
     root = Path(__file__).parents[2] / "src" / "kdive"
