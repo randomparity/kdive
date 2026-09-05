@@ -28,7 +28,8 @@ Files: `src/kdive/providers/shared/libvirt_xml.py`,
 
 Interfaces: add pure helpers that locate the grouped KDIVE root and return System text or storage
 attributes from a parsed full-domain root. `render_domain_xml(...) -> str` emits that shape;
-`require_disk_grub_source(...) -> None` and `disk_pool[_strict](...)` consume it. Existing
+`require_disk_grub_source(...) -> None`, `disk_pool(...)`, and `disk_pool_strict(...)` consume it.
+Existing
 `parse_metadata_system_id(meta_xml: str) -> str | None` additionally consumes libvirt's exact
 namespace-stripped grouped fragment for the reaper metadata API.
 
