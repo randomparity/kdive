@@ -117,3 +117,54 @@ REVOKE ALL ON FUNCTION public.resolve_external_boot_system_teardown_dispatch_bin
          kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION public.resolve_external_boot_system_teardown_dispatch_binding(uuid)
     TO kdive_server;
+
+CREATE FUNCTION public.resolve_current_external_boot_teardown_authority(
+    p_peer_incarnation text, p_authority_id uuid, p_generation bigint,
+    p_ack_sequence bigint, p_ack_digest text
+) RETURNS TABLE (
+    peer_incarnation_id text, authority_id uuid, generation bigint, system_id uuid,
+    activation_id uuid, run_id uuid, plan_identity text, purpose text, operation text,
+    provider_kind text, authority_instance text, operation_identity text, operation_digest text,
+    state text, reservation_disposition text, store_identity text, owner_key text,
+    reserved_bytes bigint, release_identity text, release_evidence jsonb
+) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
+    SELECT a.worker_incarnation, a.id, a.generation, a.system_id, a.activation_id, a.run_id,
+           a.plan_identity, a.purpose, a.operation, a.provider_kind, a.authority_instance,
+           a.operation_identity, a.operation_digest, a.state,
+           CASE WHEN reservation.activation_id IS NOT NULL THEN reservation.state
+                ELSE 'released' END,
+           coalesce(reservation.store_identity, released.store_identity),
+           coalesce(reservation.owner_key, released.owner_key),
+           coalesce(reservation.reserved_bytes, released.reserved_bytes),
+           released.release_identity, released.release_evidence
+    FROM public.external_boot_authorities AS a
+    JOIN public.worker_incarnations AS worker ON worker.incarnation = a.worker_incarnation
+    JOIN public.external_boot_authority_acknowledgements AS acknowledgement
+      ON acknowledgement.authority_id = a.id
+    JOIN public.external_boot_activations AS activation ON activation.id = a.activation_id
+    LEFT JOIN public.external_boot_reservations AS reservation
+      ON reservation.activation_id = activation.id
+    LEFT JOIN public.external_boot_reservation_releases AS released
+      ON released.activation_id = activation.id
+    WHERE pg_has_role(session_user, 'kdive_provider_authority', 'member')
+      AND worker.incarnation = p_peer_incarnation AND worker.state = 'active'
+      AND worker.fence_protocol = 4
+      AND a.id = p_authority_id AND a.generation = p_generation AND a.state = 'current'
+      AND a.purpose = 'teardown' AND a.operation = 'teardown'
+      AND acknowledgement.journal_sequence = p_ack_sequence
+      AND acknowledgement.journal_digest = p_ack_digest
+      AND (
+          reservation.state IN ('pending', 'ready')
+          OR (
+              reservation.activation_id IS NULL AND released.activation_id IS NOT NULL
+              AND activation.state IN ('recovered', 'abandoned') AND activation.cleanup_complete
+          )
+      )
+$$;
+
+REVOKE ALL ON FUNCTION public.resolve_current_external_boot_teardown_authority(
+    text,uuid,bigint,bigint,text
+) FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness;
+GRANT EXECUTE ON FUNCTION public.resolve_current_external_boot_teardown_authority(
+    text,uuid,bigint,bigint,text
+) TO kdive_provider_authority;
