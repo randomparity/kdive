@@ -310,12 +310,16 @@ async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
         )
     )
     await started.wait()
-    task.cancel()
+    task.cancel("caller stopped")
+    await asyncio.sleep(0)
+    task.cancel("later cancellation")
     await asyncio.sleep(0)
     assert not verifier_exited.is_set()
     release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as caught:
         await task
+    assert caught.value.args == ("caller stopped",)
+    assert task.cancelling() == 2
     assert verifier_exited.is_set()
     executor.shutdown()
 

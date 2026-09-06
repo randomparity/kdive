@@ -88,18 +88,28 @@ async def prepare_verified_remote_module_attempt[ResultT](
             completed = asyncio.Event()
             task.add_done_callback(lambda _task: completed.set())
             cancelled: asyncio.CancelledError | None = None
+            consumed_cancellations = 0
             while not completed.is_set():
                 try:
                     await completed.wait()
                 except asyncio.CancelledError as error:
                     cancelled = cancelled or error
+                    consumed_cancellations += 1
                     caller.uncancel()
-            if cancelled is not None or caller.cancelling() != 0:
+            if cancelled is None and caller.cancelling() != 0:
+                try:
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError as error:
+                    cancelled = error
+                    consumed_cancellations += 1
+                    caller.uncancel()
+            if cancelled is not None:
                 if not task.cancelled():
                     task.exception()
-                if cancelled is not None:
-                    raise cancelled from None
-                raise asyncio.CancelledError from None
+                message = cancelled.args[0] if cancelled.args else None
+                for _ in range(consumed_cancellations):
+                    caller.cancel(message)
+                raise cancelled from None
             return task.result()
         assert operation is not None
         return await executor.run(lambda: operation(attempt, identity, check_deadline))

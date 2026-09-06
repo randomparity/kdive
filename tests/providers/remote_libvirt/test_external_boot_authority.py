@@ -932,7 +932,9 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
             await asyncio.wait_for(retry_refused.wait(), 1)
             assert not task.done()
             assert observer_task is not None
-            task.cancel()
+            task.cancel("worker shutdown")
+            await asyncio.sleep(0)
+            task.cancel("later cancellation")
             observer_task.cancel()
             await asyncio.sleep(0)
             assert not task.done()
@@ -944,8 +946,10 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
                             contender, attempt, reason="restored"
                         )
             host_release.set()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as caught:
                 await asyncio.wait_for(task, 2)
+            assert caught.value.args == ("worker shutdown",)
+            assert task.cancelling() == 2
             async with await psycopg.AsyncConnection.connect(migrated_url) as contender:
                 assert await backing.discharge_mutation_obligation(
                     contender, attempt, reason="restored"
@@ -956,6 +960,116 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
             executor.shutdown()
 
     asyncio.run(run())
+
+
+def test_asyncio_run_shutdown_waits_for_late_prep_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _remote_preparation_request()
+    response = _terminal_response(request)
+    attempt = ModuleAttempt(
+        request.authority.system_id,
+        request.authority.run_id,
+        request.operation.operation_nonce,
+    )
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=attempt.system_id,
+            run_id=attempt.run_id,
+            operation_nonce=attempt.operation_nonce,
+        )
+    )
+    second_call_started = threading.Event()
+    post_shutdown_call_started = threading.Event()
+    host_release = threading.Event()
+    host_completed = threading.Event()
+    runner_returned = threading.Event()
+    release_failures: list[str] = []
+    calls = 0
+
+    async def verify(
+        _pool: object,
+        _repository: object,
+        _request: object,
+        candidate: ModuleAttempt,
+        consumer: Any,
+        **_kwargs: object,
+    ) -> object:
+        assert candidate == attempt
+        return await consumer(candidate)
+
+    monkeypatch.setattr(
+        "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
+        verify,
+    )
+
+    class Sender:
+        async def open_remote_module_attempt(
+            self, _begin: object, *, deadline: float
+        ) -> RemoteModulePreparationBeginResponseV1:
+            assert deadline > asyncio.get_running_loop().time()
+            return RemoteModulePreparationBeginResponseV1(
+                preparation=preparation,
+                operation=request.operation,
+            )
+
+        async def execute_remote_module_preparation(
+            self, candidate: RemoteModuleVolumePreparationRequestV1, *, deadline: float
+        ) -> RemoteModuleTerminalPreparationResponseV1:
+            nonlocal calls
+            assert candidate == request
+            assert deadline > asyncio.get_running_loop().time()
+            calls += 1
+            if calls == 1:
+                raise TimeoutError
+            if calls == 2:
+                second_call_started.set()
+                await asyncio.Event().wait()
+                raise AssertionError("cancelled transport call unexpectedly resumed")
+            post_shutdown_call_started.set()
+            while not host_release.is_set():
+                await asyncio.sleep(0.01)
+            host_completed.set()
+            return response
+
+    def release_host_after_shutdown() -> None:
+        if not post_shutdown_call_started.wait(2):
+            release_failures.append("authority completion was not observed after shutdown")
+        elif runner_returned.is_set():
+            release_failures.append("asyncio.run returned before authority completion")
+        host_release.set()
+
+    executor = RemoteModulePreparationExecutor()
+
+    async def scenario() -> None:
+        asyncio.create_task(
+            prepare_remote_module_on_authority_host(
+                pool=cast(Any, object()),
+                repository=cast(Any, object()),
+                sender=cast(Any, Sender()),
+                inputs=RemoteModulePreparationInputs(authority=request.authority),
+                executor=executor,
+                job_id=uuid4(),
+                job_attempt=1,
+                incarnation_credential=SecretStr("worker-credential"),
+                deadline=asyncio.get_running_loop().time() + 10,
+            )
+        )
+        assert await asyncio.to_thread(second_call_started.wait, 1)
+
+    releaser = threading.Thread(target=release_host_after_shutdown)
+    releaser.start()
+    try:
+        asyncio.run(scenario())
+        runner_returned.set()
+    finally:
+        host_release.set()
+        releaser.join()
+        executor.shutdown()
+
+    assert release_failures == []
+    assert host_completed.is_set()
+    assert calls == 3
 
 
 def _record() -> RemoteExternalBootRecoveryRecord:
@@ -1649,7 +1763,9 @@ async def test_worker_lifecycle_accepts_only_authenticated_terminal_failure_afte
 
     task = asyncio.create_task(operation)
     await asyncio.wait_for(retrying.wait(), 1)
-    assert task.cancel()
+    assert task.cancel("worker shutdown")
+    await asyncio.sleep(0)
+    assert task.cancel("later cancellation")
     await asyncio.sleep(0)
     assert not task.done()
     assert observer_task is not None
@@ -1657,8 +1773,10 @@ async def test_worker_lifecycle_accepts_only_authenticated_terminal_failure_afte
     await asyncio.sleep(0)
     assert not task.done()
     terminal_release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as caught:
         await asyncio.wait_for(task, 1)
+    assert caught.value.args == ("worker shutdown",)
+    assert task.cancelling() == 2
     assert calls == 3
 
 
