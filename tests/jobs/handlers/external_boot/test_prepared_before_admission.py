@@ -39,12 +39,16 @@ from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, See
 from tests.jobs.handlers.external_boot.support import CASES, build_job
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 
-# operation -> the seeding that makes a NULL recovery_point a *legal* row for that operation.
-# Each of these states is one external_boot_activation_state_evidence admits without one: it admits
-# `abandoned` on terminal_evidence alone, and the recovery states whenever pre_recovery_evidence is
-# present. So the refusal under test is the handler's, not the database's.
+# operation -> a database-valid activation with a NULL recovery_point. Release now rejects its
+# `abandoned` state before it reaches the evidence check; that earlier refusal still pins that no
+# authority is allocated for a malformed activation.
 NULL_RECOVERY_POINT_CASES: dict[str, dict[str, Any]] = {
-    "release": {"purpose": "release", "activation_state": "abandoned", "seed": {}},
+    "release": {
+        "purpose": "release",
+        "activation_state": "abandoned",
+        "seed": {},
+        "error_match": "is 'abandoned', which 'release' does not admit",
+    },
     "cleanup": {"purpose": "release", "activation_state": "abandoned", "seed": {}},
     "teardown": {
         "purpose": "teardown",
@@ -145,7 +149,9 @@ def test_a_null_recovery_point_is_refused_before_allocation(
             **spec["seed"],
         )
 
-        with pytest.raises(CategorizedError, match="has no recovery_point") as excinfo:
+        with pytest.raises(
+            CategorizedError, match=spec.get("error_match", "has no recovery_point")
+        ) as excinfo:
             await _dispatch(authority_role_dsns, case, operation, vehicle)
 
         assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -181,20 +187,22 @@ def test_an_activating_activation_cannot_hold_null_evidence_at_all(migrated_url:
     _drive(migrated_url, body)
 
 
-def test_no_handler_calls_materialize_or_prepare_on_any_path(
+def test_no_direct_handler_calls_materialize_or_prepare_on_any_path(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """ADR-0593 decision 4, across all six handlers and both their success and refusal paths.
+    """ADR-0593 decision 4, across the five direct handlers and their success paths.
 
     The fixture drives ``materialize`` and ``prepare`` itself **before** installing the wrapper,
     which is the disposition rather than a hole in it: the pin is that the *handler* never performs
     them, and the activation row the handler reads is prepared precisely because something else
-    already did.
+    already did. Derived ``release`` is intentionally excluded: its real recover-and-cleanup
+    journal flow is asserted by ``test_release_connected.py``.
     """
 
     async def body(seed: AsyncConnection) -> None:
         observed: list[str] = []
-        for operation, spec in CASES.items():
+        for operation in ("activate", "recover", "resolve-conflict", "cleanup", "teardown"):
+            spec = CASES[operation]
             vehicle = build_vehicle()
             case = await seed_case(
                 seed,
