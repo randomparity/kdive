@@ -153,6 +153,24 @@ def test_local_binding_is_disabled_only_when_all_worker_settings_are_absent() ->
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_worker_validation_does_not_require_authority_host_settings() -> None:
+    worker_environment = {
+        "KDIVE_DATABASE_URL": "postgresql://example.invalid/kdive",
+        "KDIVE_S3_ENDPOINT_URL": "http://example.invalid",
+        "KDIVE_S3_BUCKET": "kdive",
+    }
+    config_registry.load(
+        worker_environment | {"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "host-only"}
+    )
+    config_registry.validate("worker")
+    config_registry.load(
+        worker_environment | {"KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": "relative"}
+    )
+    with pytest.raises(CategorizedError) as caught:
+        config_registry.validate("worker")
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 async def test_local_sender_factory_borrows_active_credential_at_encode(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +208,40 @@ async def test_local_sender_factory_borrows_active_credential_at_encode(
     async with _server(socket_path, material, authenticated):
         assert await sender.health(deadline=asyncio.get_running_loop().time() + 2)
     assert borrowed == [credential]
+
+
+async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
+    from kdive.jobs.authority_sender import local_authority_sender_factory
+
+    material = _tls_material(tmp_path, "authority-a")
+    socket_path = tmp_path / "authority.sock"
+    client_key_ref = "client-key"  # pragma: allowlist secret - fixture reference
+    config_registry.load(
+        {
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": str(socket_path),
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "server-ca",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "client-certificate",
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": client_key_ref,
+        }
+    )
+    sender = local_authority_sender_factory(
+        FileRefBackend(tmp_path, SecretRegistry()), lambda: SecretStr("stale-incarnation")
+    )
+    assert sender is not None
+    response = b'{"category":"unauthenticated","status":"error"}'
+
+    async def reject_stale(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = json.loads(await read_frame(reader, maximum=MAX_ENVELOPE_BYTES))
+        assert request["credential"] == "stale-incarnation"
+        writer.write(len(response).to_bytes(4, "big") + response)
+        await writer.drain()
+
+    async with _server(socket_path, material, reject_stale):
+        with pytest.raises(CategorizedError, match="^authority: unauthenticated$") as caught:
+            await sender.health(deadline=asyncio.get_running_loop().time() + 2)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "stale-incarnation" not in str(caught.value)
 
 
 def test_local_sender_factory_accepts_no_caller_route() -> None:
