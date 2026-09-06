@@ -12,6 +12,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
+    ModuleAttemptTerminalEvidence,
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -21,7 +22,9 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance imp
     ApplianceConn,
     ApplianceRequest,
     DeadlineExecutor,
+    TeardownObservation,
     run_or_adopt_appliance,
+    teardown_remote_module_appliance,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
@@ -43,6 +46,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedVolume,
     StorageConn,
     VolumeRequest,
+    delete_owned_attempt_volume,
+    expected_attempt_volumes,
     prepare_attempt_volumes,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -79,6 +84,18 @@ class ModuleOperationRuntime(Protocol):
         executor: RemoteModulePreparationExecutor,
         deadline: float,
     ) -> RemoteModuleResultV1: ...
+    async def teardown(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> TeardownObservation: ...
+    async def delete_source(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None: ...
+    async def delete_scratch(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +141,26 @@ class RemoteModuleOperationRuntime:
             UUID(recovery.system_id), UUID(recovery.run_id), recovery.operation_nonce
         )
 
+    def _volume_request(self, operation: RemoteModuleOperationV1) -> VolumeRequest:
+        configured = self.volume_preparation
+        if configured is None:
+            raise CategorizedError(
+                "remote module volume preparation is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return VolumeRequest(
+            pool=configured.pool_name,
+            system_id=operation.system_id,
+            run_id=operation.run_id,
+            operation_nonce=operation.operation_nonce,
+            operation=operation,
+            source_manifest=operation.source_manifest,
+            entries=configured.entries,
+            writer=configured.writer,
+            inspect_attachments=configured.inspect_attachments,
+            work_dir=configured.work_dir,
+        )
+
     async def prepare(
         self,
         request: ModuleAttemptPreparationRequestV1,
@@ -155,18 +192,7 @@ class RemoteModuleOperationRuntime:
                     "remote module verified attempt differs from operation",
                     category=ErrorCategory.CONFLICT,
                 )
-            volume_request = VolumeRequest(
-                pool=configured.pool_name,
-                system_id=operation.system_id,
-                run_id=operation.run_id,
-                operation_nonce=operation.operation_nonce,
-                operation=operation,
-                source_manifest=operation.source_manifest,
-                entries=configured.entries,
-                writer=configured.writer,
-                inspect_attachments=configured.inspect_attachments,
-                work_dir=configured.work_dir,
-            )
+            volume_request = self._volume_request(operation)
             return prepare_attempt_volumes(
                 configured.storage, volume_request, admit_mutation=check_deadline
             )
@@ -232,29 +258,7 @@ class RemoteModuleOperationRuntime:
             )
 
         def execute() -> RemoteModuleResultV1:
-            request = ApplianceRequest(
-                name=(
-                    f"kdive-module-{operation.system_id}-{operation.run_id}-"
-                    f"{operation.operation_nonce}"
-                ),
-                architecture=configured.architecture,
-                emulator_path=configured.emulator_path,
-                memory_kib=configured.memory_kib,
-                vcpus=configured.vcpus,
-                pool=prepared.pool_name,
-                appliance_volume=configured.appliance_volume,
-                appliance_image_digest=configured.appliance_image_digest,
-                root=configured.root(operation),
-                source=volumes.source,
-                scratch=volumes.scratch,
-                operation=operation,
-                secret_registry=configured.secret_registry,
-                read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch),
-                inspect_attachments=configured.inspect_attachments,
-                executor=configured.deadline_executor,
-                monotonic=configured.monotonic,
-                invocation_deadline=deadline,
-            )
+            request = self._appliance_request(operation, volumes, deadline)
             outcome = run_or_adopt_appliance(configured.appliance, request)
             if outcome.result is None:
                 raise CategorizedError(
@@ -283,6 +287,109 @@ class RemoteModuleOperationRuntime:
             return durable
 
         return await executor.run(execute)
+
+    def _appliance_request(
+        self,
+        operation: RemoteModuleOperationV1,
+        volumes: PreparedModuleVolumes,
+        deadline: float,
+    ) -> ApplianceRequest:
+        configured = self.appliance_execution
+        prepared = self.volume_preparation
+        if configured is None or prepared is None:
+            raise CategorizedError(
+                "remote module appliance execution is not configured",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return ApplianceRequest(
+            name=f"kdive-module-{operation.system_id}-{operation.run_id}-{operation.operation_nonce}",
+            architecture=configured.architecture,
+            emulator_path=configured.emulator_path,
+            memory_kib=configured.memory_kib,
+            vcpus=configured.vcpus,
+            pool=prepared.pool_name,
+            appliance_volume=configured.appliance_volume,
+            appliance_image_digest=configured.appliance_image_digest,
+            root=configured.root(operation),
+            source=volumes.source,
+            scratch=volumes.scratch,
+            operation=operation,
+            secret_registry=configured.secret_registry,
+            read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch),
+            inspect_attachments=configured.inspect_attachments,
+            executor=configured.deadline_executor,
+            monotonic=configured.monotonic,
+            invocation_deadline=deadline,
+        )
+
+    async def teardown(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        deadline: float,
+    ) -> TeardownObservation:
+        operation = await self.reopen_operation(recovery)
+        volumes = expected_attempt_volumes(self._volume_request(operation))
+        request = self._appliance_request(operation, volumes, deadline)
+        configured = self.appliance_execution
+        assert configured is not None
+        return await executor.run(
+            lambda: teardown_remote_module_appliance(configured.appliance, request)
+        )
+
+    async def _open_reap_evidence(self, recovery: RemoteModuleRecoveryRefV1) -> None:
+        operation = await self.reopen_operation(recovery)
+        result = await self.reopen_result(recovery)
+        if recovery.installed_entry_count is None or recovery.installed_content_bytes is None:
+            raise CategorizedError(
+                "remote module installed baseline counts are absent",
+                category=ErrorCategory.CONFLICT,
+            )
+        evidence = ModuleAttemptTerminalEvidence(
+            terminal_operation=operation.model_dump(mode="json"),
+            terminal_operation_identity=identity_for(operation),
+            terminal_result=result.model_dump(mode="json"),
+            terminal_result_identity=identity_for(result),
+            baseline_operation_identity=recovery.operation_identity,
+            baseline_result_identity=recovery.result_identity,
+            installed_entry_count=recovery.installed_entry_count,
+            installed_content_bytes=recovery.installed_content_bytes,
+            recovery_reference=recovery.model_dump(mode="json"),
+        )
+        async with self.pool.connection() as conn, conn.transaction():
+            await self.repository.record_terminal_evidence(conn, self._attempt(recovery), evidence)
+            await self.repository.open_reap_obligation(conn, self._attempt(recovery))
+
+    async def _delete(
+        self,
+        recovery: RemoteModuleRecoveryRefV1,
+        executor: RemoteModulePreparationExecutor,
+        purpose: str,
+    ) -> None:
+        if purpose == "scratch":
+            await self._open_reap_evidence(recovery)
+        operation = await self.reopen_operation(recovery)
+        request = self._volume_request(operation)
+        volumes = expected_attempt_volumes(request)
+        selected = volumes.source if purpose == "source" else volumes.scratch
+        configured = self.volume_preparation
+        assert configured is not None
+
+        def delete() -> None:
+            inspection = configured.inspect_attachments()
+            delete_owned_attempt_volume(configured.storage, selected, inspection=inspection)
+
+        await executor.run(delete)
+
+    async def delete_source(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None:
+        await self._delete(recovery, executor, "source")
+
+    async def delete_scratch(
+        self, recovery: RemoteModuleRecoveryRefV1, executor: RemoteModulePreparationExecutor
+    ) -> None:
+        await self._delete(recovery, executor, "scratch")
 
     @staticmethod
     def _operation_from_result(result: RemoteModuleResultV1) -> RemoteModuleOperationV1:
