@@ -669,7 +669,7 @@ def _register_systems_resolve_external_boot_conflict(
         binding. It returns a queued job. Repeating the exact System, operation, and observed
         identity returns that same job. The worker freshly observes provider state and changes
         the activation only when the identity still matches; otherwise the job fails and leaves
-        the conflict and its evidence intact. Poll with `jobs.get` or `jobs.wait`.
+        the conflict and its evidence intact. Poll with `jobs.wait`.
 
         Requires admin on the System's project. Only an activation in `recovery_conflict` is
         admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
