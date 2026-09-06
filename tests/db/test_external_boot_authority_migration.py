@@ -1309,13 +1309,17 @@ def test_acknowledgement_replay_and_delayed_takeover_are_fenced(
         assert _acknowledge(host, case, first) == "applied"
 
     with psycopg.connect(migrated_url) as conn:
-        conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (case.job_id,))
+        conn.execute(
+            "UPDATE jobs SET state = 'running', attempt = attempt + 1 WHERE id = %s",
+            (case.job_id,),
+        )
+    successor_case = replace(case, attempt=case.attempt + 1)
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
-        second = _allocate(worker, case)
+        second = _allocate(worker, successor_case)
     with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as host:
         assert _acknowledge(host, case, first) == "superseded"
-        assert _acknowledge(host, case, second) == "applied"
-        assert _acknowledge(host, case, second, journal_digest="sha256:" + "d" * 64) == (
+        assert _acknowledge(host, successor_case, second) == "applied"
+        assert _acknowledge(host, successor_case, second, journal_digest="sha256:" + "d" * 64) == (
             "superseded"
         )
     with psycopg.connect(migrated_url) as conn:

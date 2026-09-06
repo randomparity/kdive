@@ -33,7 +33,7 @@ from kdive.providers.external_boot_authority.transport import (
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
-from tests.providers.external_boot_authority.test_network_client import _tls_material
+from tests.providers.external_boot_authority.tls_support import _tls_material
 
 pytestmark = pytest.mark.anyio
 
@@ -298,12 +298,16 @@ async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
     assert "stale-incarnation" not in str(caught.value)
 
 
-def test_local_sender_factory_accepts_no_caller_route() -> None:
+def test_local_sender_factory_accepts_only_validated_binding() -> None:
     from kdive.jobs.authority_sender import local_authority_sender_factory
 
     assert tuple(inspect.signature(local_authority_sender_factory).parameters) == (
         "secret_backend",
         "borrow",
+        "binding",
+    )
+    assert inspect.signature(local_authority_sender_factory).parameters["binding"].kind is (
+        inspect.Parameter.KEYWORD_ONLY
     )
 
 
