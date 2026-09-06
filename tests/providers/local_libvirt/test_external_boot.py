@@ -1047,6 +1047,7 @@ def test_real_materializer_capacity_accepts_equality_and_refuses_one_over() -> N
         + plan.module_obligation.uncompressed_bytes
         + plan.module_obligation.member_count * 1024
         + external_boot_module.MAX_ARCHIVE_BYTES * 2
+        + external_boot_module._source_byte_limit(plan.bundle)  # noqa: SLF001
         + external_boot_module._MAX_PROJECTION_BYTES
         + external_boot_module._MAX_RECOVERY_METADATA_BYTES
     )
@@ -1077,6 +1078,57 @@ def test_real_materializer_capacity_accepts_equality_and_refuses_one_over() -> N
     with pytest.raises(ValueError, match="configured capacity"):
         over.materialize(plan)
     assert calls == [plan]
+
+
+def test_exact_bundle_validation_discards_rebuilt_archive_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _plan()
+    directory_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    converted = ("sha256:" + "d" * 64, 12)
+
+    def stream_exact_version(
+        _store: object,
+        _source: object,
+        target_fd: int,
+        name: str,
+    ) -> int:
+        return os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=target_fd)
+
+    def convert(
+        _source: BinaryIO,
+        destination: BinaryIO,
+        *,
+        release: str,
+        temporary_directory: str,
+    ) -> tuple[str, int]:
+        assert destination.name == os.devnull
+        assert release == plan.module_obligation.release
+        assert temporary_directory == f"/proc/self/fd/{directory_fd}"
+        return converted
+
+    def digest(_directory_fd: int, name: str) -> tuple[str, int]:
+        if name == "kernel":
+            return plan.bundle.vmlinuz_sha256, plan.bundle.vmlinuz_size_bytes
+        assert name == "modules"
+        return converted
+
+    monkeypatch.setattr(external_boot_module, "_stream_exact_version", stream_exact_version)
+    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", convert)
+    monkeypatch.setattr(external_boot_module, "_descriptor_digest", digest)
+    monkeypatch.setattr(external_boot_module, "_installed_module_manifest", lambda _fd: "manifest")
+    monkeypatch.setattr(
+        external_boot_module.RealLocalExternalBootMaterializer,
+        "_validate_bundle_evidence",
+        staticmethod(lambda _plan, _descriptor: {}),
+    )
+    try:
+        store = cast(external_boot_module.ObjectStore, object())
+        materializer = external_boot_module.RealLocalExternalBootMaterializer(store)
+        assert materializer._validate_local_bundle(plan, directory_fd) == ({}, "manifest")
+        assert not (tmp_path / ".bundle.verify").exists()
+    finally:
+        os.close(directory_fd)
 
 
 def _plan() -> ExternalBootPlan:
