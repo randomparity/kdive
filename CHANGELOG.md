@@ -247,6 +247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add device identity wire values
 - Serve bounded device identity lookups
 - Add authenticated identity port
+- Prepare attempt volumes
+- Retain preparation completion
 
 ### Changed
 
@@ -1282,6 +1284,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consume resource-bound authority route
 - Bind identity transport to authority route
 - Bound identity lookup executor
+- Align module volumes with prerequisites
+- Bound module volume offload
+- Name verified preparation seam
 
 ### Fixed
 
@@ -2074,6 +2079,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Defer TLS resolution to typed calls
 - Preserve provider import boundary
 - Guarantee identity service cleanup
+- Keep preparation verification in services
+- Preserve preparation boundaries
+- Drain provider work through shutdown
+- Preserve queued cancellation
 
 ### Security
 
