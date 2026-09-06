@@ -23,6 +23,45 @@ def _identity_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_asyncio_runner_shutdown_waits_for_provider_completion() -> None:
+    executor = RemoteModulePreparationExecutor()
+    started = threading.Event()
+    release = threading.Event()
+    operation_finished = threading.Event()
+    scope_exited = threading.Event()
+    exited_before_completion: list[bool] = []
+
+    def blocked() -> None:
+        started.set()
+        release.wait()
+        operation_finished.set()
+
+    async def owning_scope() -> None:
+        try:
+            await executor.run(blocked)
+        finally:
+            scope_exited.set()
+
+    async def main() -> None:
+        asyncio.create_task(owning_scope())
+        await asyncio.to_thread(started.wait)
+
+    def release_after_shutdown_starts() -> None:
+        started.wait()
+        exited_before_completion.append(scope_exited.wait(timeout=0.1))
+        release.set()
+
+    releaser = threading.Thread(target=release_after_shutdown_starts)
+    releaser.start()
+    asyncio.run(main())
+    releaser.join()
+
+    assert exited_before_completion == [False]
+    assert operation_finished.is_set()
+    assert scope_exited.is_set()
+    executor.shutdown()
+
+
 @pytest.mark.anyio
 async def test_capacity_is_retained_until_underlying_calls_complete() -> None:
     executor = RemoteModulePreparationExecutor()

@@ -52,17 +52,19 @@ class RemoteModulePreparationExecutor:
 
     @staticmethod
     async def _await_completion[ResultT](future: Future[ResultT]) -> ResultT:
-        wrapped = asyncio.wrap_future(future)
-        completed = asyncio.Event()
-        wrapped.add_done_callback(lambda _future: completed.set())
-        completion_waiter = asyncio.create_task(completed.wait())
+        loop = asyncio.get_running_loop()
+        completed = loop.create_future()
+
+        def signal_completion(_future: Future[ResultT]) -> None:
+            loop.call_soon_threadsafe(completed.set_result, None)
+
+        future.add_done_callback(signal_completion)
         try:
-            await asyncio.shield(completion_waiter)
+            await asyncio.shield(completed)
         except asyncio.CancelledError as cancelled:
-            while not completion_waiter.done():
+            while not completed.done():
                 with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(completion_waiter)
-            if not wrapped.cancelled():
-                wrapped.exception()
+                    await asyncio.shield(completed)
+            future.exception()
             raise cancelled from None
-        return wrapped.result()
+        return future.result()
