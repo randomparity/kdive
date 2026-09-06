@@ -262,6 +262,14 @@ failures, verify the authority client group can traverse the setgid request dire
 socket owner, group, and mode match the provisioned contract; do not use a fixed worker credential
 as a health client.
 
+Local mutation is a separate opt-in. Set
+`live_vm_host_authority_local_mutation_enabled: true` only with the capacity, S3, protected S3
+credential source, and recovery-root inputs required by the role preflight. Systems selected for
+that route must already be defined on the authority's fixed private libvirt daemon, with their
+rootfs overlay and console log owned by the authority account. An ordinary System provisioned by
+a legacy fixed worker does not meet that ownership contract and must be rejected before mutation;
+do not repair it by adding workers to authority groups or widening authority access to `/var/lib`.
+
 To retire an opted-in authority host, put `authority_database_admin_dsn` and any non-default LOGIN
 name in a protected vars file, then run the explicit teardown twice to prove convergence:
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from uuid import UUID
 
@@ -23,6 +26,54 @@ from kdive.providers.shared.runtime_paths import (
 )
 
 _SYSTEM_ID = UUID("11111111-1111-1111-1111-111111111111")
+
+
+def _imported_roots(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from kdive.providers.shared.runtime_paths import (ROOTFS_DIR, UPLOADS_DIR, "
+            "console_log_path); from uuid import UUID; print(ROOTFS_DIR); "
+            "print(console_log_path(UUID(int=0)).parent); print(UPLOADS_DIR)",
+        ],
+        env=os.environ | environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_runtime_roots_bind_default_and_private_process_paths() -> None:
+    default = _imported_roots(
+        {
+            "KDIVE_LIBVIRT_ROOTFS_ROOT": "/var/lib/kdive/rootfs",
+            "KDIVE_LIBVIRT_CONSOLE_ROOT": "/var/lib/kdive/console",
+        }
+    )
+    private = _imported_roots(
+        {
+            "KDIVE_LIBVIRT_ROOTFS_ROOT": "/private/rootfs",
+            "KDIVE_LIBVIRT_CONSOLE_ROOT": "/private/console",
+        }
+    )
+    assert default.returncode == private.returncode == 0
+    assert default.stdout.splitlines() == [
+        "/var/lib/kdive/rootfs",
+        "/var/lib/kdive/console",
+        "/var/lib/kdive/rootfs-uploads",
+    ]
+    assert private.stdout.splitlines() == [
+        "/private/rootfs",
+        "/private/console",
+        "/var/lib/kdive/rootfs-uploads",
+    ]
+
+
+def test_runtime_roots_reject_relative_process_path() -> None:
+    result = _imported_roots({"KDIVE_LIBVIRT_ROOTFS_ROOT": "relative"})
+    assert result.returncode != 0
+    assert "must be an absolute path" in result.stderr
 
 
 def test_domain_name_for_uses_kdive_prefix() -> None:

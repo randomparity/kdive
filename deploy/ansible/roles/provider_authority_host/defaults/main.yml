@@ -24,6 +24,8 @@ provider_authority_host_health_client_key_source: ""
 # must be supplied and validated before the role changes the target host.
 provider_authority_host_local_mutation_enabled: false
 provider_authority_host_recovery_root: /var/lib/kdive/provider-authority/recovery
+provider_authority_host_rootfs_root: /var/lib/kdive/provider-authority/rootfs
+provider_authority_host_console_root: /var/lib/kdive/provider-authority/console
 provider_authority_host_external_boot_capacity_bytes: null
 provider_authority_host_s3_endpoint_url: ""
 provider_authority_host_s3_bucket: ""
