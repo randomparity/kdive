@@ -279,14 +279,15 @@ def _validate_access_boundary(config: AuthorityHostConfig) -> None:
         if attributes & _POSIX_ACL_XATTRS:
             raise HostReadinessError("access-boundary", "unsafe-acl")
 
-    authority_groups = {config.authority_gid, config.authority_client_gid}
     for identity in config.denied_identities:
         try:
             account = pwd.getpwnam(identity)
             identity_groups = set(os.getgrouplist(identity, account.pw_gid))
         except KeyError, OSError:
             raise HostReadinessError("access-boundary", "identity-missing") from None
-        if account.pw_uid in {0, config.authority_uid} or identity_groups & authority_groups:
+        # ADR-0619: the client group grants only request-socket transport; fixed workers are
+        # intended members. The distinct authority owner group remains forbidden.
+        if account.pw_uid in {0, config.authority_uid} or config.authority_gid in identity_groups:
             raise HostReadinessError("access-boundary", "denied-identity")
 
 
@@ -524,6 +525,16 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_current_external_boot_preparation_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.resolve_current_external_boot_release_phase_authority(text,uuid,bigint,'
+                    'bigint,text,text)'::regprocedure,
+                'public.resolve_external_boot_recovery_orphan_authority(text,uuid,uuid,integer)'
+                    ::regprocedure,
+                'public.commit_external_boot_recovery_orphan_disposition(text,uuid,uuid,integer,'
+                    'uuid,text,text)'::regprocedure,
+                'public.verify_external_boot_recovery_orphan_inventory_authority(text,uuid,uuid,'
+                    'integer)'::regprocedure,
+                'public.publish_external_boot_recovery_quarantine_authority(text,uuid,bigint,'
+                    'text,bigint,text,jsonb)'::regprocedure,
                 'public.read_external_boot_authority_journal_head(text,uuid,bigint,text)'
                     ::regprocedure,
                 'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,'
@@ -1098,10 +1109,12 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     """Build mutation support only on a host with an explicitly provisioned local root."""
     import libvirt
 
+    from kdive import config as runtime_config
     from kdive.providers.assembly.composition import (
-        build_authority_mutation_adapter,
+        build_authority_mutation_binding,
         object_store_from_env,
     )
+    from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
     from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
     from kdive.providers.external_boot_authority.service import (
         AuthorityAdapterCloser,
@@ -1134,11 +1147,11 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
     from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
     from kdive.security.secrets.secret_registry import SecretRegistry
 
-    if config_registry.get(LIBVIRT_RECOVERY_ROOT) is None:
+    if runtime_config.get(LIBVIRT_RECOVERY_ROOT) is None:
         return None
     object_store = object_store_from_env()
-    delegate = build_authority_mutation_adapter(config.provider_socket, object_store)
-    if delegate is None:
+    binding = build_authority_mutation_binding(config.provider_socket, object_store)
+    if binding is None:
         return None
 
     uri = f"qemu+unix:///system?socket={quote(str(config.provider_socket), safe='/')}"
@@ -1195,12 +1208,12 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
 
     def close_remote() -> None:
         module_store.close()
-        if isinstance(delegate, AuthorityAdapterCloser):
-            delegate.close()
+        if isinstance(binding.adapter, AuthorityAdapterCloser):
+            binding.adapter.close()
         connection.close()
 
     adapter = RemoteExternalBootAuthorityAdapter(
-        delegate, coordinator, module_executor, close=close_remote
+        binding.adapter, coordinator, module_executor, close=close_remote
     )
 
     @asynccontextmanager
@@ -1216,6 +1229,7 @@ def _build_mutation_service(config: AuthorityHostConfig) -> ExternalBootAuthorit
         ),
         adapter=adapter,
         remote_module_host=remote_module_host,
+        recovery_orphans=RecoveryOrphanAuthorityService(connections, binding.provider),
     )
 
 

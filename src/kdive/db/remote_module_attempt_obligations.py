@@ -24,7 +24,10 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.domain.remote_module_attempt_preparation import (
+    ModuleAttemptObligationReceiptV1,
+    ModuleAttemptPreparationRequestV1,
+)
 
 type MutationDischargeReason = Literal["restored", "baseline_committed", "terminal_escape"]
 
@@ -243,6 +246,30 @@ class RemoteModuleAttemptObligationRepository:
             and state["has_evidence"]
             and state["reap_opened_at"] is not None
             and state["reap_discharged_at"] is None
+        )
+
+    async def read_reap_preparation(
+        self, conn: AsyncConnection, system_id: UUID, run_id: UUID
+    ) -> ModuleAttemptPreparationRequestV1 | None:
+        """Rebuild the one retained PREP receipt a lifecycle job must carry unchanged."""
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT system_id, run_id, operation_nonce "
+                "FROM remote_module_attempt_obligations "
+                "WHERE system_id = %s AND run_id = %s "
+                "AND reap_opened_at IS NOT NULL AND reap_discharged_at IS NULL "
+                "ORDER BY operation_nonce LIMIT 2",
+                (system_id, run_id),
+            )
+            rows = await cur.fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ModuleAttemptObligationError(
+                f"multiple retained module attempts exist for {system_id}/{run_id}"
+            )
+        return ModuleAttemptPreparationRequestV1(
+            module_attempt_obligation=ModuleAttemptObligationReceiptV1(**rows[0])
         )
 
     async def discharge_mutation_obligation(

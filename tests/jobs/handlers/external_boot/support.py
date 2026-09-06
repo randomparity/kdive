@@ -86,6 +86,11 @@ def marker_fields(
         "authority_instance": authority_instance,
         "operation": operation,
         "operation_identity": f"{operation}-1",
+        **(
+            {"expected_observed_composite": "sha256:" + "8" * 64}
+            if purpose == operation == "resolve-conflict"
+            else {}
+        ),
     }
 
 

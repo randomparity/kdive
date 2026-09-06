@@ -93,6 +93,7 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
     with_release: bool = False,
     with_pre_recovery: bool = False,
     marker_overrides: dict[str, Any] | None = None,
+    reservation_store_identity: str | None = None,
 ) -> SeededCase:
     """Insert resource → allocation → system → investigation → run → activation → worker → job.
 
@@ -146,7 +147,23 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
     )
     if with_reservation or with_release:
         await _seed_store_rows(
-            conn, vehicle, with_reservation=with_reservation, with_release=with_release
+            conn,
+            vehicle,
+            with_reservation=with_reservation,
+            with_release=with_release,
+            store_override=reservation_store_identity,
+        )
+    elif activation_state == "preparing":
+        await conn.execute(
+            "INSERT INTO external_boot_reservations "
+            "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+            "VALUES (%s, %s, %s, %s, 'pending')",
+            (
+                vehicle.activation_id,
+                reservation_store_identity or store_identity(vehicle),
+                owner_key(vehicle),
+                RESERVED_BYTES,
+            ),
         )
     await conn.execute(
         "INSERT INTO worker_incarnations "
@@ -220,7 +237,12 @@ def release_evidence(vehicle: Vehicle) -> dict[str, Any]:
 
 
 async def _seed_store_rows(
-    conn: AsyncConnection, vehicle: Vehicle, *, with_reservation: bool, with_release: bool
+    conn: AsyncConnection,
+    vehicle: Vehicle,
+    *,
+    with_reservation: bool,
+    with_release: bool,
+    store_override: str | None = None,
 ) -> None:
     """A ready reservation for ``release``, or the release row ``cleanup``/``teardown`` name.
 
@@ -235,7 +257,12 @@ async def _seed_store_rows(
             "INSERT INTO external_boot_reservations "
             "(activation_id, store_identity, owner_key, reserved_bytes, state, ready_at) "
             "VALUES (%s, %s, %s, %s, 'ready', now())",
-            (vehicle.activation_id, store_identity(vehicle), owner_key(vehicle), RESERVED_BYTES),
+            (
+                vehicle.activation_id,
+                store_override or store_identity(vehicle),
+                owner_key(vehicle),
+                RESERVED_BYTES,
+            ),
         )
     if with_release:
         evidence = release_evidence(vehicle)

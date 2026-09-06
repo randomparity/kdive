@@ -63,6 +63,9 @@ class RemoteAuthorityBinding:
     server_ca_ref: str
     client_cert_ref: str
     client_key_ref: str
+    store_identity: str | None = None
+    recovery_reserve_bytes: int | None = None
+    recovery_max_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +391,9 @@ def _authority_binding_for(instance: RemoteLibvirtInstance) -> RemoteAuthorityBi
         instance.authority_server_ca_ref,
         instance.authority_client_cert_ref,
         instance.authority_client_key_ref,
+        instance.authority_store_identity,
+        instance.authority_recovery_reserve_bytes,
+        instance.authority_recovery_max_bytes,
     )
     if all(value is None for value in values):
         return None
@@ -398,6 +404,9 @@ def _authority_binding_for(instance: RemoteLibvirtInstance) -> RemoteAuthorityBi
         or instance.authority_server_ca_ref is None
         or instance.authority_client_cert_ref is None
         or instance.authority_client_key_ref is None
+        or instance.authority_store_identity is None
+        or instance.authority_recovery_reserve_bytes is None
+        or instance.authority_recovery_max_bytes is None
     ):
         raise CategorizedError(
             f"remote_libvirt[{instance.name}] authority binding fields must be all present or "
@@ -411,6 +420,9 @@ def _authority_binding_for(instance: RemoteLibvirtInstance) -> RemoteAuthorityBi
         server_ca_ref=instance.authority_server_ca_ref,
         client_cert_ref=instance.authority_client_cert_ref,
         client_key_ref=instance.authority_client_key_ref,
+        store_identity=instance.authority_store_identity,
+        recovery_reserve_bytes=instance.authority_recovery_reserve_bytes,
+        recovery_max_bytes=instance.authority_recovery_max_bytes,
     )
 
 

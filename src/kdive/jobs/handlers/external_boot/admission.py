@@ -21,6 +21,10 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttemptObligationError,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.payloads import (
@@ -31,10 +35,15 @@ from kdive.jobs.payloads import (
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
 from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.services.external_boot.routing import server_authority_instance
 
 __all__ = ["build_external_boot_payload"]
 
 _ACTIVATIONS = ExternalBootActivationRepository()
+_MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
+_REMOTE_MODULE_LIFECYCLE_OPERATIONS = frozenset(
+    {"recover", "resolve-conflict", "release", "cleanup", "teardown"}
+)
 
 
 def _refuse(message: str) -> CategorizedError:
@@ -75,24 +84,33 @@ async def build_external_boot_payload(
             f"bound for system {activation.system_id}"
         )
     if binding.runtime.external_boot is None:
-        raise _refuse(
-            f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
-            "has no external_boot port"
-        )
+        if activation.state.value != "preparing":
+            raise _refuse(
+                f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
+                "has no external_boot port"
+            )
+        if server_authority_instance(binding) != authority_instance:
+            raise _refuse("authority_instance does not match the fixed server route")
     if activation.state.value == "preparing":
         if preparation_plan is None:
             raise _refuse("a preparing activation requires its durable preparation plan")
-        if binding.runtime.external_boot_preparation is None:
-            raise _refuse(
-                f"the {binding.kind.value!r} runtime bound for system {activation.system_id} "
-                "has no external_boot_preparation port"
-            )
         if (
             preparation_plan.identity != activation.plan_identity
             or preparation_plan.ownership.system_id != str(activation.system_id)
             or preparation_plan.ownership.run_id != str(activation.run_id)
         ):
             raise _refuse("durable preparation plan does not match the activation")
+
+    remote_module_attempt = None
+    if binding.kind.value == "remote-libvirt" and operation in _REMOTE_MODULE_LIFECYCLE_OPERATIONS:
+        try:
+            remote_module_attempt = await _MODULE_ATTEMPTS.read_reap_preparation(
+                conn, activation.system_id, activation.run_id
+            )
+        except ModuleAttemptObligationError:
+            raise _refuse("remote module lifecycle PREP evidence is ambiguous") from None
+        if remote_module_attempt is None:
+            raise _refuse("remote module lifecycle has no retained PREP evidence")
 
     marker = {
         "activation_id": str(activation.id),
@@ -109,12 +127,17 @@ async def build_external_boot_payload(
         marker["expected_observed_composite"] = expected_observed_composite
     if purpose == "teardown":
         return JobKind.TEARDOWN, TeardownPayload.model_validate(
-            {"system_id": str(activation.system_id), "external_boot_authority_v1": marker}
+            {
+                "system_id": str(activation.system_id),
+                "external_boot_authority_v1": marker,
+                "remote_module_attempt_v1": remote_module_attempt,
+            }
         )
     return JobKind.BOOT, BootPayload.model_validate(
         {
             "run_id": str(activation.run_id),
             "external_boot_authority_v1": marker,
             "external_boot_plan_v1": preparation_plan,
+            "remote_module_attempt_v1": remote_module_attempt,
         }
     )

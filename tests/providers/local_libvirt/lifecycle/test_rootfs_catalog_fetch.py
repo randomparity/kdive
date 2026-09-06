@@ -56,4 +56,4 @@ def test_fetch_threads_ref_arch_roots_and_cache_to_registered_rootfs(monkeypatch
 def test_cache_dir_is_outside_the_rootfs_dir() -> None:
     # the s3-fetch cache must live outside allowed_roots so it is never a staged-path candidate
     assert mod._CACHE_DIR.name == "rootfs-cache"
-    assert Path(mod.ROOTFS_DIR).parent / "rootfs-cache" == mod._CACHE_DIR
+    assert Path("/var/lib/kdive/rootfs-cache") == mod._CACHE_DIR

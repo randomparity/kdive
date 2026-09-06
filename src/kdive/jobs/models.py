@@ -452,6 +452,10 @@ class ExternalBootAuthorityFailure(CategorizedError):
         self.result = result
 
 
+class ExternalBootDerivedReleaseCompletion(ExternalBootAuthoritySuccessV1):
+    """The release handler already committed its exact root job transaction."""
+
+
 type JobHandlerResult = str | None | ExternalBootAuthorityResultV1
 type JobHandler = Callable[[AsyncConnection, Job], Awaitable[JobHandlerResult]]
 

@@ -1,5 +1,18 @@
 # External-boot job payloads and lifecycle handlers — design
 
+## Amendment — active release completion (2026-09-06)
+
+ADR-0614 replaces this specification's former separate `release` then `cleanup` completion for an
+active public request. The immutable public `purpose=release`, `operation=release` marker owns
+derived `recover` and `cleanup` authority phases. Capacity is credited only after an exact terminal
+cleanup receipt is consumed by the root finalizer.
+
+An interrupted root attempt is retired rather than rebound. A later claimed worker takes an
+ordinary fresh root authority. It may adopt an immutable prior cleanup receipt only after the
+authority journal proves the exact old terminal `absent` cleanup observation; the fresh receipt is
+provenance-linked to the retired root and the provider cleanup call does not repeat. Recovery-only
+restart performs fresh cleanup. A stale old authority or mismatched terminal evidence is refused.
+
 Issue: [#2205](https://github.com/randomparity/kdive/issues/2205). Parent: #2118. Blocker:
 #2201, merged as `951fbaea0`. Decision record:
 [ADR-0593](../../adr/0593-external-boot-operations-ride-marked-boot-and-teardown-jobs.md).
@@ -528,23 +541,18 @@ silently.
 
 ### 9. Import closure
 
-`src/kdive/jobs/handlers/external_boot/` imports only `kdive.jobs`, `kdive.db`,
-`kdive.domain`, `kdive.providers.ports`, `kdive.providers.core`, and
-`kdive.providers.external_boot_authority.protocol`. The `provider_kind` literals are data.
+The production authority-client integration needs typed configuration as well as the original
+job, database, domain, and port contracts. Under the campaign's delegated design authority,
+criterion 10 excludes provider **execution**, not ADR-0087 setting declarations. The central
+configuration registry deliberately loads both providers' settings; the fixed remote sender
+also consumes remote inventory configuration and URI validation without loading libvirt.
 
-**The test is a real closure walk, and the existing gate is not one.**
-`tests/services/external_boot/test_recovery_requests.py` is a **static, single-module** check:
-`_reachable_names` (`:714-727`) is an `ast.walk` over one module's source, and its own docstring
-says "no walk of the transitive import graph … is needed or wanted"; `_kdive_imports` (`:749-766`)
-is a direct-import allow-list compared against a frozen reviewed set. Mirroring it would catch a
-direct `import kdive.providers.local_libvirt` and miss a transitive reach through, say,
-`kdive.providers.core.resolver` — which is exactly what criterion 10 excludes. So this change
-imports each module under `kdive.jobs.handlers.external_boot` **in a subprocess** and asserts the
-resulting `sys.modules` holds no name starting with `kdive.providers.local_libvirt` or
-`kdive.providers.remote_libvirt` and no `libvirt`. A subprocess rather than the test process
-because `sys.modules` is shared and any earlier test's imports would pollute it. The existing file
-is cited as the precedent for pairing such a gate with a canary that proves it bites, not as the
-walk to copy.
+The subprocess import-closure test allows exactly each provider's namespace package and
+`settings` module, plus `remote_libvirt.config`, `remote_libvirt.connection`, and
+`remote_libvirt.connection.uri_validation`. No other local/remote provider module and no
+`libvirt` C extension may be loaded. An execution-module canary checks that the clean closure
+becomes forbidden when concrete local boot code is added. This preserves the worker/authority
+execution boundary without duplicating configuration outside its registered source of truth.
 
 ## Threat model
 

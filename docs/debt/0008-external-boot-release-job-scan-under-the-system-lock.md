@@ -2,8 +2,7 @@
 
 ## Status
 
-Open
-review-by: 2027-03-02
+> **Resolved by #2204** (2026-09-06)
 
 ## Concern
 
@@ -82,6 +81,27 @@ Done when the arm's `EXPLAIN (ANALYZE, BUFFERS)` on a `jobs` table of the size a
 matching row, reports an index scan and buffer counts in the same order as the `system_id`
 arm's 3 rather than the 2861 measured here — and the comment and the spec paragraph are
 updated to say so.
+
+## Resolution
+
+Migration 0137 adds `jobs_payload_run_id_idx` on `jobs((payload->>'run_id'))`.
+The two-arm query and its per-arm limits remain unchanged.
+
+A PostgreSQL 17 measurement on 2026-09-06 used 200,000 queued jobs and 5,000 Runs in an
+isolated schema, with the jobs column layout cloned from the migrated schema and both expression
+indexes present. The selected System had one Run and no matching job. After `ANALYZE`,
+`EXPLAIN (ANALYZE, BUFFERS)` reported:
+
+| arm | observed plan | shared buffer hits |
+| --- | --- | --- |
+| System | `Index Scan using jobs_payload_system_id_idx` | 2 |
+| Run job lookup | `Bitmap Index Scan using jobs_payload_run_id_idx` | 3 |
+| Complete Run arm, including Run selection | indexed nested loop | 6 |
+| Complete union | both indexed arms | 8 |
+
+The measured execution time was 0.055 ms with zero result rows. These are observations on a
+synthetic no-match workload, not a production latency guarantee or a fixed planner contract.
+The migration test checks index existence and query shape; no test asserts this plan or timing.
 
 ## Provenance
 

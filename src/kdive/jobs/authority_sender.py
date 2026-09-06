@@ -15,6 +15,7 @@ from kdive.providers.external_boot_authority.device_identity import (
     decode_device_identity_response,
 )
 from kdive.providers.external_boot_authority.local_client import (
+    LocalAuthorityBinding,
     _AuthorityUnixTransport,
     local_authority_binding,
 )
@@ -31,6 +32,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
 )
@@ -220,6 +223,14 @@ class AuthorityRequestSender:
         )
         return _decode_response(response, RemoteModulePreparationBeginResponseV1)
 
+    async def resolve_recovery_orphan(
+        self, request: AuthorityRecoveryOrphanDispositionRequestV1, *, deadline: float
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("resolve-recovery-orphan", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityRecoveryOrphanDispositionResponseV1)
+
     async def observe_authority(
         self, request: AuthorityMutationRequestV1, *, deadline: float
     ) -> AuthorityObservationV1:
@@ -263,10 +274,13 @@ def authority_sender_factory(
 
 
 def local_authority_sender_factory(
-    secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
+    secret_backend: SecretBackend,
+    borrow: Callable[[], SecretStr],
+    *,
+    binding: LocalAuthorityBinding | None = None,
 ) -> AuthorityRequestSender | None:
     """Build the configured worker-local sender without accepting a caller route."""
-    binding = local_authority_binding()
+    binding = binding if binding is not None else local_authority_binding()
     if binding is None:
         return None
     return AuthorityRequestSender(

@@ -208,7 +208,7 @@ async def _durable_rows(conn: AsyncConnection, activation_id: Any) -> tuple[Any,
     return activation["value"], attempts
 
 
-@pytest.mark.parametrize("operation", ["activate", "release", "recover", "cleanup"])
+@pytest.mark.parametrize("operation", ["activate", "recover", "cleanup"])
 def test_post_provider_interruption_replays_without_a_second_mutation(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
@@ -335,7 +335,7 @@ def _drive(
     asyncio.run(_main())
 
 
-@pytest.mark.parametrize("operation", list(CASES))
+@pytest.mark.parametrize("operation", [operation for operation in CASES if operation != "release"])
 def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
     migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
 ) -> None:
@@ -671,7 +671,7 @@ def test_cmdline_failure_redacts_before_authority_persistence(
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict", "release"])
+@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
 def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
     migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
 ) -> None:

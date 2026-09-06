@@ -27,7 +27,13 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
+from kdive.domain.capacity.state import (
+    AllocationState,
+    ExternalBootActivationState,
+    InvestigationState,
+    RunState,
+    SystemState,
+)
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
@@ -67,6 +73,7 @@ from tests.mcp.systems_support import (
     seed_system,
     upload_profile,
 )
+from tests.services.external_boot.conftest import seed_activation
 from tests.support.object_store import INERT_OBJECT_STORE
 
 
@@ -1305,6 +1312,100 @@ def test_teardown_admin_enqueues_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_teardown_refuses_while_external_boot_is_active(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.ACTIVE,
+                    ready_reservation=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
+                system = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'teardown'")
+                jobs = await cur.fetchone()
+
+        assert response.status == "error"
+        assert response.error_category == "conflict"
+        assert response.data == {
+            "reason": "external_boot_release_required",
+            "activation_id": str(seeded.activation.id),
+            "activation_state": "active",
+            "owning_run_id": run_id,
+        }
+        assert response.suggested_next_actions == ["runs.release_external_boot", "runs.get"]
+        assert system is not None and system["state"] == "ready"
+        assert jobs is not None and jobs["n"] == 0
+
+    asyncio.run(_run())
+
+
+def test_teardown_activation_fence_preempts_keyed_ordinary_replay(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            first = await teardown_system(
+                pool, ctx(Role.ADMIN), system_id, idempotency_key="teardown-before-activation"
+            )
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.ACTIVE,
+                    ready_reservation=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+            replay = await teardown_system(
+                pool, ctx(Role.ADMIN), system_id, idempotency_key="teardown-before-activation"
+            )
+
+        assert first.status == "queued"
+        assert replay.status == "error"
+        assert replay.error_category == "conflict"
+        assert replay.data["reason"] == "external_boot_release_required"
+
+    asyncio.run(_run())
+
+
+def test_teardown_reports_unavailable_external_boot_failure_escape(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.RECOVERY_FAILED,
+                    ready_reservation=True,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'teardown'")
+                jobs = await cur.fetchone()
+
+        assert response.status == "error"
+        assert response.error_category == "conflict"
+        assert response.data["reason"] == "external_boot_teardown_not_supported"
+        assert "not yet available" in (response.detail or "")
+        assert response.suggested_next_actions == ["runs.get"]
+        assert jobs is not None and jobs["n"] == 0
+
+    asyncio.run(_run())
+
+
 def test_teardown_tool_already_torn_down_no_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
@@ -1390,6 +1491,50 @@ def test_teardown_handler_destroys_and_sets_torn_down(migrated_url: str) -> None
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 row = await cur.fetchone()
         assert row is not None and row["state"] == "torn_down"
+
+    asyncio.run(_run())
+
+
+def test_queued_ordinary_teardown_refuses_activation_created_before_claim(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, alloc_id, SystemState.READY)
+            job = await _enqueue_teardown(pool, system_id)
+            run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.PREPARING,
+                    system_id=UUID(system_id),
+                    run_id=UUID(run_id),
+                )
+                await conn.execute(
+                    "INSERT INTO external_boot_reservations "
+                    "(activation_id, store_identity, owner_key, reserved_bytes, state) "
+                    "VALUES (%s, 'stores/main', %s, 4096, 'pending')",
+                    (seeded.activation.id, f"owners/{seeded.activation.id}"),
+                )
+            provisioner = FakeProvisioning()
+            async with pool.connection() as conn:
+                with pytest.raises(
+                    CategorizedError, match="ordinary teardown is fenced by external-boot"
+                ) as raised:
+                    await systems_handlers.teardown_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(provisioner=provisioner),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, UUID(system_id))
+
+        assert raised.value.category is ErrorCategory.CONFLICT
+        assert raised.value.details["reason"] == "external_boot_teardown_not_supported"
+        assert system is not None and system.state is SystemState.READY
+        assert provisioner.torn_down == []
 
     asyncio.run(_run())
 

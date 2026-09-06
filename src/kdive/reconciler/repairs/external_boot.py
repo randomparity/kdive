@@ -278,6 +278,11 @@ async def _enqueue_candidate(
         authority_instance=authority_instance,
         operation_identity=operation_identity,
         resolver=resolver,
+        expected_observed_composite=(
+            marker.expected_observed_composite
+            if candidate.operation == "resolve-conflict"
+            else None
+        ),
     )
     _job, inserted = await queue.enqueue_with_status(
         conn,

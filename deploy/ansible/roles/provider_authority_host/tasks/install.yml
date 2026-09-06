@@ -4,6 +4,14 @@
     name: "{{ provider_authority_host_packages[ansible_facts['os_family']] }}"
     state: present
 
+- name: Install local authority mutation tooling
+  ansible.builtin.package:
+    name: >-
+      {{ provider_authority_host_local_packages[ansible_facts['os_family']]
+         + [provider_authority_host_qemu_packages[ansible_facts['os_family']][ansible_facts['architecture']]] }}
+    state: present
+  when: provider_authority_host_local_mutation_enabled | bool
+
 - name: Read the staged authority source revision
   ansible.builtin.command:
     argv: [git, -C, "{{ provider_authority_host_source_root }}", rev-parse, HEAD]
@@ -31,7 +39,10 @@
     home: /var/lib/kdive/provider-authority
     shell: /usr/sbin/nologin
     group: kdive-provider-authority
-    groups: [kdive-provider-authority-client]
+    groups: >-
+      {{ ['kdive-provider-authority-client', 'kvm']
+         if provider_authority_host_local_mutation_enabled else
+         ['kdive-provider-authority-client'] }}
     append: false
 
 - name: Read the authority account and group identities
@@ -213,6 +224,79 @@
     group: kdive-provider-authority
     mode: "0440"
 
+- name: Locate the system libguestfs binding files
+  ansible.builtin.find:
+    paths: /usr/lib/python3/dist-packages
+    patterns: [guestfs.py, "libguestfsmod*.so"]
+  register: provider_authority_host_libguestfs_files
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Require the local authority libguestfs binding
+  ansible.builtin.assert:
+    that: provider_authority_host_libguestfs_files.matched > 0
+    fail_msg: The target-native libguestfs Python binding is missing.
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Symlink the libguestfs binding into the authority venv
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: >-
+      /opt/kdive-provider-authority/.venv/lib/python{{ ansible_python.version.major }}.{{
+      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    state: link
+    force: true
+  loop: "{{ provider_authority_host_libguestfs_files.files | default([]) }}"
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Inspect the authority recovery root without following links
+  ansible.builtin.stat:
+    path: "{{ provider_authority_host_recovery_root }}"
+    follow: false
+  register: provider_authority_host_recovery_root_before
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Refuse a substituted authority recovery root
+  ansible.builtin.assert:
+    that: >-
+      not provider_authority_host_recovery_root_before.stat.exists or
+      (provider_authority_host_recovery_root_before.stat.isdir and
+       not provider_authority_host_recovery_root_before.stat.islnk)
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Create the owner-only authority recovery root
+  ansible.builtin.file:
+    path: "{{ provider_authority_host_recovery_root }}"
+    state: directory
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0700"
+    follow: false
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Create owner-only authority runtime roots
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0700"
+    follow: false
+  loop:
+    - "{{ provider_authority_host_rootfs_root }}"
+    - "{{ provider_authority_host_console_root }}"
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Install protected authority S3 credentials
+  ansible.builtin.copy:
+    src: "{{ provider_authority_host_s3_credentials_source }}"
+    dest: /etc/kdive/credentials/provider-authority/s3-credentials
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0400"
+  when: provider_authority_host_local_mutation_enabled | bool
+  no_log: true
+  notify: Restart provider authority after deployed changes
+
 - name: Install protected authority database and TLS material
   ansible.builtin.copy:
     src: "{{ item.source }}"
@@ -241,9 +325,9 @@
   no_log: true
   notify: Restart provider authority after deployed changes
 
-- name: Install the unchanged confined authority service
-  ansible.builtin.copy:
-    src: "{{ role_path }}/../../../systemd/system/kdive-external-boot-authority.service"
+- name: Install the mode-specific confined authority service
+  ansible.builtin.template:
+    src: authority.service.j2
     dest: /etc/systemd/system/kdive-external-boot-authority.service
     owner: root
     group: root

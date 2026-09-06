@@ -10,19 +10,22 @@ import re
 from pathlib import Path
 from uuid import UUID
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.settings import LIBVIRT_CONSOLE_ROOT, LIBVIRT_ROOTFS_ROOT
 
 _log = logging.getLogger(__name__)
 
-_CONSOLE_DIR = "/var/lib/kdive/console"
+
+_CONSOLE_DIR = config.require(LIBVIRT_CONSOLE_ROOT)
 _PCAP_DIR = "/var/lib/kdive/pcap"
 
 #: The host directory holding per-System rootfs overlays and extracted baselines.
-ROOTFS_DIR = "/var/lib/kdive/rootfs"
+ROOTFS_DIR = config.require(LIBVIRT_ROOTFS_ROOT)
 #: The host directory an investigation-scoped uploaded rootfs base is staged under, OUTSIDE the
 #: provider ``allowed_roots`` (ADR-0434 §3 / ADR-0441 §5 no-escape). A staged SENSITIVE image is
 #: never reachable as another System's ``local`` staged-path candidate.
-UPLOADS_DIR = str(Path(ROOTFS_DIR).parent / "rootfs-uploads")
+UPLOADS_DIR = "/var/lib/kdive/rootfs-uploads"
 
 # The qemu:///system hypervisor runtime user (in preference order). QEMU's filter-dump writes the
 # pcap as this unprivileged, SELinux-confined user, so the root worker owns the capture directory

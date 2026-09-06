@@ -68,15 +68,24 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-def build_authority_mutation_adapter(
-    provider_socket: Path, object_store: ObjectStore | None = None
-) -> AuthorityMutationAdapter | None:
-    """Select explicitly configured local mutation support at the provider assembly boundary."""
+def build_authority_mutation_binding(
+    provider_socket: Path,
+    object_store: ObjectStore | None = None,
+) -> local_composition.LocalExternalBootAuthorityBinding | None:
+    """Select the local provider and adapter sharing one authority lease scope."""
     if config.get(LIBVIRT_RECOVERY_ROOT) is None:
         return None
     return local_composition.build_local_external_boot_authority(
         object_store if object_store is not None else object_store_from_env(), provider_socket
-    ).adapter
+    )
+
+
+def build_authority_mutation_adapter(
+    provider_socket: Path, object_store: ObjectStore | None = None
+) -> AuthorityMutationAdapter | None:
+    """Build only the mutation adapter for callers that do not need private recovery objects."""
+    binding = build_authority_mutation_binding(provider_socket, object_store)
+    return None if binding is None else binding.adapter
 
 
 type _ConsoleHostingBuilder = Callable[

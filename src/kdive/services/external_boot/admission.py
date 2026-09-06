@@ -74,8 +74,8 @@ class ExternalBootDenied(CategorizedError):
 # strand a `live` session and leave its provider transport open with no agent-reachable way to
 # close it (#2117 review H1). It is also absent from `_OWNING_RUN_SCOPED`, because the release
 # refuses on any live session of the System regardless of owning Run: fencing the detach to the
-# activation's Run would wedge a session no caller could clear. Both departures from
-# ADR-0583:348-351 are recorded in docs/debt/0006-external-boot-detach-departs-from-adr-0583.md.
+# activation's Run would wedge a session no caller could clear. ADR-0617 supersedes these two
+# ADR-0583 restrictions and resolves debt 0006 without changing the shipped matrix.
 _ALWAYS_ADMITTED = frozenset(
     {ExternalBootOperation.SYSTEM_TEARDOWN, ExternalBootOperation.DEBUG_DETACH}
 )

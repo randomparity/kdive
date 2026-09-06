@@ -101,6 +101,11 @@ class WorkerSettings(BaseModel):
     build_user: str
     log_level: str
     health_binds: dict[int, str] = Field(max_length=8)
+    authority_instance: str | None = None
+    authority_request_socket: str | None = None
+    authority_server_ca_ref: str | None = None
+    authority_client_certificate_ref: str | None = None
+    authority_client_key_ref: str | None = None
 
     @field_validator(
         "python",
@@ -117,11 +122,16 @@ class WorkerSettings(BaseModel):
         "s3_region",
         "build_user",
         "log_level",
+        "authority_instance",
+        "authority_request_socket",
+        "authority_server_ca_ref",
+        "authority_client_certificate_ref",
+        "authority_client_key_ref",
     )
     @classmethod
-    def validate_string_bytes(cls, value: str) -> str:
+    def validate_string_bytes(cls, value: str | None) -> str | None:
         """Apply the 4-KiB bound in wire bytes, not Unicode code points."""
-        return validate_utf8_bytes(value, MAX_STRING_BYTES)
+        return validate_utf8_bytes(value, MAX_STRING_BYTES) if value is not None else None
 
     @field_validator("worker_database_url", "aws_access_key_id", "aws_secret_access_key")
     @classmethod
@@ -165,6 +175,23 @@ class WorkerSettings(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("accepted lanes must be unique")
         return value
+
+    @model_validator(mode="after")
+    def validate_authority_route(self) -> Self:
+        """Accept the worker authority route only as one complete five-value contract."""
+        values = (
+            self.authority_instance,
+            self.authority_request_socket,
+            self.authority_server_ca_ref,
+            self.authority_client_certificate_ref,
+            self.authority_client_key_ref,
+        )
+        if any(value is not None for value in values) and not all(values):
+            raise ValueError("worker authority route must be complete or absent")
+        socket = self.authority_request_socket
+        if socket is not None and not socket.startswith("/"):
+            raise ValueError("worker authority request socket must be absolute")
+        return self
 
 
 class LifecycleRequest(BaseModel):

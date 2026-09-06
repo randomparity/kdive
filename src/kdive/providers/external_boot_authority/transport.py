@@ -35,6 +35,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
+    AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     decode_authority_request,
@@ -75,6 +77,7 @@ type Operation = Literal[
     "execute-remote-module-lifecycle",
     "health",
     "resolve-device-identity",
+    "resolve-recovery-orphan",
 ]
 type AuthenticatePeer = Callable[[SecretStr], Awaitable[AuthenticatedPeer]]
 
@@ -132,6 +135,13 @@ class RemoteModulePreparationService(Protocol):
         peer: AuthenticatedPeer,
         remote: RemoteModuleLifecycleRequestV1,
     ) -> RemoteModuleLifecycleResponseV1: ...
+
+
+@runtime_checkable
+class AuthorityRecoveryOrphanService(Protocol):
+    async def resolve_recovery_orphan(
+        self, peer: AuthenticatedPeer, request: AuthorityRecoveryOrphanDispositionRequestV1
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1: ...
 
 
 class DeviceIdentityService(Protocol):
@@ -213,6 +223,10 @@ def encode_request_envelope(
         decoded, RemoteModuleLifecycleRequestV1
     ):
         raise ValueError("invalid-request")
+    if operation == "resolve-recovery-orphan" and not isinstance(
+        decoded, AuthorityRecoveryOrphanDispositionRequestV1
+    ):
+        raise ValueError("invalid-request")
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
         raise ValueError("invalid-request")
     if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
@@ -281,6 +295,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-remote-module-lifecycle",
             "health",
             "resolve-device-identity",
+            "resolve-recovery-orphan",
         }:
             raise ValueError
         if not isinstance(credential, str) or not isinstance(request_value, dict):
@@ -336,6 +351,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, RemoteModuleLifecycleRequestV1
         ):
             raise ValueError
+        if operation == "resolve-recovery-orphan" and not isinstance(
+            request, AuthorityRecoveryOrphanDispositionRequestV1
+        ):
+            raise ValueError
         if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
             raise ValueError
         if operation == "resolve-device-identity" and not isinstance(
@@ -356,7 +375,9 @@ def _success(
     | DeviceIdentityResponseV1
     | RemoteModulePreparationBeginResponseV1
     | RemoteModuleLifecycleResponseV1
-    | RemoteModuleTerminalPreparationResponseV1,
+    | RemoteModuleTerminalPreparationResponseV1
+    | AuthorityRecoveryOrphanDispositionResponseV1
+    | DeviceIdentityResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
 
@@ -452,6 +473,12 @@ async def _dispatch(
             if not isinstance(service, AuthorityPreparationService):
                 return _error("provider-not-configured")
             return _success(await service.execute_preparation(peer, request))
+        if operation == "resolve-recovery-orphan":
+            if not isinstance(request, AuthorityRecoveryOrphanDispositionRequestV1):
+                raise _TransportError("invalid-request")
+            if not isinstance(service, AuthorityRecoveryOrphanService):
+                return _error("provider-not-configured")
+            return _success(await service.resolve_recovery_orphan(peer, request))
         if operation == "observe-running":
             if not isinstance(request, AuthorityMutationRequestV1):
                 raise _TransportError("invalid-request")

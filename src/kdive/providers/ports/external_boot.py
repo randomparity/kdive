@@ -421,6 +421,7 @@ class RecoveryObjectBinding(_ClosedValue):
     attempt_id: CanonicalUuid
     mutation_journal_sequence: Annotated[int, Field(ge=1)]
     mutation_journal_digest: Digest
+    reserved_bytes: Annotated[int, Field(ge=0)]
 
 
 class RecoveryObjectObservation(_ClosedValue):
@@ -441,11 +442,17 @@ class RecoveryObjectObservation(_ClosedValue):
 class ExternalBootRecoveryObjectPorts(Protocol):
     """Bounded per-object quarantine observation and disposition."""
 
+    def quarantined_objects(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> tuple[RecoveryObjectObservation, ...]: ...
+
     def observe_object(
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
     ) -> RecoveryObjectObservation: ...
 
-    def delete_object(
+    def delete_recovery_object(
         self,
         binding: RecoveryObjectBinding,
         authority: OpaqueProviderRef,

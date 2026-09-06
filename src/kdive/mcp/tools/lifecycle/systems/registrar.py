@@ -18,6 +18,7 @@ from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
+from kdive.mcp.tools.external_boot.recovery_idempotency import MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES
 from kdive.mcp.tools.external_boot.recovery_requests import (
     MAX_OBSERVED_IDENTITY_LENGTH as _MAX_OBSERVED_IDENTITY_LENGTH,
 )
@@ -414,7 +415,12 @@ def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
         system_id: Annotated[str, Field(description="The System to tear down.")],
         idempotency_key: Annotated[
             str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+            Field(
+                description=(
+                    "Replay-safe key; a repeated key returns the prior envelope unless a new "
+                    "external-boot activation now fences that ordinary teardown."
+                )
+            ),
         ] = None,
     ) -> ToolResponse:
         """Enqueue teardown for a System. Requires admin on the System's project.
@@ -422,7 +428,10 @@ def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
         Teardown drives the System to `torn_down` but leaves its Allocation `active`; once the
         teardown job succeeds, release the freed Allocation with `allocations.release` (the
         completed job and the already-`torn_down` replay both name it in
-        `suggested_next_actions`).
+        `suggested_next_actions`). While an external boot is active, first call
+        `runs.release_external_boot`, wait for its cleanup job, then retry this tool. Teardown from
+        an external-boot recovery failure is not yet available; the tool returns `conflict` and
+        enqueues no teardown job rather than bypassing provider authority.
         """
         return await _teardown_system(
             pool, current_context(), system_id, idempotency_key=idempotency_key
@@ -661,6 +670,16 @@ def _register_systems_resolve_external_boot_conflict(
                 ),
             ),
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(
+                max_length=MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES,
+                description=(
+                    f"Optional replay key, bounded to {MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES} "
+                    "bytes encoded as UTF-8."
+                ),
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue an idempotent recovery-conflict resolution job.
 
@@ -669,7 +688,7 @@ def _register_systems_resolve_external_boot_conflict(
         binding. It returns a queued job. Repeating the exact System, operation, and observed
         identity returns that same job. The worker freshly observes provider state and changes
         the activation only when the identity still matches; otherwise the job fails and leaves
-        the conflict and its evidence intact. Poll with `jobs.get` or `jobs.wait`.
+        the conflict and its evidence intact. Poll with `jobs.wait`.
 
         Requires admin on the System's project. Only an activation in `recovery_conflict` is
         admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
@@ -682,4 +701,5 @@ def _register_systems_resolve_external_boot_conflict(
             system_id=system_id,
             operation=operation,
             observed_identity=observed_identity,
+            idempotency_key=idempotency_key,
         )

@@ -16,6 +16,8 @@ from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
+from kdive.jobs.authority_sender import AuthorityRequestSender
+from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
@@ -32,14 +34,23 @@ from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
 )
+from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.db.external_boot_authority_support import authority_role_dsns as _role_dsns_fixture
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import seed_case
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 from tests.mcp.lifecycle import runs_support
-from tests.services.external_boot.test_recovery_requests import _ctx
+from tests.mcp.systems_support import provider_resolver
+
+
+def _ctx() -> RequestContext:
+    return RequestContext(
+        principal="alice", agent_session="s", projects=("proj",), roles={"proj": Role.ADMIN}
+    )
 
 
 class _FaultAuthorityAdapter:
@@ -147,69 +158,16 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                 adapter=adapter,
             )
 
-            class Authority:
-                async def acknowledge(self, request: Any) -> Any:
-                    answer = await service.acknowledge_takeover(
-                        AuthenticatedPeer(case.worker_incarnation), request
-                    )
-                    row = await seed.execute(
-                        "SELECT allocation_id, job_id, job_attempt, worker_incarnation "
-                        "FROM external_boot_authorities WHERE id=%s",
-                        (request.authority_id,),
-                    )
-                    binding = await row.fetchone()
-                    assert binding is not None
-                    async with _authority_connection(
-                        authority_role_dsns("kdive_provider_authority")
-                    ) as connection:
-                        committed = await connection.execute(
-                            "SELECT status FROM acknowledge_external_boot_authority("
-                            "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                            (
-                                request.authority_id,
-                                request.generation,
-                                binding[0],
-                                request.activation_id,
-                                request.run_id,
-                                request.system_id,
-                                request.plan_identity,
-                                binding[1],
-                                binding[2],
-                                request.purpose,
-                                request.provider_kind,
-                                request.authority_instance,
-                                binding[3],
-                                request.operation.value,
-                                request.operation_identity,
-                                request.operation_digest,
-                                answer.journal_sequence,
-                                answer.journal_digest,
-                                answer.positive_quiescence_digest,
-                            ),
-                        )
-                        assert await committed.fetchone() == ("applied",)
-                    return answer
+            async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
+                assert credential.get_secret_value() == case.credential
+                return AuthenticatedPeer(case.worker_incarnation)
 
-                async def execute_conflict_resolution(
-                    self, request: AuthorityConflictResolutionRequestV1
-                ) -> AuthorityObservationV1:
-                    return await service.execute_conflict_resolution(
-                        AuthenticatedPeer(case.worker_incarnation), request
-                    )
+            class Backend:
+                async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+                    assert deadline > asyncio.get_running_loop().time()
+                    return await _dispatch(envelope, authenticate, service)
 
-                async def execute(
-                    self, request: AuthorityMutationRequestV1
-                ) -> AuthorityObservationV1:
-                    return await service.execute_mutation(
-                        AuthenticatedPeer(case.worker_incarnation), request
-                    )
-
-                async def observe(
-                    self, request: AuthorityMutationRequestV1
-                ) -> AuthorityObservationV1:
-                    return await service.observe_authority(
-                        AuthenticatedPeer(case.worker_incarnation), request
-                    )
+            sender = AuthorityRequestSender(Backend, lambda: SecretStr(case.credential))
 
             resolver = resolver_for(vehicle)
             async with runs_support.pool(migrated_url) as pool:
@@ -260,14 +218,14 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                 marker = ExternalBootAuthorityMarkerV1.model_validate(
                     claimed.payload["external_boot_authority_v1"]
                 )
-                authority = Authority()
                 handler = build_operations(
                     ExternalBootHandlerPorts(
-                        resolver=resolver,
+                        resolver=provider_resolver(external_boot=None),
                         incarnation_credential=SecretStr(case.credential),
                         secret_registry=SecretRegistry(),
-                        acknowledger=authority,
-                        authority_executor=authority,
+                        authority_client_factory=lambda binding, marker, deadline: (
+                            ExternalBootAuthorityClient(sender, marker, deadline)
+                        ),
                     )
                 ).get("resolve-conflict")
                 assert handler is not None

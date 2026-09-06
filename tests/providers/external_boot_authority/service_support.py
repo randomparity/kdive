@@ -130,6 +130,7 @@ class _Repository:
         self.cleanup_nonces: list[str] = []
         self.remote_attempt: ModuleAttemptPreparationRequestV1 | None = None
         self.remote_attempt_calls: list[tuple[int, str, str]] = []
+        self.published_cleanup_quarantines: list[tuple[object, ...]] = []
 
     async def open_remote_module_attempt(
         self,
@@ -170,6 +171,9 @@ class _Repository:
         self.cleanup_nonces.append(operation_nonce)
         return self.cleanup_evidence
 
+    async def publish_cleanup_quarantine(self, *args: object) -> None:
+        self.published_cleanup_quarantines.append(args)
+
     async def resolve_current_candidate(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
     ) -> AuthorityBinding | None:
@@ -187,11 +191,12 @@ class _Repository:
             or request.authority_instance != self.request.authority_instance
         ):
             return None
-        binding = _binding(
-            peer,
-            self.request if isinstance(request, AuthorityPreparationMutationRequestV1) else request,
-            "current",
+        uses_root_binding = isinstance(request, AuthorityPreparationMutationRequestV1) or (
+            self.request.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
         )
+        binding = _binding(peer, self.request if uses_root_binding else request, "current")
         return (
             replace(binding, operation=self.operation_override)
             if self.operation_override
@@ -260,6 +265,17 @@ class _Repository:
         ):
             return None
         return _binding(peer, request, "current")
+
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        return await self.resolve_current(
+            peer, request, acknowledgement_sequence, acknowledgement_digest
+        )
 
     async def resolve_current_preparation(
         self,

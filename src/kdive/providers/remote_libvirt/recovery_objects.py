@@ -132,7 +132,7 @@ class RemoteExternalBootRecoveryObjects:
             binding, present=self._volume(binding, authority) is not None, managed=False
         )
 
-    def delete_object(
+    def delete_recovery_object(
         self,
         binding: RecoveryObjectBinding,
         authority: OpaqueProviderRef,

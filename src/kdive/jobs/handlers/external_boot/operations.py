@@ -8,7 +8,10 @@ from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthoritySuccessV1
+from kdive.jobs.models import (
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.jobs.payloads import (
     ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS,
     BootPayload,

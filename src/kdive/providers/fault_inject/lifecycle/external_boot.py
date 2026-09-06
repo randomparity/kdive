@@ -74,7 +74,21 @@ class FaultInjectExternalBoot:
             raise ValueError("recovery-object ownership conflicts with request")
         return observation
 
-    def delete_object(
+    def quarantined_objects(
+        self,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        del authority
+        return tuple(
+            observation
+            for _, observation in sorted(self._recovery_objects.items())
+            if observation.binding.binding == binding
+            and observation.present
+            and not observation.managed
+        )
+
+    def delete_recovery_object(
         self,
         binding: RecoveryObjectBinding,
         authority: OpaqueProviderRef,

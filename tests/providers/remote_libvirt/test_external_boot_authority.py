@@ -96,15 +96,17 @@ from kdive.services.remote_module_authority_preparation import (
     RemoteModulePreparationInputs,
     execute_remote_module_lifecycle_on_authority_host,
 )
+from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
+    _materialization,
+    _plan,
+    _source_xml,
+)
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
 )
 from tests.providers.remote_libvirt.lifecycle.test_external_boot import (
     _FakeAgentExec,
-    _materialization,
-    _plan,
     _replies,
-    _source_xml,
 )
 from tests.support.external_boot_plan import external_boot_plan
 
@@ -2202,10 +2204,11 @@ def test_remote_recovery_object_reopens_geometry_and_deletes_exact_volume(tmp_pa
         attempt_id=str(uuid4()),
         mutation_journal_sequence=7,
         mutation_journal_digest="sha256:" + "f" * 64,
+        reserved_bytes=4096,
     )
     observed = port.observe_object(binding, authority)
     assert observed.present and not observed.managed
-    deleted = port.delete_object(binding, authority, observed.observed_digest)
+    deleted = port.delete_recovery_object(binding, authority, observed.observed_digest)
     assert not deleted.present
     store.close()
 

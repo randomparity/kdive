@@ -256,19 +256,12 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 
 ## `runs.release_external_boot`
 
-`partial`
+`implemented`
 
-**Maturity:** degraded_stub — Validates the caller's identity, role, and the System-wide external-boot admission matrix, then reports configuration_error with reason=recovery_executor_unavailable. No activation transition is committed and no recovery job is enqueued, because the external-boot recovery executor is not installed.
+Enqueue release of this Run's external boot and return a durable `job_id`.
 
-**Promotion:** Promoted when the external-boot recovery job handler and worker claim path land (#2118).
-
-Validate a release of this Run's external boot, then report the executor is missing.
-
-Today this call checks your role and the System-wide external-boot admission matrix and
-then fails with `configuration_error` and `data.reason` of
-`recovery_executor_unavailable`: the external-boot recovery executor is not installed,
-so no activation changed and the external boot is still in place. Once promoted
-(#2118), the same call releases the activation and returns the System to ordinary use.
+Repeating the exact request returns the same job. Poll it with `jobs.wait`; successful
+release returns the System to ordinary use through the worker-owned recovery path.
 
 Requires contributor on the Run's project. Only an `active` activation owned by this
 Run is admissible, and a release is refused while a job or a debug session still holds
@@ -277,6 +270,7 @@ with `systems.teardown` instead; `runs.get` reports the current state either way
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `idempotency_key` | string (nullable) | no | Optional replay key, bounded to 255 bytes encoded as UTF-8. |
 | `run_id` | string | yes | The Run whose external-boot activation to release. |
 
 ## `runs.set`

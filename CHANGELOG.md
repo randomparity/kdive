@@ -250,22 +250,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare attempt volumes
 - Retain preparation completion
 - Supervise remote module appliance
-- Add durable module reopen runtime
-- Verify module preparation receipts
-- Prepare verified module volumes
-- Run module appliance
-- Clean up module attempt volumes
 - Reap orphaned remote module volumes
 - Compose remote module volume reaper
 - Enqueue remote module volume reaping
-- Complete module reap runtime
-- Persist recovery volume geometry
-- Classify resumable module phases
 - Isolate activation cleanup artifacts
 - Pass external boot storage bounds
 - Bind teardown recovery observations
 - Reclaim interrupted preparation
 - Gate external boot recovery capacity
+- Discharge open mutations by system
+- Discharge module obligations on teardown
+- Discharge terminal module obligations
+- Discharge terminal module mutations
+- Bind preparation requests to plans
+- Persist external boot preparation plans
+- Materialize local external boot artifacts
+- Derive authority preparation bindings
+- Guard preparation receipt commits
+- Expose preparation receipt commit
+- Execute preparation through journal lanes
+- Return anchored preparation receipts
+- Materialize external boot under authority
+- Prepare external boot under authority
+- Add durable module reopen runtime
+- Verify module preparation receipts
+- Prepare verified module volumes
+- Run module appliance
+- Clean up module attempt volumes
+- Complete module reap runtime
+- Persist recovery volume geometry
+- Classify resumable module phases
 - Inspect durable module attempts
 - Resume module capture phases
 - Resume module restore cleanup
@@ -273,16 +287,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound provider call completion
 - Classify module volume inventory
 - Resume module attempt reaping
-- Discharge open mutations by system
-- Discharge module obligations on teardown
-- Discharge terminal module obligations
-- Discharge terminal module mutations
 - Add sparse module result reader
 - Bound provider call completion
 - Fence remote module worker evidence
-- Materialize local external boot artifacts
-- Fence crashes to active owning runs
+- Adapt authority journal repository
+- Scope local external boot leases
+- Assemble local external boot authority
 - Add worker local authority client
+- Send authority preparation requests
+- Fence crashes to active owning runs
+- Observe bound authority state
+- Bind conflict observation in boot payload
+- Guard conflict authority mutations
+- Verify conflict observation before recovery
+- Persist conflict observation binding
+- Read running kernel through the authority lane
+- Enqueue external boot conflict recovery
+- Bind worker boot operations to fixed authority clients
+- Provision local boot authority mutation
+- Provision fixed worker authority clients
+- Enqueue external boot release recovery
+- Bind local system root provenance
+- Publish local root boot provenance
+- Stage authority boot plans without provider mutation
+- Admit configured external boot plans
+- Add bounded recovery orphan disposition
+- Enqueue external boot release recovery
+- Persist and resolve cleanup quarantine
+- Bind recovery requests to fixed deadlines
+- Add worker local authority client
+- Configure live host authority mutation
+- Bind derived release cleanup receipts
+- Admit derived release journal phases
+- Complete active external boot release
+- Route orphan disposition through authority
+- Publish authority cleanup quarantine evidence
+- Define remote external boot recovery contract
+- Bind authority volume preparation
+- Persist authority recovery evidence
+- Persist preparation receipts
 
 ### Changed
 
@@ -450,6 +493,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Move shared boot doubles into support modules
 - Clarify discharge SQL inventory
 - Move runtime orchestration to services
+- Index run-scoped job lookups
+- Name typed recovery object deletion explicitly
+- Share installed authority carrier orchestration
 
 ### Documentation
 
@@ -1345,8 +1391,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Define recovery observation context
 - Ratify local storage reclamation
 - Align storage records with gate format
+- Place preparation behind authority
 - Record remote recovery geometry
+- State authority provisioning boundary
 - Clarify partial preparation recovery
+- Regenerate authority recovery tool reference
+- Regenerate authority recovery CLI help
+- Direct conflict recovery polling to jobs.wait
+- Describe durable release admission
+- Record indexed release job lookup measurement
+- Reconcile external boot detach admission decision
+- Keep native execution plan in workflow state
+- Regenerate authority reservation settings reference
+- Define derived release phases
+- Register installed authority native test configuration
+- Publish implemented recovery job contracts
+- Name only supported recovery job polling tools
+- Publish current external boot teardown boundary
+- Specify remote materialization receipt recovery
+- Classify request client decision alternatives
 
 ### Fixed
 
@@ -2146,21 +2209,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Avoid racing unresolved console reads
 - Preserve unresolved stream release
 - Validate console volume keys
-- Reopen restore phase evidence
-- Own terminal evidence connections
-- Validate module runtime boundaries
 - Preserve module reap payload wire shape
 - Retry unreachable module volume fleets
 - Snapshot remote fleet configuration
-- Bind v2 recovery baseline identity
 - Preserve partial abort authority
 - Run capacity probe in check mode
-- Inherit module read deadlines
-- Retain phase mutation deadlines
-- Persist install before source cleanup
-- Retain source through capture handoff
-- Harden sparse result reader
-- Close sparse reader timeout gaps
+- Defer preparation until authority
 - Harden external boot materialization retry
 - Narrow projection reopen authority
 - Validate payloads before projection commit
@@ -2168,18 +2222,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify canonical materialized modules
 - Confine module conversion scratch files
 - Bound materializer validation storage
+- Bind preparation receipts to journal evidence
+- Refresh prepared activation evidence
+- Reopen restore phase evidence
+- Own terminal evidence connections
+- Validate module runtime boundaries
+- Bind v2 recovery baseline identity
+- Inherit module read deadlines
+- Retain phase mutation deadlines
+- Persist install before source cleanup
+- Retain source through capture handoff
+- Harden sparse result reader
+- Close sparse reader timeout gaps
 - Preserve remote module recovery deadlines
 - Inherit module scratch read deadlines
 - Order remote module evidence locks
 - Resume partial remote module preparation
 - Reject unsafe partial volume repair
 - Type partial attachment inspection
+- Confirm preparation after journal ack
+- Replay exact takeover acknowledgement
+- Resume preparation authority safely
+- Adopt preparation receipts on takeover
+- Redact malformed local authority binding
+- Bind preparation adoption receipt
+- Retain authority lease through cancellation
+- Retain local authority worker binding
+- Keep authority shutdown nonblocking
+- Regenerate owning-run crash options
+- Verify authority observation journal head
+- Retain observation lane through completion
 - Fence provision during system teardown
 - Cite teardown race ordering
+- Project authority takeover acknowledgement
 - Recognize empty raw module scratch
 - Preserve short sparse module reads
-- Regenerate owning-run crash options
+- Preserve recovery observation across repository and repair
+- Assemble authority adapters at the provider boundary
+- Debit recovery capacity before authority mutation
+- Register authority recovery settings
+- Retain direct-port admission compatibility
+- Fence recovery capacity debit to worker lease
+- Reject missing recovery capacity reservations
+- Bind orphan repair to mutation proof
+- Close quarantine replay races
+- Scope recovery idempotency to activation
 - Redact malformed local authority binding
+- Project authority takeover acknowledgement
+- Retain authority lease through cancellation
+- Keep authority shutdown nonblocking
+- Assemble authority adapters at the provider boundary
+- Drain authority mutations during shutdown
+- Preserve authority shutdown cancellation
+- Preserve boot admission for authority plans
+- Preserve boot evidence on failed force admission
+- Expose managed paths to live authority
+- Isolate authority fixture runtime paths
+- Validate authority fixture path configuration
+- Guard private authority fixture replacement
+- Adopt terminal external boot release cleanup
+- Restrict release receipt projection
+- Preserve release authority lock order
+- Resume cancelled release recovery
+- Honor typed configuration in authority integration
+- Distinguish standalone cleanup from derived release
+- Permit exact derived release authority resolver grant
+- Reconcile recovery tool metadata and replay key bounds
+- Fence orphan quarantine publication
+- Bind quarantine publication resource kind
+- Reconcile orphan authority readiness and privilege inventory
+- Retire recovery stubs and regenerate served contracts
+- Recheck external boot eligibility under lock
+- Fence ordinary teardown from external boot
+- Allow request client identities
+- Validate durable recovery bindings
+- Harden preparation evidence I/O
+- Validate preparation evidence
+- Pass activation binding to materializer
 
 ### Security
 
@@ -2198,6 +2317,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Diagnostic
 
 - Expose capture manifest readiness cause
+
+### Merge
+
+- Integrate authority repository adapter
+- Integrate authority preparation contract
+- Integrate remote module phase contracts
+- Integrate owning run crash admission
+- Adopt authority service shutdown support
+- Adopt derived release authority contracts
+- Integrate authority preparation contract
 
 ### Security
 

@@ -12,11 +12,18 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
-from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
+from kdive.domain.capacity.state import (
+    ExternalBootActivationState,
+    IllegalTransition,
+    RunState,
+    SystemState,
+)
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
@@ -64,12 +71,59 @@ _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
+_EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 
 
 def _teardown_dedup_key(system_id: UUID) -> str:
     """One expression for the replay probe and the enqueue; the key does not vary with
     ``idempotency_key``, so the probe runs unconditionally."""
     return f"{system_id}:teardown"
+
+
+def _external_boot_teardown_unavailable(
+    system_id: str, activation: ExternalBootActivation
+) -> ToolResponse:
+    """Refuse the ordinary teardown path while authority-fenced teardown is incomplete."""
+    if activation.state is ExternalBootActivationState.ACTIVE:
+        detail = (
+            "release this Run's external boot with runs.release_external_boot, wait for cleanup, "
+            "then retry systems.teardown"
+        )
+        next_actions = ["runs.release_external_boot", "runs.get"]
+        reason = "external_boot_release_required"
+    elif activation.state is ExternalBootActivationState.RECOVERY_CONFLICT:
+        detail = (
+            "resolve the external-boot recovery conflict first; authority-fenced System teardown "
+            "for this state is not yet available and no teardown job was enqueued"
+        )
+        next_actions = ["systems.resolve_external_boot_conflict", "runs.get"]
+        reason = "external_boot_teardown_not_supported"
+    elif activation.state is ExternalBootActivationState.RECOVERY_FAILED:
+        detail = (
+            "authority-fenced System teardown from external-boot recovery failure is not yet "
+            "available; no teardown job was enqueued"
+        )
+        next_actions = ["runs.get"]
+        reason = "external_boot_teardown_not_supported"
+    else:
+        detail = (
+            "wait for the external-boot operation and cleanup to settle, then retry "
+            "systems.teardown; no teardown job was enqueued"
+        )
+        next_actions = ["runs.get"]
+        reason = "external_boot_teardown_in_progress"
+    return ToolResponse.failure(
+        system_id,
+        ErrorCategory.CONFLICT,
+        detail=detail,
+        suggested_next_actions=next_actions,
+        data={
+            "reason": reason,
+            "activation_id": str(activation.id),
+            "activation_state": activation.state.value,
+            "owning_run_id": str(activation.run_id),
+        },
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,11 +409,6 @@ async def teardown_system(
                     validate_idempotency_key(idempotency_key)
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error("idempotency_key", exc)
-                replay = await resolve_envelope_replay(
-                    conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
-                )
-                if replay is not None:
-                    return replay
             try:
                 return await _teardown_locked(conn, ctx, uid, system_id, idempotency_key)
             except UniqueViolation:
@@ -392,6 +441,15 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
+        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_restricting_for_system(conn, uid)
+        if activation is not None:
+            return _external_boot_teardown_unavailable(system_id, activation)
+        if idempotency_key is not None:
+            replay = await resolve_envelope_replay(
+                conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
+            )
+            if replay is not None:
+                return replay
         if system.state is SystemState.TORN_DOWN:
             # The System is already terminal, but its Allocation may still be `active`; point the
             # agent at the second wind-down step so the idempotent replay steers identically to a
@@ -405,20 +463,14 @@ async def _teardown_locked(
                 data={"project": system.project},
             )
         # `{uid}:teardown` is stable and recycles nothing, so an unkeyed repeat while the teardown
-        # job is live replays it. Both replays sit above the guard, matching every other site.
+        # job is live replays it. Both replay paths stay below the current-activation safety fence:
+        # an old ordinary teardown job cannot gain authority from its replay envelope.
         replay = await dedup_replay(conn, _teardown_dedup_key(uid))
         if replay is not None:
             return job_envelope(replay, "system_id", uid)
-        # ADR-0583 admits teardown in every restricted state, so this cannot deny today. Ordered
-        # and handled as if it could, because teardown is the one operation admitted everywhere:
-        # `_ESCALATION_HINT` and the recovery rows of `_STATE_NEXT_ACTIONS` steer every denied
-        # caller here, so it is the single exit from a wedged activation. Two open records
-        # contemplate narrowing `_ALWAYS_ADMITTED` —
-        # docs/debt/0004-force-crash-owning-run-modifier-unenforced.md and
-        # docs/debt/0006-external-boot-detach-departs-from-adr-0583.md. If that happens, a caller
-        # who already tore the System down, or whose teardown job is queued, must keep its
-        # idempotent answer rather than receive a `conflict` steering it at the tool it just
-        # called — and a denial must render the typed envelope every other site renders.
+        # No restricting activation exists at this exact System-locked read. Keep the matrix call
+        # so this reverse operation stays inside the shared admission inventory if the matrix later
+        # gains another restriction source.
         try:
             await check_external_boot_admission(
                 conn, uid, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project

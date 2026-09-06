@@ -14,6 +14,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.console.sidecar import sidecar_object_name
+from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import (
@@ -60,6 +61,7 @@ from kdive.security.secrets.system_bootstrap_key import (
 from kdive.store.objectstore import artifact_key
 
 _log = logging.getLogger(__name__)
+_EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 
 # The local-libvirt console-rotation parts and sidecar (#892) live under this tenant, matching the
 # rotation handler (``console_rotate.py`` ``_TENANT``) so teardown reclaims the same owner prefix.
@@ -772,6 +774,19 @@ async def teardown_handler(
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
             return None
+        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_restricting_for_system(conn, system_id)
+        if activation is not None:
+            raise CategorizedError(
+                "ordinary teardown is fenced by external-boot authority while an activation "
+                "restricts this System",
+                category=ErrorCategory.CONFLICT,
+                details={
+                    "reason": "external_boot_teardown_not_supported",
+                    "activation_id": str(activation.id),
+                    "activation_state": activation.state.value,
+                },
+                terminal=True,
+            )
         domain_name = system.domain_name or domain_name_for(system_id)
         if system.state is not SystemState.TORN_DOWN:
             old = system.state
