@@ -1653,6 +1653,22 @@ def test_external_boot_recovery_root_defaults_are_declared() -> None:
     assert "live_vm_host_worker_recovery_root_owner" not in defaults
 
 
+def test_external_boot_capacity_is_checked_before_worker_release() -> None:
+    defaults = _yaml(DEFAULTS)
+    capacity_bytes = defaults["live_vm_host_external_boot_capacity_bytes"]
+    concurrent = defaults["live_vm_host_external_boot_concurrent_activations"]
+    assert isinstance(capacity_bytes, int) and capacity_bytes > 0
+    assert isinstance(concurrent, int) and concurrent > 0
+    tasks = _text(MAIN_TASKS)
+    probe = tasks.index("Measure per-slot external-boot recovery free bytes")
+    capacity = tasks.index("Require provisioned external-boot recovery capacity")
+    release = tasks.index("Install the fixed live-worker executables")
+    assert probe < capacity < release
+    assert "ansible.builtin.command:\n    argv:" in tasks
+    assert "live_vm_host_external_boot_capacity_bytes | int" in tasks
+    assert "live_vm_host_external_boot_concurrent_activations | int" in tasks
+
+
 def test_external_boot_recovery_roots_are_created_per_worker_slot() -> None:
     # One root per fixed slot, not one shared root: RecoveryMetadataStore requires
     # st_uid == geteuid(), which a single directory cannot satisfy for eight accounts.
