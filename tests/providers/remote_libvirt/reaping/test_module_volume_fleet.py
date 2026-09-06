@@ -170,10 +170,10 @@ def test_reachable_host_without_authority_fails_closed(
     assert not called
 
 
-def test_no_reachable_host_does_not_read_retention() -> None:
+def test_no_reachable_host_fails_for_worker_retry_without_reading_retention() -> None:
     called = False
 
-    async def scenario() -> int:
+    async def scenario() -> None:
         nonlocal called
 
         async def retained() -> list[ModuleVolumeKey]:
@@ -181,11 +181,13 @@ def test_no_reachable_host_does_not_read_retention() -> None:
             called = True
             return []
 
-        return await _reaper(Fleet([(_config("down"), RuntimeError("down"))])).reap_module_volumes(
-            retained
-        )
+        with pytest.raises(CategorizedError) as caught:
+            await _reaper(Fleet([(_config("down"), RuntimeError("down"))])).reap_module_volumes(
+                retained
+            )
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
-    assert asyncio.run(scenario()) == 0
+    asyncio.run(scenario())
     assert not called
 
 
