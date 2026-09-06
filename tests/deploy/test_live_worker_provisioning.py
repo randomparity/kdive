@@ -1660,13 +1660,15 @@ def test_external_boot_capacity_is_checked_before_worker_release() -> None:
     assert isinstance(capacity_bytes, int) and capacity_bytes > 0
     # The shipped value admits one plan at every existing contract maximum: decoded
     # kernel, initrd, installed module tree, member overhead, archive capture plus its
-    # atomic temporary, and the bounded projection/recovery records.
+    # atomic temporary, the exact compressed-bundle validation spool, and the bounded
+    # projection/recovery records.
     maximum_live_bytes = (
         2_147_483_648
         + 536_870_912
         + 8_589_934_592
         + 200_000 * 1024
         + 9_409_134_592 * 2
+        + 2_147_483_648
         + 16_384
         + 65_536
     )
