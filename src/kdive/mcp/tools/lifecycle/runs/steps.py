@@ -416,7 +416,7 @@ async def boot_run(
                         project=run.project,
                         kind="runs.boot",
                         do_work=lambda: _enqueue_external_boot(
-                            conn, ctx, run, binding, authority_instance, resolver
+                            conn, ctx, run, binding, authority_instance, resolver, force=force
                         ),
                     )
             return await keyed_mutation(
@@ -439,6 +439,55 @@ async def boot_run(
 
 
 async def _enqueue_external_boot(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    binding: ProviderBinding,
+    authority_instance: str,
+    resolver: ProviderResolver,
+    *,
+    force: bool,
+) -> ToolResponse:
+    system_id = run.require_system_id()
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+        advisory_xact_lock(conn, LockScope.RUN, run.id),
+    ):
+        locked_run = await RUNS.get(conn, run.id)
+        if locked_run is None or locked_run.system_id != system_id:
+            return _config_error(str(run.id), data={"reason": "run_binding_changed"})
+        binding = await resolver.binding_for_system(conn, system_id)
+        if server_authority_instance(binding) != authority_instance:
+            return _config_error(str(run.id), data={"reason": "authority_route_changed"})
+        policy = (
+            queue.JobRecyclePolicy.TERMINAL if force else await _step_recycle(conn, run.id, "boot")
+        )
+        replay = await _settled_replay(conn, run.id, "boot", policy=policy)
+        if replay is not None:
+            return run_job_envelope(replay, run.id, replayed=True)
+        try:
+            await check_external_boot_admission(
+                conn,
+                system_id,
+                ExternalBootOperation.RUN_BOOT,
+                project=run.project,
+                run_id=run.id,
+            )
+        except ExternalBootDenied as exc:
+            return _external_boot_denial(str(run.id), exc, ctx)
+        if force:
+            progress = await step_progress(conn, run.id)
+            if progress.boot == RUN_STEP_RUNNING:
+                return _config_error(str(run.id), data={"reason": "step_in_progress"})
+            if progress.boot == RUN_STEP_SUCCEEDED:
+                await delete_run_step(conn, run.id, "boot")
+        return await _enqueue_external_boot_locked(
+            conn, ctx, locked_run, binding, authority_instance, resolver
+        )
+
+
+async def _enqueue_external_boot_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
     run: Run,
@@ -500,7 +549,9 @@ async def _enqueue_external_boot(
         created_at=now,
         updated_at=now,
     )
-    await ExternalBootActivationRepository().create(conn, activation, reservation)
+    persisted = await ExternalBootActivationRepository().create(conn, activation, reservation)
+    if persisted.state is not ExternalBootActivationState.PREPARING:
+        return _config_error(str(run.id), data={"reason": "external_boot_activation_not_reusable"})
     kind, payload = await build_external_boot_payload(
         conn,
         activation_id=activation_id,

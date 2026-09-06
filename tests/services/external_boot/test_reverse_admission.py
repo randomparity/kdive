@@ -15,8 +15,10 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config_registry
 from kdive.db.locks import LockScope, _lock_key
 from kdive.db.repositories import RUNS, SNAPSHOTS, SYSTEMS
 from kdive.domain.capacity.state import (
@@ -54,6 +56,7 @@ from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.debug import lifecycle as debug_lifecycle
 from kdive.services.external_boot import ExternalBootDenied
+from kdive.services.external_boot.admission import DENIAL_REASON
 from tests.mcp._seed import seed_run_on_system
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import (
@@ -277,6 +280,119 @@ async def _install_owning_run(restricted: _Restricted) -> ToolResponse:
 async def _boot_owning_run(restricted: _Restricted) -> ToolResponse:
     await _mark_installed(restricted.pool, restricted.owning_run_id)
     return await boot_run(restricted.pool, _ctx(), restricted.owning_run_id)
+
+
+@pytest.mark.parametrize("state", [_STATE.ACTIVE, _STATE.RECOVERING])
+def test_configured_authority_boot_preserves_public_admission_denial(
+    migrated_url: str, seeded_activation: SeedActivation, state: ExternalBootActivationState
+) -> None:
+    async def run() -> tuple[ToolResponse, tuple[int, ...], tuple[int, ...]]:
+        async with runs_support.pool(migrated_url) as pool:
+            restricted = await _restricted_ready_system(pool, seeded_activation, state=state)
+            await _mark_installed(pool, restricted.owning_run_id)
+            config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local"})
+            async with pool.connection() as conn:
+                before = tuple(
+                    int(value[0])
+                    for value in (
+                        await (
+                            await conn.execute(
+                                "SELECT count(*) FROM external_boot_activations "
+                                "UNION ALL SELECT count(*) FROM jobs"
+                            )
+                        ).fetchall()
+                    )
+                )
+            response = await boot_run(pool, _ctx(), restricted.owning_run_id, resolver=_resolver())
+            async with pool.connection() as conn:
+                after = tuple(
+                    int(value[0])
+                    for value in (
+                        await (
+                            await conn.execute(
+                                "SELECT count(*) FROM external_boot_activations "
+                                "UNION ALL SELECT count(*) FROM jobs"
+                            )
+                        ).fetchall()
+                    )
+                )
+            return response, before, after
+
+    response, before, after = asyncio.run(run())
+    assert response.error_category == "conflict"
+    assert response.data["reason"] == DENIAL_REASON
+    assert before == after
+
+
+def test_public_boot_atomically_admits_configured_external_boot(migrated_url: str) -> None:
+    digest = "sha256:" + "1" * 64
+
+    async def run() -> ToolResponse:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            async with pool.connection() as conn:
+                investigation = await (
+                    await conn.execute("SELECT investigation_id FROM runs WHERE id=%s", (run_id,))
+                ).fetchone()
+                assert investigation is not None
+            build_ref = await runs_support.seed_investigation_build(pool, str(investigation[0]))
+            evidence = {
+                "schema": "external-boot-evidence-v1",
+                "architecture": "x86_64",
+                "bundle_sha256": digest,
+                "archive_member_count": 1,
+                "archive_uncompressed_bytes": 4096,
+                "vmlinuz_sha256": digest,
+                "vmlinuz_size_bytes": 2048,
+                "decoded_kernel_size_bytes": 4096,
+                "elf_metadata_bytes": 512,
+                "gnu_build_id_size_bytes": 8,
+                "release": "6.9.0-kdive",
+                "module_source_manifest": digest,
+                "module_member_count": 1,
+                "module_uncompressed_bytes": 64,
+            }
+            root = {
+                "schema": "root-spec-v1",
+                "architecture": "x86_64",
+                "root": "/dev/vda1",
+                "arguments": ["root=/dev/vda1"],
+                "authority": "stage-inspection",
+                "source": {"kind": "staged-image", "identity": digest},
+            }
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE runs SET build_ref=%s WHERE id=%s", (build_ref, run_id))
+                await conn.execute(
+                    "UPDATE investigation_builds SET canonical_document=%s, build_result=%s, "
+                    "artifacts=%s WHERE build_ref=%s",
+                    (
+                        Jsonb({"version": 2, "external_boot_evidence": evidence}),
+                        Jsonb({"kernel_ref": "build/kernel.tar", "build_id": "id"}),
+                        Jsonb({"kernel": {"version_id": "kernel-v1"}}),
+                        build_ref,
+                    ),
+                )
+                await conn.execute(
+                    "INSERT INTO system_root_provenance "
+                    "(system_id, source_image_id, project, architecture, image_digest, root_spec) "
+                    "VALUES (%s, %s, 'proj', 'x86_64', %s, %s)",
+                    (system_id, uuid4(), digest, Jsonb(root)),
+                )
+            config_registry.load(
+                {
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "store-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
+                    "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4096",
+                }
+            )
+            return await boot_run(pool, _ctx(), run_id, resolver=_resolver())
+
+    response = asyncio.run(run())
+    assert response.status == "queued", response.model_dump()
+    assert response.data["replayed"] is False
 
 
 async def _power(restricted: _Restricted) -> ToolResponse:
@@ -1430,7 +1546,8 @@ def test_a_boot_admitted_before_the_activation_still_replays(
             await _mark_installed(conn_pool, run_id)
             first = await boot_run(conn_pool, _ctx(), run_id)
             await _restrict(conn_pool, seeded_activation, system_id, run_id, _STATE.ACTIVE)
-            replay = await boot_run(conn_pool, _ctx(), run_id)
+            config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local"})
+            replay = await boot_run(conn_pool, _ctx(), run_id, resolver=_resolver())
             return first, replay, await _boot_jobs(conn_pool, run_id)
 
     first, replay, enqueued = asyncio.run(_run())
