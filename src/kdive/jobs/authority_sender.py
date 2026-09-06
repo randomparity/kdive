@@ -28,6 +28,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityHealthRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     AuthorityTakeoverRequestV1,
 )
 from kdive.providers.external_boot_authority.transport import (
@@ -167,6 +169,14 @@ class AuthorityRequestSender:
             self._encode("execute-mutation", request), deadline=deadline
         )
         return _decode_response(response, AuthorityObservationV1)
+
+    async def execute_preparation(
+        self, request: AuthorityPreparationMutationRequestV1, *, deadline: float
+    ) -> AuthorityPreparationResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-preparation", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityPreparationResponseV1)
 
 
 def authority_sender_factory(
