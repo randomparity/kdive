@@ -40,6 +40,10 @@ from kdive.providers.external_boot_authority.transport import (
     encode_request_envelope,
 )
 from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.security.secrets.secrets import SecretBackend
 
 _PEER_REASONS = frozenset(
@@ -179,6 +183,15 @@ class AuthorityRequestSender:
             self._encode("execute-preparation", request), deadline=deadline
         )
         return _decode_response(response, AuthorityPreparationResponseV1)
+
+    async def execute_remote_module_preparation(
+        self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        """Run one closed remote-module preparation on the Resource-bound authority host."""
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-remote-module-preparation", request), deadline=deadline
+        )
+        return _decode_response(response, RemoteModuleTerminalPreparationResponseV1)
 
     async def observe_authority(
         self, request: AuthorityMutationRequestV1, *, deadline: float

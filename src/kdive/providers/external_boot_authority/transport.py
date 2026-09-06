@@ -42,6 +42,10 @@ from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     AuthorityServiceError,
 )
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.host import AuthorityHostConfig
@@ -61,6 +65,7 @@ type Operation = Literal[
     "execute-conflict-resolution",
     "execute-mutation",
     "execute-preparation",
+    "execute-remote-module-preparation",
     "health",
     "resolve-device-identity",
 ]
@@ -97,6 +102,17 @@ class AuthorityPreparationService(Protocol):
     async def execute_preparation(
         self, peer: AuthenticatedPeer, request: AuthorityPreparationMutationRequestV1
     ) -> AuthorityPreparationResponseV1: ...
+
+
+@runtime_checkable
+class RemoteModulePreparationService(Protocol):
+    """The authority-owned, fixed remote-module operation for one bound Resource."""
+
+    async def execute_remote_module_preparation(
+        self,
+        peer: AuthenticatedPeer,
+        request: RemoteModuleVolumePreparationRequestV1,
+    ) -> RemoteModuleTerminalPreparationResponseV1: ...
 
 
 class DeviceIdentityService(Protocol):
@@ -138,7 +154,11 @@ def encode_request_envelope(
     decoded = (
         decode_device_identity_request(request_bytes)
         if operation == "resolve-device-identity"
-        else decode_authority_request(request_bytes)
+        else (
+            RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
+            if operation == "execute-remote-module-preparation"
+            else decode_authority_request(request_bytes)
+        )
     )
     if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
         raise ValueError("invalid-request")
@@ -152,6 +172,10 @@ def encode_request_envelope(
         raise ValueError("invalid-request")
     if operation == "execute-preparation" and not isinstance(
         decoded, AuthorityPreparationMutationRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "execute-remote-module-preparation" and not isinstance(
+        decoded, RemoteModuleVolumePreparationRequestV1
     ):
         raise ValueError("invalid-request")
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
@@ -217,6 +241,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-conflict-resolution",
             "execute-mutation",
             "execute-preparation",
+            "execute-remote-module-preparation",
             "health",
             "resolve-device-identity",
         }:
@@ -230,7 +255,11 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
         request = (
             decode_device_identity_request(request_bytes)
             if operation == "resolve-device-identity"
-            else decode_authority_request(request_bytes)
+            else (
+                RemoteModuleVolumePreparationRequestV1.from_canonical_json(request_bytes)
+                if operation == "execute-remote-module-preparation"
+                else decode_authority_request(request_bytes)
+            )
         )
         if operation == "acknowledge-takeover" and not isinstance(
             request, AuthorityTakeoverRequestV1
@@ -250,6 +279,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, AuthorityPreparationMutationRequestV1
         ):
             raise ValueError
+        if operation == "execute-remote-module-preparation" and not isinstance(
+            request, RemoteModuleVolumePreparationRequestV1
+        ):
+            raise ValueError
         if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
             raise ValueError
         if operation == "resolve-device-identity" and not isinstance(
@@ -267,7 +300,8 @@ def _success(
     | AuthorityPreparationResponseV1
     | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
-    | DeviceIdentityResponseV1,
+    | DeviceIdentityResponseV1
+    | RemoteModuleTerminalPreparationResponseV1,
 ) -> bytes:
     return _canonical_json({"status": "ok", "value": value.model_dump(mode="json", by_alias=True)})
 
@@ -287,6 +321,7 @@ async def _dispatch(
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None,
     identity_service: DeviceIdentityService | None = None,
+    remote_module_service: RemoteModulePreparationService | None = None,
 ) -> bytes:
     operation, request, credential = _decode_envelope(payload)
     try:
@@ -304,6 +339,18 @@ async def _dispatch(
             return _success(await identity_service.resolve(request))
         except Exception:  # noqa: BLE001 -- filesystem details never cross the boundary
             return _error("provider-failure")
+    if operation == "execute-remote-module-preparation":
+        if remote_module_service is None:
+            return _error("provider-not-configured")
+        if not isinstance(request, RemoteModuleVolumePreparationRequestV1):
+            raise _TransportError("invalid-request")
+        try:
+            result = await remote_module_service.execute_remote_module_preparation(peer, request)
+            return _success(result)
+        except AuthorityServiceError as exc:
+            return _error(_service_category(exc.category))
+        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            return _error("provider-conflict")
     if service is None:
         return _error("provider-not-configured")
     try:
@@ -346,11 +393,14 @@ async def _handle_session(
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None,
     identity_service: DeviceIdentityService | None = None,
+    remote_module_service: RemoteModulePreparationService | None = None,
 ) -> None:
     try:
         async with asyncio.timeout(_TLS_TIMEOUT_SECONDS):
             payload = await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
-            response = await _dispatch(payload, authenticate_peer, service, identity_service)
+            response = await _dispatch(
+                payload, authenticate_peer, service, identity_service, remote_module_service
+            )
             await _write_frame(writer, response)
     except _TransportError as exc:
         with suppress(ConnectionError, ssl.SSLError):
@@ -563,6 +613,7 @@ async def serve_authority_transport(
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None = None,
     identity_service: DeviceIdentityService | None = None,
+    remote_module_service: RemoteModulePreparationService | None = None,
 ) -> AuthorityListener:
     """Bind the dormant authenticated boundary without beginning to serve it."""
     validate_socket_parent(
@@ -580,7 +631,9 @@ async def serve_authority_transport(
         raise
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _handle_session(reader, writer, authenticate_peer, service, identity_service)
+        await _handle_session(
+            reader, writer, authenticate_peer, service, identity_service, remote_module_service
+        )
 
     try:
         server = await asyncio.start_unix_server(
@@ -658,6 +711,7 @@ async def serve_authority_network_transport(
     authenticate_peer: AuthenticatePeer,
     service: AuthorityService | None = None,
     identity_service: DeviceIdentityService | None = None,
+    remote_module_service: RemoteModulePreparationService | None = None,
 ) -> AuthorityNetworkListener:
     """Bind one configured IPv4 mutual-TLS listener without beginning to serve it."""
     if config.network_address is None or config.network_port is None:
@@ -665,7 +719,9 @@ async def serve_authority_network_transport(
     context = server_tls_context(config)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _handle_session(reader, writer, authenticate_peer, service, identity_service)
+        await _handle_session(
+            reader, writer, authenticate_peer, service, identity_service, remote_module_service
+        )
 
     server = await asyncio.start_server(
         handle,
