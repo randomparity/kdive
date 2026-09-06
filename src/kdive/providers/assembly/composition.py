@@ -44,6 +44,7 @@ from kdive.providers.infra.reaping import (
     OwnedDomain,
 )
 from kdive.providers.local_libvirt import composition as local_composition
+from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.traffic import (
     CaptureExecutionRequest,
@@ -58,12 +59,23 @@ from kdive.providers.remote_libvirt.config import (
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
-from kdive.store.objectstore import ObjectStore
+from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 if TYPE_CHECKING:
+    from kdive.providers.external_boot_authority.service import AuthorityMutationAdapter
     from kdive.providers.infra.console_hosting import ConsoleHosting
 
 _log = logging.getLogger(__name__)
+
+
+def build_authority_mutation_adapter(provider_socket: Path) -> AuthorityMutationAdapter | None:
+    """Select explicitly configured local mutation support at the provider assembly boundary."""
+    if config.get(LIBVIRT_RECOVERY_ROOT) is None:
+        return None
+    return local_composition.build_local_external_boot_authority(
+        object_store_from_env(), provider_socket
+    ).adapter
+
 
 type _ConsoleHostingBuilder = Callable[
     [ConsoleTelemetry | None], Awaitable["ConsoleHosting | None"]
