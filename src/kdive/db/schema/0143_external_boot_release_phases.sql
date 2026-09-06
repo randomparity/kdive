@@ -121,10 +121,13 @@ BEGIN
     SELECT incarnation INTO v_incarnation FROM public.worker_incarnations
     WHERE credential_hash = p_credential_hash AND state = 'active' AND fence_protocol = 4;
     SELECT * INTO v_authority FROM public.external_boot_authorities
-    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    WHERE id = p_authority_id AND generation = p_generation;
     IF v_incarnation IS NULL OR NOT FOUND THEN RETURN 'superseded'; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'kdive:system:' || v_authority.system_id::text, 2125));
+    SELECT * INTO v_authority FROM public.external_boot_authorities
+    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'superseded'; END IF;
     SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     SELECT * INTO v_activation FROM public.external_boot_activations
     WHERE id = v_authority.activation_id FOR UPDATE;
@@ -225,9 +228,12 @@ BEGIN
     SELECT incarnation INTO v_incarnation FROM public.worker_incarnations
     WHERE credential_hash = p_credential_hash AND state = 'active' AND fence_protocol = 4;
     SELECT * INTO v_authority FROM public.external_boot_authorities
-    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    WHERE id = p_authority_id AND generation = p_generation;
     IF v_incarnation IS NULL OR v_authority.id IS NULL THEN RETURN 'superseded'; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('kdive:system:' || v_authority.system_id::text, 2125));
+    SELECT * INTO v_authority FROM public.external_boot_authorities
+    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'superseded'; END IF;
     SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     SELECT * INTO v_activation FROM public.external_boot_activations
     WHERE id = v_authority.activation_id FOR UPDATE;
@@ -278,9 +284,12 @@ BEGIN
     SELECT incarnation INTO v_incarnation FROM public.worker_incarnations
     WHERE credential_hash = p_credential_hash AND state = 'active' AND fence_protocol = 4;
     SELECT * INTO v_authority FROM public.external_boot_authorities
-    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    WHERE id = p_authority_id AND generation = p_generation;
     IF v_incarnation IS NULL OR v_authority.id IS NULL THEN RETURN 'superseded'; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('kdive:system:' || v_authority.system_id::text, 2125));
+    SELECT * INTO v_authority FROM public.external_boot_authorities
+    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'superseded'; END IF;
     SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     SELECT * INTO v_activation FROM public.external_boot_activations
     WHERE id = v_authority.activation_id FOR UPDATE;
@@ -349,10 +358,13 @@ BEGIN
     SELECT incarnation INTO v_incarnation FROM public.worker_incarnations
     WHERE credential_hash = p_credential_hash AND state = 'active' AND fence_protocol = 4;
     SELECT * INTO v_authority FROM public.external_boot_authorities
-    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    WHERE id = p_authority_id AND generation = p_generation;
     IF v_incarnation IS NULL OR NOT FOUND THEN RETURN 'superseded'; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'kdive:system:' || v_authority.system_id::text, 2125));
+    SELECT * INTO v_authority FROM public.external_boot_authorities
+    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'superseded'; END IF;
     SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     SELECT * INTO v_activation FROM public.external_boot_activations
     WHERE id = v_authority.activation_id FOR UPDATE;
@@ -537,10 +549,13 @@ BEGIN
     SELECT incarnation INTO v_incarnation FROM public.worker_incarnations
     WHERE credential_hash = p_credential_hash AND state = 'active' AND fence_protocol = 4;
     SELECT * INTO v_authority FROM public.external_boot_authorities
-    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    WHERE id = p_authority_id AND generation = p_generation;
     IF v_incarnation IS NULL OR v_authority.id IS NULL THEN RETURN 'superseded'; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'kdive:system:' || v_authority.system_id::text, 2125));
+    SELECT * INTO v_authority FROM public.external_boot_authorities
+    WHERE id = p_authority_id AND generation = p_generation FOR UPDATE;
+    IF NOT FOUND THEN RETURN 'superseded'; END IF;
     SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
     WHERE system_id = v_authority.system_id AND authority_instance = v_authority.authority_instance
