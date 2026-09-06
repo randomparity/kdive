@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,13 +19,18 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     PresentComponentState,
     ProviderStateIdentity,
+    RecoveryPoint,
+    RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    DurableRemoteModuleVolumePreparationHost,
+    RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
     RemoteModuleVolumePreparationHost,
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationResponseV1,
+    RemoteModuleVolumePreparationStore,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
@@ -36,6 +43,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     PreparedModuleVolumes,
     PreparedVolume,
+    render_module_volume_name,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     operation as module_operation,
@@ -74,6 +82,41 @@ def _remote_preparation_request() -> RemoteModuleVolumePreparationRequestV1:
         plan=plan,
     )
     return RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
+
+
+def _prepared_volumes(request: RemoteModuleVolumePreparationRequestV1) -> PreparedModuleVolumes:
+    common = {
+        "pool": "modules",
+        "system_id": request.operation.system_id,
+        "run_id": request.operation.run_id,
+        "operation_nonce": request.operation.operation_nonce,
+    }
+    return PreparedModuleVolumes(
+        source=PreparedVolume(
+            **common,
+            name=render_module_volume_name(
+                request.operation.system_id,
+                request.operation.run_id,
+                request.operation.operation_nonce,
+                "source.ext4",
+            ),
+            purpose="source",
+            digest=request.operation.source_manifest,
+            capacity_bytes=4096,
+        ),
+        scratch=PreparedVolume(
+            **common,
+            name=render_module_volume_name(
+                request.operation.system_id,
+                request.operation.run_id,
+                request.operation.operation_nonce,
+                "scratch.ext4",
+            ),
+            purpose="scratch",
+            digest="sha256:" + "0" * 64,
+            capacity_bytes=8192,
+        ),
+    )
 
 
 def _record() -> RemoteExternalBootRecoveryRecord:
@@ -249,29 +292,7 @@ def test_remote_volume_request_binds_exact_prepare_phase_and_operation() -> None
 
 def test_remote_volume_response_round_trips_exact_attempt_geometry() -> None:
     request = _remote_preparation_request()
-    operation = request.operation
-    common = {
-        "pool": "modules",
-        "system_id": operation.system_id,
-        "run_id": operation.run_id,
-        "operation_nonce": operation.operation_nonce,
-    }
-    volumes = PreparedModuleVolumes(
-        source=PreparedVolume(
-            **common,
-            name="source.ext4",
-            purpose="source",
-            digest=operation.source_manifest,
-            capacity_bytes=4096,
-        ),
-        scratch=PreparedVolume(
-            **common,
-            name="scratch.ext4",
-            purpose="scratch",
-            digest="sha256:" + "0" * 64,
-            capacity_bytes=8192,
-        ),
-    )
+    volumes = _prepared_volumes(request)
 
     response = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
 
@@ -307,14 +328,24 @@ async def test_remote_volume_host_retains_completion_through_cancellation() -> N
         return PreparedModuleVolumes(
             source=PreparedVolume(
                 **common,
-                name="source.ext4",
+                name=render_module_volume_name(
+                    request.operation.system_id,
+                    request.operation.run_id,
+                    request.operation.operation_nonce,
+                    "source.ext4",
+                ),
                 purpose="source",
                 digest=request.operation.source_manifest,
                 capacity_bytes=4096,
             ),
             scratch=PreparedVolume(
                 **common,
-                name="scratch.ext4",
+                name=render_module_volume_name(
+                    request.operation.system_id,
+                    request.operation.run_id,
+                    request.operation.operation_nonce,
+                    "scratch.ext4",
+                ),
                 purpose="scratch",
                 digest="sha256:" + "0" * 64,
                 capacity_bytes=8192,
@@ -332,3 +363,182 @@ async def test_remote_volume_host_retains_completion_through_cancellation() -> N
         await task
     assert finished.is_set()
     executor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+    calls = 0
+
+    def prepare(_operation: RemoteModuleOperationV1) -> PreparedModuleVolumes:
+        nonlocal calls
+        calls += 1
+        return _prepared_volumes(request)
+
+    first = RemoteModuleVolumePreparationStore(tmp_path)
+    first.stage(request)
+    first.close()
+
+    executor = RemoteModulePreparationExecutor()
+    second = RemoteModuleVolumePreparationStore(tmp_path)
+    durable = DurableRemoteModuleVolumePreparationHost(
+        second, RemoteModuleVolumePreparationHost(prepare, executor)
+    )
+    expected = await durable.execute(request)
+    second.close()
+
+    third = RemoteModuleVolumePreparationStore(tmp_path)
+    replay = DurableRemoteModuleVolumePreparationHost(
+        third, RemoteModuleVolumePreparationHost(prepare, executor)
+    )
+    assert await replay.execute(request) == expected
+    assert calls == 1
+    third.close()
+    executor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_durable_remote_preparation_retries_unrecorded_provider_return(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+    calls = 0
+
+    def prepare(_operation: RemoteModuleOperationV1) -> PreparedModuleVolumes:
+        nonlocal calls
+        calls += 1
+        return _prepared_volumes(request)
+
+    executor = RemoteModulePreparationExecutor()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request)
+    await RemoteModuleVolumePreparationHost(prepare, executor).execute(request)
+    store.close()
+
+    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    durable = DurableRemoteModuleVolumePreparationHost(
+        restarted, RemoteModuleVolumePreparationHost(prepare, executor)
+    )
+    assert (await durable.execute(request)).prepared() == _prepared_volumes(request)
+    assert calls == 2
+    restarted.close()
+    executor.shutdown()
+
+
+def test_durable_remote_preparation_rejects_same_authority_with_changed_operation(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request)
+    changed = request.model_copy(
+        update={
+            "operation": request.operation.model_copy(
+                update={"source_manifest": "sha256:" + "f" * 64}
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="conflicts with durable bytes"):
+        store.stage(changed)
+    store.close()
+
+
+def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path: Path) -> None:
+    record = _record()
+    authority = OpaqueProviderRef(ref="authority/remote-a")
+    calls: list[tuple[str, float]] = []
+
+    class Operations:
+        def materialize(self, plan: object, owner: object, deadline: float) -> object:
+            assert owner == authority
+            calls.append(("materialize", deadline))
+            return record.materialization
+
+        def prepare(
+            self, materialization: object, binding: object, owner: object, deadline: float
+        ) -> RemoteExternalBootRecoveryRecord:
+            assert materialization == record.materialization
+            assert binding == record.binding
+            assert owner == authority
+            calls.append(("prepare", deadline))
+            return record
+
+        def activate(self, recovery: object, owner: object, deadline: float) -> None:
+            assert recovery == record and owner == authority
+            calls.append(("activate", deadline))
+
+        def observe(
+            self, recovery: object, owner: object, deadline: float
+        ) -> RunningKernelObservation:
+            assert recovery == record and owner == authority
+            calls.append(("observe", deadline))
+            return RunningKernelObservation(
+                identity=record.materialization.kernel_observation,
+                cmdline=b"root=/dev/vda",
+                expected_cmdline=b"root=/dev/vda",
+            )
+
+        def recover(self, recovery: object, owner: object, deadline: float) -> None:
+            assert recovery == record and owner == authority
+            calls.append(("recover", deadline))
+
+        def cleanup(self, recovery: object, owner: object, deadline: float) -> None:
+            assert recovery == record and owner == authority
+            calls.append(("cleanup", deadline))
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
+    )
+    assert coordinator.materialize(_plan(), authority) == record.materialization
+    point = coordinator.prepare(record.materialization, record.binding, authority)
+    store.close()
+
+    restarted_store = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()),
+        restarted_store,
+        lambda: 456.0,
+    )
+    restarted.activate(point, authority)
+    assert restarted.observe(point, authority).identity == record.materialization.kernel_observation
+    restarted.recover(point, authority)
+    restarted.cleanup(point, authority)
+    assert calls == [
+        ("materialize", 123.0),
+        ("prepare", 123.0),
+        ("activate", 456.0),
+        ("observe", 456.0),
+        ("recover", 456.0),
+        ("cleanup", 456.0),
+    ]
+    restarted_store.close()
+
+
+def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: Path) -> None:
+    record = _record()
+
+    class Operations:
+        def prepare(self, *args: object) -> RemoteExternalBootRecoveryRecord:
+            return record
+
+        def activate(self, *args: object) -> None:
+            raise AssertionError("provider touched through activate")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    coordinator = RemoteExternalBootCoordinator(
+        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+    )
+    point = coordinator.prepare(
+        record.materialization, record.binding, OpaqueProviderRef(ref="authority/remote-a")
+    )
+    changed = RecoveryPoint.model_validate(
+        {
+            **point.model_dump(mode="python", by_alias=True),
+            "plan_identity": "sha256:" + "f" * 64,
+        }
+    )
+    with pytest.raises(ValueError, match="differs from durable record"):
+        coordinator.activate(changed, OpaqueProviderRef(ref="authority/remote-a"))
+    store.close()

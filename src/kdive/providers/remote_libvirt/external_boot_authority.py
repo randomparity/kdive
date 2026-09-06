@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import stat
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict
+from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,6 +26,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPlan,
     OpaqueProviderRef,
     ProviderStateIdentity,
+    RecoveryPoint,
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
@@ -35,6 +42,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     PreparedModuleVolumes,
     PreparedVolume,
+    render_module_volume_name,
 )
 
 _MAX_RECORD_BYTES = 1_048_576
@@ -152,6 +160,23 @@ class RemoteModuleVolumePreparationResponseV1(BaseModel):
     def prepared(self) -> PreparedModuleVolumes:
         return PreparedModuleVolumes(source=self.source.prepared(), scratch=self.scratch.prepared())
 
+    def validate_for(self, operation: RemoteModuleOperationV1) -> None:
+        expected = (
+            operation.system_id,
+            operation.run_id,
+            operation.operation_nonce,
+        )
+        for volume in (self.source, self.scratch):
+            if (volume.system_id, volume.run_id, volume.operation_nonce) != expected:
+                raise ValueError("provider returned volumes for a different remote module attempt")
+        if (
+            self.source.name != render_module_volume_name(*expected, "source.ext4")
+            or self.scratch.name != render_module_volume_name(*expected, "scratch.ext4")
+            or self.source.digest != operation.source_manifest
+            or self.scratch.digest != "sha256:" + "0" * 64
+        ):
+            raise ValueError("provider returned mismatched remote module volume identities")
+
     def to_canonical_json(self) -> bytes:
         encoded = _canonical_model_bytes(self)
         if len(encoded) > _MAX_PREPARATION_BYTES:
@@ -184,14 +209,182 @@ class RemoteModuleVolumePreparationHost:
     ) -> RemoteModuleVolumePreparationResponseV1:
         volumes = await self._executor.run(lambda: self._prepare(request.operation))
         response = RemoteModuleVolumePreparationResponseV1.from_prepared(volumes)
-        if (
-            response.source.system_id != request.operation.system_id
-            or response.source.run_id != request.operation.run_id
-            or response.source.operation_nonce != request.operation.operation_nonce
-            or response.source.digest != request.operation.source_manifest
-        ):
-            raise ValueError("provider returned volumes for a different remote module attempt")
+        response.validate_for(request.operation)
         return response
+
+
+class RemoteModuleVolumePreparationStore:
+    """Descriptor-confined durable request/result evidence for provider-host restart."""
+
+    def __init__(self, root: Path) -> None:
+        self._root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        status = os.fstat(self._root_fd)
+        if not stat.S_ISDIR(status.st_mode) or stat.S_IMODE(status.st_mode) & 0o022:
+            os.close(self._root_fd)
+            raise PermissionError("remote preparation store must not be group/world writable")
+
+    def close(self) -> None:
+        descriptor, self._root_fd = self._root_fd, -1
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    @staticmethod
+    def _key(request: RemoteModuleVolumePreparationRequestV1) -> str:
+        authority = request.authority
+        bound = "\0".join(
+            (
+                str(authority.system_id),
+                str(authority.activation_id),
+                str(authority.run_id),
+                str(authority.generation),
+                authority.operation_identity,
+                str(authority.attempt_id),
+            )
+        ).encode()
+        return hashlib.sha256(b"kdive-remote-preparation-v1\0" + bound).hexdigest()
+
+    def _read(self, name: str) -> bytes | None:
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._root_fd)
+        except FileNotFoundError:
+            return None
+        try:
+            status = os.fstat(descriptor)
+            if not stat.S_ISREG(status.st_mode) or stat.S_IMODE(status.st_mode) != 0o600:
+                raise PermissionError("remote preparation evidence mode is unsafe")
+            data = os.read(descriptor, _MAX_PREPARATION_BYTES + 1)
+            if len(data) > _MAX_PREPARATION_BYTES:
+                raise ValueError("remote preparation evidence exceeds 1048576 bytes")
+            return data
+        finally:
+            os.close(descriptor)
+
+    def _publish(self, name: str, data: bytes) -> None:
+        existing = self._read(name)
+        if existing is not None:
+            if existing != data:
+                raise ValueError("remote preparation evidence conflicts with durable bytes")
+            return
+        temporary = f".{name}.{uuid4().hex}.tmp"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=self._root_fd,
+        )
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            try:
+                os.link(
+                    temporary,
+                    name,
+                    src_dir_fd=self._root_fd,
+                    dst_dir_fd=self._root_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                if self._read(name) != data:
+                    raise ValueError(
+                        "remote preparation evidence conflicts with durable bytes"
+                    ) from None
+            os.unlink(temporary, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=self._root_fd)
+            raise
+
+    def stage(self, request: RemoteModuleVolumePreparationRequestV1) -> None:
+        self._publish(f"{self._key(request)}.request", request.to_canonical_json())
+
+    def reopen_request(
+        self, request: RemoteModuleVolumePreparationRequestV1
+    ) -> RemoteModuleVolumePreparationRequestV1:
+        data = self._read(f"{self._key(request)}.request")
+        if data is None:
+            raise FileNotFoundError("remote preparation request is absent")
+        reopened = RemoteModuleVolumePreparationRequestV1.from_canonical_json(data)
+        if reopened != request:
+            raise ValueError("remote preparation request differs from durable authority evidence")
+        return reopened
+
+    def publish_result(
+        self,
+        request: RemoteModuleVolumePreparationRequestV1,
+        response: RemoteModuleVolumePreparationResponseV1,
+    ) -> None:
+        self.reopen_request(request)
+        self._publish(f"{self._key(request)}.result", response.to_canonical_json())
+
+    def reopen_result(
+        self, request: RemoteModuleVolumePreparationRequestV1
+    ) -> RemoteModuleVolumePreparationResponseV1 | None:
+        self.reopen_request(request)
+        data = self._read(f"{self._key(request)}.result")
+        return (
+            None
+            if data is None
+            else RemoteModuleVolumePreparationResponseV1.from_canonical_json(data)
+        )
+
+    def publish_recovery(self, recovery: RemoteExternalBootRecoveryRecord) -> OpaqueProviderRef:
+        encoded = recovery.to_canonical_json()
+        identity = hashlib.sha256(b"kdive-remote-recovery-v1\0" + encoded).hexdigest()
+        self._publish(f"{identity}.recovery", encoded)
+        return OpaqueProviderRef(ref=f"remote-external-boot/{identity}")
+
+    def reopen_recovery(self, point: RecoveryPoint) -> RemoteExternalBootRecoveryRecord:
+        prefix = "remote-external-boot/"
+        if not point.recovery_ref.ref.startswith(prefix):
+            raise ValueError("remote recovery reference has the wrong namespace")
+        identity = point.recovery_ref.ref.removeprefix(prefix)
+        if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
+            raise ValueError("remote recovery reference is malformed")
+        data = self._read(f"{identity}.recovery")
+        if data is None:
+            raise FileNotFoundError("remote recovery record is absent")
+        if hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity:
+            raise ValueError("remote recovery record identity mismatched")
+        recovery = RemoteExternalBootRecoveryRecord.from_canonical_json(data)
+        if (
+            recovery.binding != point.binding
+            or recovery.plan_identity != point.plan_identity
+            or recovery.materialization.identity != point.materialization_identity
+            or recovery.source_state != point.source_state
+            or recovery.target_state != point.target_state
+        ):
+            raise ValueError("remote recovery point differs from durable record")
+        return recovery
+
+
+class DurableRemoteModuleVolumePreparationHost:
+    """Resume idempotent preparation from exact provider-private durable evidence."""
+
+    def __init__(
+        self,
+        store: RemoteModuleVolumePreparationStore,
+        host: RemoteModuleVolumePreparationHost,
+    ) -> None:
+        self._store = store
+        self._host = host
+
+    async def execute(
+        self, request: RemoteModuleVolumePreparationRequestV1
+    ) -> RemoteModuleVolumePreparationResponseV1:
+        self._store.stage(request)
+        if result := self._store.reopen_result(request):
+            result.validate_for(request.operation)
+            return result
+        result = await self._host.execute(self._store.reopen_request(request))
+        self._store.publish_result(request, result)
+        return result
 
 
 class RemoteExternalBootRecoveryRecord(BaseModel):
@@ -323,3 +516,57 @@ class RemoteExternalBootOperations(Protocol):
         authority: OpaqueProviderRef,
         deadline: float,
     ) -> None: ...
+
+
+class RemoteExternalBootCoordinator:
+    """Six-operation public adapter over exact durable provider-host recovery."""
+
+    def __init__(
+        self,
+        operations: RemoteExternalBootOperations,
+        store: RemoteModuleVolumePreparationStore,
+        deadline: Callable[[], float],
+    ) -> None:
+        self._operations = operations
+        self._store = store
+        self._deadline = deadline
+
+    def materialize(
+        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+    ) -> ExternalBootMaterialization:
+        return self._operations.materialize(plan, authority, self._deadline())
+
+    def prepare(
+        self,
+        materialization: ExternalBootMaterialization,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+    ) -> RecoveryPoint:
+        recovery = self._operations.prepare(materialization, binding, authority, self._deadline())
+        reference = self._store.publish_recovery(recovery)
+        return RecoveryPoint(
+            binding=recovery.binding,
+            plan_identity=recovery.plan_identity,
+            materialization_identity=recovery.materialization.identity,
+            recovery_ref=reference,
+            source_state=recovery.source_state,
+            target_state=recovery.target_state,
+        )
+
+    def activate(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        self._operations.activate(
+            self._store.reopen_recovery(recovery), authority, self._deadline()
+        )
+
+    def observe(
+        self, recovery: RecoveryPoint, authority: OpaqueProviderRef
+    ) -> RunningKernelObservation:
+        return self._operations.observe(
+            self._store.reopen_recovery(recovery), authority, self._deadline()
+        )
+
+    def recover(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        self._operations.recover(self._store.reopen_recovery(recovery), authority, self._deadline())
+
+    def cleanup(self, recovery: RecoveryPoint, authority: OpaqueProviderRef) -> None:
+        self._operations.cleanup(self._store.reopen_recovery(recovery), authority, self._deadline())
