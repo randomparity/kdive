@@ -145,6 +145,17 @@ class AuthorityPreparationRepository(Protocol):
     ) -> AuthorityBinding | None: ...
 
 
+@runtime_checkable
+class AuthorityReleasePhaseRepository(Protocol):
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None: ...
+
+
 class AuthorityServiceError(RuntimeError):
     """Bounded failure safe to expose across the authority boundary."""
 
@@ -408,6 +419,25 @@ class ExternalBootAuthorityService:
             and binding.authority_instance == request.authority_instance
         )
 
+    @staticmethod
+    def _root_candidate_matches_release_phase(
+        binding: AuthorityBinding, request: AuthorityMutationRequestV1
+    ) -> bool:
+        return (
+            request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+            and binding.authority_id == request.authority_id
+            and binding.generation == request.generation
+            and binding.system_id == request.system_id
+            and binding.activation_id == request.activation_id
+            and binding.run_id == request.run_id
+            and binding.plan_identity == request.plan_identity
+            and binding.purpose == "release"
+            and binding.operation is AuthorityOperation.RELEASE
+            and binding.provider_kind == request.provider_kind
+            and binding.authority_instance == request.authority_instance
+        )
+
     async def _resolve_confirmed(
         self,
         peer: AuthenticatedPeer,
@@ -418,6 +448,18 @@ class ExternalBootAuthorityService:
             if not isinstance(self._repository, AuthorityPreparationRepository):
                 return None
             return await self._repository.resolve_current_preparation(
+                peer,
+                request,
+                acknowledgement.sequence,
+                record_digest(acknowledgement),
+            )
+        if request.purpose == "release" and request.operation in {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.CLEANUP,
+        }:
+            if not isinstance(self._repository, AuthorityReleasePhaseRepository):
+                return None
+            return await self._repository.resolve_current_release_phase(
                 peer,
                 request,
                 acknowledgement.sequence,
@@ -1056,6 +1098,9 @@ class ExternalBootAuthorityService:
         candidate_matches = trusted is not None and (
             self._root_candidate_matches_preparation(trusted, request)
             if isinstance(request, AuthorityPreparationMutationRequestV1)
+            else self._root_candidate_matches_release_phase(trusted, request)
+            if request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
             else self._binding_matches(trusted, request)
         )
         if not candidate_matches:

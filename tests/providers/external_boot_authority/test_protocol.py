@@ -16,6 +16,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
@@ -586,3 +587,10 @@ def test_the_wire_mutation_request_carries_no_journal_field() -> None:
     ).encode()
     with pytest.raises(ValueError, match="invalid external-boot authority request"):
         decode_authority_request(payload)
+
+
+def test_release_authority_permits_derived_recover_phase() -> None:
+    request = _mutation(purpose="release", operation="recover")
+
+    assert request.purpose == "release"
+    assert request.operation is AuthorityOperation.RECOVER

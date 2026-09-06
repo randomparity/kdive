@@ -266,6 +266,62 @@ BEGIN
     RETURN 'applied';
 END $$;
 
+-- The release authority remains the immutable root while these two provider mutations advance
+-- its single journal lane.  Migration 0135 installed the preparation-aware definition; alter that
+-- exact definition rather than adding another mutable head or rewriting the root job payload.
+DO $$
+DECLARE
+    v_definition text;
+BEGIN
+    SELECT pg_get_functiondef(
+        'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,text,jsonb)'::regprocedure
+    ) INTO v_definition;
+    IF v_definition NOT LIKE '%v_bound_operation text;%' THEN
+        RAISE EXCEPTION 'external boot preparation journal shape changed';
+    END IF;
+    v_definition := replace(
+        v_definition,
+        E'    IF p_record->>''operation'' IN (''materialize'', ''prepare'')\n' ||
+        E'       AND v_authority.purpose = ''activate'' AND v_authority.operation = ''activate'' THEN',
+        E'    IF p_record->>''operation'' IN (''recover'', ''cleanup'')\n' ||
+        E'       AND v_authority.purpose = ''release'' AND v_authority.operation = ''release'' THEN\n' ||
+        E'        SELECT operation_identity, operation_digest\n' ||
+        E'        INTO v_bound_identity, v_bound_digest\n' ||
+        E'        FROM public.derive_external_boot_release_phase_binding(jsonb_build_object(\n' ||
+        E'            ''authority_id'', v_authority.id, ''generation'', v_authority.generation,\n' ||
+        E'            ''system_id'', v_authority.system_id, ''activation_id'', v_authority.activation_id,\n' ||
+        E'            ''run_id'', v_authority.run_id, ''plan_identity'', v_authority.plan_identity,\n' ||
+        E'            ''provider_kind'', v_authority.provider_kind,\n' ||
+        E'            ''authority_instance'', v_authority.authority_instance,\n' ||
+        E'            ''worker_incarnation'', v_authority.worker_incarnation,\n' ||
+        E'            ''root_operation_identity'', v_authority.operation_identity,\n' ||
+        E'            ''root_operation_digest'', v_authority.operation_digest\n' ||
+        E'        ), p_record->>''operation'');\n' ||
+        E'        v_bound_operation := p_record->>''operation'';\n' ||
+        E'    ELSIF p_record->>''operation'' IN (''materialize'', ''prepare'')\n' ||
+        E'       AND v_authority.purpose = ''activate'' AND v_authority.operation = ''activate'' THEN'
+    );
+    IF v_definition NOT LIKE '%derive_external_boot_release_phase_binding%' THEN
+        RAISE EXCEPTION 'external boot release journal operation gate was not installed';
+    END IF;
+    v_definition := replace(
+        v_definition,
+        E'            OR (v_head.phase = ''terminal''\n' ||
+        E'                AND v_head.head_record->>''operation'' = ''prepare''\n' ||
+        E'                AND p_record->>''operation'' = ''activate'')',
+        E'            OR (v_head.phase = ''terminal''\n' ||
+        E'                AND v_head.head_record->>''operation'' = ''prepare''\n' ||
+        E'                AND p_record->>''operation'' = ''activate'')\n' ||
+        E'            OR (v_head.phase = ''takeover-acknowledged''\n' ||
+        E'                AND p_record->>''operation'' = ''recover'')\n' ||
+        E'            OR (v_head.phase = ''terminal''\n' ||
+        E'                AND v_head.head_record->>''operation'' = ''recover''\n' ||
+        E'                AND p_record->>''operation'' = ''cleanup'')'
+    );
+    EXECUTE v_definition;
+END
+$$;
+
 REVOKE ALL ON public.external_boot_release_cleanup_receipts FROM PUBLIC;
 GRANT SELECT ON public.external_boot_release_cleanup_receipts TO kdive_worker;
 REVOKE ALL ON FUNCTION public.derive_external_boot_release_phase_binding(jsonb,text),
