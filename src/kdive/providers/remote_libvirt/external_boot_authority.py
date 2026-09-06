@@ -246,7 +246,11 @@ class RemoteModuleVolumePreparationStore:
 
     def _read(self, name: str) -> bytes | None:
         try:
-            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self._root_fd)
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=self._root_fd,
+            )
         except FileNotFoundError:
             return None
         try:
@@ -276,21 +280,23 @@ class RemoteModuleVolumePreparationStore:
                 raise ValueError("remote preparation evidence conflicts with durable bytes")
             return
         temporary = f".{name}.{uuid4().hex}.tmp"
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=self._root_fd,
-        )
         try:
-            view = memoryview(data)
-            while view:
-                written = os.write(descriptor, view)
-                view = view[written:]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=self._root_fd,
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("remote preparation evidence write made no progress")
+                    view = view[written:]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
             try:
                 os.link(
                     temporary,
@@ -306,10 +312,9 @@ class RemoteModuleVolumePreparationStore:
                     ) from None
             os.unlink(temporary, dir_fd=self._root_fd)
             os.fsync(self._root_fd)
-        except BaseException:
+        finally:
             with suppress(FileNotFoundError):
                 os.unlink(temporary, dir_fd=self._root_fd)
-            raise
 
     def stage(self, request: RemoteModuleVolumePreparationRequestV1) -> None:
         self._publish(f"{self._key(request)}.request", request.to_canonical_json())

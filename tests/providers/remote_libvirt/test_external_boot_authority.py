@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import cast
@@ -442,6 +445,84 @@ def test_durable_remote_preparation_rejects_same_authority_with_changed_operatio
     with pytest.raises(ValueError, match="conflicts with durable bytes"):
         store.stage(changed)
     store.close()
+
+
+@pytest.mark.parametrize("failure", ["write", "fsync", "link"])
+def test_preparation_store_removes_its_exact_temporary_after_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise OSError(f"controlled {failure} failure")
+
+    monkeypatch.setattr(
+        f"kdive.providers.remote_libvirt.external_boot_authority.os.{failure}", fail
+    )
+    with pytest.raises(OSError, match=f"controlled {failure} failure"):
+        store.stage(_remote_preparation_request())
+    store.close()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preparation_store_rejects_zero_progress_write_without_retrying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    calls = 0
+
+    def zero_once(_descriptor: int, _data: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0
+        raise AssertionError("write retried after reporting zero progress")
+
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.external_boot_authority.os.write", zero_once
+    )
+    with pytest.raises(OSError, match="made no progress"):
+        store.stage(_remote_preparation_request())
+    store.close()
+
+    assert calls == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preparation_store_refuses_fifo_without_blocking_before_metadata_check(
+    tmp_path: Path,
+) -> None:
+    fifo = tmp_path / "foreign-fifo"
+    os.mkfifo(fifo, 0o600)
+    repository = Path(__file__).resolve().parents[3]
+    program = """
+from pathlib import Path
+import sys
+from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteModuleVolumePreparationStore,
+)
+
+store = RemoteModuleVolumePreparationStore(Path(sys.argv[1]))
+try:
+    store._read('foreign-fifo')
+except PermissionError:
+    pass
+else:
+    raise SystemExit('FIFO was accepted as evidence')
+finally:
+    store.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repository,
+        timeout=2,
+    )
+
+    assert result.stdout == ""
 
 
 def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path: Path) -> None:
