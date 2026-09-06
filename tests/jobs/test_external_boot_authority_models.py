@@ -386,9 +386,84 @@ def test_worker_routes_success_and_stale_result_through_authority_adapter(monkey
         generic = AsyncMock()
         monkeypatch.setattr(queue, "complete_external_boot", complete)
         monkeypatch.setattr(queue, "complete", generic)
-        await _worker()._finalize_handler(_job(_marker(carrier)), _span(), _task_result(carrier))
+        continued = await _worker()._finalize_handler(
+            _job(_marker(carrier)), _span(), _task_result(carrier)
+        )
         complete.assert_awaited_once()
         generic.assert_not_awaited()
+        assert continued is False
+
+    asyncio.run(exercise())
+
+
+def test_worker_continues_only_an_applied_authenticated_deadline(monkeypatch) -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        job = _job(_marker(carrier))
+        complete = AsyncMock(return_value=job)
+        monkeypatch.setattr(queue, "complete_external_boot", complete)
+
+        continued = await _worker()._finalize_handler(job, _span(), _task_result(carrier))
+
+        assert continued is True
+        complete.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_worker_does_not_continue_a_mismatched_or_superseded_deadline(monkeypatch) -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        marker = _marker(carrier)
+        marker["operation_identity"] = "different"
+        complete = AsyncMock(return_value=queue.ExternalBootCommitStatus.SUPERSEDED)
+        monkeypatch.setattr(queue, "complete_external_boot", complete)
+
+        mismatched = await _worker()._finalize_handler(_job(marker), _span(), _task_result(carrier))
+        superseded = await _worker()._finalize_handler(
+            _job(_marker(carrier)), _span(), _task_result(carrier)
+        )
+
+        assert mismatched is False
+        assert superseded is False
+        complete.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_worker_bounds_same_claim_deadline_continuation(monkeypatch) -> None:
+    async def exercise() -> None:
+        worker = _worker()
+        invoke = AsyncMock(return_value=_success())
+        finalized = 0
+
+        async def finalize(_job: Job, _span: JobSpan, handler_task: asyncio.Task[object]) -> bool:
+            nonlocal finalized
+            finalized += 1
+            await handler_task
+            return True
+
+        monkeypatch.setattr(worker, "_invoke_handler", invoke)
+        monkeypatch.setattr(worker, "_finalize_handler", finalize)
+
+        await worker._run_handler(_job(), cast(Any, object()), _span())
+
+        assert invoke.await_count == 2
+        assert finalized == 2
+
+    asyncio.run(exercise())
+
+
+def test_worker_cancellation_does_not_continue_the_claim(monkeypatch) -> None:
+    async def exercise() -> None:
+        worker = _worker()
+        invoke = AsyncMock(side_effect=asyncio.CancelledError("stop"))
+        monkeypatch.setattr(worker, "_invoke_handler", invoke)
+
+        with pytest.raises(asyncio.CancelledError, match="stop"):
+            await worker._run_handler(_job(), cast(Any, object()), _span())
+
+        invoke.assert_awaited_once()
 
     asyncio.run(exercise())
 
@@ -669,17 +744,18 @@ def test_worker_routes_retry_and_terminal_exception_through_authority_adapter(
 ) -> None:
     async def exercise() -> None:
         carrier = _failure(terminal=terminal)
-        fail = AsyncMock(return_value=SimpleNamespace(state=JobState.QUEUED))
+        fail = AsyncMock(return_value=_job().model_copy(update={"state": JobState.QUEUED}))
         generic = AsyncMock()
         monkeypatch.setattr(queue, "fail_external_boot", fail)
         monkeypatch.setattr(queue, "fail", generic)
-        await _worker()._finalize_handler(
+        continued = await _worker()._finalize_handler(
             _job(_marker(carrier)),
             _span(),
             _task_result(error=ExternalBootAuthorityFailure(carrier)),
         )
         fail.assert_awaited_once()
         generic.assert_not_awaited()
+        assert continued is False
 
     asyncio.run(exercise())
 
