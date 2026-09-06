@@ -356,7 +356,7 @@ def register(
         Requires platform_admin, and a denial is audited. `delete` permanently removes every
         named object; `adopt` brings each object back under its recorded activation. The repair
         snapshots the selected quarantine rows and provider binding atomically, then returns a
-        job handle in `object_id`; pass it as `job_id` to `jobs.wait` or `jobs.get`.
+        job handle in `object_id`; pass it as `job_id` to `jobs.wait`.
 
         The response's `data.recovery_readiness_deadline` is an absolute server-clock timestamp,
         five minutes after this request is admitted. It applies to this repair job and bounds
