@@ -214,6 +214,7 @@ async def test_production_factory_binds_overlay_and_verified_installed_appliance
     factory = RemoteModuleAuthorityHostFactory(
         connection=connection,
         pool_name="systems",
+        architectures=("x86_64",),
         work_dir=tmp_path,
         appliance_root=appliance_root,
         artifact_stager=_Stager(),
@@ -253,6 +254,27 @@ async def test_production_factory_binds_overlay_and_verified_installed_appliance
     )
     assert admitted.local_deadline == 45.0
     store.close()
+    executor.shutdown()
+
+
+def test_production_factory_rejects_architecture_outside_fixed_selection(
+    tmp_path: Path,
+) -> None:
+    executor = RemoteModulePreparationExecutor()
+    factory = RemoteModuleAuthorityHostFactory(
+        connection=StorageConn(),
+        pool_name="systems",
+        architectures=("x86_64",),
+        work_dir=tmp_path,
+        appliance_root=tmp_path / "appliance",
+        artifact_stager=_Stager(),
+        secret_registry=SecretRegistry(),
+        executor=executor,
+        monotonic=Clock(),
+    )
+
+    with pytest.raises(ValueError, match="not enabled"):
+        factory.configuration("ppc64le")
     executor.shutdown()
 
 

@@ -10,9 +10,7 @@ printf 'kernel\n' >"$source_dir/image/vmlinuz"
 printf 'initramfs\n' >"$source_dir/image/initramfs.cpio"
 printf '{"format":"kdive-remote-module-appliance-v1"}\n' >"$source_dir/manifest.json"
 
-for arch in x86_64 ppc64le; do
-  tar -cf "$test_root/appliance-v1-$arch.tar" -C "$source_dir" image manifest.json
-done
+tar -cf "$test_root/appliance-v1-x86_64.tar" -C "$source_dir" image manifest.json
 
 python - "$test_root" <<'PY'
 import hashlib
@@ -22,14 +20,18 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-images = {}
-for arch in ("x86_64", "ppc64le"):
+images = {
+    "x86_64": {"url": "", "sha256": ""},
+    "ppc64le": {"url": "", "sha256": ""},
+}
+for arch in ("x86_64",):
     archive = root / f"appliance-v1-{arch}.tar"
     images[arch] = {
         "url": archive.resolve().as_uri(),
         "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
     }
 variables = {
+    "provider_authority_host_remote_module_architectures": ["x86_64"],
     "remote_libvirt_module_appliance_images": images,
     "remote_libvirt_module_appliance_install_dir": str(root / "install"),
     "remote_libvirt_module_appliance_owner": str(os.getuid()),
@@ -50,11 +52,9 @@ fi
 cat "$second_log"
 grep -Eq 'changed=0([[:space:]].*)?failed=0([[:space:]]|$)' "$second_log"
 
-for arch in x86_64 ppc64le; do
-  test -f "$install_dir/$arch/image/vmlinuz"
-  test -f "$install_dir/$arch/image/initramfs.cpio"
-  test -f "$install_dir/$arch/manifest.json"
-done
+test -f "$install_dir/x86_64/image/vmlinuz"
+test -f "$install_dir/x86_64/image/initramfs.cpio"
+test -f "$install_dir/x86_64/manifest.json"
 
 python - "$test_root/vars.json" <<'PY'
 import json

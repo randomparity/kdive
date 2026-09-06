@@ -135,6 +135,9 @@ def test_provider_authority_environment_retracts_only_network_configuration() ->
     assert "REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock" in disabled
     # pragma: allowlist nextline secret -- fixed socket path, not a credential
     assert "PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock" in disabled
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED=false" in disabled
+    assert "REMOTE_MODULE_ARCHITECTURES" not in disabled
+    assert "REMOTE_LIBVIRT_STORAGE_POOL" not in disabled
     drift = template.render(**(values | {"provider_authority_host_network_port": 18444}))
     assert "NETWORK_PORT=18444" in drift
     assert "NETWORK_PORT=18443" not in drift
@@ -155,7 +158,7 @@ def test_provider_authority_reuses_service_confinement_and_rechecks_drift() -> N
     assert "User=kdive-provider-authority" in service
     assert "ReadWritePaths=/run/kdive/provider-authority/request" in service
     assert "ReadWritePaths=/var/lib/kdive/provider-authority/journal" in service
-    assert "ReadWritePaths=/var/lib/kdive/provider-authority/remote-module-preparations" in service
+    assert "remote-module-preparations" not in service
     defaults = yaml.safe_load(_text(PROVIDER_AUTHORITY / "defaults/main.yml"))
     assert all(
         "e2fsprogs" in packages

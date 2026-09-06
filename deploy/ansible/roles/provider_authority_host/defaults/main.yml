@@ -33,6 +33,11 @@ provider_authority_host_s3_region: us-east-1
 # boto3 shared-credentials file containing the profile selected by AWS_PROFILE (default profile
 # when AWS_PROFILE is unset). Credential contents never enter Ansible facts or environment files.
 provider_authority_host_s3_credentials_source: ""
+# Remote module authority is a separate explicit capability. The selected architectures must
+# have pinned appliance assets installed before this is enabled.
+provider_authority_host_remote_module_enabled: false
+provider_authority_host_remote_module_architectures: []
+provider_authority_host_remote_libvirt_storage_pool: default
 provider_authority_host_packages:
   Debian: [acl, git, build-essential, pkg-config, python3-dev, libvirt-dev, libelf-dev, libdw-dev, libkdumpfile-dev, e2fsprogs]
   RedHat: [acl, git, gcc, make, pkgconf-pkg-config, python3-devel, libvirt-devel, elfutils-libelf-devel, elfutils-devel, libkdumpfile-devel, e2fsprogs]
