@@ -40,7 +40,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     operation_is_permitted,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.providers.ports.external_boot import ExternalBootPlan, RootSpecV1
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
@@ -283,11 +283,18 @@ class InstallPayload(RunPayload):
     ``<cmdline>``), or a leading ``crashkernel=`` prefix is rejected. This validator is the
     worker-side backstop; the tool boundary rejects the same set with per-reason
     ``configuration_error`` codes.
+
+    An authority-marked install carries the server-derived ``root_spec`` snapshot used to compose
+    the staging command line. The server reads it under the target System lock; the worker consumes
+    this closed value without direct access to the immutable provenance table. The optional field
+    preserves ordinary and legacy payload decoding, while an authority-marked legacy job without
+    it fails closed and must be re-enqueued through ``runs.install``.
     """
 
     cmdline: str | None = None
     crashkernel: str | None = None
     authority_instance: str | None = None
+    root_spec: RootSpecV1 | None = None
 
     @field_validator("authority_instance")
     @classmethod

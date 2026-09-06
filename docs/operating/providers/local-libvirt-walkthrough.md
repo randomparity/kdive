@@ -248,8 +248,12 @@ alone: `images.list` / `systems.profile_examples` list it, and a System can be p
 `catalog` reference (`{kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}`)
 rather than a host path (Step 6). The file need not exist yet at reconcile time (declared, not
 probed) — provisioning re-validates it against the provider `allowed_roots`, so build it before you
-provision. (Declare an `s3` source instead only if you publish the qcow2 to the object store; an
-`s3` row with no `digest` stays `defined` until published.)
+provision. When the adjacent `build-fs` provenance sidecar contains an architecture-matched,
+mechanically inspected root specification, reconcile also adopts its image digest without hashing
+the multi-GiB file; provisioning streams and verifies the actual bytes before using the path
+([ADR-0624](../../adr/0624-bind-staged-path-catalog-to-inspected-root.md)). A sidecarless image keeps
+the ordinary digest-less declared-path behavior. (Declare an `s3` source instead only if you publish
+the qcow2 to the object store; an `s3` row with no `digest` stays `defined` until published.)
 
 ### kdump capture prerequisites
 
@@ -369,7 +373,10 @@ provision would you also `sudo chown qemu:qemu` the file.
 `~/.config/kdive/systems.toml` (the Step 5 pattern) — `name` = the catalog `--image`, `path` =
 `/var/lib/kdive/rootfs/local/<name>.qcow2` — then re-run `reconcile-systems`. The repo-root
 `systems.toml.example` carries all the RHEL-family rows as a copy-paste reference. Each then seeds a
-`registered` catalog row a System can boot by `catalog` reference.
+`registered` catalog row a System can boot by `catalog` reference. Keep the
+`<path>.provenance.json` file that `build-fs` publishes beside the qcow2: reconcile validates its
+root specification and records the inspected image identity. It does not hash the image during the
+reconcile loop; the actual byte comparison happens when provisioning materializes the row.
 
 ### Connect an MCP client
 
@@ -444,12 +451,23 @@ systems.provision allocation_id=<granted id> profile={
 ```
 
 The `local` host-path form still works when you have not declared an `[[image]]` (it needs no
-inventory, but the path is invisible to an agent without host access):
+inventory, but the path is invisible to an agent without host access). For an exact image binding,
+calculate the staged file's digest and include it in the profile:
+
+```bash
+ROOTFS=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
+printf 'sha256:%s\n' "$(sha256sum "$ROOTFS" | cut -d' ' -f1)"
+```
 
 ```text
   "provider": {"local-libvirt": {"rootfs":
-    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"}}}
+    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2",
+     "sha256": "sha256:<64 lowercase hex digits>"}}}
 ```
+
+When the digest matches the reconciled sidecar identity, admission records the same immutable root
+authority as the catalog form. This applies only to a newly provisioned System; reconciling the
+catalog does not add or replace provenance on an existing System.
 
 > **On a POWER (`ppc64le`) host**, set `"arch": "ppc64le"` in the profile and boot the catalog's
 > `fedora-kdive-ready-44-ppc64le` image; the rest of the flow is identical. The domain's machine

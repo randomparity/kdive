@@ -170,6 +170,35 @@ def test_install_payload_omits_absent_cmdline() -> None:
     assert payload == {"run_id": str(run_id)}
 
 
+def test_authority_install_payload_round_trips_closed_root_snapshot() -> None:
+    run_id = uuid4()
+    root_spec = {
+        "schema": "root-spec-v1",
+        "architecture": "x86_64",
+        "root": "UUID=abc",
+        "arguments": ["root=UUID=abc", "rootfstype=xfs"],
+        "authority": "stage-inspection",
+        "source": {"kind": "staged-image", "identity": "sha256:" + "a" * 64},
+    }
+
+    payload = dump_payload(
+        JobKind.INSTALL,
+        InstallPayload.model_validate(
+            {
+                "run_id": str(run_id),
+                "authority_instance": "authority-local",
+                "root_spec": root_spec,
+            }
+        ),
+    )
+
+    assert payload == {
+        "run_id": str(run_id),
+        "authority_instance": "authority-local",
+        "root_spec": root_spec,
+    }
+
+
 def test_install_payload_rejects_blank_cmdline() -> None:
     with pytest.raises(ValueError, match="cmdline_blank"):
         InstallPayload(run_id=str(uuid4()), cmdline="   ")
@@ -237,6 +266,27 @@ def test_install_payload_decodes_legacy_run_only_payload() -> None:
     decoded = load_payload(job, InstallPayload)
     assert decoded.run_id == str(run_id)
     assert decoded.cmdline is None
+
+
+def test_install_payload_decodes_legacy_authority_payload_without_root_snapshot() -> None:
+    now = datetime.now(UTC)
+    run_id = uuid4()
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.INSTALL,
+        payload={"run_id": str(run_id), "authority_instance": "authority-local"},
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key=f"{run_id}:install",
+    )
+
+    decoded = load_payload(job, InstallPayload)
+
+    assert decoded.authority_instance == "authority-local"
+    assert decoded.root_spec is None
 
 
 @pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT])

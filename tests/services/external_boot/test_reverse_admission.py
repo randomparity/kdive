@@ -925,7 +925,7 @@ def test_supplied_crash_run_is_nonleaking_and_never_enqueues(
     assert after == before
 
 
-def test_teardown_fails_closed_in_recovery_failed_until_authority_chain_lands(
+def test_teardown_fails_closed_when_the_authority_route_is_not_configured(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
     async def _run() -> None:
@@ -935,9 +935,9 @@ def test_teardown_fails_closed_in_recovery_failed_until_authority_chain_lands(
             )
             response = await teardown_system(conn_pool, _ctx(), restricted.system_id)
         assert response.status == "error", response.model_dump()
-        assert response.error_category == "conflict"
-        assert response.data["reason"] == "external_boot_teardown_not_supported"
-        assert response.suggested_next_actions == ["runs.get"]
+        assert response.error_category == "configuration_error"
+        assert response.data["reason"] == "external_boot_teardown_authority_unresolved"
+        assert response.suggested_next_actions == ["systems.get"]
 
     asyncio.run(_run())
 
@@ -1493,10 +1493,9 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
     None`, so on that path the dedup key is the only replay there is and a guard ahead of it
     turns an agent's poll into a refusal while the job it is polling stays queued and runs.
 
-    ``systems.teardown`` is the deliberate exception while its authority-fenced execution chain
-    is incomplete: an ordinary job created before the activation is no longer safe to execute, so
-    the current activation must replace its replay with a refusal. The worker independently fences
-    that already-queued job before System or provider mutation.
+    ``systems.teardown`` is the deliberate exception: an ordinary job created before the
+    activation is no longer safe to execute, so the current activation must replace its replay
+    with authority routing. This test resolver has no authority route, so the call fails closed.
     """
     case = _JOB_TOOLS[tool]
 
@@ -1520,10 +1519,10 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
     assert held_first.status == "queued", held_first.model_dump()
     if tool == "systems.teardown":
         # A queued ordinary teardown predates the activation and therefore lacks authority.
-        # Replaying its envelope would advertise executable destructive work even though the
-        # worker now refuses it; the current activation wins over the old dedup row.
-        assert held_second.error_category == "conflict", held_second.model_dump()
-        assert held_second.data["reason"] == "external_boot_release_required"
+        # Replaying its envelope would advertise executable destructive work; the current
+        # activation wins, and this fixture's absent route is reported explicitly.
+        assert held_second.error_category == "configuration_error", held_second.model_dump()
+        assert held_second.data["reason"] == "external_boot_teardown_authority_unresolved"
         return
     assert held_second.error_category is None, held_second.model_dump()
     # The same job, not the same envelope: a replay may annotate itself (`data.replayed`).

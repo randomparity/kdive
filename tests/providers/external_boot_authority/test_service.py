@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -83,6 +83,53 @@ class _PreparationAdapter:
         self, request: AuthorityPreparationMutationRequestV1
     ) -> ExternalBootPreparationObservation:
         return self.reopened
+
+
+class _RecordingProofCheckpoint:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+        self.identities: list[tuple[UUID, UUID, AuthorityOperation]] = []
+
+    async def checkpoint(
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: Literal["before-provider", "after-provider"],
+    ) -> None:
+        self.identities.append((system_id, run_id, operation))
+        self.calls.append(checkpoint)
+
+
+@pytest.mark.anyio
+async def test_proof_checkpoints_wrap_provider_commit_before_provider_returned(
+    tmp_path: Path,
+) -> None:
+    _unused, repository, adapter, peer, takeover = _service(tmp_path)
+    checkpoint_calls = adapter.calls
+    proof = _RecordingProofCheckpoint(checkpoint_calls)
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        proof_checkpoint=proof,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+
+    request = _mutation(takeover)
+    await service.execute_mutation(peer, request)
+
+    assert checkpoint_calls == ["before-provider", "commit:activate", "after-provider", "observe"]
+    assert proof.identities == [
+        (request.system_id, request.run_id, request.operation),
+        (request.system_id, request.run_id, request.operation),
+    ]
+    assert [record.phase for record in repository.records][-3:] == [
+        JournalPhase.PROVIDER_RETURNED,
+        JournalPhase.OBSERVED,
+        JournalPhase.TERMINAL,
+    ]
 
 
 @pytest.mark.anyio

@@ -327,6 +327,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persist authority recovery evidence
 - Persist preparation receipts
 - Verify existing authority fixture
+- Bind staged rootfs provenance digest
+- Retain plans for host preparation
+- Run module preparation on authority host
+- Reopen running recovery evidence
+- Authorize remote module cleanup evidence
+- Bind recovery object disposition
+- Open remote preparation obligations
+- Await verified remote preparation
+- Construct verified host preparation
+- Materialize external boot artifacts
+- Prepare external boot recovery
+- Dispatch durable preparation phases
+- Activate and observe external boot
+- Recover external boot definition
+- Authorize exact cleanup evidence
+- Add closed module preparation transport
+- Anchor module prepare attempts
+- Stream module archives into ext4
+- Wire authority-owned module preparation
+- Wire remote module recovery lifecycle
+- Route external history teardown through authority
+- Add closed authority teardown proof
+- Resolve trusted teardown snapshot
+- Add authority teardown request
+- Transport closed authority teardown proofs
+- Add authority-owned local system teardown
+- Finalize authority teardown receipts
+- Consume authority teardown receipts
+- Resolve authority teardown snapshots
+- Admit full teardown journal records
+- Anchor authority-owned system teardown proofs
+- Add remote authority-owned system teardown
 
 ### Changed
 
@@ -1411,6 +1443,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Publish current external boot teardown boundary
 - Specify remote materialization receipt recovery
 - Classify request client decision alternatives
+- Assign remote module input ownership
+- Clarify selected appliance architecture inputs
+- Record rejected remote authority alternatives
+- Correct derived release ordering
+- Refresh system teardown reference
+- Refresh teardown CLI argument help
+- Record rejected remote authority alternatives
 
 ### Fixed
 
@@ -2308,6 +2347,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Parse bzImage release token
 - Accept bzImage gzip trailers
 - Allow active authority fixtures
+- Use local worker authority binding
+- Close authority install root provenance payload
+- Bind remote cleanup to current authority
+- Retain preparation completion evidence
+- Assemble authority adapters at the provider boundary
+- Release begin-only preparation lanes
+- Separate external boot artifact staging
+- Support direct-kernel module appliances
+- Retain ambiguous completion ownership
+- Drain cancelled completion observers
+- Restore drained cancellation state
+- Persist cancelled host failures
+- Close authority import boundaries
+- Gate authority host deployment
+- Retain authority orphan completion executor
+- Package bootable remote module appliance runtime
+- Retain release proof through teardown
+- Retain teardown reservation through recovery
+- Complete authority-owned system teardown
+- Preserve teardown intent across capacity release
+- Reconcile system teardown terminal contracts
 
 ### Security
 

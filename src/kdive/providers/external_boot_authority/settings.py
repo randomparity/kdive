@@ -166,6 +166,12 @@ AUTHORITY_PROVIDER_SOCKET = Setting(
     group="external-boot-authority",
     help="Authority-owned provider mutation socket checked for local reachability.",
 )
+AUTHORITY_PROOF_SOCKET = Setting(
+    name="KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET",
+    parse=_authority_socket_path,
+    group="external-boot-authority-proof",
+    help="Optional fixed root-only AF_UNIX socket for the native authority fault proof.",
+)
 AUTHORITY_STORE_IDENTITY = Setting(
     name="KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY",
     parse=_bounded_opaque,
@@ -264,6 +270,7 @@ SETTINGS = [
     AUTHORITY_JOURNAL_DIR,
     AUTHORITY_REQUEST_SOCKET,
     AUTHORITY_PROVIDER_SOCKET,
+    AUTHORITY_PROOF_SOCKET,
     AUTHORITY_STORE_IDENTITY,
     AUTHORITY_RECOVERY_RESERVE_BYTES,
     AUTHORITY_RECOVERY_MAX_BYTES,
