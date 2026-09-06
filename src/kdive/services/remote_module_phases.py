@@ -182,7 +182,6 @@ async def capture_install_modules(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"teardown_complete": False},
         )
-    await runtime.delete_source(recovery, executor, deadline)
     return recovery
 
 
