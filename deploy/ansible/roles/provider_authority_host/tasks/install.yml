@@ -116,6 +116,32 @@
     - {path: /run/kdive/provider-authority/request, mode: "2750", group: kdive-provider-authority-client}
     - {path: /run/kdive/provider-authority/libvirt}
 
+- name: Inspect the optional fault-proof runtime without following links
+  ansible.builtin.stat:
+    path: /run/kdive/provider-authority/proof-control
+    follow: false
+  register: provider_authority_host_fault_proof_path
+  when: provider_authority_host_fault_proof_enabled | bool
+
+- name: Refuse a substituted fault-proof runtime
+  ansible.builtin.assert:
+    that: >-
+      not provider_authority_host_fault_proof_path.stat.exists or
+      (provider_authority_host_fault_proof_path.stat.isdir and
+       not provider_authority_host_fault_proof_path.stat.islnk)
+    quiet: true
+  when: provider_authority_host_fault_proof_enabled | bool
+
+- name: Create the owner-only fault-proof runtime
+  ansible.builtin.file:
+    path: /run/kdive/provider-authority/proof-control
+    state: directory
+    owner: kdive-provider-authority
+    group: kdive-provider-authority
+    mode: "0700"
+    follow: false
+  when: provider_authority_host_fault_proof_enabled | bool
+
 - name: Inspect remote module authority directories without following links
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -161,6 +187,9 @@
       d /run/kdive/provider-authority 0710 kdive-provider-authority kdive-provider-authority-client -
       d /run/kdive/provider-authority/request 2750 kdive-provider-authority kdive-provider-authority-client -
       d /run/kdive/provider-authority/libvirt 0700 kdive-provider-authority kdive-provider-authority -
+      {% if provider_authority_host_fault_proof_enabled | bool %}
+      d /run/kdive/provider-authority/proof-control 0700 kdive-provider-authority kdive-provider-authority -
+      {% endif %}
   notify: Restart provider authority after deployed changes
 
 - name: Inspect the installed authority revision

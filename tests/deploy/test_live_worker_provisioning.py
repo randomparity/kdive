@@ -117,6 +117,7 @@ def test_provider_authority_environment_retracts_only_network_configuration() ->
         provider_authority_host_network_address="127.0.0.1",
         provider_authority_host_network_port=18443,
         provider_authority_host_denied_identities=["operator", "observer"],
+        provider_authority_host_fault_proof_enabled=False,
     )
     enabled = template.render(**values)
     assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS=127.0.0.1\n" in enabled
@@ -139,6 +140,12 @@ def test_provider_authority_environment_retracts_only_network_configuration() ->
     assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ENABLED=false" in disabled
     assert "REMOTE_MODULE_ARCHITECTURES" not in disabled
     assert "REMOTE_LIBVIRT_STORAGE_POOL" not in disabled
+    assert "PROOF_SOCKET" not in disabled
+    proof = template.render(**(values | {"provider_authority_host_fault_proof_enabled": True}))
+    assert (
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROOF_SOCKET="
+        "/run/kdive/provider-authority/proof-control/control.sock\n" in proof
+    )
     drift = template.render(**(values | {"provider_authority_host_network_port": 18444}))
     assert "NETWORK_PORT=18444" in drift
     assert "NETWORK_PORT=18443" not in drift

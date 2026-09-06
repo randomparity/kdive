@@ -82,6 +82,7 @@
                 remote_module = value['remote_module']
                 architectures, pool = value['architectures'], value['pool']
                 assert type(remote_module) is bool
+                assert type(value['fault_proof']) is bool
                 assert type(architectures) is list
                 assert all(type(architecture) is str for architecture in architectures)
                 if remote_module:
@@ -121,7 +122,8 @@
           's3_credentials': provider_authority_host_s3_credentials_source,
           'remote_module': provider_authority_host_remote_module_enabled,
           'architectures': provider_authority_host_remote_module_architectures,
-          'pool': provider_authority_host_remote_libvirt_storage_pool} | to_json }}
+          'pool': provider_authority_host_remote_libvirt_storage_pool,
+          'fault_proof': provider_authority_host_fault_proof_enabled} | to_json }}
   changed_when: false
   check_mode: false
   no_log: true
