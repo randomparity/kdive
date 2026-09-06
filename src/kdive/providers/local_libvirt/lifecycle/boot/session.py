@@ -1426,6 +1426,20 @@ class _ConcreteSystemTeardownSession:
             if domain is not None:
                 domain.free()
 
+    def owned_xml(self) -> tuple[str, str]:
+        """Read both exact owned XML views after applying the normal teardown ownership check."""
+        domain = self._lookup_owned()
+        if domain is None:
+            raise ValueError("owned domain is absent")
+        try:
+            inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+            live = domain.XMLDesc(0)
+            _parse_owned_xml(inactive, self._system_id, self._overlay)
+            _parse_owned_xml(live, self._system_id, self._overlay)
+            return inactive, live
+        finally:
+            domain.free()
+
     def destroy(self) -> None:
         domain = self._lookup_owned()
         if domain is None:

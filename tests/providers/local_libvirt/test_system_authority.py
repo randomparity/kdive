@@ -16,6 +16,7 @@ from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
     _Intent,
+    _xml_identity,
 )
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
@@ -31,6 +32,36 @@ class _Provisioner:
         raise AssertionError("intent-only tests must not provision")
 
 
+class _AbsentInspection:
+    domain_absent = True
+    domain_validated = False
+    overlay_absent = True
+    baseline_absent = True
+
+
+class _AbsentTeardown:
+    def inspect(self) -> _AbsentInspection:
+        return _AbsentInspection()
+
+    def owned_xml(self) -> tuple[str, str]:
+        raise AssertionError("absent domain has no XML")
+
+    def destroy(self) -> None:
+        raise AssertionError("unexpected teardown")
+
+    def undefine(self) -> None:
+        raise AssertionError("unexpected teardown")
+
+    def remove_overlay(self) -> None:
+        raise AssertionError("unexpected teardown")
+
+    def remove_baseline(self) -> None:
+        raise AssertionError("unexpected teardown")
+
+    def close(self) -> None:
+        return None
+
+
 def _provider(tmp_path: Path) -> LocalAuthoritySystemProvider:
     base = tmp_path / "base.qcow2"
     base.touch()
@@ -43,13 +74,13 @@ def _provider(tmp_path: Path) -> LocalAuthoritySystemProvider:
             staged_bases={_DIGEST: base},
         ),
         readiness_probe=lambda _system_id: False,
-        open_teardown=lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected teardown")),
+        open_teardown=lambda *_args: _AbsentTeardown(),
         allocate_port=lambda: 2200,
         now=lambda: datetime(2026, 9, 6, tzinfo=UTC),
     )
 
 
-def _intent() -> _Intent:
+def _intent(tmp_path: Path) -> _Intent:
     system_id = uuid4()
     return _Intent(
         system_id=system_id,
@@ -61,18 +92,18 @@ def _intent() -> _Intent:
         operation_digest=_DIGEST,
         deadline=datetime(2026, 9, 6, 0, 15, tzinfo=UTC),
         domain_name=f"kdive-{system_id}",
-        overlay=f"/private/overlays/{system_id}.qcow2",
-        baseline=f"/private/baseline/{system_id}",
-        base="/private/base.qcow2",
+        overlay=str(tmp_path / "overlays" / f"{system_id}.qcow2"),
+        baseline=str(tmp_path / "baseline" / f"{system_id}-baseline"),
+        base=str(tmp_path / "base.qcow2"),
         gdb_port=None,
         ssh_port=2200,
-        xml_digest=None,
+        xml_digest=_DIGEST,
     )
 
 
 def test_private_intent_is_fsynced_private_and_replay_is_exact(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
-    intent = _intent()
+    intent = _intent(tmp_path)
 
     provider._store_intent(intent)
 
@@ -96,7 +127,7 @@ def test_observation_load_does_not_create_private_intent_root(tmp_path: Path) ->
 
 def test_private_intent_symlink_is_rejected(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
-    intent = _intent()
+    intent = _intent(tmp_path)
     root = tmp_path / "intents"
     root.mkdir(mode=0o700)
     path = root / f"{intent.system_id}.json"
@@ -112,6 +143,78 @@ def test_private_intent_root_symlink_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(LocalAuthoritySystemError, match="unsafe"):
         provider._load_intent(uuid4())
+
+
+def test_loaded_intent_cannot_redirect_fixed_private_topology(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    intent = replace(_intent(tmp_path), overlay="/foreign/overlay.qcow2")
+    provider._store_intent(intent)
+
+    with pytest.raises(LocalAuthoritySystemError, match="fixed topology"):
+        provider._load_intent(intent.system_id)
+
+
+def test_first_attempt_rejects_concrete_retained_baseline_without_intent(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    system_id = uuid4()
+    baseline = tmp_path / "baseline" / f"{system_id}-baseline"
+    baseline.mkdir(parents=True)
+
+    with pytest.raises(LocalAuthoritySystemError, match="artifact exists"):
+        provider._reject_unowned_retained_artifacts(system_id)
+
+
+def test_retry_rejects_divergent_live_xml_before_provisioner_mutation(tmp_path: Path) -> None:
+    intent = _intent(tmp_path)
+    Path(intent.overlay).parent.mkdir()
+    Path(intent.overlay).write_bytes(b"qcow2")
+    Path(intent.baseline).mkdir(parents=True)
+    expected = "<domain><name>expected</name></domain>"
+    divergent = "<domain><name>different</name></domain>"
+    intent = replace(intent, xml_digest=_xml_identity(expected))
+
+    class Inspection:
+        domain_absent = False
+        domain_validated = True
+
+    class Teardown:
+        def inspect(self) -> Inspection:
+            return Inspection()
+
+        def owned_xml(self) -> tuple[str, str]:
+            return divergent, divergent
+
+        def destroy(self) -> None:
+            raise AssertionError("identity check must happen before teardown")
+
+        def undefine(self) -> None:
+            raise AssertionError("identity check must happen before teardown")
+
+        def remove_overlay(self) -> None:
+            raise AssertionError("identity check must happen before teardown")
+
+        def remove_baseline(self) -> None:
+            raise AssertionError("identity check must happen before teardown")
+
+        def close(self) -> None:
+            return None
+
+    base = tmp_path / "base.qcow2"
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: False,
+        open_teardown=lambda *_args: Teardown(),
+        allocate_port=lambda: 2200,
+    )
+
+    with pytest.raises(LocalAuthoritySystemError, match="does not match"):
+        provider._verify_retained_provision_identity(intent)
 
 
 def test_cancellation_drains_the_completion_owned_host_operation(tmp_path: Path) -> None:
@@ -150,6 +253,9 @@ def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: 
         def inspect(self) -> Inspection:
             calls.append("inspect")
             return Inspection()
+
+        def owned_xml(self) -> tuple[str, str]:
+            raise AssertionError("absent replay must not read domain XML")
 
         def destroy(self) -> None:
             calls.append("destroy")

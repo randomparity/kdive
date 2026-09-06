@@ -14,6 +14,7 @@ import json
 import os
 import stat
 import threading
+import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -21,6 +22,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID
+
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
@@ -54,6 +58,8 @@ class _Provisioner(Protocol):
 
 class _SystemTeardown(Protocol):
     def inspect(self) -> Any: ...
+
+    def owned_xml(self) -> tuple[str, str]: ...
 
     def destroy(self) -> None: ...
 
@@ -301,15 +307,12 @@ class LocalAuthoritySystemProvider:
     ) -> AuthoritySystemProvisionFacts:
         intent = self._load_intent(request.system_id)
         if intent is None:
+            self._reject_unowned_retained_artifacts(request.system_id)
             intent = self._candidate_intent(request, snapshot)
-            # A retained baseline performs no extraction callback.  Persist before the overlay can
-            # be touched on that retry path; otherwise the local provisioner's callback runs after
-            # the guestfs read-only selection and before it resets any extraction staging.
-            if Path(intent.baseline).is_dir():
-                self._store_intent(self._intent_with_xml(intent, snapshot, None))
         self._require_matching_intent(intent, request, snapshot)
         if intent.deadline <= self._utc_now():
             raise LocalAuthoritySystemError("local authority provision deadline expired")
+        self._verify_retained_provision_identity(intent)
         self._provisioner.provision(
             request.system_id,
             snapshot.profile,
@@ -447,6 +450,22 @@ class LocalAuthoritySystemProvider:
             xml_digest=None,
         )
 
+    def _reject_unowned_retained_artifacts(self, system_id: UUID) -> None:
+        """Never adopt a pre-intent domain, overlay, or baseline directory on a first attempt."""
+        inspection = self._inspect_without_intent(system_id)
+        if not inspection.domain_absent:
+            raise LocalAuthoritySystemError(
+                "local authority domain exists without a private intent"
+            )
+        for path in (self._topology.overlay_for(system_id), self._topology.baseline_for(system_id)):
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            raise LocalAuthoritySystemError(
+                "local authority artifact exists without a private intent"
+            )
+
     def _intent_with_xml(
         self,
         intent: _Intent,
@@ -475,8 +494,32 @@ class LocalAuthoritySystemProvider:
         )
         return replace(
             intent,
-            xml_digest="sha256:" + hashlib.sha256(xml.encode("utf-8")).hexdigest(),
+            xml_digest=_xml_identity(xml),
         )
+
+    def _verify_retained_provision_identity(self, intent: _Intent) -> None:
+        """Fence retries on the exact retained domain definition and no-alias private storage."""
+        session = self._open_teardown(intent.system_id, intent.overlay, intent.baseline)
+        try:
+            inspection = session.inspect()
+            if inspection.domain_absent:
+                self._require_retained_storage_is_safe(intent)
+                return
+            if not inspection.domain_validated or intent.xml_digest is None:
+                raise LocalAuthoritySystemError(
+                    "retained local authority domain lacks exact intent"
+                )
+            self._require_owned_storage(intent)
+            inactive, live = session.owned_xml()
+            if (
+                _xml_identity(inactive) != intent.xml_digest
+                or _xml_identity(live) != intent.xml_digest
+            ):
+                raise LocalAuthoritySystemError(
+                    "retained local authority domain does not match intent"
+                )
+        finally:
+            session.close()
 
     def _provision_facts(self, intent: _Intent, *, ready: bool) -> AuthoritySystemProvisionFacts:
         domain_owned = False
@@ -484,12 +527,16 @@ class LocalAuthoritySystemProvider:
             teardown = self._open_teardown(intent.system_id, intent.overlay, intent.baseline)
             try:
                 inspected = teardown.inspect()
-                domain_owned = inspected.domain_validated
+                domain_owned = (
+                    inspected.domain_validated
+                    and intent.xml_digest is not None
+                    and all(_xml_identity(xml) == intent.xml_digest for xml in teardown.owned_xml())
+                )
             finally:
                 teardown.close()
         except Exception:
             domain_owned = False
-        root_owned = Path(intent.overlay).is_file() and Path(intent.baseline).is_dir()
+        root_owned = self._storage_is_owned(intent)
         complete = domain_owned and root_owned and ready
         return AuthoritySystemProvisionFacts(
             intent_identity=intent.identity,
@@ -548,9 +595,11 @@ class LocalAuthoritySystemProvider:
         finally:
             os.close(root)
         try:
-            return _Intent.from_json(json.loads(payload))
+            intent = _Intent.from_json(json.loads(payload))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise LocalAuthoritySystemError("local authority intent is unreadable") from error
+        self._require_intent_topology(intent)
+        return intent
 
     def _store_intent(self, intent: _Intent) -> None:
         root = self._open_private_root(create=True)
@@ -597,6 +646,31 @@ class LocalAuthoritySystemProvider:
             os.fsync(root)
         finally:
             os.close(root)
+
+    def _require_intent_topology(self, intent: _Intent) -> None:
+        if (
+            intent.domain_name != f"kdive-{intent.system_id}"
+            or intent.overlay != str(self._topology.overlay_for(intent.system_id))
+            or intent.baseline != str(self._topology.baseline_for(intent.system_id))
+            or intent.base != str(self._topology.base_for(intent.root_identity))
+            or intent.xml_digest is None
+        ):
+            raise LocalAuthoritySystemError("local authority intent does not match fixed topology")
+
+    def _storage_is_owned(self, intent: _Intent) -> bool:
+        try:
+            self._require_owned_storage(intent)
+        except LocalAuthoritySystemError:
+            return False
+        return True
+
+    def _require_owned_storage(self, intent: _Intent) -> None:
+        _require_owned_regular(Path(intent.overlay), self._owner_uid, self._owner_gid)
+        _require_owned_tree(Path(intent.baseline), self._owner_uid, self._owner_gid)
+
+    def _require_retained_storage_is_safe(self, intent: _Intent) -> None:
+        _require_optional_owned_regular(Path(intent.overlay), self._owner_uid, self._owner_gid)
+        _require_optional_owned_tree(Path(intent.baseline), self._owner_uid, self._owner_gid)
 
     def _open_private_root(self, *, create: bool) -> int | None:
         root = self._topology.intent_root
@@ -763,6 +837,72 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         if written <= 0:
             raise LocalAuthoritySystemError("failed to write the full local authority intent")
         view = view[written:]
+
+
+def _require_owned_regular(path: Path, uid: int, gid: int) -> None:
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise LocalAuthoritySystemError("local authority overlay is absent") from error
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or info.st_gid != gid
+        or info.st_nlink != 1
+    ):
+        raise LocalAuthoritySystemError("local authority overlay has unsafe ownership or aliases")
+
+
+def _require_optional_owned_regular(path: Path, uid: int, gid: int) -> None:
+    try:
+        os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    _require_owned_regular(path, uid, gid)
+
+
+def _require_owned_tree(path: Path, uid: int, gid: int) -> None:
+    try:
+        root = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise LocalAuthoritySystemError("local authority baseline is absent") from error
+    if not stat.S_ISDIR(root.st_mode) or root.st_uid != uid or root.st_gid != gid:
+        raise LocalAuthoritySystemError("local authority baseline has unsafe ownership")
+    entries = 0
+    for current, directories, files in os.walk(path, followlinks=False):
+        for name in [*directories, *files]:
+            entries += 1
+            if entries > 4096:
+                raise LocalAuthoritySystemError("local authority baseline exceeds its entry bound")
+            info = os.stat(Path(current) / name, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != uid or info.st_gid != gid:
+                raise LocalAuthoritySystemError("local authority baseline has unsafe ownership")
+            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                raise LocalAuthoritySystemError("local authority baseline carries aliases")
+            if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
+                raise LocalAuthoritySystemError("local authority baseline has an unsafe entry")
+
+
+def _require_optional_owned_tree(path: Path, uid: int, gid: int) -> None:
+    try:
+        os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    _require_owned_tree(path, uid, gid)
+
+
+def _xml_identity(xml: str) -> str:
+    try:
+        root = _safe_fromstring(xml)
+    except (ET.ParseError, DefusedXmlException) as error:
+        raise LocalAuthoritySystemError("local authority domain XML is malformed") from error
+    canonical = ET.canonicalize(
+        ET.tostring(root, encoding="unicode"),
+        with_comments=False,
+        strip_text=False,
+        rewrite_prefixes=True,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _require_private_file(info: os.stat_result, uid: int, gid: int) -> None:
