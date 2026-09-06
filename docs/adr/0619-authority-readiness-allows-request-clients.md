@@ -39,8 +39,9 @@ installed TLS identity, a current incarnation credential, and an accepted closed
 
 ## Considered & rejected
 
-- Remove fixed workers from the client group: they could not reach the ADR-0611 AF_UNIX route.
-- Stop checking denied identities: missing identities, root or authority aliases, and authority
-  owner-group membership would no longer fail closed.
-- Permit ACLs on private directories: request transport access does not require changing the
-  authority's private filesystem boundary.
+- judgment: Remove fixed workers from the client group: they could not reach the ADR-0611 AF_UNIX
+  route.
+- judgment: Stop checking denied identities: missing identities, root or authority aliases, and
+  authority owner-group membership would no longer fail closed.
+- judgment: Permit ACLs on private directories: request transport access does not require changing
+  the authority's private filesystem boundary.
