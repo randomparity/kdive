@@ -2299,6 +2299,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden preparation evidence I/O
 - Validate preparation evidence
 - Pass activation binding to materializer
+- Stage private authority fixture input
+- Verify authority kvm membership by mode
+- Keep authority host settings out of worker lifecycle
 
 ### Security
 
