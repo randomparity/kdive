@@ -258,8 +258,8 @@ def build_external_boot_session_mechanisms(
 ) -> LocalExternalBootMechanisms:
     """Assemble the local external-boot host mechanisms (ADR-0591); opens nothing here.
 
-    Takes no parameters: the only path into these mechanisms is the composition seam, so no
-    caller can inject a root, URI, path, command or credential into them.
+    The authority host may bind its already validated provider socket; the recovery root and
+    every other host resource still come from fixed configuration or concrete mechanisms.
     """
     root = config.require(LIBVIRT_RECOVERY_ROOT)
     lease_scope = LocalOperationLeaseScope()
