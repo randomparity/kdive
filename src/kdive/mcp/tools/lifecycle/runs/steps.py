@@ -465,13 +465,17 @@ async def _enqueue_external_boot(
         replay = await _settled_replay(conn, run.id, "boot", policy=policy)
         if replay is not None:
             return run_job_envelope(replay, run.id, replayed=True)
+        if locked_run.state is not RunState.SUCCEEDED:
+            return _config_error(str(run.id), data={"current_status": locked_run.state.value})
+        if not await _has_succeeded_step(conn, locked_run.id, "install"):
+            return _install_first(str(run.id))
         try:
             await check_external_boot_admission(
                 conn,
                 system_id,
                 ExternalBootOperation.RUN_BOOT,
-                project=run.project,
-                run_id=run.id,
+                project=locked_run.project,
+                run_id=locked_run.id,
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(str(run.id), exc, ctx)
