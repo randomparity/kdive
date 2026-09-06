@@ -754,6 +754,26 @@ def test_internal_reap_job_is_hidden_from_colliding_tenant_read_cancel_and_list(
     asyncio.run(_run())
 
 
+def test_internal_rows_do_not_consume_tenant_pages_or_cursors(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            tenant = [
+                await _enqueue_in(pool, f"tenant-{index}", "remote-libvirt") for index in range(3)
+            ]
+            for index in range(3):
+                await _enqueue_internal(pool, f"internal-{index}")
+            first = await _list_jobs(pool, _INTERNAL_CTX, limit=2)
+            second = await _list_jobs(
+                pool, _INTERNAL_CTX, limit=2, cursor=first.data["next_cursor"]
+            )
+        assert [item.object_id for item in first.items] == list(reversed(tenant[-2:]))
+        assert first.data["truncated"] is True
+        assert [item.object_id for item in second.items] == [tenant[0]]
+        assert second.data["truncated"] is False
+
+    asyncio.run(_run())
+
+
 def test_get_job_in_unowned_project_is_indistinguishable_from_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
