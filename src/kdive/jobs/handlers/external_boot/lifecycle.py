@@ -39,6 +39,7 @@ from kdive.jobs.handlers.external_boot.runner import (
     authority_ref,
     run_operation,
 )
+from kdive.jobs.handlers.systems import reclaim_system_core_after_provider_teardown
 from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
@@ -523,12 +524,32 @@ async def _teardown_prerequisites(
 ) -> Mapping[str, Any]:
     """Admit every restricting activation, including one with only a pending reservation."""
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT state FROM systems WHERE id = %s", (activation.system_id,))
+        await cur.execute(
+            "SELECT systems.state, latest.id AS latest_activation_id FROM systems "
+            "LEFT JOIN LATERAL ("
+            "SELECT id FROM external_boot_activations "
+            "WHERE system_id = systems.id ORDER BY created_at DESC, id DESC LIMIT 1"
+            ") AS latest ON true WHERE systems.id = %s",
+            (activation.system_id,),
+        )
         row = await cur.fetchone()
-    if row is None or row["state"] != "failed":
+    admitted_states = {
+        "provisioning",
+        "ready",
+        "reprovisioning",
+        "restoring",
+        "paused",
+        "crashing",
+        "crashed",
+        "failed",
+    }
+    if (
+        row is None
+        or row["state"] not in admitted_states
+        or row["latest_activation_id"] != activation.id
+    ):
         raise _refuse(
-            f"teardown requires system {activation.system_id} in 'failed', "
-            f"not {row and row['state']!r}"
+            f"teardown requires the newest activation on nonterminal system {activation.system_id}"
         )
     return {"connection": conn}
 
@@ -967,6 +988,9 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         executor = ports.teardown_executor
         if executor is None:
             raise _refuse("no external-boot authority teardown executor is configured")
+        artifact_store = ports.artifact_store
+        if artifact_store is None:
+            raise _refuse("no System artifact store is configured for authority teardown")
         request = AuthorityTeardownMutationRequestV1(
             authority_id=context.authority.authority_id,
             generation=context.authority.generation,
@@ -983,6 +1007,14 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             attempt_id=uuid5(NAMESPACE_URL, context.marker.operation_identity),
         )
         response = await executor.execute_teardown(request)
+        if response.proof.disposition != "retained_quarantine":
+            await reclaim_system_core_after_provider_teardown(
+                context.prerequisites["connection"],
+                artifact_store,
+                context.marker.system_id,
+                reclaim_snapshot_ledger=True,
+                discharge_mutation_obligations=False,
+            )
         async with context.prerequisites["connection"].cursor() as cursor:
             await cursor.execute(
                 "SELECT public.finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",

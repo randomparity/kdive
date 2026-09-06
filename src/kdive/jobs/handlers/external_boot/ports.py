@@ -26,6 +26,7 @@ from kdive.services.external_boot.routing import AuthorityReservationGeometry
 
 if TYPE_CHECKING:
     from kdive.jobs.external_boot_authority_client import ExternalBootClientFactory
+    from kdive.jobs.handlers.systems import RetiredKeyBatchDeleter
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
@@ -98,6 +99,7 @@ class ExternalBootHandlerPorts:
     authority_executor: ExternalBootAuthorityExecutor | None = None
     preparation_executor: ExternalBootAuthorityPreparationExecutor | None = None
     teardown_executor: ExternalBootAuthorityTeardownExecutor | None = None
+    artifact_store: RetiredKeyBatchDeleter | None = None
     authority_client_factory: ExternalBootClientFactory | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     activation_readiness_timeout: timedelta = timedelta(minutes=5)

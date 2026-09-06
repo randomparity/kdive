@@ -218,6 +218,14 @@ async def _reprovision_in_lock(
         if existing is not None:
             return job_envelope(existing, "system_id", system_id)
         return _config_error(str(system_id), data={"current_status": system.state.value})
+    if await _EXTERNAL_BOOT_ACTIVATIONS.teardown_authority_is_current(conn, system_id):
+        return ToolResponse.failure(
+            str(system_id),
+            ErrorCategory.CONFLICT,
+            detail="System teardown is already in progress",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "external_boot_teardown_in_progress"},
+        )
     # Below the `REPROVISIONING` replay return above: a repeat call that finds the live dedup job
     # enqueues nothing and returns it unchanged, so it is a poll rather than fresh work, and an
     # activation that appeared since must not turn it into a `conflict` while that job stays

@@ -58,6 +58,52 @@ CREATE UNIQUE INDEX external_boot_activations_one_live_per_system
     ON public.external_boot_activations (system_id)
     WHERE state NOT IN ('recovered', 'abandoned', 'torn_down') OR NOT cleanup_complete;
 
+-- Public teardown admits the System in its real state. Replace the inherited recovery-failure-only
+-- allocator clause without changing the remaining worker, lease, marker, project, or Run fences.
+-- The activation must still be the newest one for the System by the same deterministic ordering
+-- used by the public dispatch resolver.
+DO $$
+DECLARE
+    v_definition text;
+    v_old text := E'       OR (p_purpose = ''teardown'' AND (\n' ||
+                  E'           v_system.state <> ''failed''\n' ||
+                  E'           OR v_activation.state NOT IN (''recovery_conflict'', ''recovery_failed'')\n' ||
+                  E'       )) THEN';
+    v_new text := E'       OR (p_purpose = ''teardown'' AND (\n' ||
+                  E'           v_system.state NOT IN (\n' ||
+                  E'               ''provisioning'', ''ready'', ''reprovisioning'', ''restoring'',\n' ||
+                  E'               ''paused'', ''crashing'', ''crashed'', ''failed''\n' ||
+                  E'           )\n' ||
+                  E'           OR v_activation.state NOT IN (\n' ||
+                  E'               ''preparing'', ''prepared'', ''activating'', ''active'', ''recovering'',\n' ||
+                  E'               ''recovered'', ''recovery_conflict'', ''recovery_failed'', ''abandoned''\n' ||
+                  E'           )\n' ||
+                  E'           OR EXISTS (\n' ||
+                  E'               SELECT 1 FROM public.external_boot_activations AS newer\n' ||
+                  E'               WHERE newer.system_id = v_activation.system_id\n' ||
+                  E'                 AND (newer.created_at, newer.id) >\n' ||
+                  E'                     (v_activation.created_at, v_activation.id)\n' ||
+                  E'           )\n' ||
+                  E'       ))\n' ||
+                  E'       OR (p_purpose <> ''teardown'' AND EXISTS (\n' ||
+                  E'           SELECT 1 FROM public.external_boot_authorities AS teardown_authority\n' ||
+                  E'           WHERE teardown_authority.system_id = p_system_id\n' ||
+                  E'             AND teardown_authority.purpose = ''teardown''\n' ||
+                  E'             AND teardown_authority.state = ''current''\n' ||
+                  E'       )) THEN';
+BEGIN
+    SELECT pg_get_functiondef((
+        'public.allocate_external_boot_authority('
+        || 'bytea,uuid,integer,uuid,uuid,uuid,text,text,text,text,text)'
+    )::regprocedure) INTO v_definition;
+    IF strpos(v_definition, v_old) = 0 THEN
+        RAISE EXCEPTION 'external boot teardown allocation shape changed';
+    END IF;
+    v_definition := replace(v_definition, v_old, v_new);
+    EXECUTE v_definition;
+END
+$$;
+
 -- Keep the pre-existing authority commit fence intact: it already verifies the exact worker,
 -- acknowledged generation, job attempt and result evidence.  Its legacy teardown tail wrote only
 -- ``cleanup_complete``; with physical teardown now represented separately, that tail must record
@@ -114,6 +160,12 @@ LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
         LIMIT 1
     ) AS authority ON true
     WHERE activation.system_id = p_system_id
+      AND activation.state <> 'torn_down'
+      AND NOT EXISTS (
+          SELECT 1 FROM public.external_boot_activations AS newer
+          WHERE newer.system_id = activation.system_id
+            AND (newer.created_at, newer.id) > (activation.created_at, activation.id)
+      )
     ORDER BY activation.created_at DESC, activation.id DESC
     LIMIT 1
 $$;
@@ -122,6 +174,25 @@ REVOKE ALL ON FUNCTION public.resolve_external_boot_system_teardown_dispatch_bin
     FROM PUBLIC, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
          kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION public.resolve_external_boot_system_teardown_dispatch_binding(uuid)
+    TO kdive_server;
+
+CREATE FUNCTION public.external_boot_teardown_authority_is_current(p_system_id uuid)
+RETURNS boolean
+LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.external_boot_authorities AS authority
+        WHERE authority.system_id = p_system_id
+          AND authority.purpose = 'teardown'
+          AND authority.operation = 'teardown'
+          AND authority.state = 'current'
+    )
+$$;
+
+REVOKE ALL ON FUNCTION public.external_boot_teardown_authority_is_current(uuid)
+    FROM PUBLIC, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
+         kdive_provider_authority;
+GRANT EXECUTE ON FUNCTION public.external_boot_teardown_authority_is_current(uuid)
     TO kdive_server;
 
 CREATE FUNCTION public.resolve_current_external_boot_teardown_authority(
@@ -159,6 +230,11 @@ CREATE FUNCTION public.resolve_current_external_boot_teardown_authority(
       AND a.purpose = 'teardown' AND a.operation = 'teardown'
       AND acknowledgement.journal_sequence = p_ack_sequence
       AND acknowledgement.journal_digest = p_ack_digest
+      AND NOT EXISTS (
+          SELECT 1 FROM public.external_boot_activations AS newer
+          WHERE newer.system_id = activation.system_id
+            AND (newer.created_at, newer.id) > (activation.created_at, activation.id)
+      )
       AND (
           reservation.state IN ('pending', 'ready')
           OR (
@@ -202,6 +278,7 @@ DECLARE
     v_authority public.external_boot_authorities%ROWTYPE;
     v_job public.jobs%ROWTYPE;
     v_activation public.external_boot_activations%ROWTYPE;
+    v_system public.systems%ROWTYPE;
     v_reservation public.external_boot_reservations%ROWTYPE;
     v_release public.external_boot_reservation_releases%ROWTYPE;
     v_head public.external_boot_authority_journal_heads%ROWTYPE;
@@ -241,6 +318,8 @@ BEGIN
     SELECT * INTO v_job FROM public.jobs WHERE id = p_job_id FOR UPDATE;
     SELECT * INTO v_activation FROM public.external_boot_activations
     WHERE id = v_authority.activation_id FOR UPDATE;
+    SELECT * INTO v_system FROM public.systems
+    WHERE id = v_authority.system_id FOR UPDATE;
     SELECT * INTO v_reservation FROM public.external_boot_reservations
     WHERE activation_id = v_authority.activation_id FOR UPDATE;
     SELECT * INTO v_release FROM public.external_boot_reservation_releases
@@ -257,6 +336,17 @@ BEGIN
                     THEN CASE WHEN v_receipt.consumed THEN 'applied' ELSE 'retained' END
                     ELSE 'conflict' END;
     END IF;
+    IF v_system.id IS NULL OR v_system.state NOT IN (
+        'provisioning', 'ready', 'reprovisioning', 'restoring',
+        'paused', 'crashing', 'crashed', 'failed'
+    ) OR v_activation.state NOT IN (
+        'preparing', 'prepared', 'activating', 'active', 'recovering',
+        'recovered', 'recovery_conflict', 'recovery_failed', 'abandoned'
+    ) OR EXISTS (
+        SELECT 1 FROM public.external_boot_activations AS newer
+        WHERE newer.system_id = v_activation.system_id
+          AND (newer.created_at, newer.id) > (v_activation.created_at, v_activation.id)
+    ) THEN RETURN 'superseded'; END IF;
     IF (v_authority.state = 'current' AND v_authority.purpose = 'teardown'
         AND v_authority.operation = 'teardown' AND v_authority.worker_incarnation = v_incarnation
         AND v_authority.job_id = p_job_id AND v_authority.job_attempt = p_attempt
@@ -270,14 +360,22 @@ BEGIN
              (v_head.head_record #>> '{observation,category}' <> 'absent'))
     ) IS NOT TRUE THEN RETURN 'superseded'; END IF;
     IF v_disposition = 'complete_ready' AND NOT (
-        v_reservation.state = 'ready' AND v_proof->'release_evidence' = jsonb_build_object(
-            'schema', 'external-boot-release-evidence-v1',
-            'activation_id', v_authority.activation_id::text,
-            'system_id', v_authority.system_id::text,
-            'store_identity', jsonb_build_object('ref', v_reservation.store_identity),
-            'owner_key', jsonb_build_object('ref', v_reservation.owner_key),
-            'reserved_bytes', v_reservation.reserved_bytes, 'enumeration_complete', true,
-            'objects', jsonb_build_array(), 'verified_at', v_proof #> '{release_evidence,verified_at}'
+        (
+            (v_reservation.state = 'ready' AND v_proof->'release_evidence' = jsonb_build_object(
+                'schema', 'external-boot-release-evidence-v1',
+                'activation_id', v_authority.activation_id::text,
+                'system_id', v_authority.system_id::text,
+                'store_identity', jsonb_build_object('ref', v_reservation.store_identity),
+                'owner_key', jsonb_build_object('ref', v_reservation.owner_key),
+                'reserved_bytes', v_reservation.reserved_bytes, 'enumeration_complete', true,
+                'objects', jsonb_build_array(),
+                'verified_at', v_proof #> '{release_evidence,verified_at}'
+            )) OR (
+                v_reservation.activation_id IS NULL
+                AND v_release.activation_id = v_authority.activation_id
+                AND v_proof->'release_evidence' = v_release.release_evidence
+                AND v_proof->>'release_identity' = v_release.release_identity
+            )
         ) AND v_proof->>'release_identity' = 'sha256:' || encode(sha256(
             convert_to('kdive-external-boot-release-evidence-v1', 'UTF8') || decode('00', 'hex')
             || convert_to(public.canonical_external_boot_authority_json(
@@ -311,18 +409,37 @@ BEGIN
         RETURN 'retained';
     END IF;
     IF v_disposition = 'complete_ready' THEN
-        INSERT INTO public.external_boot_reservation_releases (
-            activation_id, store_identity, owner_key, reserved_bytes, release_identity, release_evidence
-        ) VALUES (v_reservation.activation_id, v_reservation.store_identity, v_reservation.owner_key,
-            v_reservation.reserved_bytes, v_proof->>'release_identity', v_proof->'release_evidence');
-        DELETE FROM public.external_boot_reservations WHERE activation_id = v_authority.activation_id;
+        IF v_reservation.activation_id IS NOT NULL THEN
+            INSERT INTO public.external_boot_reservation_releases (
+                activation_id, store_identity, owner_key, reserved_bytes,
+                release_identity, release_evidence
+            ) VALUES (
+                v_reservation.activation_id, v_reservation.store_identity, v_reservation.owner_key,
+                v_reservation.reserved_bytes, v_proof->>'release_identity',
+                v_proof->'release_evidence'
+            );
+            DELETE FROM public.external_boot_reservations
+            WHERE activation_id = v_authority.activation_id;
+        END IF;
     ELSIF v_disposition = 'complete_pending' THEN
         DELETE FROM public.external_boot_reservations WHERE activation_id = v_authority.activation_id;
     END IF;
+    INSERT INTO public.audit_log (
+        principal, agent_session, project, tool, object_kind, object_id, transition, args_digest
+    ) VALUES (
+        v_job.authorizing->>'principal', v_job.authorizing->>'agent_session', v_system.project,
+        'systems.teardown', 'systems', v_system.id, v_system.state || '->torn_down',
+        encode(sha256(convert_to(
+            '{"system_id":"' || v_system.id::text || '"}', 'UTF8'
+        )), 'hex')
+    );
     UPDATE public.external_boot_activations SET state = 'torn_down', cleanup_complete = true,
         teardown_evidence = v_proof->'teardown_evidence',
         cleanup_evidence = coalesce(v_proof->'cleanup_evidence', cleanup_evidence)
     WHERE id = v_authority.activation_id;
+    UPDATE public.remote_module_attempt_obligations
+    SET mutation_discharged_at = now(), mutation_discharge_reason = 'terminal_escape'
+    WHERE system_id = v_authority.system_id AND mutation_discharged_at IS NULL;
     UPDATE public.systems SET state = 'torn_down' WHERE id = v_authority.system_id;
     UPDATE public.jobs SET state = 'succeeded', result_ref = NULL WHERE id = p_job_id;
     UPDATE public.external_boot_authorities SET state = 'retired', retired_at = clock_timestamp()

@@ -1319,7 +1319,13 @@ def test_teardown_admin_enqueues_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-async def _seed_retired_teardown_authority(conn: psycopg.AsyncConnection, seeded: Any) -> None:
+async def _seed_retired_teardown_authority(
+    conn: psycopg.AsyncConnection,
+    seeded: Any,
+    *,
+    purpose: str = "recover",
+    current: bool = False,
+) -> None:
     """Persist the durable route that System teardown must use, not infer."""
     job_id = uuid4()
     worker = f"worker-{uuid4()}"
@@ -1353,8 +1359,8 @@ async def _seed_retired_teardown_authority(conn: psycopg.AsyncConnection, seeded
         "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
         "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
         "operation_identity, operation_digest, generation, state, acknowledged_at, retired_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 1, 'recover', 'local-libvirt', 'authority-a', %s, "
-        "'recover', 'prior-recovery', %s, 1, 'retired', now(), now())",
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, 'local-libvirt', 'authority-a', %s, "
+        "%s, 'prior-recovery', %s, 1, %s, now(), CASE WHEN %s THEN NULL ELSE now() END)",
         (
             seeded.system_id,
             allocation_id,
@@ -1362,8 +1368,12 @@ async def _seed_retired_teardown_authority(conn: psycopg.AsyncConnection, seeded
             seeded.run_id,
             plan_identity,
             job_id,
+            purpose,
             worker,
+            purpose,
             "sha256:" + "2" * 64,
+            "current" if current else "retired",
+            current,
         ),
     )
 
@@ -2156,6 +2166,42 @@ def test_reprovision_with_terminal_run_is_admissible(migrated_url: str) -> None:
             await _seed_run(pool, sys_id, RunState.SUCCEEDED)  # terminal -> does not block
             resp = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
         assert resp.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_reprovision_rejects_current_teardown_authority_before_mutation(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id, RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                seeded = await seed_activation(
+                    conn,
+                    state=ExternalBootActivationState.RECOVERED,
+                    cleanup_complete=True,
+                    ready_reservation=False,
+                    system_id=UUID(sys_id),
+                    run_id=UUID(run_id),
+                )
+                await _seed_retired_teardown_authority(
+                    conn, seeded, purpose="teardown", current=True
+                )
+            response = await _reprovision(pool, ctx(), sys_id, _active_allocation_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute("SELECT state FROM systems WHERE id=%s", (sys_id,))
+                system = await cursor.fetchone()
+                await cursor.execute("SELECT count(*) AS count FROM jobs WHERE kind='reprovision'")
+                jobs = await cursor.fetchone()
+
+        assert response.status == "error"
+        assert response.error_category == "conflict"
+        assert response.data["reason"] == "external_boot_teardown_in_progress"
+        assert system is not None and system["state"] == "ready"
+        assert jobs is not None and jobs["count"] == 0
 
     asyncio.run(_run())
 

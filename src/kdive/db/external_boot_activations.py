@@ -41,6 +41,10 @@ class CasStatus(StrEnum):
     RETAINED_CAPACITY = "retained_capacity"
 
 
+class ExternalBootTeardownInProgress(ValueError):
+    """A current authority owns physical teardown for this System."""
+
+
 @dataclass(frozen=True)
 class CasResult:
     """A mutation result without disclosing which authority predicate mismatched."""
@@ -120,6 +124,10 @@ class ExternalBootActivationRepository:
             advisory_xact_lock(conn, LockScope.SYSTEM, activation.system_id),
             conn.cursor(row_factory=dict_row) as cur,
         ):
+            if await self.teardown_authority_is_current(conn, activation.system_id):
+                raise ExternalBootTeardownInProgress(
+                    f"system {activation.system_id} has a current teardown authority"
+                )
             await cur.execute(
                 "INSERT INTO external_boot_activations "
                 "(id, system_id, run_id, plan_identity, operation_owner_id, "
@@ -212,6 +220,15 @@ class ExternalBootActivationRepository:
         if current is None:
             raise RuntimeError("activation create returned no row")
         return current
+
+    async def teardown_authority_is_current(self, conn: AsyncConnection, system_id: UUID) -> bool:
+        """Return whether an acknowledged System teardown still owns host mutation."""
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT external_boot_teardown_authority_is_current(%s)", (system_id,)
+            )
+            row = await cur.fetchone()
+        return row is not None and row[0] is True
 
     async def _require_ready_reservation(self, conn: AsyncConnection, activation_id: UUID) -> bool:
         reservation = await self.get_reservation(conn, activation_id)
@@ -1231,4 +1248,9 @@ class ExternalBootActivationRepository:
         return CasResult(CasStatus.APPLIED, _activation(row))
 
 
-__all__ = ["CasResult", "CasStatus", "ExternalBootActivationRepository"]
+__all__ = [
+    "CasResult",
+    "CasStatus",
+    "ExternalBootActivationRepository",
+    "ExternalBootTeardownInProgress",
+]

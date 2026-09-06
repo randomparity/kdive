@@ -154,6 +154,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
+            artifact_store=assembly.object_stores.store,
             authority_client_factory=assembly.external_boot_client_factory,
         )
     )
