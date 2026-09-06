@@ -22,11 +22,18 @@ holding the transaction-scoped System advisory lock and invokes one inline consu
 volumes. A row without a volume is an expected retry state, so a verified replay continues through
 the existing deterministic lookup/create behavior.
 
-The inline consumer submits the whole synchronous two-volume operation once to a bounded,
-completion-owned offload. Cancellation shields the underlying future and drains it to actual
-completion before re-raising cancellation, so neither the verification transaction nor its System
-lock can unwind while libvirt still mutates storage. Repeated cancellation cannot detach the
-future or shorten that lifetime. The synchronous primitive checks the one captured provider
+The inline consumer submits the whole synchronous two-volume operation once to a worker-service
+owned four-thread executor guarded by four non-waiting admission slots. Exhaustion starts no
+libvirt work and raises one redacted `INFRASTRUCTURE_FAILURE`. Admission belongs to the underlying
+concurrent future and is released only by its completion callback. Cancellation shields that
+future and drains it to actual completion before re-raising cancellation, so neither the
+verification transaction nor its System lock can unwind while libvirt still mutates storage.
+During the drain, each delivered cancellation is removed from the task only long enough to keep
+awaiting the same shielded future; the exact cancellation count is restored before
+`CancelledError` is re-raised. Repeated cancellation cannot detach the future or shorten that
+lifetime. Service shutdown closes admission, cancels queued work, invokes executor shutdown with
+`wait=False`, and rejects new work; it does not claim to terminate a running libvirt call. The
+synchronous primitive checks the one captured provider
 deadline before every `createXML`, upload/download stream stage, repair, and cleanup delete. An
 expired deadline starts no later stage. A kernel-blocked libvirt call can therefore retain the lock
 until it returns; the design does not claim to terminate such a call.
@@ -104,6 +111,8 @@ forge or destroy the objects being inspected.
 - Blocked-call and repeated-cancellation tests prove the verifier transaction/System lock remains
   held until underlying completion; completion then re-raises cancellation and a verified retry
   can acquire the lock and reopen the deterministic volumes.
+- Exact-capacity, recovery, and shutdown tests prove exhausted admission starts no work, actual
+  completion restores capacity, and shutdown neither waits for running libvirt nor accepts work.
 - Deadline tests expire each mutation/stream boundary independently and prove no later stage starts.
 - Focused tests, lint, type checking, the ordinary suite, and `just ci` run before publication.
 

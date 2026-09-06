@@ -76,10 +76,13 @@ Steps:
 1. Add the async orchestration seam that passes ADR-0605's exact request/attempt to
    `run_verified_module_attempt_preparation` and supplies one inline two-volume consumer. Confirm a
    missing/mismatched/discharged receipt reaches no libvirt call.
-2. Submit the synchronous primitive once through a bounded completion-owned offload. Shield the
-   underlying future; on cancellation, drain it to actual completion while retaining the verifier
-   transaction/System lock, then preserve and re-raise cancellation. Add blocked-call,
-   repeated-cancellation, lock-retention, completion, and verified-retry tests.
+2. Add one worker-service-owned four-thread executor and four non-waiting admission slots. Submit
+   the synchronous primitive once, bind admission release to the concurrent future's actual
+   completion, and fail exhausted admission as a redacted infrastructure error without starting
+   work. Shield the future; on cancellation, drain it to actual completion while retaining the
+   verifier transaction/System lock, temporarily removing and finally restoring the exact task
+   cancellation count before re-raising. Add blocked-call, repeated-cancellation, lock-retention,
+   exact-capacity, completion recovery, shutdown/new-work rejection, and verified-retry tests.
 3. Capture one absolute provider-operation deadline and check it before every `createXML`, stream
    send/receive/finish/abort, repair, and cleanup delete. Fault each boundary and prove no later
    stage starts after expiry.
