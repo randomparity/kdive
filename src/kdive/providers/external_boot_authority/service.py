@@ -1336,11 +1336,10 @@ class ExternalBootAuthorityService:
                     if confirmed is None or not self._binding_matches(confirmed, request):
                         raise AuthorityServiceError("superseded")
                     binding = confirmed
-                    teardown_snapshot = (
+                    if isinstance(request, AuthorityTeardownMutationRequestV1):
+                        # Reject a request whose acknowledged teardown binding cannot be
+                        # resolved before creating any journal admission records.
                         await self._teardown_snapshot(authenticated, request, acknowledgement)
-                        if isinstance(request, AuthorityTeardownMutationRequestV1)
-                        else None
-                    )
                     records = await self._recover(binding, journal, records)
                     phases_by_operation: dict[str, JournalRecordV1] = {}
                     for record in reversed(records):
@@ -1748,15 +1747,17 @@ class ExternalBootAuthorityService:
         )
         if started is None or terminal is None or acknowledgement is None:
             raise AuthorityServiceError("journal_conflict")
-        snapshot = await self._teardown_snapshot(authenticated, request, acknowledgement)
         facts = await self._system_teardown_facts(
             request, AuthorityCommitContextV1.for_record(started)
         )
-        if facts.reservation is not None and facts.reservation != snapshot.reservation:
-            raise AuthorityServiceError("provider_conflict")
         proof = teardown_proof(request, facts)
         if self._teardown_observation(proof) != observation:
             raise AuthorityServiceError("provider_conflict")
+        # The provider persists this reservation as the host-side teardown intent before it
+        # destroys anything.  A concurrent release may change current accounting from ready to
+        # released while that intent is in flight; that is a valid completion, not a reason to
+        # discard host-proved absence.  The final lookup still fences the acknowledgement and
+        # current authority binding, but its mutable reservation must not replace the intent.
         await self._teardown_snapshot(authenticated, request, acknowledgement)
         return AuthorityTeardownResponseV1(
             observation=observation,

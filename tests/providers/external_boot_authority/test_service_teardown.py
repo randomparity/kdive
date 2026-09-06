@@ -1,6 +1,7 @@
 """Full teardown traverses authentication, anchoring and host-owned IO (ADR-0620)."""
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -8,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
@@ -34,6 +36,7 @@ from tests.providers.external_boot_authority.service_support import _Adapter, _R
 
 class _TeardownRepository(_Repository):
     deny_snapshot = False
+    released_after_provider = False
 
     async def resolve_current_teardown(
         self,
@@ -50,16 +53,38 @@ class _TeardownRepository(_Repository):
         )
         if binding is None or self.deny_snapshot:
             return None
+        reservation = AuthorityTeardownReservationV1(
+            disposition="ready",
+            store_identity=OpaqueProviderRef(ref="store-a"),
+            owner_key=OpaqueProviderRef(ref="owner-a"),
+            reserved_bytes=4096,
+        )
+        if not self.released_after_provider:
+            return AuthorityTeardownSnapshot(
+                binding=binding,
+                reservation=reservation,
+                release_identity=None,
+                release_evidence=None,
+            )
+        release = ExternalBootReleaseEvidenceV1(
+            activation_id=request.activation_id,
+            system_id=request.system_id,
+            store_identity=reservation.store_identity,
+            owner_key=reservation.owner_key,
+            reserved_bytes=reservation.reserved_bytes,
+            objects=(),
+            verified_at=datetime(2026, 9, 6, tzinfo=UTC),
+        )
         return AuthorityTeardownSnapshot(
             binding=binding,
             reservation=AuthorityTeardownReservationV1(
-                disposition="ready",
-                store_identity=OpaqueProviderRef(ref="store-a"),
-                owner_key=OpaqueProviderRef(ref="owner-a"),
-                reserved_bytes=4096,
+                disposition="released",
+                store_identity=reservation.store_identity,
+                owner_key=reservation.owner_key,
+                reserved_bytes=reservation.reserved_bytes,
             ),
-            release_identity=None,
-            release_evidence=None,
+            release_identity=release.identity,
+            release_evidence=release,
         )
 
 
@@ -85,6 +110,7 @@ class _TeardownAdapter(_Adapter):
         self.commit_count = 0
         self.read_count = 0
         self.lose_completion_reply = False
+        self.release_reservation_after_commit: Callable[[], None] | None = None
 
     async def execute_system_teardown(
         self,
@@ -99,6 +125,8 @@ class _TeardownAdapter(_Adapter):
         await self.release.wait()
         if self.lose_completion_reply:
             raise OSError("injected lost host completion reply")
+        if self.release_reservation_after_commit is not None:
+            self.release_reservation_after_commit()
         return self.facts
 
     async def observe_system_teardown(
@@ -223,6 +251,22 @@ async def test_restart_recovers_completed_teardown_without_repeating_mutation(
     assert response.proof.release_evidence.verified_at == adapter.facts.completed_at
     assert adapter.commit_count == 1
     await restarted.close()
+
+
+@pytest.mark.anyio
+async def test_teardown_response_keeps_provider_intent_when_capacity_releases_after_commit(
+    tmp_path: Path,
+) -> None:
+    service, repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.release_reservation_after_commit = lambda: setattr(
+        repository, "released_after_provider", True
+    )
+
+    response = await service.execute_teardown(peer, request)
+
+    assert response.proof.disposition == "complete_ready"
+    assert adapter.commit_count == 1
+    await service.close()
 
 
 @pytest.mark.anyio
