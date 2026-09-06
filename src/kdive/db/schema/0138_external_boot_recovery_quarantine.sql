@@ -23,6 +23,10 @@ CREATE TABLE external_boot_recovery_quarantine (
     object_reference    text NOT NULL,
     ownership_digest    text NOT NULL,
     observed_digest     text NOT NULL,
+    operation_identity  text NOT NULL,
+    attempt_id          uuid NOT NULL,
+    mutation_journal_sequence bigint NOT NULL,
+    mutation_journal_digest text NOT NULL,
     reserved_bytes      bigint NOT NULL,
     status              text NOT NULL DEFAULT 'quarantined',
     disposition_job_id  uuid REFERENCES jobs (id) ON DELETE RESTRICT,
@@ -42,6 +46,12 @@ CREATE TABLE external_boot_recovery_quarantine (
         CHECK (ownership_digest ~ '^sha256:[0-9a-f]{64}$'),
     CONSTRAINT external_boot_recovery_quarantine_observed_digest
         CHECK (observed_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT external_boot_recovery_quarantine_operation_identity
+        CHECK (octet_length(operation_identity) BETWEEN 1 AND 255),
+    CONSTRAINT external_boot_recovery_quarantine_journal_sequence
+        CHECK (mutation_journal_sequence > 0),
+    CONSTRAINT external_boot_recovery_quarantine_journal_digest
+        CHECK (mutation_journal_digest ~ '^sha256:[0-9a-f]{64}$'),
     CONSTRAINT external_boot_recovery_quarantine_reserved_bytes CHECK (reserved_bytes >= 0),
     CONSTRAINT external_boot_recovery_quarantine_status
         CHECK (status IN ('quarantined', 'adopted', 'deleted')),

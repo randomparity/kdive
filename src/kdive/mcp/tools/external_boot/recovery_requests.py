@@ -126,7 +126,9 @@ _CONFLICT_AUTHORITY_SQL: LiteralString = (
 _QUARANTINE_SQL: LiteralString = (
     "SELECT q.id, q.object_identity, q.resource_id, q.activation_id, q.provider_kind, "
     "q.authority_instance, q.object_kind, q.object_reference, q.ownership_digest, "
-    "q.observed_digest, q.reserved_bytes, r.kind AS resource_kind "
+    "q.observed_digest, q.reserved_bytes, r.kind AS resource_kind, "
+    "q.operation_identity, q.attempt_id, q.mutation_journal_sequence, "
+    "q.mutation_journal_digest "
     "FROM external_boot_recovery_quarantine AS q "
     "JOIN systems AS s ON s.id = q.system_id "
     "JOIN allocations AS a ON a.id = s.allocation_id "

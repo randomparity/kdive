@@ -408,6 +408,10 @@ class RecoveryObjectBinding(_ClosedValue):
     kind: Literal["kernel", "initrd", "modules", "recovery-record"]
     reference: OpaqueProviderRef
     ownership_digest: Digest
+    operation_identity: Annotated[str, Field(min_length=1, max_length=255)]
+    attempt_id: CanonicalUuid
+    mutation_journal_sequence: Annotated[int, Field(ge=1)]
+    mutation_journal_digest: Digest
 
 
 class RecoveryObjectObservation(_ClosedValue):

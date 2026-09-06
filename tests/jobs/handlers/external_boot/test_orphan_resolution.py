@@ -72,6 +72,10 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     kind="modules",
                     reference=OpaqueProviderRef(ref="modules/quarantined-a"),
                     ownership_digest=_DIGEST,
+                    operation_identity="cleanup-a",
+                    attempt_id=str(uuid4()),
+                    mutation_journal_sequence=7,
+                    mutation_journal_digest="sha256:" + "b" * 64,
                 )
                 provider = FaultInjectExternalBoot()
                 observation = provider.register_recovery_object(object_binding)
@@ -79,8 +83,10 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     "INSERT INTO external_boot_recovery_quarantine "
                     "(id, object_identity, resource_id, system_id, activation_id, provider_kind, "
                     "authority_instance, object_kind, object_reference, ownership_digest, "
-                    "observed_digest, reserved_bytes) "
-                    "VALUES (%s, %s, %s, %s, %s, 'local-libvirt', %s, %s, %s, %s, %s, 4096)",
+                    "operation_identity, attempt_id, mutation_journal_sequence, "
+                    "mutation_journal_digest, observed_digest, reserved_bytes) "
+                    "VALUES (%s, %s, %s, %s, %s, 'local-libvirt', %s, %s, %s, %s, "
+                    "%s, %s, %s, %s, %s, 4096)",
                     (
                         record_id,
                         "quarantine-a",
@@ -91,6 +97,10 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                         object_binding.kind,
                         object_binding.reference.ref,
                         object_binding.ownership_digest,
+                        object_binding.operation_identity,
+                        object_binding.attempt_id,
+                        object_binding.mutation_journal_sequence,
+                        object_binding.mutation_journal_digest,
                         observation.observed_digest,
                     ),
                 )

@@ -47,7 +47,9 @@ async def resolve_recovery_orphan_handler(
         await cur.execute(
             "SELECT q.id, q.resource_id, q.system_id, q.activation_id, a.run_id, q.provider_kind, "
             "q.authority_instance, q.object_kind, q.object_reference, q.ownership_digest, "
-            "q.observed_digest, q.status, r.kind AS resource_kind "
+            "q.observed_digest, q.status, r.kind AS resource_kind, "
+            "q.operation_identity, q.attempt_id, q.mutation_journal_sequence, "
+            "q.mutation_journal_digest "
             "FROM external_boot_recovery_quarantine AS q "
             "JOIN external_boot_activations AS a ON a.id = q.activation_id "
             "JOIN systems AS s ON s.id = q.system_id "
@@ -88,6 +90,10 @@ async def resolve_recovery_orphan_handler(
             kind=row["object_kind"],
             reference=OpaqueProviderRef(ref=row["object_reference"]),
             ownership_digest=row["ownership_digest"],
+            operation_identity=row["operation_identity"],
+            attempt_id=str(row["attempt_id"]),
+            mutation_journal_sequence=row["mutation_journal_sequence"],
+            mutation_journal_digest=row["mutation_journal_digest"],
         )
         authority = OpaqueProviderRef(ref=row["authority_instance"])
         observation = port.observe_object(expected, authority)
