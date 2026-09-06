@@ -154,7 +154,7 @@ def _read_debugfs(image: Path, deadline: float, monotonic: Callable[[], float]) 
             pipe.close()
     if _absent_debugfs_error(bytes(error)):
         return None
-    if code != 0 or _debugfs_diagnostics(bytes(error)):
+    if code != 0 or _debugfs_diagnostics(bytes(error)) != []:
         raise _conflict("remote module durable filesystem is unreadable")
     return bytes(output)
 
@@ -251,7 +251,14 @@ class SparseRemoteModuleResultReader:
             image = Path(raw_path)
             logical = 0
             with os.fdopen(descriptor, "wb") as handle:
-                stream = self._call(lambda: self.storage.newStream(0), limit)
+
+                def open_stream() -> object:
+                    nonlocal stream
+                    stream = self.storage.newStream(0)
+                    return stream
+
+                self._call(open_stream, limit)
+                assert stream is not None
 
                 def data(_stream: object, chunk: bytes, _opaque: object) -> int:
                     nonlocal logical
@@ -275,8 +282,8 @@ class SparseRemoteModuleResultReader:
                     ),
                     limit,
                 )
-                self._call(lambda: stream.sparseRecvAll(data, hole, None), limit)
-                self._call(stream.finish, limit)
+                self._call(lambda: cast(Any, stream).sparseRecvAll(data, hole, None), limit)
+                self._call(cast(Any, stream).finish, limit)
                 finished = True
                 handle.truncate(capacity)
             return _read_debugfs(image, limit, self.monotonic)

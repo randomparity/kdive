@@ -22,6 +22,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents imp
     RemoteModuleRecoveryRefV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_result_reader import (
@@ -113,6 +114,7 @@ class _Storage:
         self.stream = stream
         self.pool = _Pool(_Volume(stream))
         self.fail_new_stream = False
+        self.after_new_stream: Callable[[], None] | None = None
 
     def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
         assert name == "pool"
@@ -121,6 +123,8 @@ class _Storage:
     def newStream(self, _flags: int = 0) -> _Stream:  # noqa: N802
         if self.fail_new_stream:
             raise OSError("stream unavailable")
+        if self.after_new_stream is not None:
+            self.after_new_stream()
         return self.stream
 
 
@@ -300,6 +304,10 @@ def test_debugfs_rejects_a_malformed_filesystem(tmp_path: Path) -> None:
     assert exc_info.value.category is ErrorCategory.CONFLICT
 
 
+def test_invalid_utf8_debugfs_diagnostics_are_not_success() -> None:
+    assert remote_module_result_reader._debugfs_diagnostics(b"\xff") is None
+
+
 def test_new_stream_failure_closes_mkstemp_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -361,6 +369,27 @@ def test_sparse_reader_aborts_after_deadline_during_finish(tmp_path: Path) -> No
 
     assert exc_info.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert stream.aborted
+
+
+def test_postcompletion_new_stream_timeout_aborts_and_closes_descriptor(tmp_path: Path) -> None:
+    stream = _Stream([])
+    storage = _Storage(stream)
+    clock = Clock()
+
+    storage.after_new_stream = lambda: setattr(clock, "value", 1.0)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(clock),
+        monotonic=clock,
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        reader.read_volume(_scratch(), deadline=1.0)
+
+    assert exc_info.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert stream.aborted
+    assert not list(tmp_path.glob("kdive-module-result-*.ext4"))
 
 
 def test_sparse_reader_refuses_foreign_closed_scratch_identity(tmp_path: Path) -> None:
