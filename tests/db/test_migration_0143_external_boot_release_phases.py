@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, LiteralString, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -63,7 +64,7 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                 vehicle,
                 purpose="release",
                 operation="release",
-                activation_state="recovered",
+                activation_state="active",
                 with_reservation=True,
                 with_release=False,
             )
@@ -199,6 +200,26 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                 )
                 recover_phase = await cur.fetchone()
             assert recover_phase is not None
+            async with await psycopg.AsyncConnection.connect(
+                migrated_url, autocommit=True
+            ) as worker:
+                assert (
+                    await _scalar(
+                        worker,
+                        "SELECT begin_external_boot_derived_release_recovery("
+                        "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s)",
+                        (
+                            case.credential,
+                            case.job_id,
+                            case.attempt,
+                            authority_id,
+                            generation,
+                            uuid5(NAMESPACE_URL, f"{case.marker['operation_identity']}/recover"),
+                            datetime.now(UTC) + timedelta(minutes=5),
+                        ),
+                    )
+                    == "applied"
+                )
             await service.execute_mutation(
                 peer,
                 AuthorityMutationRequestV1.model_validate(
@@ -211,6 +232,34 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                     }
                 ),
             )
+            recovered = {
+                "schema": "external-boot-terminal-evidence-v1",
+                "activation_id": str(vehicle.activation_id),
+                "system_id": str(vehicle.system_id),
+                "outcome": "recovered",
+                "composite_state": acknowledgement.positive_quiescence_digest,
+                "objects": [],
+                "observed_at": "2026-09-06T00:00:00Z",
+            }
+            async with await psycopg.AsyncConnection.connect(
+                migrated_url, autocommit=True
+            ) as worker:
+                recovery_args = (
+                    case.credential,
+                    case.job_id,
+                    case.attempt,
+                    authority_id,
+                    generation,
+                    recover_phase["operation_identity"],
+                    recover_phase["operation_digest"],
+                    json.dumps(recovered),
+                )
+                recovery_sql = (
+                    "SELECT commit_external_boot_derived_release_recovery("
+                    "sha256(convert_to(%s,'UTF8')),%s,%s,%s,%s,%s,%s,%s::jsonb)"
+                )
+                assert await _scalar(worker, recovery_sql, recovery_args) == "applied"
+                assert await _scalar(worker, recovery_sql, recovery_args) == "applied"
             cleanup_request = AuthorityMutationRequestV1.model_validate(
                 common
                 | {
@@ -304,5 +353,15 @@ def test_cleanup_receipt_is_exact_and_final_credit_is_idempotent(
                 )
             ).fetchone()
             assert row == (True, 1)
+            job = await (
+                await admin.execute("SELECT state FROM jobs WHERE id=%s", (case.job_id,))
+            ).fetchone()
+            authority = await (
+                await admin.execute(
+                    "SELECT state FROM external_boot_authorities WHERE id=%s", (authority_id,)
+                )
+            ).fetchone()
+            assert job == ("succeeded",)
+            assert authority == ("retired",)
 
     asyncio.run(run())
