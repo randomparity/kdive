@@ -84,11 +84,21 @@ def _ctx() -> RequestContext:
     )
 
 
-@pytest.mark.parametrize("disposition", ("delete", "adopt"))
+@pytest.mark.parametrize(
+    ("disposition", "tamper"),
+    (
+        ("delete", None),
+        ("adopt", None),
+        ("delete", "ownership"),
+        ("delete", "resource"),
+        ("delete", "deadline"),
+    ),
+)
 def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_provider(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     disposition: str,
+    tamper: str | None,
 ) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -202,6 +212,40 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                     disposition=disposition,
                 )
                 assert first.object_id == second.object_id
+                if tamper == "ownership":
+                    await conn.execute(
+                        "UPDATE external_boot_recovery_quarantine SET ownership_digest = %s "
+                        "WHERE id = %s",
+                        ("sha256:" + "c" * 64, record_id),
+                    )
+                elif tamper == "resource":
+                    replacement_resource = uuid4()
+                    await conn.execute(
+                        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+                        "VALUES (%s, 'local-libvirt', 'replacement', 'standard', 'available', "
+                        "'qemu:///system')",
+                        (replacement_resource,),
+                    )
+                    await conn.execute(
+                        "UPDATE allocations SET resource_id = %s "
+                        "WHERE id = (SELECT allocation_id FROM systems WHERE id = %s)",
+                        (replacement_resource, system_id),
+                    )
+                elif tamper == "deadline":
+                    request_row = await (
+                        await conn.execute(
+                            "SELECT id FROM external_boot_recovery_orphan_requests "
+                            "WHERE job_id = %s",
+                            (UUID(first.object_id),),
+                        )
+                    ).fetchone()
+                    assert request_row is not None
+                    await conn.execute(
+                        "UPDATE external_boot_recovery_orphan_requests "
+                        "SET readiness_deadline = clock_timestamp() - interval '1 second' "
+                        "WHERE id = %s",
+                        (request_row[0],),
+                    )
                 service = ExternalBootAuthorityService(
                     repository=DatabaseAuthorityRepository(
                         lambda: _authority_connection(
@@ -266,6 +310,17 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                     )
                     interrupted = await runner.run_once(DEFAULT_JOB_DISPATCH_LANE)
                     assert interrupted is not None and str(interrupted.id) == first.object_id
+                    if tamper is not None:
+                        assert provider.recovery_object_mutations == []
+                        states = await (
+                            await conn.execute(
+                                "SELECT status FROM external_boot_recovery_quarantine "
+                                "WHERE id = ANY(%s) ORDER BY id",
+                                ([record_id, sibling_record_id],),
+                            )
+                        ).fetchall()
+                        assert states == [("quarantined",), ("quarantined",)]
+                        return
                     assert set(provider.recovery_object_mutations) == {
                         (disposition, str(record_id)),
                         (disposition, str(sibling_record_id)),
