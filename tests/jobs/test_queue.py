@@ -30,6 +30,7 @@ from kdive.jobs.payloads import (
     AuthorizeSshKeyPayload,
     Authorizing,
     InstallPayload,
+    RemoteModuleVolumeReapPayload,
     ReprovisionPayload,
     RestorePayload,
     SnapshotPayload,
@@ -1343,6 +1344,87 @@ def test_recent_jobs_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             assert await queue.recent_jobs(conn, limit=10, projects=["proj"]) == []
+
+    asyncio.run(_run())
+
+
+def test_internal_reap_job_deduplicates_and_recycles_terminal_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        payload = RemoteModuleVolumeReapPayload(schema="remote-module-volume-reap-v1")
+        authorizing = Authorizing(principal="remote-libvirt", project="remote-libvirt")
+        async with await _connect(migrated_url) as conn:
+            first, inserted = await queue.enqueue_with_status(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                payload,
+                authorizing,
+                "reap:v1",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+            duplicate, admitted = await queue.enqueue_with_status(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                payload,
+                authorizing,
+                "reap:v1",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+            assert inserted and not admitted and duplicate.id == first.id
+            await conn.execute(
+                "UPDATE jobs SET state = 'succeeded', attempt = 2 WHERE id = %s", (first.id,)
+            )
+            recycled, admitted = await queue.enqueue_with_status(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                payload,
+                authorizing,
+                "reap:v1",
+                recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            )
+        assert admitted and recycled.id == first.id
+        assert recycled.state is JobState.QUEUED and recycled.attempt == 0
+
+    asyncio.run(_run())
+
+
+def test_internal_reap_job_is_reclaimed_after_worker_restart(migrated_url: str) -> None:
+    async def _run() -> None:
+        payload = RemoteModuleVolumeReapPayload(schema="remote-module-volume-reap-v1")
+        authorizing = Authorizing(principal="remote-libvirt", project="remote-libvirt")
+        async with await _connect(migrated_url) as conn:
+            cur = await conn.execute(
+                "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, worker_id, "
+                "lease_expires_at, authorizing, dedup_key) VALUES (%s, %s, 'running', 1, 3, "
+                "'dead', clock_timestamp() - interval '1 second', %s, 'reap:v1') RETURNING *",
+                (
+                    JobKind.REMOTE_MODULE_VOLUME_REAP.value,
+                    Jsonb(payload.model_dump(mode="json", by_alias=True)),
+                    Jsonb(authorizing.model_dump(mode="json")),
+                ),
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            job_id = row[0]
+            await _register_worker(conn, "replacement")
+            claimed = await _dequeue(conn, "replacement")
+        assert claimed is not None and claimed.id == job_id
+        assert claimed.attempt == 2 and claimed.worker_id == "replacement"
+
+    asyncio.run(_run())
+
+
+def test_platform_recent_jobs_keeps_internal_reap_rows(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn,
+                JobKind.REMOTE_MODULE_VOLUME_REAP,
+                RemoteModuleVolumeReapPayload(schema="remote-module-volume-reap-v1"),
+                Authorizing(principal="remote-libvirt", project="remote-libvirt"),
+                "reap:v1",
+            )
+            rows = await queue.all_recent_jobs(conn, 10)
+        assert job.id in {row.id for row in rows}
 
     asyncio.run(_run())
 

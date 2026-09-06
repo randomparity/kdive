@@ -12,7 +12,7 @@ reaper can never silently sweep just one host.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from typing import NoReturn, Protocol
 
@@ -66,16 +66,19 @@ def map_over_fleet[C, T](
     work: Callable[[C, RemoteLibvirtConfig], T],
     *,
     operation: str,
+    configs: Sequence[RemoteLibvirtConfig] | None = None,
 ) -> list[T]:
     """Run ``work`` on every declared host, isolating an unreachable host (ADR-0187, #395).
 
     A host whose connection fails to open (unreachable / TLS error) is logged and skipped, so one
     down host never aborts the fleet-wide reaper sweep — the healthy hosts are still swept. A
     failure raised by ``work`` on a reachable host propagates (a genuine error must surface).
-    Results are returned in declaration order.
+    Results are returned in declaration order.  A caller that needs to make a decision from the
+    declared fleet after iterating can pass a snapshot in ``configs``; this avoids re-reading
+    mutable operator configuration midway through one sweep.
     """
     results: list[T] = []
-    for config in connections.configs():
+    for config in configs if configs is not None else connections.configs():
         opened = _enter_host(connections, config, operation=operation)
         if opened is None:
             continue
