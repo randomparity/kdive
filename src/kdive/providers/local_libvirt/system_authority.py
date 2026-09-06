@@ -308,7 +308,7 @@ class LocalAuthoritySystemProvider:
             if Path(intent.baseline).is_dir():
                 self._store_intent(self._intent_with_xml(intent, snapshot, None))
         self._require_matching_intent(intent, request, snapshot)
-        if intent.deadline <= self._now():
+        if intent.deadline <= self._utc_now():
             raise LocalAuthoritySystemError("local authority provision deadline expired")
         self._provisioner.provision(
             request.system_id,
@@ -354,8 +354,12 @@ class LocalAuthoritySystemProvider:
     ) -> AuthoritySystemAbsenceFacts:
         intent = self._load_intent(request.system_id)
         if intent is None:
+            inspection = self._inspect_without_intent(request.system_id)
             return self._absence_facts(
-                request, domain_absent=True, storage_absent=True, intent_absent=True
+                request,
+                domain_absent=inspection.domain_absent,
+                storage_absent=inspection.overlay_absent and inspection.baseline_absent,
+                intent_absent=True,
             )
         self._require_teardown_intent(intent, request)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
@@ -383,8 +387,12 @@ class LocalAuthoritySystemProvider:
     ) -> AuthoritySystemAbsenceFacts:
         intent = self._load_intent(request.system_id)
         if intent is None:
+            inspection = self._inspect_without_intent(request.system_id)
             return self._absence_facts(
-                request, domain_absent=True, storage_absent=True, intent_absent=True
+                request,
+                domain_absent=inspection.domain_absent,
+                storage_absent=inspection.overlay_absent and inspection.baseline_absent,
+                intent_absent=True,
             )
         self._require_teardown_intent(intent, request)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
@@ -403,6 +411,17 @@ class LocalAuthoritySystemProvider:
             retained=not absent,
         )
 
+    def _inspect_without_intent(self, system_id: UUID) -> Any:
+        session = self._open_teardown(
+            system_id,
+            str(self._topology.overlay_for(system_id)),
+            str(self._topology.baseline_for(system_id)),
+        )
+        try:
+            return session.inspect()
+        finally:
+            session.close()
+
     def _candidate_intent(
         self, request: AuthoritySystemMutationRequestV1, snapshot: AuthoritySystemProvisionSnapshot
     ) -> _Intent:
@@ -418,7 +437,7 @@ class LocalAuthoritySystemProvider:
             root_identity=snapshot.root_identity,
             bootstrap_identity=snapshot.bootstrap_identity,
             operation_digest=request.operation_digest,
-            deadline=self._now() + self._deadline,
+            deadline=self._utc_now() + self._deadline,
             domain_name=f"kdive-{request.system_id}",
             overlay=str(self._topology.overlay_for(request.system_id)),
             baseline=str(self._topology.baseline_for(request.system_id)),
@@ -479,7 +498,7 @@ class LocalAuthoritySystemProvider:
             boot_ready=ready if domain_owned else False,
             bootstrap_ready=complete,
             quarantine_retained=not complete,
-            completed_at=self._now() if complete else None,
+            completed_at=self._utc_now() if complete else None,
         )
 
     @staticmethod
@@ -552,13 +571,19 @@ class LocalAuthoritySystemProvider:
                     raise LocalAuthoritySystemError("local authority intent was replaced") from None
                 return
             try:
-                os.write(descriptor, payload)
+                _write_all(descriptor, payload)
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
             os.fsync(root)
         finally:
             os.close(root)
+
+    def _utc_now(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise LocalAuthoritySystemError("authority clock must return an aware UTC time")
+        return value
 
     def _remove_intent(self, intent: _Intent) -> None:
         root = self._open_private_root(create=False)
@@ -644,8 +669,12 @@ def _validated_provision_inputs(
     AuthoritySystemProvisionSnapshot,
 ]:
     try:
-        checked_request = AuthoritySystemMutationRequestV1.model_validate(request.model_dump())
-        checked_context = AuthoritySystemCommitContextV1.model_validate(context.model_dump())
+        checked_request = AuthoritySystemMutationRequestV1.model_validate(
+            request.model_dump(by_alias=True)
+        )
+        checked_context = AuthoritySystemCommitContextV1.model_validate(
+            context.model_dump(by_alias=True)
+        )
         checked_snapshot = AuthoritySystemProvisionSnapshot(
             system_id=snapshot.system_id,
             allocation_id=snapshot.allocation_id,
@@ -686,8 +715,12 @@ def _validated_teardown_inputs(
     request: AuthoritySystemMutationRequestV1, context: AuthoritySystemCommitContextV1
 ) -> tuple[AuthoritySystemMutationRequestV1, AuthoritySystemCommitContextV1]:
     try:
-        checked_request = AuthoritySystemMutationRequestV1.model_validate(request.model_dump())
-        checked_context = AuthoritySystemCommitContextV1.model_validate(context.model_dump())
+        checked_request = AuthoritySystemMutationRequestV1.model_validate(
+            request.model_dump(by_alias=True)
+        )
+        checked_context = AuthoritySystemCommitContextV1.model_validate(
+            context.model_dump(by_alias=True)
+        )
     except (AttributeError, ValueError) as error:
         raise LocalAuthoritySystemError("authority teardown values are invalid") from error
     if (
@@ -719,6 +752,15 @@ def _read_bounded(descriptor: int) -> bytes:
     if len(payload) > _MAX_INTENT_BYTES:
         raise LocalAuthoritySystemError("local authority intent exceeds its byte bound")
     return payload
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise LocalAuthoritySystemError("failed to write the full local authority intent")
+        view = view[written:]
 
 
 def _require_private_file(info: os.stat_result, uid: int, gid: int) -> None:

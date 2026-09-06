@@ -17,6 +17,11 @@ from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemTopology,
     _Intent,
 )
+from kdive.providers.system_authority import (
+    AuthoritySystemCommitContextV1,
+    AuthoritySystemMutationRequestV1,
+    AuthoritySystemOperation,
+)
 
 _DIGEST = "sha256:" + "a" * 64
 
@@ -123,3 +128,76 @@ async def _cancel_and_drain(tmp_path: Path) -> None:
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    class Inspection:
+        domain_absent = True
+        overlay_absent = True
+        baseline_absent = True
+
+    class Teardown:
+        def inspect(self) -> Inspection:
+            calls.append("inspect")
+            return Inspection()
+
+        def destroy(self) -> None:
+            calls.append("destroy")
+
+        def undefine(self) -> None:
+            calls.append("undefine")
+
+        def remove_overlay(self) -> None:
+            calls.append("overlay")
+
+        def remove_baseline(self) -> None:
+            calls.append("baseline")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    base = tmp_path / "base.qcow2"
+    base.touch()
+    provider = LocalAuthoritySystemProvider(
+        provisioner=_Provisioner(),
+        topology=LocalAuthoritySystemTopology(
+            intent_root=tmp_path / "intents",
+            overlay_root=tmp_path / "overlays",
+            baseline_root=tmp_path / "baseline",
+            staged_bases={_DIGEST: base},
+        ),
+        readiness_probe=lambda _system_id: False,
+        open_teardown=lambda *_args: Teardown(),
+        allocate_port=lambda: 2200,
+    )
+    request = AuthoritySystemMutationRequestV1(
+        system_id=uuid4(),
+        allocation_id=uuid4(),
+        resource_id=uuid4(),
+        provider_kind="local-libvirt",
+        resource_name="local-a",
+        authority_instance="authority-a",
+        profile_identity=_DIGEST,
+        root_identity=_DIGEST,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        operation_identity="teardown-a",
+        authority_id=uuid4(),
+        generation=1,
+        attempt_id=uuid4(),
+        operation_digest=_DIGEST,
+        bootstrap_identity=_DIGEST,
+    )
+    context = AuthoritySystemCommitContextV1(
+        attempt_id=request.attempt_id,
+        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+        journal_sequence=1,
+        journal_digest=_DIGEST,
+    )
+
+    facts = asyncio.run(provider.execute_preactivation_teardown(request, context))
+
+    assert facts.complete
+    assert calls == ["inspect", "close"]
+    assert not (tmp_path / "intents").exists()
