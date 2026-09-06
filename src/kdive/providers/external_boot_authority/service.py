@@ -478,10 +478,11 @@ class ExternalBootAuthorityService:
                 acknowledgement.sequence,
                 record_digest(acknowledgement),
             )
-        if request.purpose == "release" and request.operation in {
-            AuthorityOperation.RECOVER,
-            AuthorityOperation.CLEANUP,
-        }:
+        if (
+            acknowledgement.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+        ):
             if not isinstance(self._repository, AuthorityReleasePhaseRepository):
                 return None
             return await self._repository.resolve_current_release_phase(
@@ -1135,7 +1136,8 @@ class ExternalBootAuthorityService:
             self._root_candidate_matches_preparation(trusted, request)
             if isinstance(request, AuthorityPreparationMutationRequestV1)
             else self._root_candidate_matches_release_phase(trusted, request)
-            if request.purpose == "release"
+            if trusted.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
             and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
             else self._binding_matches(trusted, request)
         )

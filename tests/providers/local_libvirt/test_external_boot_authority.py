@@ -1314,10 +1314,10 @@ def _cleanup_takeover() -> AuthorityTakeoverRequestV1:
         run_id=RUN_ID,
         plan_identity=PLAN_IDENTITY,
         purpose="release",
-        operation=AuthorityOperation.RELEASE,
+        operation=AuthorityOperation.CLEANUP,
         provider_kind="local-libvirt",
         authority_instance="local-authority",
-        operation_identity="takeover-release",
+        operation_identity="cleanup-1",
         operation_digest="sha256:" + "9" * 64,
     )
 
