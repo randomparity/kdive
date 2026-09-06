@@ -101,6 +101,7 @@ class RootfsBuildProvenance:
         boot_kernel_count: int | None,
         default_kernel_version: str | None,
         os_release: dict[str, str] | None,
+        root_spec: RootSpecV1,
     ) -> RootfsBuildProvenance:
         """Build local-libvirt provenance from verified provider build operands."""
         return cls(
@@ -121,6 +122,7 @@ class RootfsBuildProvenance:
             boot_kernel_count=boot_kernel_count,
             default_kernel_version=default_kernel_version,
             os_release=os_release,
+            root_spec=root_spec,
         )
 
     @classmethod

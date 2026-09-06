@@ -35,6 +35,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -84,12 +85,14 @@ from kdive.images.planes.provenance_probes import (
     DEFAULT_KERNEL_CONFIG_PROBE,
     DEFAULT_MAKEDUMPFILE_PROBE,
     DEFAULT_OS_RELEASE_PROBE,
+    DEFAULT_ROOT_BOOT_INSPECT,
     DEFAULT_VERSION_INSPECT,
     BootEntriesProbeSeam,
     DrgnProbeSeam,
     KernelConfigProbeSeam,
     MakedumpfileProbeSeam,
     OsReleaseProbeSeam,
+    RootBootProbeSeam,
     VersionInspectSeam,
 )
 from kdive.images.rootfs.base_source import Downloader, _real_download, acquire_base
@@ -118,6 +121,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_customization_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.ports.external_boot import Architecture
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 from kdive.providers.shared.libvirt_xml import parse_guest_arches
 
@@ -501,6 +505,7 @@ class RootfsProvenanceInspection:
     probe_boot_entries: BootEntriesProbeSeam = DEFAULT_BOOT_ENTRIES_PROBE
     probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
     probe_kernel_config: KernelConfigProbeSeam = DEFAULT_KERNEL_CONFIG_PROBE
+    inspect_root_boot: RootBootProbeSeam = DEFAULT_ROOT_BOOT_INSPECT
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
@@ -575,6 +580,9 @@ class LocalLibvirtRootfsBuildPlane:
             os_release = self._capture_os_release(probe_src)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
+        root_spec = self._provenance.inspect_root_boot(
+            qcow2, cast("Architecture", spec.arch), digest
+        )
         return RootfsBuildOutput(
             qcow2_path=qcow2,
             digest=digest,
@@ -592,6 +600,7 @@ class LocalLibvirtRootfsBuildPlane:
                 boot_kernel_count=boot_facts.boot_kernel_count,
                 default_kernel_version=boot_facts.default_kernel_version,
                 os_release=os_release,
+                root_spec=root_spec,
             ).to_dict(),
         )
 
