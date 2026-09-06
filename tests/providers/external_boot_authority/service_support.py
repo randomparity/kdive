@@ -18,6 +18,7 @@ from kdive.db.external_boot_authority_journal import (
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityAcknowledgementV1,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -160,6 +161,21 @@ class _Repository:
         if request == self.request and self.current:
             return None
         return _binding(peer, request, "allocating")
+
+    async def acknowledge(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityTakeoverRequestV1,
+        acknowledgement: AuthorityAcknowledgementV1,
+    ) -> AuthorityAcknowledgementV1 | None:
+        if (
+            peer != self.peer
+            or request != self.allocating_request
+            or binding.authority_id != request.authority_id
+        ):
+            return None
+        return acknowledgement
 
     async def resolve_current(
         self,
