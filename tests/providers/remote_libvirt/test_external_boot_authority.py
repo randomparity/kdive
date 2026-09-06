@@ -550,6 +550,45 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
 
 
 @pytest.mark.anyio
+async def test_durable_remote_preparation_cancellation_waits_and_records_terminal(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    expected = RemoteModuleVolumePreparationResponseV1.from_prepared(_prepared_volumes(request))
+
+    class BlockingHost:
+        async def execute(self, request: object) -> object:
+            del request
+            started.set()
+            await release.wait()
+            return expected
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    task = asyncio.create_task(
+        DurableRemoteModuleVolumePreparationHost(store, cast(Any, BlockingHost())).execute(request)
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    store.close()
+
+    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    assert (
+        await DurableRemoteModuleVolumePreparationHost(
+            restarted, cast(Any, BlockingHost())
+        ).execute(request)
+        == expected
+    )
+    restarted.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     tmp_path: Path,
 ) -> None:
