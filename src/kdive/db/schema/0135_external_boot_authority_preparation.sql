@@ -377,6 +377,16 @@ BEGIN
         E'                AND p_record->>''operation'' = ''activate'')\n' ||
         E'        )\n' ||
         E'    ) OR NOT (\n' ||
+        E'        (v_phase = ''admitted'' AND (\n' ||
+        E'            (v_head.phase = ''takeover-acknowledged''\n' ||
+        E'             AND p_record->>''operation'' = ''materialize'')\n' ||
+        E'            OR (v_head.phase = ''terminal''\n' ||
+        E'                AND v_head.head_record->>''operation'' = ''materialize''\n' ||
+        E'                AND p_record->>''operation'' = ''prepare'')\n' ||
+        E'            OR (v_head.phase = ''terminal''\n' ||
+        E'                AND v_head.head_record->>''operation'' = ''prepare''\n' ||
+        E'                AND p_record->>''operation'' = ''activate'')\n' ||
+        E'        )) OR\n' ||
         E'        (v_head.phase = ''takeover-acknowledged'' AND v_phase = ''admitted'')'
     );
     EXECUTE v_definition;
