@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,6 +30,8 @@ from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
     OpaqueProviderRef,
     ProviderStateIdentity,
     RecoveryPoint,
@@ -55,6 +57,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
 
 _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
+_OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
 
 
 def _canonical_model_bytes(value: BaseModel) -> bytes:
@@ -535,12 +538,69 @@ class RemoteModuleVolumePreparationStore:
             raise ValueError("remote module terminal preparation binding differs")
         return record
 
+    @staticmethod
+    def _preparation_key(request: ExternalBootPreparationRequest) -> str:
+        return hashlib.sha256(
+            b"kdive-remote-external-boot-preparation-v1\0" + request.to_canonical_json()
+        ).hexdigest()
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        data = self._read(f"{self._preparation_key(request)}.preparation")
+        if data is not None:
+            receipt = ExternalBootPreparationObservation.from_canonical_json(data)
+            if (
+                receipt.binding != request.binding
+                or receipt.plan_identity != request.plan.identity
+                or receipt.authority != request.authority
+                or receipt.operation_identity != request.operation_identity
+            ):
+                raise ValueError("remote preparation receipt differs from request")
+            return receipt
+        return ExternalBootPreparationObservation(
+            state="absent",
+            binding=request.binding,
+            plan_identity=request.plan.identity,
+            authority=request.authority,
+            operation_identity=request.operation_identity,
+        )
+
+    def publish_preparation(
+        self, request: ExternalBootPreparationRequest, receipt: ExternalBootPreparationObservation
+    ) -> ExternalBootPreparationObservation:
+        if self.observe_preparation(request).state != "absent":
+            existing = self.observe_preparation(request)
+            if existing != receipt:
+                raise ValueError("remote preparation receipt conflicts with durable bytes")
+            return existing
+        self._publish(f"{self._preparation_key(request)}.preparation", receipt.to_canonical_json())
+        return self.observe_preparation(request)
+
     def publish_materialization(
         self, plan: ExternalBootPlan, materialization: ExternalBootMaterialization
     ) -> None:
         record = RemoteExternalBootMaterializationRecord(plan=plan, materialization=materialization)
         identity = materialization.identity.removeprefix("sha256:")
         self._publish(f"{identity}.materialization", record.to_canonical_json())
+        self._publish(
+            f"{plan.identity.removeprefix('sha256:')}.materialization-index",
+            identity.encode("ascii"),
+        )
+
+    def reopen_materialization_for_plan(
+        self, plan: ExternalBootPlan
+    ) -> RemoteExternalBootMaterializationRecord:
+        index = self._read(f"{plan.identity.removeprefix('sha256:')}.materialization-index")
+        if index is None:
+            raise FileNotFoundError("remote materialization plan index is absent")
+        data = self._read(f"{index.decode('ascii')}.materialization")
+        if data is None:
+            raise ValueError("remote materialization plan index is incomplete")
+        record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
+        if record.plan != plan:
+            raise ValueError("remote materialization plan index differs")
+        return record
 
     def reopen_materialization(
         self, materialization: ExternalBootMaterialization
@@ -842,7 +902,11 @@ class RemoteExternalBootOperations(Protocol):
     """The six closed operations available to the remote coordinator."""
 
     def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef, deadline: float
+        self,
+        plan: ExternalBootPlan,
+        binding: ExternalBootActivationBinding,
+        authority: OpaqueProviderRef,
+        deadline: float,
     ) -> ExternalBootMaterialization: ...
 
     def prepare(
@@ -898,9 +962,18 @@ class RemoteExternalBootCoordinator:
         self._deadline = deadline
 
     def materialize(
-        self, plan: ExternalBootPlan, authority: OpaqueProviderRef
+        self,
+        plan: ExternalBootPlan,
+        authority: OpaqueProviderRef,
+        binding: ExternalBootActivationBinding | None = None,
     ) -> ExternalBootMaterialization:
-        materialization = self._operations.materialize(plan, authority, self._deadline())
+        if binding is None:
+            binding = ExternalBootActivationBinding(
+                system_id=plan.ownership.system_id,
+                run_id=plan.ownership.run_id,
+                activation_id=str(UUID(int=0)),
+            )
+        materialization = self._operations.materialize(plan, binding, authority, self._deadline())
         if (
             materialization.plan_identity != plan.identity
             or materialization.ownership.system_id != plan.ownership.system_id
@@ -909,6 +982,36 @@ class RemoteExternalBootCoordinator:
             raise ValueError("remote materialization differs from the requested plan")
         self._store.publish_materialization(plan, materialization)
         return materialization
+
+    def execute_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        observed = self._store.observe_preparation(request)
+        if observed.state != "absent":
+            return observed
+        if request.phase == "materialize":
+            materialization = self.materialize(request.plan, request.authority, request.binding)
+            receipt = observed.model_copy(
+                update={"state": "materialized", "materialization": materialization}
+            )
+        else:
+            record = self._store.reopen_materialization_for_plan(request.plan)
+            recovery = self.prepare(record.materialization, request.binding, request.authority)
+            receipt = ExternalBootPreparationObservation(
+                state="prepared",
+                binding=request.binding,
+                plan_identity=request.plan.identity,
+                authority=request.authority,
+                operation_identity=request.operation_identity,
+                materialization=record.materialization,
+                recovery_point=recovery,
+            )
+        return self._store.publish_preparation(request, receipt)
+
+    def observe_preparation(
+        self, request: ExternalBootPreparationRequest
+    ) -> ExternalBootPreparationObservation:
+        return self._store.observe_preparation(request)
 
     def prepare(
         self,
@@ -971,13 +1074,72 @@ class RemoteExternalBootAuthorityAdapter:
         self._coordinator = coordinator
         self._executor = executor
 
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+    @staticmethod
+    def _preparation_request(
+        request: AuthorityPreparationMutationRequestV1,
+    ) -> ExternalBootPreparationRequest:
+        if request.operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
+            raise ValueError("remote preparation request has a non-preparation operation")
+        phase: Literal["materialize", "prepare"] = (
+            "materialize" if request.operation is AuthorityOperation.MATERIALIZE else "prepare"
+        )
+        return ExternalBootPreparationRequest(
+            phase=phase,
+            plan=request.plan,
+            binding=ExternalBootActivationBinding(
+                system_id=str(request.system_id),
+                run_id=str(request.run_id),
+                activation_id=str(request.activation_id),
+            ),
+            authority=OpaqueProviderRef(
+                ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+            ),
+            operation_identity=request.operation_identity,
+        )
+
+    @staticmethod
+    def _preparation_observation(
+        receipt: ExternalBootPreparationObservation,
+    ) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid5(_OBSERVATION_NAMESPACE, receipt.identity),
+            category="target",
+            composite_state=receipt.identity,
+        )
+
+    async def observe(
+        self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
+    ) -> AuthorityObservationV1:
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            receipt = await self._executor.run(
+                lambda: self._coordinator.observe_preparation(self._preparation_request(request))
+            )
+            return self._preparation_observation(receipt)
         return await self._delegate.observe(request)
 
     async def commit(
-        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1:
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            if (
+                context.operation_identity != request.operation_identity
+                or context.attempt_id != request.attempt_id
+            ):
+                raise ValueError("preparation commit context differs from request")
+            receipt = await self._executor.run(
+                lambda: self._coordinator.execute_preparation(self._preparation_request(request))
+            )
+            return self._preparation_observation(receipt)
         return await self._delegate.commit(request, context)
+
+    async def preparation_receipt(
+        self, request: AuthorityPreparationMutationRequestV1
+    ) -> ExternalBootPreparationObservation:
+        return await self._executor.run(
+            lambda: self._coordinator.observe_preparation(self._preparation_request(request))
+        )
 
     async def observe_running(
         self, request: AuthorityMutationRequestV1

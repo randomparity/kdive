@@ -19,6 +19,7 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -259,6 +260,76 @@ def test_concrete_remote_prepare_captures_source_before_deriving_durable_recover
     assert recovery.module_recovery == modules.response.recovery
     assert recovery.materialization.artifacts.kernel in recovery.recovery_objects
     assert recovery.module_recovery.source_volume in recovery.recovery_objects
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_mutation(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    plan = _plan_for_record(record)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    terminal = store.reopen_terminal(record.binding, plan.identity)
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(
+            self, plan: object, binding: object, owner: object, deadline: float
+        ) -> object:
+            del plan, binding, owner, deadline
+            calls.append("materialize")
+            return record.materialization.model_copy(
+                update={"plan_identity": terminal.request.authority.plan_identity}
+            )
+
+        def prepare(self, *args: object) -> RemoteExternalBootRecoveryRecord:
+            calls.append("prepare")
+            return record.model_copy(
+                update={
+                    "plan_identity": terminal.request.authority.plan_identity,
+                    "materialization": record.materialization.model_copy(
+                        update={"plan_identity": terminal.request.authority.plan_identity}
+                    ),
+                }
+            )
+
+    class Delegate:
+        async def observe(self, request: object) -> object:
+            raise AssertionError(request)
+
+        async def commit(self, request: object, context: object) -> object:
+            raise AssertionError((request, context))
+
+    coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(cast(Any, Delegate()), coordinator, executor)
+    prepare_request = terminal.request.authority
+    materialize_request = prepare_request.model_copy(
+        update={
+            "operation": AuthorityOperation.MATERIALIZE,
+            "operation_identity": "materialize-path",
+            "attempt_id": uuid4(),
+        }
+    )
+
+    def context(request: AuthorityPreparationMutationRequestV1) -> AuthorityCommitContextV1:
+        return AuthorityCommitContextV1(
+            commit_point=request.operation,
+            operation_identity=request.operation_identity,
+            attempt_id=request.attempt_id,
+            journal_sequence=1,
+            journal_digest="sha256:" + "a" * 64,
+        )
+
+    first_m = await adapter.commit(materialize_request, context(materialize_request))
+    assert await adapter.commit(materialize_request, context(materialize_request)) == first_m
+    first_p = await adapter.commit(prepare_request, context(prepare_request))
+    assert await adapter.commit(prepare_request, context(prepare_request)) == first_p
+    assert calls == ["materialize", "prepare"]
+    assert await adapter.preparation_receipt(prepare_request) is not None
+    executor.shutdown()
     store.close()
 
 
@@ -822,8 +893,11 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     calls: list[tuple[str, float]] = []
 
     class Operations:
-        def materialize(self, plan: object, owner: object, deadline: float) -> object:
+        def materialize(
+            self, plan: object, binding: object, owner: object, deadline: float
+        ) -> object:
             assert owner == authority
+            assert binding is not None
             calls.append(("materialize", deadline))
             return record.materialization
 
