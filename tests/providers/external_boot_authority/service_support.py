@@ -146,11 +146,7 @@ class _Repository:
             or request.authority_instance != self.request.authority_instance
         ):
             return None
-        binding = _binding(
-            peer,
-            self.request if isinstance(request, AuthorityPreparationMutationRequestV1) else request,
-            "current",
-        )
+        binding = _binding(peer, self.request, "current")
         return (
             replace(binding, operation=self.operation_override)
             if self.operation_override
@@ -219,6 +215,17 @@ class _Repository:
         ):
             return None
         return _binding(peer, request, "current")
+
+    async def resolve_current_release_phase(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> AuthorityBinding | None:
+        return await self.resolve_current(
+            peer, request, acknowledgement_sequence, acknowledgement_digest
+        )
 
     async def resolve_current_preparation(
         self,

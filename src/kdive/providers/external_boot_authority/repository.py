@@ -244,6 +244,15 @@ class DatabaseAuthorityRepository:
         objects = []
         for observation in observations:
             object_binding = observation.binding
+            if (
+                not observation.present
+                or observation.managed
+                or object_binding.binding.system_id != str(binding.system_id)
+                or object_binding.binding.activation_id != str(binding.activation_id)
+                or object_binding.binding.run_id != str(binding.run_id)
+                or object_binding.operation_identity != binding.operation_identity
+            ):
+                raise ValueError("cleanup quarantine receipt does not match current authority")
             identity = (
                 "sha256:"
                 + hashlib.sha256(
