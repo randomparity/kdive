@@ -503,6 +503,14 @@ async def check_database_role(connection: Any) -> None:
                     'bigint,text,text)'::regprocedure,
                 'public.resolve_current_external_boot_release_phase_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.resolve_external_boot_recovery_orphan_authority(text,uuid,uuid,integer)'
+                    ::regprocedure,
+                'public.commit_external_boot_recovery_orphan_disposition(text,uuid,uuid,integer,'
+                    'uuid,text,text)'::regprocedure,
+                'public.verify_external_boot_recovery_orphan_inventory_authority(text,uuid,uuid,'
+                    'integer)'::regprocedure,
+                'public.publish_external_boot_recovery_quarantine_authority(text,uuid,bigint,'
+                    'text,bigint,text,jsonb)'::regprocedure,
                 'public.read_external_boot_authority_journal_head(text,uuid,bigint,text)'
                     ::regprocedure,
                 'public.advance_external_boot_authority_journal_head(text,uuid,bigint,bigint,'

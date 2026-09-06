@@ -201,6 +201,9 @@ def test_migration_creates_four_ledgers_and_run_system_key(migrated_url: str) ->
             "external_boot_reservations",
             "external_boot_reservation_releases",
             "external_boot_recovery_attempts",
+            "external_boot_recovery_quarantine",
+            "external_boot_recovery_orphan_requests",
+            "external_boot_release_cleanup_receipts",
         }
         indexes = {
             row[0]
