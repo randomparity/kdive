@@ -217,12 +217,13 @@ class _Repository:
 
 
 class _Provider:
-    def __init__(self) -> None:
+    def __init__(self, *, completed_at: datetime | None = None) -> None:
         self.execute_calls = 0
         self.observe_calls = 0
         self.entered: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
         self.fail_execute = False
+        self.completed_at = completed_at or datetime(2026, 9, 6, tzinfo=UTC)
 
     def _facts(self) -> AuthoritySystemProvisionFacts:
         return AuthoritySystemProvisionFacts(
@@ -232,7 +233,7 @@ class _Provider:
             boot_ready=True,
             bootstrap_ready=True,
             quarantine_retained=False,
-            completed_at=datetime(2026, 9, 6, tzinfo=UTC),
+            completed_at=self.completed_at,
         )
 
     async def execute_system_provision(self, request, context, snapshot):
@@ -371,6 +372,72 @@ def test_one_file_ahead_record_is_replayed_after_restart(tmp_path: Path) -> None
         assert response.proof.disposition == "provision-ready"
         assert recovery_provider.execute_calls == 0
         assert recovery_provider.observe_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_terminal_file_ahead_replays_only_exact_stable_provider_facts(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        request = _request(snapshot)
+        first = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=_Provider(),
+        )
+        acknowledgement = await _begin(first, repository, request)
+        repository.fail_phase_once = AuthoritySystemJournalPhase.TERMINAL
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await first.execute("worker-a", _mutation(request), acknowledgement)
+        await first.close()
+
+        stable_provider = _Provider()
+        recovered = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=stable_provider,
+        )
+        response = await recovered.execute("worker-a", _mutation(request), acknowledgement)
+        await recovered.close()
+        assert response.proof.disposition == "provision-ready"
+        assert stable_provider.execute_calls == 0
+        assert stable_provider.observe_calls == 1
+        assert repository.receipt is not None
+
+    asyncio.run(scenario())
+
+
+def test_terminal_file_ahead_rejects_changed_recovery_observation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        request = _request(snapshot)
+        first = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=_Provider(completed_at=datetime(2026, 9, 6, tzinfo=UTC)),
+        )
+        acknowledgement = await _begin(first, repository, request)
+        repository.fail_phase_once = AuthoritySystemJournalPhase.TERMINAL
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await first.execute("worker-a", _mutation(request), acknowledgement)
+        await first.close()
+
+        changed_provider = _Provider(completed_at=datetime(2026, 9, 7, tzinfo=UTC))
+        recovered = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=changed_provider,
+        )
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await recovered.execute("worker-a", _mutation(request), acknowledgement)
+        await recovered.close()
+        assert changed_provider.execute_calls == 0
+        assert changed_provider.observe_calls == 1
+        assert repository.receipt is None
 
     asyncio.run(scenario())
 

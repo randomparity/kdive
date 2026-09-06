@@ -110,6 +110,66 @@ def test_noncanonical_or_partial_record_is_rejected_without_append(tmp_path: Pat
     assert path.read_bytes() == b'{"schema": "authority-system-journal-v1"}'
 
 
+def test_hard_linked_journal_is_rejected_before_read_or_append(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id = uuid4()
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    path.touch(mode=0o600)
+    os.link(path, root / "system-operations" / "alias")
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        with pytest.raises(PermissionError, match="exactly one link"):
+            journal.read()
+        with pytest.raises(PermissionError, match="exactly one link"):
+            journal.append(
+                _record(
+                    system_id,
+                    sequence=1,
+                    previous_digest=GENESIS_DIGEST,
+                    phase=AuthoritySystemJournalPhase.ADMITTED,
+                )
+            )
+
+
+def test_append_rejects_path_replacement_after_validation_without_writing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    system_id = uuid4()
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    first = _record(
+        system_id,
+        sequence=1,
+        previous_digest=GENESIS_DIGEST,
+        phase=AuthoritySystemJournalPhase.ADMITTED,
+    )
+    journal = FileAuthoritySystemJournal(root, system_id)
+    journal.append(first)
+    original = path.read_bytes()
+    replacement = root / "system-operations" / "replacement"
+    replacement.write_bytes(original)
+    replacement.chmod(0o600)
+    displaced = root / "system-operations" / "displaced"
+    real_open = journal._open_append
+
+    def replace_then_open() -> tuple[int, bool]:
+        path.rename(displaced)
+        replacement.rename(path)
+        return real_open()
+
+    monkeypatch.setattr(journal, "_open_append", replace_then_open)
+    second = _record(
+        system_id,
+        sequence=2,
+        previous_digest=authority_system_record_digest(first),
+        phase=AuthoritySystemJournalPhase.MUTATION_STARTED,
+    )
+    with pytest.raises(ValueError, match="changed since validation"):
+        journal.append(second)
+    journal.close()
+    assert path.read_bytes() == original
+    assert displaced.read_bytes() == original
+
+
 def test_inventory_rejects_aggregate_4097_before_opening_any_journal(tmp_path: Path) -> None:
     root = _root(tmp_path)
     directory = root / "system-operations"

@@ -129,32 +129,69 @@ class FileAuthoritySystemJournal:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _open(self, *, create: bool = False) -> int | None:
-        flags = os.O_RDONLY | _OPEN
-        if create:
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _OPEN
-        try:
-            descriptor = os.open(self._name, flags, 0o600, dir_fd=self._journal_fd)
-        except FileNotFoundError:
-            return None
+    def _validate_descriptor(self, descriptor: int) -> os.stat_result:
         status = os.fstat(descriptor)
         if not stat.S_ISREG(status.st_mode):
-            os.close(descriptor)
             raise OSError("authority System journal must be a regular file")
+        if status.st_nlink != 1:
+            raise PermissionError("authority System journal must have exactly one link")
         if status.st_uid != self._owner_uid:
-            os.close(descriptor)
             raise PermissionError("authority System journal has foreign ownership")
         if stat.S_IMODE(status.st_mode) != 0o600:
-            os.close(descriptor)
             raise PermissionError("authority System journal must have exact mode 0600")
+        return status
+
+    def _open(self) -> int | None:
+        try:
+            descriptor = os.open(self._name, os.O_RDONLY | _OPEN, dir_fd=self._journal_fd)
+        except FileNotFoundError:
+            return None
+        try:
+            self._validate_descriptor(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
         return descriptor
 
-    def read(self) -> tuple[AuthoritySystemJournalRecordV1, ...]:
+    def _open_append(self) -> tuple[int, bool]:
+        try:
+            descriptor = os.open(
+                self._name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | _OPEN,
+                0o600,
+                dir_fd=self._journal_fd,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(
+                self._name, os.O_RDWR | os.O_APPEND | _OPEN, dir_fd=self._journal_fd
+            )
+            created = False
+        try:
+            self._validate_descriptor(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor, created
+
+    @staticmethod
+    def _identity(status: os.stat_result) -> tuple[int, ...]:
+        return (
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+            status.st_nlink,
+        )
+
+    def _read(self) -> tuple[tuple[AuthoritySystemJournalRecordV1, ...], os.stat_result | None]:
         descriptor = self._open()
         if descriptor is None:
-            return ()
+            return (), None
         try:
-            size = os.fstat(descriptor).st_size
+            status = os.fstat(descriptor)
+            size = status.st_size
             if size > MAX_JOURNAL_BYTES:
                 raise ValueError("authority System journal exceeds 16 MiB")
             payload = b""
@@ -225,7 +262,11 @@ class FileAuthoritySystemJournal:
             prior_phase = record.phase
             prior_generation = record.generation
             records.append(record)
-        return tuple(records)
+        return tuple(records), status
+
+    def read(self) -> tuple[AuthoritySystemJournalRecordV1, ...]:
+        records, _status = self._read()
+        return records
 
     def head(self) -> AuthoritySystemFileHead:
         records = self.read()
@@ -240,7 +281,7 @@ class FileAuthoritySystemJournal:
         record = AuthoritySystemJournalRecordV1.model_validate(
             record.model_dump(mode="python", by_alias=True)
         )
-        records = self.read()
+        records, validated = self._read()
         if records:
             last = records[-1]
             head = AuthoritySystemFileHead(
@@ -294,10 +335,21 @@ class FileAuthoritySystemJournal:
         ):
             raise ValueError("authority System takeover generation did not advance")
         encoded = canonical_system_authority_bytes(record) + b"\n"
-        descriptor = self._open(create=True)
-        assert descriptor is not None
+        descriptor, created = self._open_append()
         try:
-            if os.fstat(descriptor).st_size + len(encoded) > MAX_JOURNAL_BYTES:
+            before = os.fstat(descriptor)
+            if validated is None:
+                if not created or before.st_size != 0:
+                    raise ValueError("authority System journal changed since validation")
+            elif created or self._identity(before) != self._identity(validated):
+                raise ValueError("authority System journal changed since validation")
+            tail = canonical_system_authority_bytes(records[-1]) + b"\n" if records else b""
+            if tail and os.pread(descriptor, len(tail), before.st_size - len(tail)) != tail:
+                raise ValueError("authority System journal changed since validation")
+            path_status = os.stat(self._name, dir_fd=self._journal_fd, follow_symlinks=False)
+            if (path_status.st_dev, path_status.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("authority System journal changed since validation")
+            if before.st_size + len(encoded) > MAX_JOURNAL_BYTES:
                 raise ValueError("authority System journal append exceeds 16 MiB")
             if head.sequence >= MAX_RECORDS_PER_JOURNAL:
                 raise ValueError("authority System journal append exceeds 1024 records")
@@ -308,9 +360,17 @@ class FileAuthoritySystemJournal:
                     raise OSError("authority System journal append made no progress")
                 offset += written
             os.fsync(descriptor)
-            os.fsync(self._journal_fd)
+            final_status = os.fstat(descriptor)
+            final_path = os.stat(self._name, dir_fd=self._journal_fd, follow_symlinks=False)
+            if (final_path.st_dev, final_path.st_ino) != (
+                final_status.st_dev,
+                final_status.st_ino,
+            ):
+                raise ValueError("authority System journal changed during append")
         finally:
             os.close(descriptor)
+        if created:
+            os.fsync(self._journal_fd)
         return AuthoritySystemFileHead(
             self._system_id, record.sequence, authority_system_record_digest(record), record.phase
         )
