@@ -428,7 +428,7 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
     )
 
     class InspectionRepo:
-        async def mutation_obligation_is_open(self, conn: object, attempt: ModuleAttempt) -> bool:
+        async def attempt_is_preparable(self, conn: object, attempt: ModuleAttempt) -> bool:
             del conn
             return attempt.operation_nonce == operation.operation_nonce
 
@@ -481,6 +481,10 @@ async def test_inspect_attempt_distinguishes_absence_and_valid_current_evidence(
     monkeypatch.setattr(
         "kdive.services.remote_module_operation.validate_attempt_volumes",
         lambda _storage, _request: volumes,
+    )
+    monkeypatch.setattr(
+        "kdive.services.remote_module_operation.validate_scratch_volume",
+        lambda _storage, _request: volumes.scratch,
     )
 
     inspected = await runtime.inspect_attempt(receipt, operation, executor, 10**12)

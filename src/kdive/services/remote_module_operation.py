@@ -20,6 +20,9 @@ from kdive.db.remote_module_attempt_obligations import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.external_boot_authority.device_identity import (
+    build_remote_device_identity_port,
+)
 from kdive.providers.infra.reaping import ModuleVolumeKey, ModuleVolumeReaper
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
@@ -59,6 +62,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     prepare_attempt_volumes,
     recovery_attempt_volumes,
     validate_attempt_volumes,
+    validate_scratch_volume,
 )
 from kdive.providers.remote_libvirt.reaping.module_volumes import (
     ModuleVolumeReaperConn,
@@ -178,6 +182,7 @@ class RemoteModuleOperationRuntime:
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
         deadline: float,
+        authority: AuthorityRequestSender | None = None,
     ) -> ModuleAttemptInspection | None:
         """Read exact current-attempt state only when its durable obligation remains open."""
         self._check_deadline(deadline)
@@ -193,7 +198,7 @@ class RemoteModuleOperationRuntime:
                 category=ErrorCategory.CONFLICT,
             )
         async with self.pool.connection() as conn:
-            if not await self.repository.mutation_obligation_is_open(conn, attempt):
+            if not await self.repository.attempt_is_preparable(conn, attempt):
                 raise CategorizedError(
                     "remote module inspection obligation is absent",
                     category=ErrorCategory.CONFLICT,
@@ -205,8 +210,10 @@ class RemoteModuleOperationRuntime:
                 "remote module attempt inspection is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        identity = build_remote_device_identity_port(authority, deadline)
 
         def inspect() -> ModuleAttemptInspection | None:
+            assert configured is not None
             self._check_deadline(deadline)
             volume_request = self._volume_request(operation)
             pool = configured.storage.storagePoolLookupByName(configured.pool_name)
@@ -233,18 +240,44 @@ class RemoteModuleOperationRuntime:
             if not any(present):
                 return None
             if not all(present):
-                raise CategorizedError(
-                    "remote module attempt volumes are incomplete",
-                    category=ErrorCategory.CONFLICT,
-                )
-            volumes = validate_attempt_volumes(configured.storage, volume_request)
-            raw = appliance.read_scratch_result(volumes.scratch, deadline)
+                if present != [True, False]:
+                    raise CategorizedError(
+                        "remote module attempt volume order is invalid",
+                        category=ErrorCategory.CONFLICT,
+                    )
+                if identity is None:
+                    raise CategorizedError(
+                        "remote module provider authority is unavailable",
+                        category=ErrorCategory.CONFLICT,
+                    )
+                inspection = configured.inspect_attachments(identity, frozenset({names[0]}))
+                if inspection.appliance_present or not inspection.proves_detached(
+                    configured.pool_name, names[0]
+                ):
+                    raise CategorizedError(
+                        "remote module attempt volumes are not safely preparable",
+                        category=ErrorCategory.CONFLICT,
+                    )
+                return None
+            scratch = validate_scratch_volume(configured.storage, volume_request)
+            raw = appliance.read_scratch_result(scratch, deadline)
             self._check_deadline(deadline)
             if raw is None:
-                raise CategorizedError(
-                    "remote module attempt result is absent",
-                    category=ErrorCategory.CONFLICT,
-                )
+                if identity is None:
+                    raise CategorizedError(
+                        "remote module provider authority is unavailable",
+                        category=ErrorCategory.CONFLICT,
+                    )
+                inspection = configured.inspect_attachments(identity)
+                if inspection.appliance_present or not all(
+                    inspection.proves_detached(configured.pool_name, name) for name in names
+                ):
+                    raise CategorizedError(
+                        "remote module attempt volumes are not safely preparable",
+                        category=ErrorCategory.CONFLICT,
+                    )
+                return None
+            volumes = validate_attempt_volumes(configured.storage, volume_request)
             try:
                 result = RemoteModuleResultV1.from_wire_bytes(raw)
                 result.validate_for(operation)

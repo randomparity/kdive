@@ -17,7 +17,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance imp
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
-    RemoteDeviceIdentityPort,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
@@ -46,6 +45,7 @@ class ModuleOperationRuntime(Protocol):
         operation: RemoteModuleOperationV1,
         executor: RemoteModulePreparationExecutor,
         deadline: float,
+        authority: AuthorityRequestSender | None = None,
     ) -> ModuleAttemptInspection | None: ...
     async def reap_state(
         self,
@@ -139,7 +139,7 @@ class RemoteModuleVolumePreparation:
     pool_name: str
     entries: tuple[ModuleTreeEntry, ...]
     writer: FilesystemImageWriter
-    inspect_attachments: Callable[[RemoteDeviceIdentityPort], AttachmentInspection]
+    inspect_attachments: Callable[..., AttachmentInspection]
     work_dir: Path
 
 

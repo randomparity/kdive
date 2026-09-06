@@ -162,9 +162,12 @@ def inspect_module_attachments(
     conn: AttachmentConn,
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
+    present_attempt_volumes: frozenset[str] | None = None,
 ) -> AttachmentInspection:
     """Prove the System is stopped and all three volumes have exclusive owners."""
-    protected_identities = _protected_volume_identities(conn, identity_port, expected)
+    protected_identities = _protected_volume_identities(
+        conn, identity_port, expected, present_attempt_volumes
+    )
     try:
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
@@ -294,10 +297,14 @@ def _protected_volume_identities(
     conn: AttachmentConn,
     identity_port: RemoteDeviceIdentityPort,
     expected: ExpectedAttachmentState,
+    present_attempt_volumes: frozenset[str] | None = None,
 ) -> dict[str, RemoteDeviceIdentity]:
+    attempt_volumes = present_attempt_volumes or frozenset(
+        {expected.source_volume, expected.scratch_volume}
+    )
     identities = {
         volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
-        for volume in (expected.root_volume, expected.source_volume, expected.scratch_volume)
+        for volume in (expected.root_volume, *sorted(attempt_volumes))
     }
     if len(set(identities.values())) != len(identities):
         raise _conflict("protected remote module identities are not distinct")

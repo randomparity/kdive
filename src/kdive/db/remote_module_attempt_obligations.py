@@ -208,6 +208,17 @@ class RemoteModuleAttemptObligationRepository:
         state = await self._state(conn, attempt)
         return state is not None and state["mutation_discharged_at"] is None
 
+    async def attempt_is_preparable(self, conn: AsyncConnection, attempt: ModuleAttempt) -> bool:
+        """Return whether an exact attempt may still create or repair its volumes."""
+        state = await self._state(conn, attempt)
+        return (
+            state is not None
+            and state["mutation_discharged_at"] is None
+            and not state["has_evidence"]
+            and state["reap_opened_at"] is None
+            and state["reap_discharged_at"] is None
+        )
+
     async def discharge_mutation_obligation(
         self, conn: AsyncConnection, attempt: ModuleAttempt, *, reason: MutationDischargeReason
     ) -> bool:
