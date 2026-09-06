@@ -1,0 +1,24 @@
+---
+- name: Validate firewall ownership before quiescing an authority
+  ansible.builtin.import_role:
+    name: gdbstub_acl
+    tasks_from: authority_validate
+  vars:
+    gdbstub_acl_authority_port: "{{ provider_authority_host_network_port if provider_authority_host_enabled else none }}"
+
+- name: Inspect the existing authority service unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/kdive-external-boot-authority.service
+    follow: false
+  register: provider_authority_host_existing_unit
+
+- name: Quiesce the authority before retracting its previous firewall tuple
+  ansible.builtin.systemd_service:
+    name: kdive-external-boot-authority.service
+    state: stopped
+  when:
+    - provider_authority_host_existing_unit.stat.exists
+    - >-
+      not provider_authority_host_enabled or
+      gdbstub_acl_authority_targets.pending is not none or
+      gdbstub_acl_authority_targets.previous != gdbstub_acl_authority_targets.current

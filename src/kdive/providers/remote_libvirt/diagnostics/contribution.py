@@ -8,6 +8,8 @@ declared instance the behavior is unchanged (one row each); with N instances eac
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, Check
 from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.diagnostics.provider_checks import (
@@ -20,7 +22,9 @@ from kdive.diagnostics.provider_contracts import (
     DiagnosticProviderContribution,
     WorkerVantageDescriptor,
 )
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.remote_libvirt.config import (
+    RemoteAuthorityBinding,
     all_remote_configs_by_name,
     is_remote_libvirt_configured,
     remote_config_for_resource,
@@ -30,6 +34,10 @@ from kdive.providers.remote_libvirt.config import (
 from kdive.providers.remote_libvirt.diagnostics import (
     base_image_staging,
     reachability,
+)
+from kdive.providers.remote_libvirt.diagnostics.authority import (
+    AUTHORITY_READINESS_ID,
+    AuthorityReadinessCheck,
 )
 from kdive.providers.remote_libvirt.diagnostics.provider_tls import provider_tls_probe
 
@@ -69,10 +77,16 @@ def _unavailable_worker_checks() -> list[WorkerVantageDescriptor]:
     for _name in remote_instance_names():
         descriptors.append(WorkerVantageDescriptor(id=PROVIDER_TLS_ID, provider=_REMOTE_PROVIDER))
         descriptors.append(WorkerVantageDescriptor(id=GDBSTUB_ACL_ID, provider=_REMOTE_PROVIDER))
+        descriptors.append(
+            WorkerVantageDescriptor(id=AUTHORITY_READINESS_ID, provider=_REMOTE_PROVIDER)
+        )
     return descriptors
 
 
-def _worker_checks() -> list[Check]:
+def _worker_checks(
+    authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+    | None = None,
+) -> list[Check]:
     checks: list[Check] = []
     for _name, config in all_remote_configs_by_name():
         checks.append(
@@ -90,14 +104,24 @@ def _worker_checks() -> list[Check]:
                 probe=gdbstub_acl_probe(),
             )
         )
+        if authority_sender_factory is not None:
+
+            def build_authority(name: str = _name) -> AuthorityRequestSender | None:
+                binding = remote_config_for_resource(name).authority
+                return authority_sender_factory(binding) if binding is not None else None
+
+            checks.append(AuthorityReadinessCheck(build_authority))
     return checks
 
 
-def diagnostic_contribution() -> DiagnosticProviderContribution:
+def diagnostic_contribution(
+    authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+    | None = None,
+) -> DiagnosticProviderContribution:
     return DiagnosticProviderContribution(
         provider=_REMOTE_PROVIDER,
         enabled=is_remote_libvirt_configured,
         checks=_checks,
         unavailable_worker_checks=_unavailable_worker_checks,
-        worker_checks=_worker_checks,
+        worker_checks=lambda: _worker_checks(authority_sender_factory),
     )

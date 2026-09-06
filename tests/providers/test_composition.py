@@ -934,7 +934,10 @@ def test_resolver_threads_shared_registry_into_provider_runtimes(
         seen["local"] = secret_registry
         return real_local(secret_registry=secret_registry, store=store)
 
-    def _remote(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
+    def _remote(
+        *, secret_registry: SecretRegistry, store: ObjectStore, authority_sender_factory: object
+    ) -> ProviderRuntime:
+        assert authority_sender_factory is None
         seen["remote"] = secret_registry
         return real_remote(secret_registry=secret_registry, store=store)
 

@@ -1,0 +1,58 @@
+---
+- name: Ensure the authority systemd user unit directory exists
+  ansible.builtin.file:
+    path: "{{ provider_authority_host_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ provider_authority_host_account }}"
+    group: "{{ provider_authority_host_account }}"
+    mode: "0700"
+
+- name: Install the dormant authority session-libvirtd user unit
+  ansible.builtin.copy:
+    dest: >-
+      {{ provider_authority_host_home
+      }}/.config/systemd/user/kdive-libvirtd-external-boot-authority.service
+    content: |
+      [Unit]
+      Description=kdive dormant external-boot authority session libvirt daemon
+      ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt
+
+      [Service]
+      Type=forking
+      Environment=XDG_RUNTIME_DIR=/run/kdive/provider-authority
+      ExecStart=/usr/sbin/libvirtd --daemon \
+        --config /etc/kdive/libvirtd-external-boot-authority.conf \
+        --pid-file /run/kdive/provider-authority/libvirt/libvirtd.pid
+      PIDFile=/run/kdive/provider-authority/libvirt/libvirtd.pid
+      Restart=on-failure
+      RestartSec=5s
+
+      [Install]
+      WantedBy=default.target
+    owner: "{{ provider_authority_host_account }}"
+    group: "{{ provider_authority_host_account }}"
+    mode: "0644"
+  register: provider_authority_host_user_unit
+  notify: "{{ provider_authority_host_libvirt_restart_handler }}"
+
+- name: Enable the dormant authority session-libvirtd user unit
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-external-boot-authority.service
+    scope: user
+    enabled: true
+    daemon_reload: true
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ provider_authority_host_uid }}"
+  become: true
+  become_user: "{{ provider_authority_host_account }}"
+
+- name: Start the dormant authority session libvirtd
+  ansible.builtin.systemd_service:
+    name: kdive-libvirtd-external-boot-authority.service
+    scope: user
+    state: started
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ provider_authority_host_uid }}"
+  become: true
+  become_user: "{{ provider_authority_host_account }}"
+  when: provider_authority_host_enabled | bool

@@ -12,6 +12,7 @@ from pydantic import SecretStr
 import kdive.config as config
 from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
+from kdive.jobs.authority_sender import authority_sender_factory
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.handlers import diagnostics, external_boot, image_build, systems
@@ -24,6 +25,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.secrets import secret_backend_from_env
 from kdive.store.assembly import ObjectStoreAssembly
 
 
@@ -48,7 +50,12 @@ def build_worker_handler_assembly(
     """Derive worker handler ports from one completed process assembly."""
     stores = process_assembly.object_stores
     composition = process_assembly.providers
-    resolver = composition.build_provider_resolver()
+    # The closure reads the completed assembly only at request encoding, never a copied SecretStr.
+    sender_factory = authority_sender_factory(
+        secret_backend_from_env(registry=composition.secret_registry),
+        lambda: assembly.incarnation_credential,
+    )
+    resolver = composition.build_provider_resolver(authority_sender_factory=sender_factory)
     supervisor = CaptureOperationSupervisor(
         launcher=GatedCaptureLauncher(
             runtime_root=Path(config.require(BUILD_WORKSPACE)) / "capture-operations"
@@ -56,7 +63,7 @@ def build_worker_handler_assembly(
         credential=incarnation_credential,
         pool=pool,
     )
-    return WorkerHandlerAssembly(
+    assembly = WorkerHandlerAssembly(
         resolver=resolver,
         incarnation_credential=incarnation_credential,
         secret_registry=composition.secret_registry,
@@ -64,10 +71,11 @@ def build_worker_handler_assembly(
         capture_supervisor=supervisor,
         worker_check_builders={
             contribution.provider: contribution.worker_checks
-            for contribution in diagnostic_provider_contributions()
+            for contribution in diagnostic_provider_contributions(sender_factory)
             if contribution.enabled()
         },
     )
+    return assembly
 
 
 def build_production_worker_handler_assembly(

@@ -6,7 +6,6 @@ import inspect
 import re
 from pathlib import Path
 from typing import Any, cast
-from uuid import UUID
 
 import pytest
 
@@ -23,15 +22,19 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    LocalExternalBootReadiness,
+    prepare_console_readiness_window,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     LocalExternalBootSessionFactory,
     OpenArtifactRoot,
     OpenGuest,
     PinOperationLease,
+    PrepareConsole,
     ReadinessProbe,
     RunningObserver,
-    _unconfigured_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalRunningObserver,
@@ -78,7 +81,8 @@ def test_external_boot_session_factory_builder_is_lazy_and_unadvertised(
     pin_lease = cast(PinOperationLease, lambda _lease: opened.append("pin"))
     open_artifact_root = cast(OpenArtifactRoot, lambda _ownership: opened.append("artifact") or 41)
     open_guest = cast(OpenGuest, lambda: opened.append("guest"))
-    readiness = cast(ReadinessProbe, lambda _system_id: opened.append("readiness"))
+    prepare_console = cast(PrepareConsole, lambda _system_id: opened.append("prepare"))
+    readiness = cast(ReadinessProbe, lambda _system_id, _window: opened.append("readiness"))
     observe_running = cast(
         RunningObserver, lambda _system_id, _domain: opened.append("observation")
     )
@@ -88,6 +92,7 @@ def test_external_boot_session_factory_builder_is_lazy_and_unadvertised(
         pin_lease=pin_lease,
         open_artifact_root=open_artifact_root,
         open_guest=open_guest,
+        prepare_console=prepare_console,
         readiness=readiness,
         observe_running=observe_running,
         cleanup_payloads=cleanup_payloads,
@@ -410,11 +415,11 @@ def test_production_builder_binds_open_guest(seam: Path) -> None:
     assert factory._open_guest is open_libguestfs_guest
 
 
-def test_production_builder_leaves_readiness_unconfigured(seam: Path) -> None:
+def test_production_builder_binds_anchored_readiness(seam: Path) -> None:
     factory = composition.build_external_boot_session_mechanisms().factory
-    assert factory._readiness is _unconfigured_readiness
-    with pytest.raises(RuntimeError, match="local external-boot readiness is not configured"):
-        factory._readiness(UUID("11111111-1111-1111-1111-111111111111"))
+
+    assert factory._prepare_console is prepare_console_readiness_window
+    assert isinstance(factory._readiness, LocalExternalBootReadiness)
 
 
 def test_production_builder_binds_running_observer(seam: Path) -> None:
