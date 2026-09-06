@@ -88,7 +88,7 @@ class FaultInjectExternalBoot:
             and not observation.managed
         )
 
-    def delete_object(
+    def delete_recovery_object(
         self,
         binding: RecoveryObjectBinding,
         authority: OpaqueProviderRef,

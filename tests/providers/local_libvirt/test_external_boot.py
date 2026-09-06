@@ -1749,7 +1749,9 @@ def test_local_quarantine_adopt_and_delete_are_exact_and_durable() -> None:
     delete_ports.record_cleanup_quarantine(point, _cleanup_proof_for(point), authority)
     deleted_binding = delete_ports.quarantined_objects(point.binding, authority)[0].binding
     before_delete = delete_ports.observe_object(deleted_binding, authority)
-    deleted = delete_ports.delete_object(deleted_binding, authority, before_delete.observed_digest)
+    deleted = delete_ports.delete_recovery_object(
+        deleted_binding, authority, before_delete.observed_digest
+    )
     assert not deleted.present and not deleted.managed
     assert delete_io.finalized_proof == _cleanup_proof_for(point)
 

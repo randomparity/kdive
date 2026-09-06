@@ -213,7 +213,7 @@ class RecoveryOrphanAuthorityService:
                 binding, authority, selection.observed_digest
             )
         if selection.disposition == "delete":
-            return self._ports.delete_object(binding, authority, selection.observed_digest)
+            return self._ports.delete_recovery_object(binding, authority, selection.observed_digest)
         return self._ports.adopt_object(binding, authority, selection.observed_digest)
 
     async def resolve_recovery_orphan(

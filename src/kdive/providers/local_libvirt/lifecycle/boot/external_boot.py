@@ -2336,7 +2336,7 @@ class LocalLibvirtExternalBoot:
             raise ValueError("cleanup quarantine ownership conflicts with request")
         return observation
 
-    def delete_object(
+    def delete_recovery_object(
         self,
         binding: RecoveryObjectBinding,
         authority: OpaqueProviderRef,

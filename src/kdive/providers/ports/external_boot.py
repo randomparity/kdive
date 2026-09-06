@@ -444,7 +444,7 @@ class ExternalBootRecoveryObjectPorts(Protocol):
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
     ) -> RecoveryObjectObservation: ...
 
-    def delete_object(
+    def delete_recovery_object(
         self,
         binding: RecoveryObjectBinding,
         authority: OpaqueProviderRef,

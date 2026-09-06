@@ -219,7 +219,7 @@ class LocalExternalBootAuthorityAdapter:
         return await self._offload_recovery_object(
             binding,
             authority,
-            lambda: self._ports.delete_object(binding, authority, digest),
+            lambda: self._ports.delete_recovery_object(binding, authority, digest),
         )
 
     async def adopt_recovery_object(
