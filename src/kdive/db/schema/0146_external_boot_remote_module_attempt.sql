@@ -1,4 +1,4 @@
--- 0141_external_boot_remote_module_attempt.sql — server-owned remote PREPARE obligation
+-- 0146_external_boot_remote_module_attempt.sql — server-owned remote PREPARE obligation
 
 CREATE FUNCTION public.open_external_boot_remote_module_attempt(
     p_peer_incarnation text,

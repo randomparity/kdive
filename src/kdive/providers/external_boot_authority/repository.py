@@ -121,7 +121,7 @@ class DatabaseAuthorityRepository:
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> ModuleAttemptPreparationRequestV1 | None:
-        """Open/replay the authority-only 0141 receipt after PREPARE is journal-started."""
+        """Open/replay the authority-only 0146 receipt after PREPARE is journal-started."""
         async with self._connections() as conn, conn.transaction():
             row = await conn.execute(
                 "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,%s,%s,%s,%s,%s)",

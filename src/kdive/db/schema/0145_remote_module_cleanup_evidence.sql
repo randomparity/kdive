@@ -1,4 +1,4 @@
--- 0139_remote_module_cleanup_evidence.sql — authority read of worker-owned reap evidence
+-- 0145_remote_module_cleanup_evidence.sql — authority read of worker-owned reap evidence
 
 CREATE FUNCTION public.read_authorized_remote_module_cleanup_evidence(
     p_peer_incarnation text,

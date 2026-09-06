@@ -39,7 +39,7 @@ derive the target definition without caller reconstruction.
 
 Remote PREPARE is split into two closed authenticated authority operations. `begin` admits the
 exact current PREPARE request, anchors its `mutation-started` journal record, and then opens the
-0141 attempt obligation using that record's exact acknowledgement, attempt, identity, and digest.
+0146 attempt obligation using that record's exact acknowledgement, attempt, identity, and digest.
 It returns the resulting receipt but performs no provider mutation. The worker uses the receipt
 nonce to form the fixed remote-module request and retains the ADR-0605 read-only verifier
 transaction and System lock while it awaits `execute`. `execute` accepts only the immutable
