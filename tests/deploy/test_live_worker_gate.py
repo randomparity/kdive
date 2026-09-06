@@ -70,6 +70,13 @@ def _gate_env(tmp_path: Path, python: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_S3_ENDPOINT_URL": "http://127.0.0.1:9000",
         "KDIVE_S3_REGION": "us-east-1",
         "KDIVE_WORKER_ACCEPTED_LANES": "default,state-fenced",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": "authority/client-cert",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": (
+            "authority/client-key"  # pragma: allowlist secret
+        ),
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": "/run/authority.sock",
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": "authority/server-ca",
         "KDIVE_WORKER_INCARNATION_ID": _INCARNATION,
         "KDIVE_WORKER_INCARNATION_KIND": "local",
         "KDIVE_WORKER_PYTHON": str(python),
@@ -219,6 +226,21 @@ def test_gate_execs_exact_worker_with_allowlisted_environment(
         "KDIVE_S3_ENDPOINT_URL": env["KDIVE_S3_ENDPOINT_URL"],
         "KDIVE_S3_REGION": env["KDIVE_S3_REGION"],
         "KDIVE_WORKER_ACCEPTED_LANES": env["KDIVE_WORKER_ACCEPTED_LANES"],
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF": env[
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF"
+        ],
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF": env[
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF"
+        ],
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE": env[
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE"
+        ],
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET": env[
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET"
+        ],
+        "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF": env[
+            "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF"
+        ],
         "KDIVE_WORKER_INCARNATION_ID": _INCARNATION,
         "KDIVE_WORKER_INCARNATION_KIND": "local",
         "KDIVE_WORKER_SOURCE_ROOT": env["KDIVE_WORKER_SOURCE_ROOT"],
