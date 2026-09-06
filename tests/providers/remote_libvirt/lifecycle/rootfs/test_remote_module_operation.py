@@ -925,7 +925,12 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
             "systems",
             (),
             Writer(),
-            lambda _identity: AttachmentInspection(True, True, False, frozenset()),
+            lambda _identity, present=None: AttachmentInspection(
+                True,
+                True,
+                False,
+                frozenset(("systems", name) for name in (present or {source_name, scratch_name})),
+            ),
             tmp_path,
         )
         appliance_config = RemoteModuleApplianceExecution(
@@ -1018,6 +1023,36 @@ def test_real_runtime_and_database_resume_at_cleanup_boundaries(
                 cast(Any, object()),
                 authority_reference,
             )
+            if cleanup_fault == "reaping-marker":
+                create_xml = storage.pool.createXML
+                interrupted_source: list[Any] = []
+
+                def create_then_die_before_upload(xml: str, flags: int = 0):
+                    created = create_xml(xml, flags)
+                    if "source.ext4" in xml:
+                        original_upload = created.upload
+
+                        def die_before_upload(*_args: object, **_kwargs: object) -> int:
+                            raise SystemExit("worker died before source upload")
+
+                        cast(Any, created).upload = die_before_upload
+                        interrupted_source[:] = [created, original_upload]
+                    return created
+
+                cast(Any, storage.pool).createXML = create_then_die_before_upload
+                with pytest.raises(SystemExit, match="before source upload"):
+                    await capture_install_modules(
+                        request,
+                        runtime=preparation_runtime(),
+                        executor=executor,
+                        deadline=10**12,
+                    )
+                cast(Any, storage.pool).createXML = create_xml
+                source, original_upload = interrupted_source
+                source.upload = original_upload
+                assert set(storage.pool.volumes) == {source_name}
+                assert bytes(source.payload) == b""
+
             with pytest.raises(RuntimeError, match="worker loss during teardown"):
                 await capture_install_modules(
                     request, runtime=preparation_runtime(), executor=executor, deadline=10**12
