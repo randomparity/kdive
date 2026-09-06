@@ -12,6 +12,7 @@ import pytest
 
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCleanupEvidenceContextV1,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -108,12 +109,70 @@ async def test_read_only_observation_rechecks_current_authority(tmp_path: Path) 
 
     with pytest.raises(AuthorityServiceError, match="superseded"):
         await service.observe_authority(peer, _mutation(takeover))
-
     assert adapter.calls == ["observe"]
     assert [record.phase for record in repository.records] == [
         JournalPhase.WATERMARK_INSTALLED,
         JournalPhase.TAKEOVER_ACKNOWLEDGED,
     ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("evidence_present", [True, False])
+async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
+    tmp_path: Path, evidence_present: bool
+) -> None:
+    peer = AuthenticatedPeer(uuid4())
+    takeover = _takeover().model_copy(
+        update={
+            "purpose": "recover",
+            "operation": AuthorityOperation.RECOVER,
+            "provider_kind": "remote-libvirt",
+        }
+    )
+    repository = _Repository(peer, takeover)
+
+    class CleanupAdapter(_Adapter):
+        async def cleanup_subject(self, request: object) -> str:
+            self.calls.append("cleanup-subject")
+            return "0" * 32
+
+        async def commit_cleanup(
+            self, request: object, context: object, evidence: object
+        ) -> object:
+            self.calls.append("commit-cleanup")
+            assert evidence is repository.cleanup_evidence
+            return self._observation("target")
+
+    adapter = CleanupAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, takeover)
+    repository.current = True
+    request = _mutation(takeover)
+    if evidence_present:
+        repository.cleanup_evidence = AuthorityCleanupEvidenceContextV1(
+            operation_identity=request.operation_identity,
+            attempt_id=request.attempt_id,
+            operation_nonce="0" * 32,
+            cleanup_state="open",
+            recovery_reference_json="{}",
+        )
+
+    if evidence_present:
+        await service.execute_mutation(peer, request)
+    else:
+        with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+            await service.execute_mutation(peer, request)
+
+    assert repository.cleanup_nonces == ["0" * 32]
+    assert adapter.calls == (
+        ["cleanup-subject", "commit-cleanup", "observe"]
+        if evidence_present
+        else ["cleanup-subject"]
+    )
 
 
 @pytest.mark.anyio

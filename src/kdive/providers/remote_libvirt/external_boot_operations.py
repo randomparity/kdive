@@ -306,7 +306,23 @@ class ConcreteRemoteExternalBootOperations:
             boot = [recovery.materialization.artifacts.kernel]
             if recovery.materialization.artifacts.initrd is not None:
                 boot.append(recovery.materialization.artifacts.initrd)
-            for reference in boot:
+            for index, reference in enumerate(boot):
+                kind = "kernel" if index == 0 else "initrd"
+                parsed = parse_boot_artifact_name(reference.ref)
+                digest = (
+                    recovery.materialization.extracted_vmlinuz_sha256
+                    if kind == "kernel"
+                    else recovery.materialization.verified_initrd_sha256
+                )
+                if (
+                    parsed is None
+                    or parsed.partial
+                    or parsed.kind != kind
+                    or str(parsed.system_id) != recovery.binding.system_id
+                    or str(parsed.run_id) != recovery.binding.run_id
+                    or parsed.digest != digest
+                ):
+                    raise ValueError("remote cleanup boot artifact identity differs")
                 self._require_deadline(deadline, "cleanup")
                 volume = self._lookup_optional(boot_pool, reference.ref)
                 if volume is None:

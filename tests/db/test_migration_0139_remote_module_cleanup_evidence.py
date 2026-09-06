@@ -5,11 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.providers.external_boot_authority.protocol import AuthorityMutationRequestV1
+from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from tests.db.external_boot_authority_support import (
     _JOURNAL,
     _PLAN,
@@ -170,6 +175,63 @@ def test_cleanup_evidence_follows_restored_open_then_discharged_order(
     with psycopg.connect(authority_role_dsns("kdive_provider_authority")) as provider:
         assert _read(provider, case, allocated) == ("open", recovery)
         assert _read(provider, case, allocated, authority_instance="foreign") is None
+
+    @asynccontextmanager
+    async def connections():
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_provider_authority")
+        ) as connection:
+            yield connection
+
+    request = AuthorityMutationRequestV1.model_validate(
+        dict(
+            authority_id=allocated.authority_id,
+            generation=allocated.generation,
+            system_id=case.system_id,
+            activation_id=case.activation_id,
+            run_id=case.run_id,
+            plan_identity=_PLAN,
+            purpose=case.purpose,
+            operation=case.operation,
+            provider_kind="remote-libvirt",
+            authority_instance=case.authority_instance,
+            operation_identity=case.operation_identity,
+            operation_digest=allocated.operation_digest,
+            attempt_id=case.job_id,
+            expected_source_identity="source",
+            intended_target_identity="target",
+            recovery_objects=(),
+        )
+    )
+    binding = AuthorityBinding(
+        peer_incarnation_id=case.worker_id,
+        authority_id=allocated.authority_id,
+        generation=allocated.generation,
+        system_id=case.system_id,
+        activation_id=case.activation_id,
+        run_id=case.run_id,
+        plan_identity=_PLAN,
+        purpose=case.purpose,
+        operation=request.operation,
+        provider_kind="remote-libvirt",
+        authority_instance=case.authority_instance,
+        operation_identity=case.operation_identity,
+        operation_digest=allocated.operation_digest,
+        state="current",
+    )
+    projected = __import__("asyncio").run(
+        DatabaseAuthorityRepository(connections).resolve_cleanup_evidence(
+            AuthenticatedPeer(incarnation_id=case.worker_id),
+            binding,
+            request,
+            1,
+            _JOURNAL,
+            _NONCE,
+        )
+    )
+    assert projected is not None
+    assert projected.cleanup_state == "open"
+    assert json.loads(projected.recovery_reference_json) == recovery
     with psycopg.connect(migrated_url) as admin:
         admin.execute(
             "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s",

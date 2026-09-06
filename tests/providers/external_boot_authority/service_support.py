@@ -18,6 +18,7 @@ from kdive.db.external_boot_authority_journal import (
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -123,6 +124,21 @@ class _Repository:
         # changed, a check that ignored the scoping entirely would still see a matching
         # sequence and digest and pass, so the test would not discriminate.
         self.head_operation_identity_override: str | None = None
+        self.cleanup_evidence: AuthorityCleanupEvidenceContextV1 | None = None
+        self.cleanup_nonces: list[str] = []
+
+    async def resolve_cleanup_evidence(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+        operation_nonce: str,
+    ) -> AuthorityCleanupEvidenceContextV1 | None:
+        del peer, binding, request, acknowledgement_sequence, acknowledgement_digest
+        self.cleanup_nonces.append(operation_nonce)
+        return self.cleanup_evidence
 
     async def resolve_current_candidate(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
