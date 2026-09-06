@@ -36,6 +36,7 @@ from tests.live_vm.installed_local_authority_support import (
     require_authority_artifact_confinement,
     require_deployed_revision,
     require_fault_barrier,
+    require_installed_authority_routes,
     require_journal_inventory_refusal,
     restart_authority_after_fault,
     restore_after_journal_inventory_refusal,
@@ -502,6 +503,53 @@ def test_deployed_revision_resolves_the_actual_checkout_abbreviation() -> None:
     )
 
 
+def test_installed_route_preflight_requires_exact_active_worker_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def output(*argv: str) -> str:
+        calls.append(argv)
+        return "route-ok"
+
+    monkeypatch.setattr(carrier, "_output", output)
+    require_installed_authority_routes(
+        config,
+        "kdive-live-worker@2.service loaded active running KDIVE retained live worker slot 2",
+    )
+
+    assert calls[0][:4] == ("sudo", "-n", "/usr/bin/python3", "-c")
+    assert calls[0][-1] == "2"
+    assert calls[0][-3] == str(Path(__file__).resolve().parents[2])
+    assert calls[0][-2] == str(Path(sys.executable).resolve())
+
+
+def test_installed_route_preflight_rejects_an_unexpected_root_helper_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    monkeypatch.setattr(carrier, "_output", lambda *_argv: "other")
+
+    with pytest.raises(AssertionError, match="route preflight"):
+        require_installed_authority_routes(
+            config,
+            "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1",
+        )
+
+
 def test_identity_probe_limits_mutation_to_exact_authority_sentinels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -645,6 +693,7 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
     monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
     monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
     monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "require_installed_authority_routes", lambda *_args: None)
     monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
     monkeypatch.setattr(carrier, "require_authority_artifact_confinement", probe)
     monkeypatch.setattr(carrier, "LiveStackClient", StopBeforeMcpClient)
@@ -653,6 +702,45 @@ def test_native_carrier_probes_identities_after_fixture_before_public_mcp_mutati
 
     with pytest.raises(RuntimeError, match="stop before public MCP mutation"):
         carrier.run_installed_local_authority_normal_operations()
+
+
+def test_native_route_preflight_fails_before_fixture_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    fixture_called = False
+
+    def output(*argv: str) -> str:
+        if argv[:3] == ("sudo", "-n", "cat"):
+            return config.installed_revision
+        if argv[:2] == ("systemctl", "is-active"):
+            return "active"
+        return "kdive-live-worker@1.service loaded active running KDIVE retained live worker slot 1"
+
+    async def provision(_db_url: str, _config: NativeAuthorityConfig) -> None:
+        nonlocal fixture_called
+        fixture_called = True
+
+    def reject_route(*_args: object) -> None:
+        raise RuntimeError("installed server authority route is incomplete")
+
+    monkeypatch.setattr(carrier, "load_config", lambda: config)
+    monkeypatch.setattr(carrier, "_output", output)
+    monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
+    monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
+    monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "require_installed_authority_routes", reject_route)
+    monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
+
+    with pytest.raises(RuntimeError, match="authority route is incomplete"):
+        carrier.run_installed_local_authority_normal_operations()
+    assert not fixture_called
 
 
 @pytest.mark.parametrize("restart_recovery", [False, True])
@@ -730,6 +818,7 @@ def test_native_carriers_supply_the_required_cleanup_summary(
     monkeypatch.setattr(carrier, "require_issuer", lambda: "issuer")
     monkeypatch.setattr(carrier, "require_stack", lambda: "http://127.0.0.1:8000/mcp")
     monkeypatch.setattr(carrier, "require_deployed_revision", lambda *_args: None)
+    monkeypatch.setattr(carrier, "require_installed_authority_routes", lambda *_args: None)
     monkeypatch.setattr(carrier, "mint_role_token", lambda *_args, **_kwargs: "token")
     monkeypatch.setattr(carrier, "provision_authority_fixture", provision)
     monkeypatch.setattr(carrier, "require_authority_artifact_confinement", lambda *_args: None)
