@@ -205,7 +205,7 @@ Consumes `RemoteModuleAttemptObligationRepository.retained_owners`, whose entrie
 `remote_module_volume_reap` to the persisted job enum. The closed payload is:
 
 ```python
-class RemoteModuleVolumeReapPayload(ClosedPayload):
+class RemoteModuleVolumeReapPayload(_PayloadBase):
     schema: Literal["remote-module-volume-reap-v1"]
 ```
 
@@ -234,7 +234,8 @@ def ProviderComposition.build_worker_module_volume_reaper(
     self,
     *,
     enable_remote_libvirt: bool | None = None,
-    authority_sender_factory: AuthoritySenderFactory | None = None,
+    authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+    | None = None,
 ) -> ModuleVolumeReaper: ...
 ```
 
