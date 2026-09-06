@@ -9,16 +9,17 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.protocol import MAX_MESSAGE_BYTES
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    HostStatDeviceIdentity,
-    RemoteDeviceIdentity,
-)
+
+if TYPE_CHECKING:
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+        RemoteDeviceIdentity,
+    )
 
 _MAX_PATH_BYTES = 4_096
 _MAX_IDENTITY_COMPONENT = 2**64 - 1
@@ -141,6 +142,10 @@ class RemoteAuthorityDeviceIdentity:
         self._clock = clock
 
     def identity(self, path: str) -> RemoteDeviceIdentity | None:
+        from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+            RemoteDeviceIdentity,
+        )
+
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -204,7 +209,13 @@ class RemoteDeviceIdentityService:
     ) -> None:
         if capacity < 1 or capacity > 4:
             raise ValueError("identity lookup capacity must be between one and four")
-        self._identity = identity or HostStatDeviceIdentity().identity
+        if identity is None:
+            from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+                HostStatDeviceIdentity,
+            )
+
+            identity = HostStatDeviceIdentity().identity
+        self._identity = identity
         self._executor = ThreadPoolExecutor(
             max_workers=capacity, thread_name_prefix="kdive-device-identity"
         )
@@ -230,6 +241,10 @@ class RemoteDeviceIdentityService:
             raise
         if result is None:
             return DeviceIdentityAbsentV1()
+        from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+            RemoteDeviceIdentity,
+        )
+
         if type(result) is not RemoteDeviceIdentity:
             raise RuntimeError("provider-failure")
         if result.kind == "block":
