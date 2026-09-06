@@ -75,6 +75,16 @@ async def _dispatch(
     dsns: Callable[[str], str], case: SeededCase, operation: str, vehicle: Vehicle
 ) -> None:
     class Executor:
+        async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+            return AuthorityObservationV1(
+                observation_id=uuid4(), category="source", composite_state="sha256:" + "8" * 64
+            )
+
+        async def execute_conflict_resolution(
+            self, request: AuthorityMutationRequestV1
+        ) -> AuthorityObservationV1:
+            return await self.execute(request)
+
         async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
             vehicle.port.calls.append("authority-execute")
             category = "target" if request.operation.value == "activate" else "source"

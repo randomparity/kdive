@@ -181,7 +181,13 @@ async def _execute(
         authority_observation = await cast(ExternalBootAuthorityExecutor, executor).execute(request)
     kernel_observation = None
     if authority_observation.category == "target":
-        kernel_observation = context.port.observe(_recovery(context), authority_ref(context))
+        running_reader = getattr(executor, "observe_running", None)
+        if running_reader is not None:
+            kernel_observation = await running_reader(request)
+        elif context.port is not None:
+            kernel_observation = context.port.observe(_recovery(context), authority_ref(context))
+        else:
+            raise _refuse("no external-boot running observation reader is configured")
     return authority_observation, kernel_observation
 
 

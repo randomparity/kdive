@@ -43,6 +43,16 @@ class RecordingExecutor:
         self.category = category
         self.requests: list[AuthorityMutationRequestV1] = []
 
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
+        )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        return await self.execute(request)
+
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.requests.append(request)
         return AuthorityObservationV1(

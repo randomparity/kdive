@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import SecretStr
 
@@ -20,6 +20,9 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTakeoverRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+if TYPE_CHECKING:
+    from kdive.jobs.external_boot_authority_client import ExternalBootClientFactory
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
@@ -82,6 +85,7 @@ class ExternalBootHandlerPorts:
     acknowledger: ExternalBootAuthorityAcknowledger | None = None
     authority_executor: ExternalBootAuthorityExecutor | None = None
     preparation_executor: ExternalBootAuthorityPreparationExecutor | None = None
+    authority_client_factory: ExternalBootClientFactory | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     activation_readiness_timeout: timedelta = timedelta(minutes=5)
     recovery_readiness_timeout: timedelta = timedelta(minutes=5)

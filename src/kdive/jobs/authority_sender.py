@@ -15,6 +15,7 @@ from kdive.providers.external_boot_authority.device_identity import (
     decode_device_identity_response,
 )
 from kdive.providers.external_boot_authority.local_client import (
+    LocalAuthorityBinding,
     _AuthorityUnixTransport,
     local_authority_binding,
 )
@@ -223,10 +224,13 @@ def authority_sender_factory(
 
 
 def local_authority_sender_factory(
-    secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
+    secret_backend: SecretBackend,
+    borrow: Callable[[], SecretStr],
+    *,
+    binding: LocalAuthorityBinding | None = None,
 ) -> AuthorityRequestSender | None:
     """Build the configured worker-local sender without accepting a caller route."""
-    binding = local_authority_binding()
+    binding = binding if binding is not None else local_authority_binding()
     if binding is None:
         return None
     return AuthorityRequestSender(

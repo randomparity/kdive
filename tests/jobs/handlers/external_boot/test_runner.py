@@ -133,6 +133,7 @@ def _job(case: SeededCase) -> Job:
 def _observe(context: OperationContext) -> RunningKernelObservation:
     recovery = context.activation.recovery_point
     assert recovery is not None
+    assert context.port is not None
     return context.port.observe(recovery, authority_ref(context))
 
 
