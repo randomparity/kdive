@@ -262,6 +262,63 @@ async def test_verified_consumer_runs_inline_with_identity(
 
 
 @pytest.mark.anyio
+async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = RemoteModulePreparationExecutor()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    verifier_exited = asyncio.Event()
+
+    async def verify(
+        _pool: object,
+        _repository: object,
+        _request: object,
+        attempt: object,
+        consumer: Any,
+    ) -> object:
+        try:
+            return await consumer(attempt)
+        finally:
+            verifier_exited.set()
+
+    async def operation(attempt: object, identity: object, check_deadline: Any) -> str:
+        del attempt, identity
+        check_deadline()
+        started.set()
+        await release.wait()
+        return "terminal"
+
+    monkeypatch.setattr(
+        "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
+        verify,
+    )
+    task = asyncio.create_task(
+        prepare_verified_remote_module_attempt(
+            cast(Any, object()),
+            cast(Any, object()),
+            cast(Any, object()),
+            cast(Any, object()),
+            executor,
+            cast(Any, object()),
+            10.0,
+            None,
+            awaited_operation=operation,
+            clock=lambda: 9.0,
+        )
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not verifier_exited.is_set()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert verifier_exited.is_set()
+    executor.shutdown()
+
+
+@pytest.mark.anyio
 async def test_cancellation_retains_verified_consumer_until_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
