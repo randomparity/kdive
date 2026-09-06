@@ -146,6 +146,14 @@ def test_observation_dispatches_to_the_read_only_service_method() -> None:
             del peer, request
             pytest.fail("an observation must not dispatch as a mutation")
 
+        async def execute_conflict_resolution(
+            self,
+            peer: AuthenticatedPeer,
+            request: protocol.AuthorityConflictResolutionRequestV1,
+        ) -> protocol.AuthorityObservationV1:
+            del peer, request
+            pytest.fail("an observation must not dispatch as conflict resolution")
+
     async def exercise() -> None:
         service = ObservationService()
         request = _request() | {

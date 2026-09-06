@@ -18,6 +18,7 @@ from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityAcknowledgementV1,
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -1176,6 +1177,13 @@ class ExternalBootAuthorityService:
                 # cannot reconcile, not a state it should paper over.
                 if not await self._head_still_anchors(binding, context):
                     raise AuthorityServiceError("journal_conflict")
+                if isinstance(request, AuthorityConflictResolutionRequestV1):
+                    observed = await self._adapter.observe(request)
+                    if (
+                        observed.category == "unreadable"
+                        or observed.composite_state != request.expected_observed_composite
+                    ):
+                        raise AuthorityServiceError("superseded")
                 try:
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
@@ -1250,6 +1258,12 @@ class ExternalBootAuthorityService:
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
+
+    async def execute_conflict_resolution(
+        self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        """Mutate only after the authority re-observes the caller-bound conflict identity."""
+        return await self.execute_mutation(peer, request)
 
     async def observe_authority(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1

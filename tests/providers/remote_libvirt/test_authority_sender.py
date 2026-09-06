@@ -107,6 +107,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "health",
         "acknowledge_takeover",
         "execute_mutation",
+        "execute_conflict_resolution",
         "observe_authority",
         "resolve_device_identity",
     }

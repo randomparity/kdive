@@ -27,6 +27,7 @@ from kdive.providers.external_boot_authority.device_identity import (
 from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
     AuthorityHealthRequestV1,
     AuthorityMutationRequestV1,
@@ -55,6 +56,7 @@ _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_defa
 type Operation = Literal[
     "acknowledge-takeover",
     "observe-authority",
+    "execute-conflict-resolution",
     "execute-mutation",
     "execute-preparation",
     "health",
@@ -74,6 +76,10 @@ class AuthorityService(Protocol):
 
     async def observe_authority(
         self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1: ...
+
+    async def execute_conflict_resolution(
+        self, peer: AuthenticatedPeer, request: AuthorityConflictResolutionRequestV1
     ) -> AuthorityObservationV1: ...
 
 
@@ -129,6 +135,10 @@ def encode_request_envelope(
         raise ValueError("invalid-request")
     if operation in {"execute-mutation", "observe-authority"} and not isinstance(
         decoded, AuthorityMutationRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "execute-conflict-resolution" and not isinstance(
+        decoded, AuthorityConflictResolutionRequestV1
     ):
         raise ValueError("invalid-request")
     if operation == "execute-preparation" and not isinstance(
@@ -194,6 +204,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
         if operation not in {
             "acknowledge-takeover",
             "observe-authority",
+            "execute-conflict-resolution",
             "execute-mutation",
             "execute-preparation",
             "health",
@@ -217,6 +228,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             raise ValueError
         if operation in {"execute-mutation", "observe-authority"} and not isinstance(
             request, AuthorityMutationRequestV1
+        ):
+            raise ValueError
+        if operation == "execute-conflict-resolution" and not isinstance(
+            request, AuthorityConflictResolutionRequestV1
         ):
             raise ValueError
         if operation == "execute-preparation" and not isinstance(
@@ -293,6 +308,10 @@ async def _dispatch(
             if not isinstance(request, AuthorityMutationRequestV1):
                 raise _TransportError("invalid-request")
             return _success(await service.observe_authority(peer, request))
+        if operation == "execute-conflict-resolution":
+            if not isinstance(request, AuthorityConflictResolutionRequestV1):
+                raise _TransportError("invalid-request")
+            return _success(await service.execute_conflict_resolution(peer, request))
         if not isinstance(request, AuthorityMutationRequestV1):
             raise _TransportError("invalid-request")
         return _success(await service.execute_mutation(peer, request))
