@@ -31,8 +31,12 @@ from pydantic import ValidationError
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LocalRecoveryMetadataV1,
+    TargetProjectionV1,
+    _artifact_ref_parts,
     _open_or_create_private_child,
     _open_private_directory,
+    _read_private_file,
     _require_private_owned_directory,
 )
 
@@ -47,6 +51,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     _Guest,
 )
 from kdive.providers.ports.external_boot import (
+    ActivationOwnership,
     Architecture,
     ExternalBootActivationBinding,
     RunningKernelObservation,
@@ -319,7 +324,7 @@ def _canonical_name(value: str) -> str:
 
 
 class LocalArtifactRoot:
-    """Opens `<recovery_root>/<system_id>/<run_id>`, creating the two children when absent.
+    """Open the activation-exclusive artifact directory, creating owned children when absent.
 
     ADR-0591 binds this walk to the configured recovery root: the root is held from
     construction and every later resolution is descriptor-relative from it, so the only
@@ -346,9 +351,15 @@ class LocalArtifactRoot:
             finally:
                 os.close(root_fd)
             try:
-                return _open_or_create_private_child(system_fd, run)
+                run_fd = _open_or_create_private_child(system_fd, run)
             finally:
                 os.close(system_fd)
+            try:
+                return _open_or_create_private_child(
+                    run_fd, _canonical_name(ownership.binding.activation_id)
+                )
+            finally:
+                os.close(run_fd)
         except OSError as exc:
             # `from None`, not `from exc`: the root is opened by path, so its `OSError` holds
             # the host path in `.filename`, and chaining would re-attach it to the traceback
@@ -364,7 +375,7 @@ class LocalPayloadCleanup:
     def __init__(self, recovery_root: Path) -> None:
         self._root = recovery_root
 
-    def cleanup(self, root_fd: int, binding: ExternalBootActivationBinding) -> None:
+    def cleanup(self, root_fd: int, metadata: LocalRecoveryMetadataV1) -> None:
         """Remove the activation's payloads and its published archive, validating first.
 
         **Every check runs before the first unlink.** Deleting the payloads and only then
@@ -375,18 +386,95 @@ class LocalPayloadCleanup:
         the archive `finalize_tombstone` blocks on is untouched. Nothing required that ordering.
         """
         # Composed first, so a non-canonical binding refuses before anything is opened.
+        binding = metadata.binding
         directory = f"{_canonical_name(binding.system_id)}.{_canonical_name(binding.activation_id)}"
         recovery_fd = self._open_recovery_directory(directory)
         try:
+            ownership = ActivationOwnership(system_id=binding.system_id, run_id=binding.run_id)
+            parts = _artifact_ref_parts(
+                metadata.materialized_modules, ownership, binding.activation_id
+            )
+            try:
+                projection_fd = _open_private_directory(root_fd, parts[4])
+            except FileNotFoundError:
+                projection_fd = None
+            if projection_fd is not None:
+                try:
+                    try:
+                        raw_projection = _read_private_file(projection_fd, "target-projection.json")
+                    except FileNotFoundError:
+                        if os.listdir(projection_fd):
+                            raise ValueError(
+                                "target projection contains unexpected residue"
+                            ) from None
+                    else:
+                        projection = TargetProjectionV1.model_validate_json(raw_projection)
+                        if (
+                            projection.canonical_bytes() != raw_projection
+                            or projection.ownership != ownership
+                            or projection.activation_id != binding.activation_id
+                            or projection.digest.removeprefix("sha256:") != parts[4]
+                        ):
+                            raise ValueError("target projection does not match cleanup metadata")
+                finally:
+                    os.close(projection_fd)
             for name in PAYLOAD_NAMES:
                 with suppress(FileNotFoundError):
                     os.unlink(name, dir_fd=root_fd)
+            try:
+                projection_fd = _open_private_directory(root_fd, parts[4])
+            except FileNotFoundError:
+                projection_fd = None
+            if projection_fd is not None:
+                try:
+                    with suppress(FileNotFoundError):
+                        os.unlink("target-projection.json", dir_fd=projection_fd)
+                    os.fsync(projection_fd)
+                finally:
+                    os.close(projection_fd)
+            with suppress(FileNotFoundError):
+                os.rmdir(parts[4], dir_fd=root_fd)
             if recovery_fd is not None:
                 with suppress(FileNotFoundError):
                     os.unlink(_ARCHIVE_NAME, dir_fd=recovery_fd)
         finally:
             if recovery_fd is not None:
                 os.close(recovery_fd)
+        self._prune_owned_parents(root_fd, binding)
+
+    def _prune_owned_parents(
+        self, activation_descriptor: int, binding: ExternalBootActivationBinding
+    ) -> None:
+        root_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _require_private_owned_directory(root_fd, "artifact root")
+            try:
+                system_fd = _open_private_directory(root_fd, binding.system_id)
+            except FileNotFoundError:
+                # Legacy unit seams can supply an already-open activation descriptor while
+                # omitting its parents. There is then nothing this bounded parent walk can
+                # prune; payload deletion remains confined to the supplied descriptor.
+                return
+            try:
+                run_fd = _open_private_directory(system_fd, binding.run_id)
+                try:
+                    activation_fd = _open_private_directory(run_fd, binding.activation_id)
+                    try:
+                        opened = os.fstat(activation_descriptor)
+                        resolved = os.fstat(activation_fd)
+                        if (opened.st_dev, opened.st_ino) != (resolved.st_dev, resolved.st_ino):
+                            raise ValueError("artifact descriptor does not match cleanup ownership")
+                    finally:
+                        os.close(activation_fd)
+                    _rmdir_converged(run_fd, binding.activation_id)
+                finally:
+                    os.close(run_fd)
+                _rmdir_converged(system_fd, binding.run_id)
+            finally:
+                os.close(system_fd)
+            _rmdir_converged(root_fd, binding.system_id)
+        finally:
+            os.close(root_fd)
 
     def _open_recovery_directory(self, directory: str) -> int | None:
         """Open and validate the activation's recovery directory, or `None` when it is absent.
@@ -423,6 +511,18 @@ class LocalPayloadCleanup:
                 raise ValueError(_refused(_RECOVERY_REFUSED, exc)) from None
         finally:
             os.close(root_fd)
+
+
+def _rmdir_converged(parent_fd: int, name: str) -> None:
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if exc.errno == errno.ENOTEMPTY:
+            return
+        raise ValueError(_refused(_ARTIFACT_ROOT_REFUSED, exc)) from None
+    os.fsync(parent_fd)
 
 
 def open_libguestfs_guest() -> _Guest:

@@ -22,6 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityRecoveryObservationContextV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -172,6 +173,8 @@ class _FakeIO:
         # what the real store raises for every state in which the recovery record cannot be
         # rebuilt; `OSError` stands for a read that merely failed.
         self.reopen_error: BaseException | None = None
+        self.partial_abort_result: Literal["removed", "absent", "not-partial"] = "not-partial"
+        self.recovery_absent = False
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
@@ -281,6 +284,23 @@ class _FakeIO:
         self.tombstone = True
         self.intent_present = False
 
+    def abort_preparation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: str,
+        source_identity: str,
+        target_identity: str,
+        authority: OpaqueProviderRef,
+    ) -> Literal["removed", "absent", "not-partial"]:
+        del binding, plan_identity, source_identity, target_identity, authority
+        self.actions.append("abort-preparation")
+        return self.partial_abort_result
+
+    def recovery_is_absent(self, binding: ExternalBootActivationBinding) -> bool:
+        del binding
+        self.actions.append("recovery-absence")
+        return self.recovery_absent
+
     def materialize(self, plan: object) -> object:
         raise AssertionError("the authority adapter must not materialize")
 
@@ -368,6 +388,33 @@ def _context(
         recovery_objects=(),
     )
     return AuthorityCommitContextV1.for_record(record)
+
+
+def _recovery_context(
+    phase: JournalPhase = JournalPhase.MUTATION_STARTED,
+) -> AuthorityRecoveryObservationContextV1:
+    record = JournalRecordV1(
+        authority_id=AUTHORITY_ID,
+        generation=7,
+        system_id=SYSTEM_ID,
+        activation_id=ACTIVATION_ID,
+        run_id=RUN_ID,
+        plan_identity=PLAN_IDENTITY,
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        provider_kind="local-libvirt",
+        authority_instance="local-authority",
+        operation_identity="op-1",
+        operation_digest="sha256:" + "9" * 64,
+        sequence=4,
+        previous_digest="sha256:" + "0" * 64,
+        phase=phase,
+        attempt_id=ATTEMPT_ID,
+        expected_source_identity=SOURCE_IDENTITY,
+        intended_target_identity=TARGET_IDENTITY,
+        recovery_objects=(_owned_object(),),
+    )
+    return AuthorityRecoveryObservationContextV1.for_record(record)
 
 
 _PURPOSE_FOR: dict[AuthorityOperation, str] = {
@@ -839,6 +886,97 @@ async def test_a_deleting_commit_point_drives_cleanup_when_ownership_is_named(
 
     assert "cleanup" in io.actions
     assert io.tombstone is True
+
+
+async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery() -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("intent.json")
+    io.partial_abort_result = "removed"
+    io.recovery_absent = True
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    adapter = _adapter(io)
+
+    committed = await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+    recovered = await adapter.observe_recovery(request, _recovery_context())
+
+    assert committed.category == "absent"
+    assert recovered == committed
+    assert io.actions.count("abort-preparation") == 1
+    assert io.actions.count("recovery-absence") == 2
+
+
+async def test_restarted_recovery_proves_all_exact_storage_absent() -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("intent.json")
+    io.recovery_absent = True
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    observed = await _adapter(io).observe_recovery(
+        request, _recovery_context(JournalPhase.PROVIDER_RETURNED)
+    )
+
+    assert observed.category == "absent"
+    assert "recovery-absence" in io.actions
+
+
+async def test_restarted_recovery_refuses_present_activation_residue() -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("intent.json")
+    io.recovery_absent = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert caught.value.category == "provider_conflict"
+
+
+async def test_partial_abort_does_not_cache_absence_while_activation_residue_exists() -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("intent.json")
+    io.partial_abort_result = "removed"
+    io.recovery_absent = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    adapter = _adapter(io)
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+
+    assert caught.value.category == "provider_conflict"
+    assert io.actions.count("recovery-absence") == 1
+
+
+async def test_restarted_recovery_classifies_tombstone_before_absence_probe() -> None:
+    io = _FakeIO(_metadata("recovered"))
+    io.tombstone = True
+    io.intent_present = False
+    io.recovery_absent = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+
+    observed = await _adapter(io).observe_recovery(request, _recovery_context())
+
+    assert observed.category == "absent"
+    assert "recovery-absence" not in io.actions
 
 
 async def test_release_without_cleanup_mutates_nothing() -> None:
