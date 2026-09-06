@@ -33,7 +33,8 @@ from tests.services.external_boot.conftest import SeedActivation, build_activati
 _STATE = ExternalBootActivationState
 _OP = ExternalBootOperation
 
-_EVERY_RESTRICTED_STATE = frozenset(_STATE)
+_TERMINAL_STATE = _STATE.TORN_DOWN
+_EVERY_RESTRICTED_STATE = frozenset(set(_STATE) - {_TERMINAL_STATE})
 _ACTIVE_ONLY = frozenset({_STATE.ACTIVE})
 
 _ADMITTING_STATES: dict[ExternalBootOperation, frozenset[ExternalBootActivationState]] = {
@@ -86,7 +87,7 @@ _OWNING_RUN_SCOPED = frozenset(
 # System. `recovered` and `abandoned` with `cleanup_complete=true` stop restricting entirely and
 # are covered by the no-activation case instead.
 _RESTRICTING_CASES = [
-    *((state, False) for state in _STATE),
+    *((state, False) for state in _STATE if state is not _TERMINAL_STATE),
     (_STATE.RECOVERY_CONFLICT, True),
     (_STATE.RECOVERY_FAILED, True),
 ]
@@ -144,6 +145,24 @@ def test_the_admitted_table_is_total_over_the_activation_state_enum() -> None:
     """Totality, so no restricting activation can reach an undecided operation."""
     assert admission_module._ADMITTED.keys() == set(ExternalBootActivationState)
     assert admission_module._OWNING_RUN_SCOPED == _OWNING_RUN_SCOPED
+
+
+def test_a_terminal_activation_row_admits_no_operation_if_it_reaches_the_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleaned terminal row is normally filtered by the repository; stale input fails closed."""
+    system_id, run_id = uuid4(), uuid4()
+    activation = build_activation(
+        activation_id=uuid4(),
+        system_id=system_id,
+        run_id=run_id,
+        state=_TERMINAL_STATE,
+        cleanup_complete=True,
+    )
+    _restricted_by(monkeypatch, activation)
+    for operation in ExternalBootOperation:
+        with pytest.raises(ExternalBootDenied):
+            _check(system_id, operation, run_id)
 
 
 def test_the_expected_table_decides_every_operation() -> None:
@@ -229,7 +248,9 @@ def test_a_denial_carries_the_project_its_render_frame_filters_on() -> None:
     assert raised.value.project == "proj"
 
 
-_NON_ACTIVE_RESTRICTING = [state for state in _STATE if state is not _STATE.ACTIVE]
+_NON_ACTIVE_RESTRICTING = [
+    state for state in _STATE if state not in {_STATE.ACTIVE, _TERMINAL_STATE}
+]
 
 
 def _detach_check(
@@ -255,7 +276,7 @@ def test_the_owning_run_may_detach_in_every_restricting_state(
     assert _detach_check(monkeypatch, state, None) is None
 
 
-@pytest.mark.parametrize("state", list(_STATE))
+@pytest.mark.parametrize("state", list(_EVERY_RESTRICTED_STATE))
 def test_a_different_run_may_also_detach_in_every_restricting_state(
     monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
 ) -> None:
@@ -280,6 +301,7 @@ def test_get_restricting_for_system_sees_only_uncleaned_activations(
             torn_down = await seeded_activation(
                 conn, state=_STATE.RECOVERY_FAILED, cleanup_complete=True
             )
+            terminal = await seeded_activation(conn, state=_STATE.TORN_DOWN, cleanup_complete=True)
             await conn.commit()
 
             found = await repo.get_restricting_for_system(conn, uncleaned.system_id)
@@ -293,6 +315,7 @@ def test_get_restricting_for_system_sees_only_uncleaned_activations(
             still_restricting = await repo.get_restricting_for_system(conn, torn_down.system_id)
             assert still_restricting is not None
             assert still_restricting.id == torn_down.activation.id
+            assert await repo.get_restricting_for_system(conn, terminal.system_id) is None
             assert await repo.get_restricting_for_system(conn, uuid4()) is None
 
     asyncio.run(_run())

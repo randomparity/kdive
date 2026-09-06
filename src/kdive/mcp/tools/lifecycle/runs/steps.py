@@ -10,7 +10,10 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.external_boot_activations import ExternalBootActivationRepository
+from kdive.db.external_boot_activations import (
+    ExternalBootActivationRepository,
+    ExternalBootTeardownInProgress,
+)
 from kdive.db.idempotency import delete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
@@ -572,7 +575,16 @@ async def _enqueue_external_boot_locked(
         created_at=now,
         updated_at=now,
     )
-    persisted = await ExternalBootActivationRepository().create(conn, activation, reservation)
+    try:
+        persisted = await ExternalBootActivationRepository().create(conn, activation, reservation)
+    except ExternalBootTeardownInProgress:
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFLICT,
+            detail="System teardown is already in progress",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "external_boot_teardown_in_progress"},
+        )
     if persisted.state is not ExternalBootActivationState.PREPARING:
         return ToolResponse.failure(
             str(run.id),

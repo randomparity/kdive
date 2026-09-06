@@ -46,6 +46,7 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from tests.providers.local_libvirt.external_boot_support import _metadata
+from tests.providers.local_libvirt.fakes import libvirt_error
 from tests.providers.local_libvirt.lifecycle.boot.session_support import (
     ACTIVATION_ID,
     BINDING,
@@ -92,6 +93,127 @@ class FakeLane:
         return PinnedOperationOwnership(
             OperationOwnership(lease.system_id, lease.binding), FakePin(lease)
         )
+
+
+class _TeardownDomain(Domain):
+    def __init__(self, events: list[str], *, xml: str | None = None) -> None:
+        super().__init__(events, xml)
+        self.active = True
+        self.defined = True
+
+    def undefineFlags(self, flags: int) -> int:  # noqa: N802
+        self.events.append(f"domain.undefine:{flags}")
+        self.defined = False
+        return 0
+
+
+class _TeardownConn(Conn):
+    domain: _TeardownDomain
+
+    def lookupByName(self, name: str) -> _TeardownDomain:  # noqa: N802
+        self.events.append(f"domain.open:{name}")
+        if not self.domain.defined:
+            raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+        return self.domain
+
+
+def _teardown_factory(
+    tmp_path: Path,
+    events: list[str],
+    domain: _TeardownDomain,
+) -> tuple[LocalExternalBootSessionFactory, Path, Path]:
+    overlay = tmp_path / f"{SYSTEM_ID}-overlay.qcow2"
+    overlay.write_bytes(b"qcow")
+    baseline = tmp_path / f"{SYSTEM_ID}-baseline"
+    baseline.mkdir()
+    domain.xml = _xml(overlay=str(overlay))
+    domain.inactive_xml = domain.xml
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: events.append("connection.open") or _TeardownConn(events, domain),
+        open_artifact_root=lambda _ownership: (_ for _ in ()).throw(
+            AssertionError("teardown must not open or create activation artifacts")
+        ),
+        open_guest=lambda: Guest(events),
+        teardown_overlay_path=lambda _system_id: str(overlay),
+        teardown_baseline_path=lambda _system_id: str(baseline),
+    )
+    return factory, overlay, baseline
+
+
+def test_teardown_session_validates_both_xml_views_and_removes_only_owned_system(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+    sibling_overlay = tmp_path / "sibling-overlay.qcow2"
+    sibling_overlay.write_bytes(b"sibling")
+    sibling_baseline = tmp_path / "sibling-baseline"
+    sibling_baseline.mkdir()
+
+    session = factory.open_teardown(_lease(), _expected())
+    assert session.inspect().domain_validated
+    session.destroy()
+    session.undefine()
+    session.remove_overlay()
+    session.remove_baseline()
+    observed = session.inspect()
+    assert observed.domain_absent
+    assert observed.overlay_absent
+    assert observed.baseline_absent
+    session.close()
+
+    assert events.index("domain.xml:2") < events.index("domain.destroy")
+    assert events.index("domain.xml:0") < events.index("domain.destroy")
+    assert "domain.undefine:2" in events
+    assert not overlay.exists()
+    assert not baseline.exists()
+    assert sibling_overlay.read_bytes() == b"sibling"
+    assert sibling_baseline.is_dir()
+
+
+@pytest.mark.parametrize("view", ["live", "inactive"])
+def test_teardown_session_rejects_xml_ownership_mismatch_before_mutation(
+    tmp_path: Path, view: str
+) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+    mismatched = _xml(overlay=str(overlay), system_id=UUID(int=9))
+    if view == "live":
+        domain.xml = mismatched
+    else:
+        domain.inactive_xml = mismatched
+
+    session = factory.open_teardown(_lease(), _expected())
+    with pytest.raises(ValueError, match="ownership"):
+        session.inspect()
+    session.close()
+
+    assert "domain.destroy" not in events
+    assert not any(event.startswith("domain.undefine") for event in events)
+    assert overlay.exists()
+    assert baseline.exists()
+
+
+def test_teardown_session_absent_replay_is_read_only_and_creates_nothing(tmp_path: Path) -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    domain.defined = False
+    factory, overlay, baseline = _teardown_factory(tmp_path, events, domain)
+    overlay.unlink()
+    baseline.rmdir()
+
+    session = factory.open_teardown(_lease(), _expected())
+    before = sorted(tmp_path.iterdir())
+    observed = session.inspect()
+    session.close()
+
+    assert observed.domain_absent
+    assert observed.overlay_absent
+    assert observed.baseline_absent
+    assert sorted(tmp_path.iterdir()) == before == []
 
 
 LANE = FakeLane()

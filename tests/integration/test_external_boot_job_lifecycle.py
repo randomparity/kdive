@@ -56,7 +56,9 @@ from tests.jobs.handlers.external_boot.seeding import (
     RecordingAcknowledger,
     seed_case,
 )
+from tests.jobs.handlers.external_boot.support import RecordingTeardownExecutor
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
+from tests.support.object_store import INERT_OBJECT_STORE
 
 CREDENTIAL = SecretStr("external-boot-e2e-incarnation-credential")
 
@@ -72,8 +74,8 @@ ARMS: dict[str, dict[str, Any]] = {
         "purpose": "teardown",
         "kind": JobKind.TEARDOWN,
         "activation_state": "recovery_failed",
-        "seed": {"attempt_state": "failed", "with_release": True},
-        "after": "recovery_failed",
+        "seed": {"attempt_state": "failed", "with_reservation": True},
+        "after": "torn_down",
     },
 }
 
@@ -98,7 +100,11 @@ class _VehicleExecutor:
         )
 
 
-def _registry(vehicle: Vehicle, dsns: Callable[[str], str]) -> HandlerRegistry:
+def _registry(
+    vehicle: Vehicle,
+    dsns: Callable[[str], str],
+    teardown_executor: RecordingTeardownExecutor,
+) -> HandlerRegistry:
     """The production routing shape: one operations registry behind ``route_marked``.
 
     The two ordinary handlers are stand-ins that fail loudly rather than the real ones, because a
@@ -116,6 +122,8 @@ def _registry(vehicle: Vehicle, dsns: Callable[[str], str]) -> HandlerRegistry:
             secret_registry=SecretRegistry(),
             acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
             authority_executor=_VehicleExecutor(vehicle),
+            teardown_executor=teardown_executor,
+            artifact_store=INERT_OBJECT_STORE,
         )
     )
     registry = HandlerRegistry()
@@ -184,6 +192,7 @@ def test_a_marked_job_is_claimed_run_and_committed_by_a_real_worker(
         assert kind is spec["kind"]
 
         worker_id = f"local:external-boot-e2e-{arm}"
+        teardown_executor = RecordingTeardownExecutor(seed)
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=6) as pool:
             await _register_incarnation(pool, worker_id)
             async with pool.connection() as conn:
@@ -202,7 +211,7 @@ def test_a_marked_job_is_claimed_run_and_committed_by_a_real_worker(
 
             worker = Worker(
                 pool,
-                _registry(vehicle, authority_role_dsns),
+                _registry(vehicle, authority_role_dsns, teardown_executor),
                 worker_id=worker_id,
                 incarnation_credential=CREDENTIAL,
                 secret_registry=SecretRegistry(),
@@ -211,7 +220,12 @@ def test_a_marked_job_is_claimed_run_and_committed_by_a_real_worker(
 
         assert claimed is not None
         assert claimed.id == job.id
-        assert vehicle.port.calls, "the worker dispatched nothing to the operation handler"
+        if arm == "teardown":
+            assert len(teardown_executor.calls) == 1
+            assert teardown_executor.calls[0].system_id == vehicle.system_id
+            assert vehicle.port.calls == []
+        else:
+            assert vehicle.port.calls, "the worker dispatched nothing to the operation handler"
 
         activation = await _one(
             seed,

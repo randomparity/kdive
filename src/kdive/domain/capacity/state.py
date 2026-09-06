@@ -190,6 +190,7 @@ class ExternalBootActivationState(StrEnum):
     RECOVERY_CONFLICT = "recovery_conflict"
     RECOVERY_FAILED = "recovery_failed"
     ABANDONED = "abandoned"
+    TORN_DOWN = "torn_down"
 
 
 class ExternalBootReservationState(StrEnum):
@@ -312,6 +313,7 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
                 ExternalBootActivationState.PREPARED,
                 ExternalBootActivationState.ABANDONED,
                 ExternalBootActivationState.RECOVERY_CONFLICT,
+                ExternalBootActivationState.TORN_DOWN,
             }
         ),
         ExternalBootActivationState.PREPARED: frozenset(
@@ -319,6 +321,7 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
                 ExternalBootActivationState.ACTIVATING,
                 ExternalBootActivationState.RECOVERING,
                 ExternalBootActivationState.RECOVERY_CONFLICT,
+                ExternalBootActivationState.TORN_DOWN,
             }
         ),
         ExternalBootActivationState.ACTIVATING: frozenset(
@@ -326,12 +329,14 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
                 ExternalBootActivationState.ACTIVE,
                 ExternalBootActivationState.RECOVERING,
                 ExternalBootActivationState.RECOVERY_CONFLICT,
+                ExternalBootActivationState.TORN_DOWN,
             }
         ),
         ExternalBootActivationState.ACTIVE: frozenset(
             {
                 ExternalBootActivationState.RECOVERING,
                 ExternalBootActivationState.RECOVERY_CONFLICT,
+                ExternalBootActivationState.TORN_DOWN,
             }
         ),
         ExternalBootActivationState.RECOVERING: frozenset(
@@ -339,14 +344,18 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
                 ExternalBootActivationState.RECOVERED,
                 ExternalBootActivationState.RECOVERY_FAILED,
                 ExternalBootActivationState.RECOVERY_CONFLICT,
+                ExternalBootActivationState.TORN_DOWN,
             }
         ),
         ExternalBootActivationState.RECOVERY_CONFLICT: frozenset(
-            {ExternalBootActivationState.RECOVERING}
+            {ExternalBootActivationState.RECOVERING, ExternalBootActivationState.TORN_DOWN}
         ),
-        ExternalBootActivationState.RECOVERED: frozenset(),
-        ExternalBootActivationState.RECOVERY_FAILED: frozenset(),
-        ExternalBootActivationState.ABANDONED: frozenset(),
+        ExternalBootActivationState.RECOVERED: frozenset({ExternalBootActivationState.TORN_DOWN}),
+        ExternalBootActivationState.RECOVERY_FAILED: frozenset(
+            {ExternalBootActivationState.TORN_DOWN}
+        ),
+        ExternalBootActivationState.ABANDONED: frozenset({ExternalBootActivationState.TORN_DOWN}),
+        ExternalBootActivationState.TORN_DOWN: frozenset(),
     },
     ExternalBootReservationState: {
         ExternalBootReservationState.PENDING: frozenset({ExternalBootReservationState.READY}),

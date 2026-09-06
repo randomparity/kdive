@@ -168,6 +168,7 @@ _PROTECTED_TABLES = {
     "external_boot_authority_audit",
     "external_boot_authority_counters",
     "external_boot_authority_journal_heads",
+    "external_boot_teardown_receipts",
     "external_boot_recovery_quarantine",
     "external_boot_recovery_orphan_requests",
     "external_boot_release_cleanup_receipts",

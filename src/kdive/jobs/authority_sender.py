@@ -36,6 +36,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownResponseV1,
 )
 from kdive.providers.external_boot_authority.transport import (
     MAX_ENVELOPE_BYTES,
@@ -201,6 +203,14 @@ class AuthorityRequestSender:
             self._encode("execute-preparation", request), deadline=deadline
         )
         return _decode_response(response, AuthorityPreparationResponseV1)
+
+    async def execute_teardown(
+        self, request: AuthorityTeardownMutationRequestV1, *, deadline: float
+    ) -> AuthorityTeardownResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("execute-teardown", request), deadline=deadline
+        )
+        return _decode_response(response, AuthorityTeardownResponseV1)
 
     async def execute_remote_module_preparation(
         self, request: RemoteModuleVolumePreparationRequestV1, *, deadline: float

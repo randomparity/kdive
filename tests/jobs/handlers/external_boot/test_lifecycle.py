@@ -15,24 +15,30 @@ Charter criteria 5, 6 and 7. Every operation asserts the same four things:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, LiteralString
-from uuid import uuid4
+from typing import Any, LiteralString, cast
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
-from pydantic import SecretStr
+from psycopg.types.json import Jsonb
+from pydantic import SecretStr, TypeAdapter
 
 import kdive.jobs.handlers.external_boot.lifecycle as lifecycle_module  # noqa: F401
+from kdive.domain.capacity.state import ExternalBootActivationState, SystemState
+from kdive.domain.external_boot_activation import (
+    ExternalBootReleaseEvidenceV1,
+    ExternalBootTeardownEvidenceV1,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
@@ -43,24 +49,40 @@ from kdive.jobs.models import (
     ExternalBootAuthoritySuccessV1,
     _ActivateResult,
     _FailureResult,
+    _TeardownResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityTeardownMutationRequestV1,
+    AuthorityTeardownProofV1,
+    AuthorityTeardownResponseV1,
+    canonical_teardown_proof_bytes,
+    teardown_proof_digest,
 )
 from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
-from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
+from tests.jobs.handlers.external_boot.seeding import (
+    RecordingAcknowledger,
+    SeededCase,
+    seed_case,
+)
 from tests.jobs.handlers.external_boot.support import CASES, build_job
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
+from tests.mcp import systems_support
+from tests.mcp.systems_support import ctx, granted_allocation, provider_resolver, seed_system
+from tests.services.external_boot.conftest import seed_activation
+from tests.support.object_store import INERT_OBJECT_STORE
 
 
 def _job(case: SeededCase) -> Job:
@@ -116,6 +138,35 @@ async def _system_state(conn: AsyncConnection, system_id: Any) -> str:
         row = await cur.fetchone()
     assert row is not None
     return str(row["state"])
+
+
+async def _seed_core_owned_teardown_rows(conn: AsyncConnection, case: SeededCase) -> None:
+    await conn.execute(
+        "INSERT INTO snapshots (system_id,name,include_memory,state,principal,project) "
+        "VALUES (%s,'before-teardown',false,'available','p','proj')",
+        (case.vehicle.system_id,),
+    )
+    await conn.execute(
+        "INSERT INTO system_bootstrap_keys (system_id,private_key,public_key) "
+        "VALUES (%s,'private-test-key','public-test-key')",  # pragma: allowlist secret
+        (case.vehicle.system_id,),
+    )
+
+
+async def _core_owned_teardown_row_counts(
+    conn: AsyncConnection, case: SeededCase
+) -> tuple[int, int]:
+    snapshots = await _one(
+        conn,
+        "SELECT count(*) AS count FROM snapshots WHERE system_id = %s",
+        (case.vehicle.system_id,),
+    )
+    keys = await _one(
+        conn,
+        "SELECT count(*) AS count FROM system_bootstrap_keys WHERE system_id = %s",
+        (case.vehicle.system_id,),
+    )
+    return int(snapshots["count"]), int(keys["count"])
 
 
 class _VehicleExecutor:
@@ -178,6 +229,137 @@ class _ReceiptExecutor(_VehicleExecutor):
         return observation
 
 
+class _TeardownExecutor:
+    def __init__(self, conn: AsyncConnection, *, retained_quarantine: bool = False) -> None:
+        self._conn = conn
+        self._retained_quarantine = retained_quarantine
+
+    async def execute_teardown(
+        self, request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        release = None
+        if not self._retained_quarantine:
+            async with self._conn.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    "SELECT release_identity FROM external_boot_reservation_releases "
+                    "WHERE activation_id = %s",
+                    (request.activation_id,),
+                )
+                release = await cursor.fetchone()
+                if release is not None:
+                    await cursor.execute(
+                        "UPDATE external_boot_activations SET state = 'recovered', "
+                        "cleanup_complete = true, cleanup_evidence = %s::jsonb WHERE id = %s",
+                        (
+                            json.dumps(
+                                {
+                                    "schema": "external-boot-cleanup-evidence-v1",
+                                    "activation_id": str(request.activation_id),
+                                    "system_id": str(request.system_id),
+                                    "release_identity": release["release_identity"],
+                                    "mode": "ordinary",
+                                    "completed_at": "2026-09-06T00:00:00Z",
+                                }
+                            ),
+                            request.activation_id,
+                        ),
+                    )
+                else:
+                    await cursor.execute(
+                        "SELECT store_identity, owner_key, reserved_bytes "
+                        "FROM external_boot_reservations WHERE activation_id = %s",
+                        (request.activation_id,),
+                    )
+                    reservation = await cursor.fetchone()
+                    assert reservation is not None
+        proof_value: dict[str, Any]
+        if self._retained_quarantine:
+            proof_value = {"disposition": "retained_quarantine"}
+        elif release is not None:
+            proof_value = {
+                "disposition": "complete_released",
+                "teardown_evidence": {
+                    "schema": "external-boot-teardown-evidence-v1",
+                    "system_id": str(request.system_id),
+                    "system_state": "torn_down",
+                    "observed_at": "2026-09-06T00:00:00Z",
+                },
+            }
+        else:
+            teardown = {
+                "schema": "external-boot-teardown-evidence-v1",
+                "system_id": str(request.system_id),
+                "system_state": "torn_down",
+                "observed_at": "2026-09-06T00:00:00Z",
+            }
+            release_value = {
+                "schema": "external-boot-release-evidence-v1",
+                "activation_id": str(request.activation_id),
+                "system_id": str(request.system_id),
+                "store_identity": {"ref": reservation["store_identity"]},
+                "owner_key": {"ref": reservation["owner_key"]},
+                "reserved_bytes": reservation["reserved_bytes"],
+                "enumeration_complete": True,
+                "objects": [],
+                "verified_at": "2026-08-29T00:00:00Z",
+            }
+            release_identity = ExternalBootReleaseEvidenceV1.model_validate(release_value).identity
+            teardown_identity = ExternalBootTeardownEvidenceV1.model_validate(teardown).identity
+            proof_value = {
+                "disposition": "complete_ready",
+                "teardown_evidence": teardown,
+                "release_evidence": release_value,
+                "release_identity": release_identity,
+                "cleanup_evidence": {
+                    "schema": "external-boot-cleanup-evidence-v1",
+                    "activation_id": str(request.activation_id),
+                    "system_id": str(request.system_id),
+                    "release_identity": release_identity,
+                    "mode": "system_teardown",
+                    "teardown_identity": teardown_identity,
+                    "completed_at": "2026-09-06T00:00:00Z",
+                },
+            }
+        proof = TypeAdapter(AuthorityTeardownProofV1).validate_python(proof_value)
+        response = AuthorityTeardownResponseV1(
+            observation=AuthorityObservationV1(
+                observation_id=uuid4(),
+                category="conflict" if self._retained_quarantine else "absent",
+                composite_state=teardown_proof_digest(proof),
+            ),
+            proof=proof,
+            journal_sequence=2,
+            journal_digest="sha256:" + "8" * 64,
+        )
+        await self._conn.execute(
+            "INSERT INTO external_boot_authority_journal_heads "
+            "(authority_instance,system_id,sequence,digest,phase,authority_id,generation,"
+            "operation_identity,head_record) VALUES (%s,%s,%s,%s,'terminal',%s,%s,%s,%s) "
+            "ON CONFLICT (authority_instance,system_id) DO UPDATE SET sequence=excluded.sequence,"
+            "digest=excluded.digest,phase=excluded.phase,authority_id=excluded.authority_id,"
+            "generation=excluded.generation,operation_identity=excluded.operation_identity,"
+            "head_record=excluded.head_record",
+            (
+                request.authority_instance,
+                request.system_id,
+                response.journal_sequence,
+                response.journal_digest,
+                request.authority_id,
+                request.generation,
+                request.operation_identity,
+                Jsonb({"observation": response.observation.model_dump(mode="json", by_alias=True)}),
+            ),
+        )
+        return response
+
+
+class _DisconnectedTeardownExecutor:
+    async def execute_teardown(
+        self, _request: AuthorityTeardownMutationRequestV1
+    ) -> AuthorityTeardownResponseV1:
+        raise OSError("authority transport disconnected")
+
+
 def _ports(
     case: SeededCase, vehicle: Vehicle, dsns: Callable[[str], str]
 ) -> ExternalBootHandlerPorts:
@@ -187,6 +369,7 @@ def _ports(
         secret_registry=SecretRegistry(),
         acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
         authority_executor=_VehicleExecutor(vehicle),
+        artifact_store=INERT_OBJECT_STORE,
     )
 
 
@@ -283,6 +466,8 @@ async def _run_operation(
     registry: SecretRegistry | None = None,
 ) -> ExternalBootAuthoritySuccessV1:
     ports = _ports(case, case.vehicle, dsns)
+    if operation == "teardown":
+        ports = replace(ports, teardown_executor=_TeardownExecutor(seed))
     if registry is not None:
         ports = replace(
             ports,
@@ -348,8 +533,11 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
 
         # 1. the §7 port call, against the row's recovery point rather than the test's object
         readiness_reads = ["observe"] if operation == "activate" else []
-        assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
-        assert case.vehicle.port.recoveries[0] == persisted
+        if operation == "teardown":
+            assert case.vehicle.port.calls == []
+        else:
+            assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
+            assert case.vehicle.port.recoveries[0] == persisted
 
         # 2. criterion 7, through the worker's own gate
         marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
@@ -361,16 +549,17 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
         # variant" and written nowhere. Converting here would make this test more permissive than
         # the worker and hide exactly that — which it did, until the end-to-end test caught it.
         assert isinstance(result, ExternalBootAuthoritySuccessV1)
-        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
-            committed = await queue.complete_external_boot(
-                worker,
-                _job(case),
-                result,
-                incarnation_credential=SecretStr(case.credential),
-            )
-        assert committed is not None
+        if operation != "teardown":
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                committed = await queue.complete_external_boot(
+                    worker,
+                    _job(case),
+                    result,
+                    incarnation_credential=SecretStr(case.credential),
+                )
+            assert committed is not None
         row = await _activation_row(seed, case.vehicle.activation_id)
-        assert row["state"] == spec["after"]
+        assert row["state"] == ("torn_down" if operation == "teardown" else spec["after"])
         if operation == "resolve-conflict":
             observed = await _one(
                 seed,
@@ -436,25 +625,6 @@ def test_cleanup_marks_the_activation_cleanup_complete(
         assert (await _activation_row(seed, case.vehicle.activation_id))["cleanup_complete"] is True
 
     _drive(migrated_url, authority_role_dsns, "cleanup", body)
-
-
-def test_teardown_drives_the_system_to_torn_down(
-    migrated_url: str, authority_role_dsns: Callable[[str], str]
-) -> None:
-    async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        result = await _run_operation(authority_role_dsns, seed, case, "teardown")
-        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
-            await queue.complete_external_boot(
-                worker,
-                _job(case),
-                result,
-                incarnation_credential=SecretStr(case.credential),
-            )
-
-        assert await _system_state(seed, case.vehicle.system_id) == "torn_down"
-        assert (await _activation_row(seed, case.vehicle.activation_id))["cleanup_complete"] is True
-
-    _drive(migrated_url, authority_role_dsns, "teardown", body)
 
 
 @pytest.mark.parametrize(
@@ -792,43 +962,261 @@ def test_observed_identity_stale_terminalizes_once_in_the_classifying_transactio
     _drive(migrated_url, authority_role_dsns, "activate", body)
 
 
-def test_the_persisted_teardown_identity_digests_the_persisted_teardown_evidence(
+def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    """``teardown_identity`` must name a document an auditor can recompute from the stored row.
-
-    The commit persists ``teardown_evidence`` verbatim (``0122…sql:1454-1458``) and checks only
-    that ``teardown_identity`` *looks like* a sha256 — it never recomputes it. So a handler
-    digesting a different document produces an identity that names nothing, and no schema check
-    would ever catch it. An earlier version of this handler digested
-    ``{schema, system_id, system_state, generation}`` while emitting
-    ``{schema, system_id, system_state, observed_at}``.
-
-    This reads both columns back out of Postgres and recomputes the digest exactly as an auditor
-    would, rather than comparing two values the handler produced.
-    """
+    """The handler persists the exact typed proof accepted by the authenticated terminal head."""
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        await _seed_core_owned_teardown_rows(seed, case)
         result = await _run_operation(authority_role_dsns, seed, case, "teardown")
-        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
-            committed = await queue.complete_external_boot(
-                worker, _job(case), result, incarnation_credential=SecretStr(case.credential)
-            )
-        assert committed is not None
+        assert result.result.operation == "teardown"
+        response = cast(_TeardownResult, result.result).response
 
-        row = await _one(
+        receipt = await _one(
             seed,
-            "SELECT teardown_evidence, cleanup_evidence FROM external_boot_activations "
-            "WHERE id = %s",
-            (case.vehicle.activation_id,),
+            "SELECT proof_bytes, proof_digest, disposition, consumed "
+            "FROM external_boot_teardown_receipts WHERE root_authority_id = %s",
+            (result.authority_id,),
         )
-        recomputed = (
-            "sha256:"
-            + hashlib.sha256(
-                json.dumps(row["teardown_evidence"], sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+        head = await _one(
+            seed,
+            "SELECT sequence, digest, head_record FROM external_boot_authority_journal_heads "
+            "WHERE authority_instance = %s AND system_id = %s",
+            (result.authority_instance, result.system_id),
         )
+        assert receipt == {
+            "proof_bytes": canonical_teardown_proof_bytes(response.proof),
+            "proof_digest": response.observation.composite_state,
+            "disposition": "complete_released",
+            "consumed": True,
+        }
+        assert (head["sequence"], head["digest"]) == (
+            response.journal_sequence,
+            response.journal_digest,
+        )
+        assert head["head_record"]["observation"] == response.observation.model_dump(
+            mode="json", by_alias=True
+        )
+        assert await _system_state(seed, case.vehicle.system_id) == "torn_down"
+        assert await _job_state(seed, case.job_id) == "succeeded"
+        assert await _core_owned_teardown_row_counts(seed, case) == (0, 0)
+        assert case.vehicle.port.calls == []
 
-        assert row["cleanup_evidence"]["teardown_identity"] == recomputed
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_teardown_quarantine_retains_core_owned_state(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        await _seed_core_owned_teardown_rows(seed, case)
+        ports = replace(
+            _ports(case, case.vehicle, authority_role_dsns),
+            teardown_executor=_TeardownExecutor(seed, retained_quarantine=True),
+        )
+        handler = build_operations(ports).get("teardown")
+        assert handler is not None
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            result = await handler(
+                worker,
+                _job(case),
+                ExternalBootAuthorityMarkerV1.model_validate(case.marker),
+            )
+        assert cast(_TeardownResult, result.result).response.proof.disposition == (
+            "retained_quarantine"
+        )
+        assert await _core_owned_teardown_row_counts(seed, case) == (1, 1)
+        assert await _system_state(seed, case.vehicle.system_id) == "failed"
+        assert await _job_state(seed, case.job_id) == "queued"
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_teardown_runs_for_ready_system_with_active_activation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def _run() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="teardown",
+                operation="teardown",
+                activation_state="active",
+                system_state="ready",
+                run_state="succeeded",
+                with_reservation=True,
+            )
+            await _run_operation(authority_role_dsns, seed, case, "teardown")
+            assert await _system_state(seed, vehicle.system_id) == "torn_down"
+            assert await _job_state(seed, case.job_id) == "succeeded"
+
+    asyncio.run(_run())
+
+
+def test_public_ready_active_teardown_claims_and_completes_marked_handler(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def _run() -> None:
+        credential = SecretStr(f"worker-credential-{uuid4()}")
+        worker_id = f"docker:connected-teardown-{uuid4()}"
+        vehicle = build_vehicle()
+        async with systems_support.pool(migrated_url) as pool:
+            allocation_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, allocation_id, SystemState.READY)
+            investigation_id, run_id = uuid4(), uuid4()
+            async with pool.connection() as seed:
+                await seed.execute(
+                    "UPDATE allocations SET state = 'active' WHERE id = %s",
+                    (allocation_id,),
+                )
+                await seed.execute(
+                    "INSERT INTO investigations (id,principal,project,title,state) "
+                    "VALUES (%s,'p','proj','connected teardown','active')",
+                    (investigation_id,),
+                )
+                await seed.execute(
+                    "INSERT INTO runs (id,investigation_id,system_id,target_kind,state,"
+                    "build_profile,principal,project) "
+                    "VALUES (%s,%s,%s,'local-libvirt','succeeded','{}'::jsonb,'p','proj')",
+                    (run_id, investigation_id, system_id),
+                )
+                seeded = await seed_activation(
+                    seed,
+                    state=ExternalBootActivationState.ACTIVE,
+                    ready_reservation=True,
+                    system_id=UUID(system_id),
+                    run_id=run_id,
+                )
+                prior_job_id = uuid4()
+                prior_worker = f"docker:prior-authority-{uuid4()}"
+                await seed.execute(
+                    "INSERT INTO jobs (id,kind,payload,state,max_attempts,authorizing,dedup_key) "
+                    "VALUES (%s,'boot',%s,'succeeded',3,%s,%s)",
+                    (
+                        prior_job_id,
+                        Jsonb({"run_id": str(run_id)}),
+                        Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
+                        f"prior-authority-{prior_job_id}",
+                    ),
+                )
+                await seed.execute(
+                    "INSERT INTO worker_incarnations "
+                    "(incarnation,authority_kind,authority_binding,credential_hash,fence_protocol) "
+                    "VALUES (%s,'docker','{}'::jsonb,%s,4)",
+                    (prior_worker, b"p" * 32),
+                )
+                await seed.execute(
+                    "INSERT INTO external_boot_authorities "
+                    "(system_id,allocation_id,activation_id,run_id,plan_identity,job_id,"
+                    "job_attempt,purpose,provider_kind,authority_instance,worker_incarnation,"
+                    "operation,operation_identity,operation_digest,generation,state,"
+                    "acknowledged_at,retired_at) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,1,'activate','local-libvirt','authority-vehicle',%s,"
+                    "'activate','prior-activate',%s,1,'retired',now(),now())",
+                    (
+                        system_id,
+                        allocation_id,
+                        seeded.activation.id,
+                        run_id,
+                        seeded.activation.plan_identity,
+                        prior_job_id,
+                        prior_worker,
+                        "sha256:" + "2" * 64,
+                    ),
+                )
+                await seed.execute(
+                    "INSERT INTO external_boot_authority_counters (system_id,last_generation) "
+                    "VALUES (%s,1)",
+                    (system_id,),
+                )
+                await seed.execute(
+                    "INSERT INTO worker_incarnations "
+                    "(incarnation,authority_kind,authority_binding,credential_hash,fence_protocol) "
+                    "VALUES (%s,'docker','{}'::jsonb,sha256(convert_to(%s,'UTF8')),4)",
+                    (worker_id, credential.get_secret_value()),
+                )
+            response = await teardown_system(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            assert response.status == "queued"
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                job = await queue.dequeue(
+                    worker,
+                    worker_id,
+                    incarnation_credential=credential,
+                )
+                assert job is not None and str(job.id) == response.object_id
+                async with await psycopg.AsyncConnection.connect(
+                    migrated_url, autocommit=True
+                ) as seed:
+                    ports = ExternalBootHandlerPorts(
+                        resolver=resolver_for(vehicle),
+                        incarnation_credential=credential,
+                        secret_registry=SecretRegistry(),
+                        acknowledger=RecordingAcknowledger(
+                            authority_role_dsns("kdive_provider_authority")
+                        ),
+                        teardown_executor=_TeardownExecutor(seed),
+                        artifact_store=INERT_OBJECT_STORE,
+                    )
+                    handler = build_operations(ports).get("teardown")
+                    assert handler is not None
+                    await handler(
+                        worker,
+                        job,
+                        ExternalBootAuthorityMarkerV1.model_validate(
+                            job.payload["external_boot_authority_v1"]
+                        ),
+                    )
+            async with pool.connection() as conn:
+                assert await _system_state(conn, system_id) == "torn_down"
+                assert await _job_state(conn, response.object_id) == "succeeded"
+                audit = await _one(
+                    conn,
+                    "SELECT count(*) AS count FROM audit_log "
+                    "WHERE tool='systems.teardown' AND object_id=%s",
+                    (system_id,),
+                )
+                assert audit["count"] == 1
+
+    asyncio.run(_run())
+
+
+def test_teardown_transport_failure_is_a_bound_nonterminal_authority_failure(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """A sender disconnect keeps the admitted acknowledgement available to the worker commit."""
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        ports = replace(
+            _ports(case, case.vehicle, authority_role_dsns),
+            teardown_executor=_DisconnectedTeardownExecutor(),
+        )
+        handler = build_operations(ports).get("teardown")
+        assert handler is not None
+
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            with pytest.raises(ExternalBootAuthorityFailure) as caught:
+                await handler(
+                    worker,
+                    _job(case),
+                    ExternalBootAuthorityMarkerV1.model_validate(case.marker),
+                )
+
+        result = caught.value.result
+        assert _authority_binding_matches(
+            ExternalBootAuthorityMarkerV1.model_validate(case.marker), result
+        )
+        failure = result.result
+        assert isinstance(failure, _FailureResult)
+        assert failure.error_category.value == "infrastructure_failure"
+        assert failure.terminal is False
+        assert failure.failure_context.phase == "commit"
 
     _drive(migrated_url, authority_role_dsns, "teardown", body)

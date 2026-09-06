@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -35,7 +36,11 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityTeardownMutationRequestV1,
+    JournalPhase,
+    JournalRecordV1,
 )
+from kdive.providers.external_boot_authority.teardown import AuthorityTeardownReservationV1
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -49,6 +54,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.remote_libvirt import external_boot_authority
 from kdive.providers.remote_libvirt import external_boot_materialization as materialization_module
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
@@ -65,6 +71,8 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationResponseV1,
     RemoteModuleVolumePreparationStore,
+    RemoteSystemTeardownInspection,
+    RemoteSystemTeardownState,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
@@ -79,6 +87,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes impor
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
+    RemoteDeviceIdentity,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
@@ -93,6 +102,10 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedModuleVolumes,
     PreparedVolume,
     render_module_volume_name,
+)
+from kdive.providers.remote_libvirt.lifecycle.xml import (
+    overlay_volume_name,
+    supplied_base_volume_name,
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -2682,3 +2695,475 @@ def test_remote_worker_inputs_exclude_provider_owned_volume_and_appliance_identi
 
     assert set(RemoteModulePreparationInputs.__dataclass_fields__) == {"authority"}
     assert inputs.authority == request.authority
+
+
+def _remote_teardown_request(*, generation: int = 7) -> AuthorityTeardownMutationRequestV1:
+    record = _record()
+    return AuthorityTeardownMutationRequestV1(
+        authority_id=UUID("00000000-0000-0000-0000-00000000000a"),
+        generation=generation,
+        system_id=UUID(record.binding.system_id),
+        activation_id=UUID(record.binding.activation_id),
+        run_id=UUID(record.binding.run_id),
+        plan_identity=record.plan_identity,
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        provider_kind="remote-libvirt",
+        authority_instance="remote-authority",
+        operation_identity="teardown-op",
+        operation_digest="sha256:" + "9" * 64,
+        attempt_id=UUID("00000000-0000-0000-0000-00000000000b"),
+    )
+
+
+def _remote_teardown_context(
+    request: AuthorityTeardownMutationRequestV1,
+) -> AuthorityCommitContextV1:
+    return AuthorityCommitContextV1.for_record(
+        JournalRecordV1(
+            **request.model_dump(exclude={"schema_", "attempt_id"}),
+            sequence=4,
+            previous_digest="sha256:" + "0" * 64,
+            phase=JournalPhase.MUTATION_STARTED,
+            attempt_id=request.attempt_id,
+            expected_source_identity="sha256:" + "1" * 64,
+            intended_target_identity="sha256:" + "2" * 64,
+            recovery_objects=(),
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_restarts_after_lost_storage_response(
+    tmp_path: Path,
+) -> None:
+    request = _remote_teardown_request()
+    context = _remote_teardown_context(request)
+    reservation = AuthorityTeardownReservationV1(
+        disposition="ready",
+        store_identity=OpaqueProviderRef(ref="stores/private"),
+        owner_key=OpaqueProviderRef(ref="owners/private"),
+        reserved_bytes=4096,
+    )
+    calls: list[str] = []
+    state = {"domain": True, "overlay": True, "baseline": True, "fail": True}
+
+    class Operations:
+        def validate_system_teardown(self, _state: object) -> None:
+            calls.append("validate")
+
+        def destroy_system_domain(self, _state: object) -> None:
+            calls.append("destroy")
+            state["domain"] = False
+
+        def undefine_system_domain(self, _state: object) -> None:
+            calls.append("undefine")
+
+        def remove_system_artifacts(self, _state: object) -> None:
+            calls.append("remove")
+            state["overlay"] = False
+            state["baseline"] = False
+            if state.pop("fail", False):
+                raise RuntimeError("lost response after storage removal")
+
+        def inspect_system_teardown(
+            self, _state: object, *, domain_validated: bool
+        ) -> RemoteSystemTeardownInspection:
+            assert domain_validated
+            return RemoteSystemTeardownInspection(
+                domain_absent=not state["domain"],
+                overlay_absent=not state["overlay"],
+                baseline_absent=not state["baseline"],
+                recovery_absent=True,
+            )
+
+    def adapter(store: RemoteModuleVolumePreparationStore) -> RemoteExternalBootAuthorityAdapter:
+        executor = RemoteModulePreparationExecutor()
+        return RemoteExternalBootAuthorityAdapter(
+            cast(Any, object()),
+            RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
+            executor,
+            teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+        )
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    first = adapter(store)
+    with pytest.raises(RuntimeError, match="lost response"):
+        await first.execute_system_teardown(request, context, reservation)
+    first.close()
+    store.close()
+    assert calls == ["validate", "destroy", "undefine", "remove"]
+
+    restarted_store = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = adapter(restarted_store)
+    result = await restarted.execute_system_teardown(request, context, reservation)
+    assert result.complete
+    assert result.reservation == reservation
+    assert result.completed_at == datetime(2026, 9, 6, tzinfo=UTC)
+    assert calls == ["validate", "destroy", "undefine", "remove", "remove"]
+    observed = await restarted.observe_system_teardown(request, context)
+    assert observed == result
+    assert calls == ["validate", "destroy", "undefine", "remove", "remove"]
+    for changed in (
+        request.model_copy(update={"plan_identity": "sha256:" + "8" * 64}),
+        request.model_copy(update={"activation_id": uuid4()}),
+    ):
+        with pytest.raises(ValueError, match="conflicts with retained intent"):
+            await restarted.execute_system_teardown(
+                changed, _remote_teardown_context(changed), reservation
+            )
+    assert calls == ["validate", "destroy", "undefine", "remove", "remove"]
+    restarted.close()
+    restarted_store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_reaps_full_private_recovery_before_undefine(
+    tmp_path: Path,
+) -> None:
+    recovery = _record()
+    plan = _plan_for_record(recovery)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, recovery)
+    store.publish_materialization(plan, recovery.materialization)
+    store.publish_recovery(recovery)
+    request = _remote_teardown_request()
+    context = _remote_teardown_context(request)
+    reservation = AuthorityTeardownReservationV1(
+        disposition="pending",
+        store_identity=OpaqueProviderRef(ref="stores/private"),
+        owner_key=OpaqueProviderRef(ref="owners/private"),
+        reserved_bytes=4096,
+    )
+    calls: list[str] = []
+    flags = {"domain": True, "recovery": True, "artifacts": True}
+
+    class Operations:
+        def validate_system_teardown(self, _state: object) -> None:
+            calls.append("validate")
+
+        def destroy_system_domain(self, _state: object) -> None:
+            calls.append("destroy")
+
+        def undefine_system_domain(self, _state: object) -> None:
+            assert not flags["recovery"]
+            calls.append("undefine")
+            flags["domain"] = False
+
+        def remove_system_artifacts(self, _state: object) -> None:
+            calls.append("remove")
+            flags["artifacts"] = False
+
+        def inspect_system_teardown(
+            self, _state: object, *, domain_validated: bool
+        ) -> RemoteSystemTeardownInspection:
+            assert domain_validated
+            return RemoteSystemTeardownInspection(
+                domain_absent=not flags["domain"],
+                overlay_absent=not flags["artifacts"],
+                baseline_absent=not flags["artifacts"],
+                recovery_absent=not flags["recovery"] and not flags["artifacts"],
+            )
+
+    class ModuleHost:
+        async def execute_system_teardown(self, exact: object) -> object:
+            assert isinstance(exact, external_boot_authority.RemoteModuleSystemTeardownRequestV1)
+            assert exact.authority == request
+            retained = store.reopen_system_teardown(
+                RemoteExternalBootAuthorityAdapter._teardown_anchor(request, context)
+            )
+            assert retained is not None
+            assert retained.phase == "domain-destroyed"
+            calls.append("reap")
+            flags["recovery"] = False
+            return object()
+
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(
+        cast(Any, object()),
+        RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
+        executor,
+        remote_module_host=cast(Any, ModuleHost()),
+        teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    result = await adapter.execute_system_teardown(request, context, reservation)
+    assert result.complete
+    assert calls == ["validate", "destroy", "reap", "undefine", "remove"]
+    adapter.close()
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_cancellation_retains_underlying_checkpoint(
+    tmp_path: Path,
+) -> None:
+    request = _remote_teardown_request()
+    context = _remote_teardown_context(request)
+    reservation = AuthorityTeardownReservationV1(
+        disposition="released",
+        store_identity=OpaqueProviderRef(ref="stores/private"),
+        owner_key=OpaqueProviderRef(ref="owners/private"),
+        reserved_bytes=4096,
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    class Operations:
+        def validate_system_teardown(self, _state: object) -> None:
+            return None
+
+        def destroy_system_domain(self, _state: object) -> None:
+            started.set()
+            release.wait()
+
+        def undefine_system_domain(self, _state: object) -> None:
+            raise AssertionError("cancellation must return after the active phase checkpoints")
+
+        def remove_system_artifacts(self, _state: object) -> None:
+            raise AssertionError("cancellation must stop before another phase")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(
+        cast(Any, object()),
+        RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
+        executor,
+    )
+    task = asyncio.create_task(adapter.execute_system_teardown(request, context, reservation))
+    await asyncio.to_thread(started.wait)
+    task.cancel("authority shutdown")
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError, match="authority shutdown"):
+        await task
+    record = store.reopen_system_teardown(adapter._teardown_anchor(request, context))
+    assert record is not None
+    assert record.phase == "domain-destroyed"
+    adapter.close()
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_retains_unfinished_preparation_before_undefine(
+    tmp_path: Path,
+) -> None:
+    recovery = _record()
+    plan = _plan_for_record(recovery)
+    base = _remote_preparation_request()
+    authority = base.authority.model_copy(
+        update={
+            "system_id": UUID(recovery.binding.system_id),
+            "activation_id": UUID(recovery.binding.activation_id),
+            "run_id": UUID(recovery.binding.run_id),
+            "plan_identity": plan.identity,
+            "plan": plan,
+        }
+    )
+    operation = base.operation.model_copy(
+        update={
+            "system_id": recovery.binding.system_id,
+            "run_id": recovery.binding.run_id,
+            "plan_identity": plan.identity,
+            "release": plan.module_obligation.release,
+            "source_manifest": plan.module_obligation.source_manifest,
+        }
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(
+        RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation),
+        999.0,
+    )
+    request = _remote_teardown_request()
+    context = _remote_teardown_context(request)
+    reservation = AuthorityTeardownReservationV1(
+        disposition="pending",
+        store_identity=OpaqueProviderRef(ref="stores/private"),
+        owner_key=OpaqueProviderRef(ref="owners/private"),
+        reserved_bytes=4096,
+    )
+    calls: list[str] = []
+
+    class Operations:
+        def validate_system_teardown(self, _state: object) -> None:
+            calls.append("validate")
+
+        def destroy_system_domain(self, _state: object) -> None:
+            calls.append("destroy")
+
+        def unfinished_preparation_absent(self, _state: object) -> bool:
+            calls.append("inspect-partial")
+            return False
+
+        def inspect_system_teardown(
+            self, _state: object, *, domain_validated: bool
+        ) -> RemoteSystemTeardownInspection:
+            assert domain_validated
+            return RemoteSystemTeardownInspection(False, False, False, False)
+
+        def undefine_system_domain(self, _state: object) -> None:
+            raise AssertionError("a retained partial must preserve the inactive domain")
+
+        def remove_system_artifacts(self, _state: object) -> None:
+            raise AssertionError("a retained partial must preserve System storage")
+
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(
+        cast(Any, object()),
+        RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
+        executor,
+    )
+    result = await adapter.execute_system_teardown(request, context, reservation)
+    assert result.quarantine_retained
+    assert calls == ["validate", "destroy", "inspect-partial"]
+    adapter.close()
+    store.close()
+
+
+def test_concrete_remote_system_teardown_preserves_siblings_and_rejects_aliases() -> None:
+    record = _record()
+    system_id = record.binding.system_id
+    sibling_id = str(uuid4())
+    own_overlay = overlay_volume_name(system_id)
+    own_base = supplied_base_volume_name(system_id)
+    sibling_overlay = overlay_volume_name(sibling_id)
+    sibling_base = supplied_base_volume_name(sibling_id)
+    paths = {
+        own_overlay: "/pool/overlay.qcow2",
+        own_base: "/pool/base.qcow2",
+        sibling_overlay: "/pool/sibling.qcow2",
+        sibling_base: "/pool/sibling-base.qcow2",
+    }
+    deleted: set[str] = set()
+
+    def absent(code: int) -> libvirt.libvirtError:
+        error = libvirt.libvirtError("absent")
+        error.err = (code, 0, "absent", 0, "", "", "", 0, 0)
+        return error
+
+    class Volume:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def name(self) -> str:
+            return self._name
+
+        def path(self) -> str:
+            return paths[self._name]
+
+        def delete(self, flags: int = 0) -> int:
+            assert flags == 0
+            deleted.add(self._name)
+            return 0
+
+    class Pool:
+        def storageVolLookupByName(self, name: str) -> Volume:  # noqa: N802
+            if name in deleted:
+                raise absent(libvirt.VIR_ERR_NO_STORAGE_VOL)
+            if name not in paths:
+                raise absent(libvirt.VIR_ERR_NO_STORAGE_VOL)
+            return Volume(name)
+
+    class Domain:
+        def __init__(self, identity: str, xml: str, *, active: bool) -> None:
+            self.identity = identity
+            self.xml = xml
+            self.active = active
+            self.defined = True
+
+        def name(self) -> str:
+            return domain_name_for(UUID(self.identity))
+
+        def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+            del flags
+            return self.xml
+
+        def isActive(self) -> int:  # noqa: N802
+            return int(self.active)
+
+        def isPersistent(self) -> int:  # noqa: N802
+            return 1
+
+        def destroy(self) -> int:
+            self.active = False
+            return 0
+
+        def undefineFlags(self, flags: int = 0) -> int:  # noqa: N802
+            assert flags == libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
+            self.defined = False
+            return 0
+
+    owner = Domain(
+        system_id,
+        _source_xml(system_id=UUID(system_id), pool="modules"),
+        active=True,
+    )
+    sibling_xml = (
+        _source_xml(system_id=UUID(sibling_id), pool="modules")
+        .replace("/pool/overlay.qcow2", "/pool/sibling.qcow2")
+        .replace("/pool/base.qcow2", "/pool/sibling-base.qcow2")
+    )
+    sibling = Domain(sibling_id, sibling_xml, active=False)
+    pool = Pool()
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def lookupByName(self, name: str) -> Domain:  # noqa: N802
+            if owner.defined and name == owner.name():
+                return owner
+            raise absent(libvirt.VIR_ERR_NO_DOMAIN)
+
+        def storagePoolLookupByName(self, name: str) -> Pool:  # noqa: N802
+            assert name == "modules"
+            return pool
+
+        def listAllDomains(self, flags: int = 0) -> list[Domain]:  # noqa: N802
+            assert flags == 0
+            return [domain for domain in (owner, sibling) if domain.defined]
+
+    identities = {
+        path: RemoteDeviceIdentity(kind="inode", primary=1, secondary=index)
+        for index, path in enumerate(paths.values(), start=1)
+    }
+
+    class Identity:
+        def identity(self, path: str) -> RemoteDeviceIdentity | None:
+            return identities.get(path)
+
+    operations = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()),
+        cast(Any, Connection),
+        "modules",
+        lambda: 1.0,
+        cast(Any, object()),
+        Identity(),
+    )
+    state = RemoteSystemTeardownState(
+        binding=record.binding,
+        plan_identity=record.plan_identity,
+        preparation=None,
+        terminal=None,
+        materialization=None,
+        recovery=None,
+    )
+    operations.validate_system_teardown(state)
+    operations.destroy_system_domain(state)
+    operations.undefine_system_domain(state)
+    operations.remove_system_artifacts(state)
+    assert deleted == {own_overlay, own_base}
+    assert sibling.defined
+    assert sibling_overlay not in deleted
+    assert sibling_base not in deleted
+
+    owner.defined = True
+    owner.active = False
+    deleted.clear()
+    identities["/pool/sibling.qcow2"] = identities["/pool/overlay.qcow2"]
+    with pytest.raises(CategorizedError, match="another domain references"):
+        operations.validate_system_teardown(state)
+    assert deleted == set()
