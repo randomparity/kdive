@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from uuid import UUID, uuid5
 
 from kdive.providers.external_boot_authority.protocol import (
@@ -31,6 +32,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalOperationLeaseScope,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -110,8 +114,11 @@ class LocalExternalBootAuthorityAdapter:
     already bound inside the injected coordinator.
     """
 
-    def __init__(self, ports: LocalLibvirtExternalBoot) -> None:
+    def __init__(
+        self, ports: LocalLibvirtExternalBoot, lease_scope: LocalOperationLeaseScope | None = None
+    ) -> None:
         self._ports = ports
+        self._lease_scope = lease_scope
         # Highest generation this adapter has admitted per activation lane. It complements
         # the journal watermark the service enforces through ``resolve_current``; it does
         # not replace it, and it is deliberately in-process because a restarted adapter
@@ -120,16 +127,36 @@ class LocalExternalBootAuthorityAdapter:
         self._pending_cleanup_finalization: dict[str, RecoveryPoint] = {}
         self._pending_absence: dict[str, AuthorityMutationRequestV1] = {}
 
+    async def _offload[T](
+        self,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        operation: Callable[[], T],
+    ) -> T:
+        def scoped() -> T:
+            if self._lease_scope is None:
+                return operation()
+            with self._lease_scope.issue(_authority_ref(request), _activation_binding(request)):
+                return operation()
+
+        task = asyncio.create_task(asyncio.to_thread(scoped))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            finally:
+                raise
+
     async def observe(
         self, request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1
     ) -> AuthorityObservationV1:
         """Classify observed provider state against the request's exact identities."""
         if isinstance(request, AuthorityPreparationMutationRequestV1):
-            receipt = await asyncio.to_thread(
-                self._ports.observe_preparation, self._preparation_request(request)
+            receipt = await self._offload(
+                request, lambda: self._ports.observe_preparation(self._preparation_request(request))
             )
             return self._preparation_observation(receipt)
-        return await asyncio.to_thread(self._observe, request)
+        return await self._offload(request, lambda: self._observe(request))
 
     async def observe_recovery(
         self,
@@ -142,7 +169,7 @@ class LocalExternalBootAuthorityAdapter:
             or context.attempt_id != request.attempt_id
         ):
             raise AuthorityServiceError("provider_conflict")
-        return await asyncio.to_thread(self._observe_recovery, request)
+        return await self._offload(request, lambda: self._observe_recovery(request))
 
     async def commit(
         self,
@@ -153,17 +180,17 @@ class LocalExternalBootAuthorityAdapter:
         operation = self._require_permitted_commit_point(request, context)
         self._require_admissible_generation(request)
         if isinstance(request, AuthorityPreparationMutationRequestV1):
-            receipt = await asyncio.to_thread(
-                self._ports.execute_preparation, self._preparation_request(request)
+            receipt = await self._offload(
+                request, lambda: self._ports.execute_preparation(self._preparation_request(request))
             )
             return self._preparation_observation(receipt)
-        return await asyncio.to_thread(self._commit, request, operation, context)
+        return await self._offload(request, lambda: self._commit(request, operation, context))
 
     async def preparation_receipt(
         self, request: AuthorityPreparationMutationRequestV1
     ) -> ExternalBootPreparationObservation:
-        return await asyncio.to_thread(
-            self._ports.observe_preparation, self._preparation_request(request)
+        return await self._offload(
+            request, lambda: self._ports.observe_preparation(self._preparation_request(request))
         )
 
     @staticmethod
@@ -199,10 +226,9 @@ class LocalExternalBootAuthorityAdapter:
         authority = _authority_ref(request)
         point = self._pending_cleanup_finalization.pop(request.operation_identity, None)
         if point is None:
-            point = await asyncio.to_thread(
-                self._ports.cleanup_receipt,
-                _activation_binding(request),
-                authority,
+            point = await self._offload(
+                request,
+                lambda: self._ports.cleanup_receipt(_activation_binding(request), authority),
             )
         if point is None:
             # A terminal replay after exact finalization has no durable point left to
@@ -211,11 +237,11 @@ class LocalExternalBootAuthorityAdapter:
         matched = self._require_matching_identities(request, point)
         if not _ownership_is_proven(request, matched, require_named=True):
             raise AuthorityServiceError("provider_conflict")
-        await asyncio.to_thread(
-            self._ports.finalize_cleanup_tombstone,
-            matched,
-            _cleanup_proof(context, matched),
-            authority,
+        await self._offload(
+            request,
+            lambda: self._ports.finalize_cleanup_tombstone(
+                matched, _cleanup_proof(context, matched), authority
+            ),
         )
 
     @staticmethod

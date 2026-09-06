@@ -788,10 +788,10 @@ async def test_unproven_recovery_object_is_quarantined_not_reused_or_deleted() -
 # --------------------------------------------------------------------------------------
 
 
-def test_construction_takes_only_the_coordinator() -> None:
+def test_construction_takes_only_the_coordinator_and_local_lease_scope() -> None:
     parameters = list(inspect.signature(LocalExternalBootAuthorityAdapter.__init__).parameters)
 
-    assert parameters == ["self", "ports"]
+    assert parameters == ["self", "ports", "lease_scope"]
 
 
 def test_no_request_field_can_select_a_host_resource() -> None:

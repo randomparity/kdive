@@ -52,6 +52,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLease,
+    LocalOperationLeaseScope,
     LocalPayloadCleanup,
     LocalRunningObserver,
     open_libguestfs_guest,
@@ -78,6 +79,23 @@ BINDING = ExternalBootActivationBinding(
     activation_id="33333333-3333-3333-3333-333333333333",
 )
 OWNERSHIP = OperationOwnership(SYSTEM_ID, BINDING)
+
+
+def test_operation_lease_scope_is_exact_and_released() -> None:
+    scope = LocalOperationLeaseScope()
+    authority = OpaqueProviderRef(ref="authority/exact")
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+    with scope.issue(authority, BINDING):
+        lease = scope.resolve(authority)
+        assert lease.binding == BINDING
+        with pytest.raises(RuntimeError, match="not active"):
+            scope.resolve(OpaqueProviderRef(ref="authority/foreign"))
+    assert lease.released
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+
+
 _NOTES = bytes.fromhex("040000000400000003000000474e5500") + bytes.fromhex("01020304")
 
 

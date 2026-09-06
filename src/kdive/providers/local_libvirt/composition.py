@@ -41,14 +41,18 @@ from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
+    RealLocalExternalBootIO,
+    RealLocalExternalBootMaterializer,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     LocalExternalBootReadiness,
     prepare_console_readiness_window,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import RealGuestRecoveryWriter
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     CleanupPayloads,
     Connect,
@@ -63,6 +67,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
+    LocalOperationLeaseScope,
     LocalPayloadCleanup,
     LocalRunningObserver,
     open_libguestfs_guest,
@@ -86,7 +91,11 @@ from kdive.providers.local_libvirt.reaping import (
 )
 from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT, LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
+    LIBVIRT_RECOVERY_ROOT,
+    LIBVIRT_URI,
+)
 from kdive.providers.ports.traffic import LocalCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
@@ -233,6 +242,13 @@ class LocalExternalBootMechanisms:
 
     factory: LocalExternalBootSessionFactory
     recovery_root: Path
+    lease_scope: LocalOperationLeaseScope
+
+
+@dataclass(frozen=True, slots=True)
+class LocalExternalBootAuthorityBinding:
+    provider: LocalLibvirtExternalBoot
+    adapter: LocalExternalBootAuthorityAdapter
 
 
 def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
@@ -242,8 +258,10 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
     caller can inject a root, URI, path, command or credential into them.
     """
     root = config.require(LIBVIRT_RECOVERY_ROOT)
+    lease_scope = LocalOperationLeaseScope()
+    lane = LocalOperationLane()
     factory = build_external_boot_session_factory(
-        pin_lease=LocalOperationLane().pin,
+        pin_lease=lane.pin,
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=open_libguestfs_guest,
         prepare_console=prepare_console_readiness_window,
@@ -251,7 +269,24 @@ def build_external_boot_session_mechanisms() -> LocalExternalBootMechanisms:
         observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
     )
-    return LocalExternalBootMechanisms(factory=factory, recovery_root=root)
+    return LocalExternalBootMechanisms(factory=factory, recovery_root=root, lease_scope=lease_scope)
+
+
+def build_local_external_boot_authority(store: ObjectStore) -> LocalExternalBootAuthorityBinding:
+    """Build the local provider and authority adapter over one exact lease scope."""
+    mechanisms = build_external_boot_session_mechanisms()
+    io = RealLocalExternalBootIO(
+        mechanisms.recovery_root,
+        RealLocalExternalBootMaterializer(store),
+        RealGuestRecoveryWriter(),
+        mechanisms.lease_scope.resolve,
+        mechanisms.factory,
+        config.require(LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES),
+    )
+    provider = LocalLibvirtExternalBoot(io)
+    return LocalExternalBootAuthorityBinding(
+        provider, LocalExternalBootAuthorityAdapter(provider, mechanisms.lease_scope)
+    )
 
 
 def external_boot_authority_is_configured() -> bool:

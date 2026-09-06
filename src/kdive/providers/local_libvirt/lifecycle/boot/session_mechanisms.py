@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import errno
 import os
+import threading
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -54,6 +55,7 @@ from kdive.providers.ports.external_boot import (
     ActivationOwnership,
     Architecture,
     ExternalBootActivationBinding,
+    OpaqueProviderRef,
     RunningKernelObservation,
 )
 from kdive.providers.shared.guest_agent import (
@@ -168,6 +170,31 @@ class LocalOperationLane:
             OperationOwnership(lease.system_id, lease.binding),
             _Pin(lease),
         )
+
+
+class LocalOperationLeaseScope:
+    """Issue one exact operation lease within the executing provider thread."""
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    @contextmanager
+    def issue(self, authority: OpaqueProviderRef, binding: ExternalBootActivationBinding):
+        if getattr(self._local, "active", None) is not None:
+            raise RuntimeError("operation lease scope is already active")
+        lease = LocalOperationLease(UUID(binding.system_id), binding)
+        self._local.active = (authority, lease)
+        try:
+            yield
+        finally:
+            lease.release()
+            self._local.active = None
+
+    def resolve(self, authority: OpaqueProviderRef) -> LocalOperationLease:
+        active = getattr(self._local, "active", None)
+        if active is None or active[0] != authority or active[1].released:
+            raise RuntimeError("operation lease is not active")
+        return active[1]
 
 
 class LocalRunningObserver:
