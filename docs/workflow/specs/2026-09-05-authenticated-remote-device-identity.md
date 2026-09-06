@@ -2,9 +2,10 @@
 
 ## Scope and governing decisions
 
-Issue #2250 supplies ADR-0603's remote-host implementation. ADR-0604 selects the additive client
-and transport shape over the mutual-TLS Unix authority boundary accepted by ADR-0584 and exposes a
-production `RemoteDeviceIdentityPort` adapter for remote-libvirt preparation.
+Issue #2250 supplies ADR-0603's remote-host implementation. ADR-0604 selects an additive typed
+operation over ADR-0606's Resource-bound mutual-TLS authority route, which preserves the Unix
+boundary accepted by ADR-0584, and exposes a production `RemoteDeviceIdentityPort` adapter for
+remote-libvirt preparation.
 
 The change does not add generic remote execution, SSH, caller-selected hosts or credentials,
 volume creation, obligation persistence, reaping, or external-boot mutation behavior. It keeps
@@ -24,21 +25,24 @@ value: `absent`, `inode` with unsigned 64-bit `st_dev` and `st_ino`, or `block` 
 64-bit `st_rdev`. It emits no path or host detail. The existing authority listener remains the
 single server endpoint, and the two existing operation schemas and dispatch paths do not change.
 
-`RemoteAuthorityDeviceIdentity` is a synchronous adapter because ADR-0603's inspection port and
-libvirt preparation path are synchronous. It opens a mutual-TLS AF_UNIX connection using one
-injected, per-preparation client configuration. The configuration contains a fixed socket,
-authority server name, TLS CA/certificate/key paths, the active incarnation request credential, and
-the preparation's monotonic absolute deadline; `identity(path)` cannot select any of them. The
-captured deadline is converted to the positive remaining budget immediately before every
-potentially blocking connect, TLS, write, read, and
-orderly-close operation. A zero or expired budget fails before connection.
+`RemoteAuthorityDeviceIdentity` is synchronous because ADR-0603's inspection port and libvirt
+preparation path are synchronous. It receives only the Resource-bound `AuthorityRequestSender` and
+the preparation's monotonic absolute deadline; `identity(path)` cannot select an endpoint, TLS
+reference, authority identity, or credential. Immediately before each lookup it computes the
+positive remainder from the captured preparation deadline. It enters one private event loop,
+translates that remainder to the loop's absolute monotonic clock, and awaits the sender's typed
+`resolve_device_identity` method. The sender then applies that single deadline across TCP connect,
+TLS handshake, write, response read, and close. A zero or expired preparation budget fails before
+sender or network use. Repeated identity calls always consume the same captured preparation
+deadline.
 
-Remote-libvirt composition exposes one factory that accepts only the validated per-preparation
-client configuration and returns the port. #2170 will inject that factory into its
-server-preparation adapter; this issue
-does not invent that not-yet-landed preparation lifecycle. An absent client configuration yields no
-port, so callers fail closed before storage mutation. Resource selection stays in the existing
-remote-libvirt `config_factory`; neither the wire request nor the identity client can rebind it.
+Remote-libvirt composition exposes one factory that accepts only the already Resource-bound sender
+and captured preparation deadline and returns the synchronous port. #2170 will inject that factory
+into its server-preparation adapter; this issue does not invent that not-yet-landed preparation
+lifecycle. An absent Resource authority sender yields no port, so callers fail closed before
+storage mutation. Resource selection, TLS references, and active credential borrowing stay in
+ADR-0606's existing worker composition; neither the wire request nor the identity adapter can
+rebind them.
 
 ## Data contracts
 
@@ -89,9 +93,10 @@ allowed after the budget expires.
 - Existing widened: the mutual-TLS AF_UNIX listener accepts a third operation. Existing TLS 1.3,
   client-certificate authentication, request credential authentication, frame bound, session
   timeout, and socket ownership/ACL checks remain unchanged.
-- Existing used: injected per-preparation client configuration supplies destination, TLS material,
-  active incarnation credential, and deadline. Trusted deployment and #2170 preparation composition
-  own it; no request or path can select another destination or credential.
+- Existing used: ADR-0606's Resource-bound sender supplies fixed destination selection, call-local
+  TLS material, and active-incarnation credential borrowing. #2170 preparation composition supplies
+  only that sender and the enclosing deadline; no request or path can select another destination or
+  credential.
 
 ### Actors and controls
 
@@ -102,8 +107,8 @@ A compromised authority peer could return malformed bytes; independent client de
 them without disclosure or mutation. The bounded deadline contains silent or slow peers.
 
 Generic filesystem confidentiality beyond redacted errors is out of scope: an authenticated caller
-receives only opaque identity or absence, never metadata or content. Preventing a trusted deployment
-from injecting the wrong fixed client configuration is deployment ownership, not request-time host
+receives only opaque identity or absence, never metadata or content. Preventing trusted inventory
+from binding a Resource to the wrong authority remains deployment ownership, not request-time host
 selection. External-boot mutation authorization remains governed by ADR-0584 and is unchanged.
 
 ## Verification
@@ -117,8 +122,8 @@ selection. External-boot mutation authorization remains governed by ADR-0584 and
 - Transport tests prove unauthenticated and unconfigured requests never call `stat`, operational
   lookup failures are redacted, and stalled connect/read/close stages cannot exceed one absolute
   deadline.
-- Composition tests prove missing configuration returns no port and configured construction binds
-  only the supplied fixed endpoint and credentials.
+- Composition tests prove a missing Resource-bound sender returns no port and configured
+  construction retains only that sender plus the captured preparation deadline.
 - Run focused tests, `just lint`, `just type`, and bare `just ci` with blocking stream redirection.
 
 ## Rollback
