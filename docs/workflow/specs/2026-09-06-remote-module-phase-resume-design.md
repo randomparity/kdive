@@ -45,6 +45,12 @@ All other composites are conflicts. Result bytes must decode as the bounded cano
 and match the exact operation identity. An absent attempt, malformed result, complete result for
 another attempt, and valid current result are separate observations.
 
+An exact open attempt without terminal evidence or reap intent may resume interrupted initial
+preparation. Source-only state, or both volumes with no result, requires validated ownership and
+capacity and a stopped, detached attachment graph with no appliance before repair. Scratch-only,
+foreign, malformed nonempty, attached, or unresolvable state fails closed. The verifier rechecks
+the durable preparable predicate under the System lock before creating or repairing volumes.
+
 Capture retains both deterministic source and scratch volumes through the handoff. They remain
 covered by the open mutation obligation and charged to their persisted capacities; capture does
 not discharge the obligation or delete source early. This avoids inventing recovery geometry if
@@ -55,7 +61,8 @@ current scratch state. After a durable `restored` result and complete appliance 
 stores exact terminal evidence and opens the reap obligation before publishing the whole-name
 `reaping.journal` marker. Only then may source and scratch be deleted. The `reaped.journal`
 marker and reap-obligation discharge follow successful deletion. A restart at `reaping` resumes
-teardown and exact-name deletion; a restart at `reaped` performs no mutation.
+teardown and exact-name deletion; a restart at `reaped` performs no provider mutation and
+idempotently completes any reap-obligation discharge interrupted after marker publication.
 
 ## Ownership and inventory
 

@@ -9,7 +9,9 @@ import json
 import os
 import stat
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast, get_args
 from uuid import UUID
@@ -52,6 +54,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLease,
+    LocalOperationLeaseScope,
     LocalPayloadCleanup,
     LocalRunningObserver,
     open_libguestfs_guest,
@@ -78,6 +81,46 @@ BINDING = ExternalBootActivationBinding(
     activation_id="33333333-3333-3333-3333-333333333333",
 )
 OWNERSHIP = OperationOwnership(SYSTEM_ID, BINDING)
+
+
+def test_operation_lease_scope_is_exact_and_released() -> None:
+    scope = LocalOperationLeaseScope()
+    authority = OpaqueProviderRef(ref="authority/exact")
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+    with scope.issue(authority, BINDING):
+        lease = scope.resolve(authority)
+        assert lease.binding == BINDING
+        with pytest.raises(RuntimeError, match="not active"):
+            scope.resolve(OpaqueProviderRef(ref="authority/foreign"))
+    assert lease.released
+    with pytest.raises(RuntimeError, match="not active"):
+        scope.resolve(authority)
+
+
+def test_operation_lease_scope_isolated_between_executing_threads() -> None:
+    scope = LocalOperationLeaseScope()
+    barrier = threading.Barrier(2)
+
+    def resolve(ref: str, binding: ExternalBootActivationBinding) -> str:
+        authority = OpaqueProviderRef(ref=ref)
+        with scope.issue(authority, binding):
+            barrier.wait()
+            return scope.resolve(authority).binding.system_id
+
+    other = ExternalBootActivationBinding(
+        system_id="44444444-4444-4444-4444-444444444444",
+        run_id="55555555-5555-5555-5555-555555555555",
+        activation_id="66666666-6666-6666-6666-666666666666",
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = (
+            executor.submit(resolve, "authority/one", BINDING),
+            executor.submit(resolve, "authority/two", other),
+        )
+        assert {result.result() for result in results} == {BINDING.system_id, other.system_id}
+
+
 _NOTES = bytes.fromhex("040000000400000003000000474e5500") + bytes.fromhex("01020304")
 
 

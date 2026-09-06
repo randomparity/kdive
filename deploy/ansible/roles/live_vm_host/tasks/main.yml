@@ -254,6 +254,13 @@
       - "{{ live_vm_host_worker_libvirt_group }}"
     append: true
 
+- name: Create the fixed-worker authority client group before account membership
+  ansible.builtin.group:
+    name: "{{ live_vm_host_authority_client_group }}"
+    system: true
+    state: present
+  when: live_vm_host_worker_authority_enabled | bool
+
 - name: Create the isolated live-worker accounts
   ansible.builtin.user:
     name: "{{ item }}"
@@ -262,7 +269,10 @@
     home: /nonexistent
     shell: /usr/sbin/nologin
     group: "{{ item }}"
-    groups: ["{{ live_vm_host_worker_libvirt_group }}", kvm]
+    groups: >-
+      {{ [live_vm_host_worker_libvirt_group, 'kvm', live_vm_host_authority_client_group]
+         if live_vm_host_worker_authority_enabled else
+         [live_vm_host_worker_libvirt_group, 'kvm'] }}
     append: false
   loop: "{{ live_vm_host_worker_accounts }}"
 
@@ -381,8 +391,48 @@
     - {path: /etc/kdive, mode: "0755"}
     # Traverse-only lets each service reach its own private child without listing sibling names.
     - {path: /etc/kdive/credentials, mode: "0711"}
+    - {path: /var/lib/kdive/secrets, mode: "0711"}
     - {path: "{{ live_vm_host_worker_state_root }}", mode: "0755"}
     - {path: /opt/kdive-live-worker-lifecycle, mode: "0755"}
+
+- name: Inspect the fixed-worker authority secrets root without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_authority_secrets_root }}"
+    follow: false
+  register: live_vm_host_worker_authority_secrets_before
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Refuse a substituted fixed-worker authority secrets root
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_worker_authority_secrets_before.stat.exists or
+      (live_vm_host_worker_authority_secrets_before.stat.isdir and
+       not live_vm_host_worker_authority_secrets_before.stat.islnk)
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Create the protected fixed-worker authority secrets root
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_authority_secrets_root }}"
+    state: directory
+    owner: root
+    group: "{{ live_vm_host_authority_client_group }}"
+    mode: "0750"
+    follow: false
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Install protected fixed-worker authority TLS files
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ live_vm_host_worker_authority_secrets_root }}/{{ item.name }}"
+    owner: root
+    group: "{{ live_vm_host_authority_client_group }}"
+    mode: "0440"
+  loop:
+    - {name: server-ca, source: "{{ live_vm_host_worker_authority_server_ca_source }}"}
+    - {name: client-certificate, source: "{{ live_vm_host_worker_authority_client_certificate_source }}"}
+    - {name: client-key, source: "{{ live_vm_host_worker_authority_client_key_source }}"}
+  when: live_vm_host_worker_authority_enabled | bool
+  no_log: true
 
 - name: Create the shared slots parent
   ansible.builtin.file:

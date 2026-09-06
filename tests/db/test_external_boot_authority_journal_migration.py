@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -14,16 +15,10 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
-from kdive.db.external_boot_authority_journal import (
-    advance_journal_head,
-    read_journal_head,
-    resolve_allocating_authority_binding,
-    resolve_current_authority_binding,
-    resolve_current_authority_candidate,
-)
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
@@ -32,6 +27,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
     record_digest,
 )
+from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
@@ -157,63 +153,16 @@ def _seed_allocated(migrated_url: str, role_dsns: _RoleDsns, suffix: str) -> tup
     return case, authority
 
 
-class _RealRepository:
-    def __init__(self, connection: psycopg.AsyncConnection[Any]) -> None:
-        self.connection = connection
+def _database_repository(dsn: str) -> DatabaseAuthorityRepository:
+    @asynccontextmanager
+    async def connections():
+        connection = await psycopg.AsyncConnection.connect(dsn)
+        try:
+            yield connection
+        finally:
+            await connection.close()
 
-    async def resolve_allocating(
-        self, peer: AuthenticatedPeer, request: AuthorityTakeoverRequestV1
-    ):
-        return await resolve_allocating_authority_binding(
-            self.connection,
-            peer_incarnation_id=str(peer.incarnation_id),
-            authority_id=request.authority_id,
-            generation=request.generation,
-        )
-
-    async def resolve_current_candidate(
-        self, peer: AuthenticatedPeer, request: AuthorityMutationRequestV1
-    ):
-        return await resolve_current_authority_candidate(
-            self.connection,
-            peer_incarnation_id=str(peer.incarnation_id),
-            authority_id=request.authority_id,
-            generation=request.generation,
-        )
-
-    async def resolve_current(
-        self,
-        peer: AuthenticatedPeer,
-        request: AuthorityMutationRequestV1,
-        acknowledgement_sequence: int,
-        acknowledgement_digest: str,
-    ):
-        return await resolve_current_authority_binding(
-            self.connection,
-            peer_incarnation_id=str(peer.incarnation_id),
-            authority_id=request.authority_id,
-            generation=request.generation,
-            acknowledgement_sequence=acknowledgement_sequence,
-            acknowledgement_digest=acknowledgement_digest,
-        )
-
-    async def read_head(self, binding: Any):
-        return await read_journal_head(self.connection, binding=binding)
-
-    async def advance(
-        self,
-        binding: Any,
-        expected_sequence: int,
-        expected_digest: str,
-        record: JournalRecordV1,
-    ):
-        return await advance_journal_head(
-            self.connection,
-            binding=binding,
-            expected_sequence=expected_sequence,
-            expected_digest=expected_digest,
-            record=record,
-        )
+    return DatabaseAuthorityRepository(connections)
 
 
 def _takeover_request(case: Any, authority: Any) -> AuthorityTakeoverRequestV1:
@@ -847,57 +796,50 @@ async def test_repository_round_trips_typed_binding_and_head(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     case, authority = _seed_allocated(migrated_url, authority_role_dsns, "t")
-    async with await psycopg.AsyncConnection.connect(
-        authority_role_dsns("kdive_provider_authority"), autocommit=True
-    ) as connection:
-        binding = await resolve_allocating_authority_binding(
-            connection,
-            peer_incarnation_id=case.worker_id,
-            authority_id=authority.authority_id,
-            generation=authority.generation,
+    repository = _database_repository(authority_role_dsns("kdive_provider_authority"))
+    peer = AuthenticatedPeer(case.worker_id)
+    request = _takeover_request(case, authority)
+    binding = await repository.resolve_allocating(peer, request)
+    assert binding is not None and isinstance(binding.authority_id, UUID)
+    record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
+    assert await repository.advance(binding, 0, GENESIS_DIGEST, record) == "advanced"
+    head = await repository.read_head(binding)
+    assert head is not None
+    assert head.sequence == 1 and head.phase is JournalPhase.WATERMARK_INSTALLED
+    acknowledgement = _record(
+        case,
+        authority,
+        2,
+        record_digest(record),
+        JournalPhase.TAKEOVER_ACKNOWLEDGED,
+        watermark_sequence=record.sequence,
+        watermark_digest=record_digest(record),
+    )
+    assert (
+        await repository.advance(binding, 1, record_digest(record), acknowledgement) == "advanced"
+    )
+    assert (
+        await repository.advance(binding, 1, record_digest(record), acknowledgement) == "advanced"
+    )
+    _promote(migrated_url, case, authority, acknowledgement)
+    mutation = _mutation_request(request)
+    current = await repository.resolve_current_candidate(peer, mutation)
+    assert current is not None and current.state == "current"
+    assert (
+        await repository.resolve_current(
+            peer, mutation, acknowledgement.sequence, record_digest(acknowledgement)
         )
-        assert binding is not None and isinstance(binding.authority_id, UUID)
-        record = _record(case, authority, 1, GENESIS_DIGEST, JournalPhase.WATERMARK_INSTALLED)
-        assert (
-            await advance_journal_head(
-                connection,
-                binding=binding,
-                expected_sequence=0,
-                expected_digest=GENESIS_DIGEST,
-                record=record,
-            )
-            == "advanced"
+        == current
+    )
+    assert (
+        await repository.resolve_current(
+            peer, mutation, acknowledgement.sequence, "sha256:" + "0" * 64
         )
-        head = await read_journal_head(connection, binding=binding)
-        assert head is not None
-        assert head.sequence == 1 and head.phase is JournalPhase.WATERMARK_INSTALLED
-        acknowledgement = _record(
-            case,
-            authority,
-            2,
-            record_digest(record),
-            JournalPhase.TAKEOVER_ACKNOWLEDGED,
-            watermark_sequence=record.sequence,
-            watermark_digest=record_digest(record),
-        )
-        assert (
-            await advance_journal_head(
-                connection,
-                binding=binding,
-                expected_sequence=1,
-                expected_digest=record_digest(record),
-                record=acknowledgement,
-            )
-            == "advanced"
-        )
-        _promote(migrated_url, case, authority, acknowledgement)
-        current = await resolve_current_authority_candidate(
-            connection,
-            peer_incarnation_id=case.worker_id,
-            authority_id=authority.authority_id,
-            generation=authority.generation,
-        )
-        assert current is not None and current.state == "current"
+        is None
+    )
+    assert (
+        await repository.resolve_current_candidate(AuthenticatedPeer("foreign"), mutation) is None
+    )
 
 
 @pytest.mark.anyio
@@ -908,26 +850,72 @@ async def test_service_promotes_and_mutates_through_real_repository(
     request = _takeover_request(case, authority)
     peer = AuthenticatedPeer(case.worker_id)
     adapter = _Adapter()
-    async with await psycopg.AsyncConnection.connect(
-        authority_role_dsns("kdive_provider_authority"), autocommit=True
-    ) as connection:
-        service = ExternalBootAuthorityService(
-            repository=_RealRepository(connection),
-            journal_factory=lambda system_id: FileAuthorityJournal(
-                tmp_path, f"{system_id}.journal"
-            ),
-            adapter=adapter,
+    service = ExternalBootAuthorityService(
+        repository=_database_repository(authority_role_dsns("kdive_provider_authority")),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    acknowledgement = await service.acknowledge_takeover(peer, request)
+
+    with psycopg.connect(migrated_url) as conn:
+        row = conn.execute(
+            "SELECT state FROM external_boot_authorities WHERE id = %s",
+            (authority.authority_id,),
+        ).fetchone()
+    assert row == ("current",)
+    assert await service.acknowledge_takeover(peer, request) == acknowledgement
+
+    restarted = ExternalBootAuthorityService(
+        repository=_database_repository(authority_role_dsns("kdive_provider_authority")),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    assert await restarted.acknowledge_takeover(peer, request) == acknowledgement
+
+    observation = await restarted.execute_mutation(peer, _mutation_request(request))
+
+    assert observation.category == "target"
+    assert adapter.calls == ["commit:activate", "observe"]
+
+
+@pytest.mark.anyio
+async def test_repository_rejects_mismatched_projection_without_core_write(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority = _seed_allocated(migrated_url, authority_role_dsns, "m")
+    request = _takeover_request(case, authority)
+    peer = AuthenticatedPeer(case.worker_id)
+    repository = _database_repository(authority_role_dsns("kdive_provider_authority"))
+    binding = await repository.resolve_allocating(peer, request)
+    assert binding is not None
+    acknowledgement = AuthorityAcknowledgementV1(
+        authority_id=request.authority_id,
+        generation=request.generation,
+        system_id=request.system_id,
+        journal_sequence=1,
+        journal_digest="sha256:" + "b" * 64,
+        positive_quiescence_digest="sha256:" + "c" * 64,
+    )
+
+    assert (
+        await repository.acknowledge(
+            peer,
+            replace(binding, operation_identity="different-operation"),
+            request,
+            acknowledgement,
         )
-        await service.acknowledge_takeover(peer, request)
-        journal = FileAuthorityJournal(tmp_path, f"{request.system_id}.journal")
-        acknowledgement = journal.load()[-1]
-        journal.close()
-        _promote(migrated_url, case, authority, acknowledgement)
-
-        observation = await service.execute_mutation(peer, _mutation_request(request))
-
-        assert observation.category == "target"
-        assert adapter.calls == ["commit:activate", "observe"]
+        is None
+    )
+    with psycopg.connect(migrated_url) as conn:
+        state = conn.execute(
+            "SELECT state FROM external_boot_authorities WHERE id = %s", (authority.authority_id,)
+        ).fetchone()
+        acknowledgements = conn.execute(
+            "SELECT count(*) FROM external_boot_authority_acknowledgements WHERE authority_id = %s",
+            (authority.authority_id,),
+        ).fetchone()
+    assert state == ("allocating",)
+    assert acknowledgements == (0,)
 
 
 @pytest.mark.anyio
@@ -938,39 +926,28 @@ async def test_service_successor_authenticates_inflight_completion_through_real_
     request = _takeover_request(case, authority)
     peer = AuthenticatedPeer(case.worker_id)
     adapter = _Adapter()
-    async with await psycopg.AsyncConnection.connect(
-        authority_role_dsns("kdive_provider_authority"), autocommit=True
-    ) as connection:
-        service = ExternalBootAuthorityService(
-            repository=_RealRepository(connection),
-            journal_factory=lambda system_id: FileAuthorityJournal(
-                tmp_path, f"{system_id}.journal"
-            ),
-            adapter=adapter,
-        )
-        await service.acknowledge_takeover(peer, request)
-        journal = FileAuthorityJournal(tmp_path, f"{request.system_id}.journal")
-        acknowledgement = journal.load()[-1]
-        journal.close()
-        _promote(migrated_url, case, authority, acknowledgement)
-        adapter.release.clear()
-        mutation_task = asyncio.create_task(
-            service.execute_mutation(peer, _mutation_request(request))
-        )
-        await adapter.entered.wait()
-        successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, case)
-        successor_request = _takeover_request(successor_case, successor)
-        takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor_request))
-        active = service._lanes[request.system_id].active
-        assert active is not None
-        while active.completion_binding is None:
-            await asyncio.sleep(0)
-        assert not takeover_task.done()
+    service = ExternalBootAuthorityService(
+        repository=_database_repository(authority_role_dsns("kdive_provider_authority")),
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+    )
+    await service.acknowledge_takeover(peer, request)
+    adapter.release.clear()
+    mutation_task = asyncio.create_task(service.execute_mutation(peer, _mutation_request(request)))
+    await adapter.entered.wait()
+    successor_case, successor = _allocate_successor(migrated_url, authority_role_dsns, case)
+    successor_request = _takeover_request(successor_case, successor)
+    takeover_task = asyncio.create_task(service.acknowledge_takeover(peer, successor_request))
+    active = service._lanes[request.system_id].active
+    assert active is not None
+    while active.completion_binding is None:
+        await asyncio.sleep(0)
+    assert not takeover_task.done()
 
-        adapter.release.set()
+    adapter.release.set()
 
-        assert (await mutation_task).category == "target"
-        assert (await takeover_task).generation == successor.generation
+    assert (await mutation_task).category == "target"
+    assert (await takeover_task).generation == successor.generation
 
 
 def test_successor_takeover_has_exact_supersede_watermark_ack_order(

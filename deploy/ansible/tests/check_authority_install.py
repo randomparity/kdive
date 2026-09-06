@@ -25,12 +25,19 @@ def installation_play(root):
     tasks = yaml.safe_load(
         (HERE.parent / "roles/provider_authority_host/tasks/install.yml").read_text()
     )
-    start = next(i for i, task in enumerate(tasks) if "frozen dependency lock" in task["name"])
-    # Include the marker read that the production command uses, when present.
-    while start and "revision" in tasks[start - 1]["name"].lower():
-        start -= 1
-    end = next(i for i, task in enumerate(tasks) if "database and TLS material" in task["name"])
-    selected = tasks[1:3] + tasks[start:end]
+    selected_names = {
+        "Read the staged authority source revision",
+        "Require a clean staged authority checkout",
+        "Inspect the installed authority revision",
+        "Refuse a substituted installed authority revision",
+        "Read the installed authority revision",
+        "Determine authority source revision drift",
+        "Install the authority from the staged checkout and frozen dependency lock",
+        "Prove the installed project bytes match the clean source revision",
+        "Record the installed authority revision after successful installation",
+    }
+    selected = [task for task in tasks if task["name"] in selected_names]
+    assert {task["name"] for task in selected} == selected_names
     for task in selected:
         if "ansible.builtin.copy" in task:
             task["ansible.builtin.copy"].update(owner=str(os.getuid()), group=str(os.getgid()))

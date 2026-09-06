@@ -1546,8 +1546,11 @@ class _ExternalIO:
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation:
         receipt = self.observe_preparation(predecessor)
+        if receipt.identity != predecessor_receipt_identity:
+            raise ValueError("preparation predecessor cannot be adopted")
         adopted = receipt.model_copy(
             update={
                 "authority": request.authority,
@@ -4094,7 +4097,10 @@ def test_preparation_receipt_adoption_rebinds_without_materialization(tmp_path: 
 
     with RecoveryMetadataStore(root) as store:
         store.publish_preparation(receipt)
-        adopted = store.adopt_preparation(successor, predecessor)
+        with pytest.raises(ValueError, match="cannot be adopted"):
+            store.adopt_preparation(successor, predecessor, "sha256:" + "0" * 64)
+        assert store.observe_preparation(predecessor) == receipt
+        adopted = store.adopt_preparation(successor, predecessor, receipt.identity)
 
     assert adopted.materialization == materialization
     assert adopted.authority == successor.authority
@@ -4105,7 +4111,7 @@ def test_preparation_receipt_adoption_rebinds_without_materialization(tmp_path: 
     )
     with RecoveryMetadataStore(root) as store:
         with pytest.raises(ValueError, match="identity conflicts"):
-            store.adopt_preparation(successor, foreign)
+            store.adopt_preparation(successor, foreign, receipt.identity)
         assert store.observe_preparation(successor) == adopted
 
 

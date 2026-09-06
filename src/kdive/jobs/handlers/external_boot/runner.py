@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -128,7 +129,7 @@ class OperationContext:
     marker: ExternalBootAuthorityMarkerV1
     activation: ExternalBootActivation
     binding: ProviderBinding
-    port: ExternalBootPorts
+    port: ExternalBootPorts | None
     authority: AllocatedAuthority
     acknowledgement: AuthorityAcknowledgementV1
     secret_registry: SecretRegistry
@@ -247,7 +248,7 @@ async def _resolve_port(
     conn: AsyncConnection,
     marker: ExternalBootAuthorityMarkerV1,
     ports: ExternalBootHandlerPorts,
-) -> tuple[ProviderBinding, ExternalBootPorts]:
+) -> tuple[ProviderBinding, ExternalBootPorts | None]:
     """Step 1. Refuse a marker whose provider_kind disagrees with the System's bound runtime."""
     binding = await ports.resolver.binding_for_system(conn, marker.system_id)
     if binding.kind.value != marker.provider_kind:
@@ -255,7 +256,7 @@ async def _resolve_port(
             f"marker provider_kind {marker.provider_kind!r} does not match the "
             f"{binding.kind.value!r} runtime bound for system {marker.system_id}"
         )
-    if binding.runtime.external_boot is None:
+    if binding.runtime.external_boot is None and ports.authority_client_factory is None:
         raise _refuse(
             f"the {binding.kind.value!r} runtime bound for system {marker.system_id} "
             "has no external_boot port"
@@ -491,6 +492,18 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     nothing type-check clean.
     """
     binding, port = await _resolve_port(conn, marker, ports)
+    if ports.authority_client_factory is not None:
+        timeout = (
+            ports.activation_readiness_timeout
+            if marker.purpose == "activate"
+            else ports.recovery_readiness_timeout
+        )
+        client = ports.authority_client_factory(
+            binding, marker, asyncio.get_running_loop().time() + timeout.total_seconds()
+        )
+        ports = replace(
+            ports, acknowledger=client, authority_executor=client, preparation_executor=client
+        )
     activation = await _read_activation(
         conn,
         marker,
@@ -498,6 +511,8 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         require_activation_evidence=require_activation_evidence,
     )
     prerequisites = await require_preconditions(conn, activation, marker)
+    if ports.authority_client_factory is not None:
+        prerequisites = dict(prerequisites) | {"authority_executor": ports.authority_executor}
     if (
         activation.state is ExternalBootActivationState.PREPARING
         and ports.preparation_executor is None

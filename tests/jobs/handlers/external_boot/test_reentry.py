@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 import psycopg
 import pytest
 from pydantic import SecretStr
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
+    _FailureResult,
     _RecoveryAttemptResult,
 )
 from kdive.providers.external_boot_authority.protocol import (
@@ -39,11 +43,120 @@ class RecordingExecutor:
         self.category = category
         self.requests: list[AuthorityMutationRequestV1] = []
 
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
+        )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        return await self.execute(request)
+
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         self.requests.append(request)
         return AuthorityObservationV1(
             observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
         )
+
+
+class _DisconnectedAuthorityTransport:
+    """A deterministic peer boundary before or after its authority journal commit."""
+
+    def __init__(self, *, committed: bool, peer_rejection: str | None = None) -> None:
+        self.committed = committed
+        self.peer_rejection = peer_rejection
+        self.requests: list[dict[str, object]] = []
+
+    async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+        assert deadline == 123.0
+        if self.committed:
+            self.requests.append(json.loads(envelope))
+        if self.peer_rejection is not None:
+            return json.dumps(
+                {"category": self.peer_rejection, "status": "error"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        raise CategorizedError(
+            "authority: transport-failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+        )
+
+
+class _SenderExecutor:
+    def __init__(self, sender: AuthorityRequestSender) -> None:
+        self._sender = sender
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._sender.execute_mutation(request, deadline=123.0)
+
+
+@pytest.mark.parametrize(
+    ("committed", "peer_rejection"),
+    [(False, None), (True, None), (True, "superseded")],
+    ids=["before-submission", "after-commit", "closed-peer-rejection"],
+)
+def test_sender_disconnect_returns_nonterminal_bound_failure_with_same_operation_identity(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    committed: bool,
+    peer_rejection: str | None,
+) -> None:
+    """A lost reply cannot fabricate a terminal observation or a new mutation identity."""
+
+    async def main() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(seed, vehicle, purpose="activate", activation_state="prepared")
+            transport = _DisconnectedAuthorityTransport(
+                committed=committed, peer_rejection=peer_rejection
+            )
+            sender = AuthorityRequestSender(lambda: transport, lambda: SecretStr(case.credential))
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+                authority_executor=_SenderExecutor(sender),
+            )
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            job = build_job(
+                JobKind.BOOT,
+                {"run_id": str(vehicle.run_id), "external_boot_authority_v1": case.marker},
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            handler = build_operations(ports).get("activate")
+            assert handler is not None
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                prepared = await handler(worker, job, marker)
+                assert prepared.result.operation == "deadline"
+                committed_result = await queue.complete_external_boot(
+                    worker,
+                    job,
+                    prepared,
+                    incarnation_credential=SecretStr(case.credential),
+                )
+                assert committed_result is not None
+                with pytest.raises(ExternalBootAuthorityFailure) as caught:
+                    await handler(worker, job, marker)
+
+        result = caught.value.result
+        assert result.operation_identity == marker.operation_identity
+        assert result.operation_digest
+        assert result.result.operation == "fail"
+        assert isinstance(result.result, _FailureResult)
+        assert result.result.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert result.result.terminal is False
+        assert "superseded" not in result.model_dump_json(by_alias=True)
+        assert len(transport.requests) == int(committed)
+        if committed:
+            assert transport.requests[0]["operation"] == "execute-mutation"
+            request = transport.requests[0]["request"]
+            assert isinstance(request, dict)
+            encoded_request = cast(dict[str, object], request)
+            assert encoded_request["operation_identity"] == marker.operation_identity
+            assert encoded_request["operation_digest"] == result.operation_digest
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize(

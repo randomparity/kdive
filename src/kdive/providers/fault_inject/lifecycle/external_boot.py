@@ -182,10 +182,12 @@ class FaultInjectExternalBoot:
         self,
         request: ExternalBootPreparationRequest,
         predecessor: ExternalBootPreparationRequest,
+        predecessor_receipt_identity: str,
     ) -> ExternalBootPreparationObservation:
         receipt = self.observe_preparation(predecessor)
         if (
             receipt.state == "absent"
+            or receipt.identity != predecessor_receipt_identity
             or request.phase != predecessor.phase
             or request.binding != predecessor.binding
             or request.plan.identity != predecessor.plan.identity

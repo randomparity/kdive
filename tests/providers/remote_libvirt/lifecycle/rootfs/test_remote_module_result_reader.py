@@ -171,9 +171,10 @@ def test_sparse_reader_requests_sparse_stream_and_preserves_holes(
 
 
 class _ImageStream:
-    def __init__(self, image: Path, capacity: int) -> None:
+    def __init__(self, image: Path, capacity: int, *, cover_tail: bool = True) -> None:
         self.image = image
         self.capacity = capacity
+        self.cover_tail = cover_tail
         self.sparse_called = False
         self.finished = False
 
@@ -187,7 +188,8 @@ class _ImageStream:
                     data_offset = os.lseek(descriptor, offset, os.SEEK_DATA)
                 except OSError as exc:
                     assert exc.errno == errno.ENXIO
-                    hole(self, self.capacity - offset, opaque)
+                    if self.cover_tail:
+                        hole(self, self.capacity - offset, opaque)
                     return
                 if data_offset > offset:
                     hole(self, data_offset - offset, opaque)
@@ -318,6 +320,82 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     assert asyncio.run(runtime.reopen_result(recovery, 10.0)) == result_value
     assert observed["deadline"] == 10
     preparation.shutdown()
+
+
+def test_sparse_reader_treats_a_complete_zero_raw_scratch_as_absent(tmp_path: Path) -> None:
+    image = tmp_path / "raw-scratch.ext4"
+    with image.open("wb") as handle:
+        handle.truncate(SCRATCH_CAPACITY_BYTES)
+    stream = _ImageStream(image, SCRATCH_CAPACITY_BYTES)
+    storage = _ImageStorage(_ImageVolume(image, stream), stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    assert reader.read_volume(_scratch()) is None
+    assert stream.sparse_called and stream.finished
+
+
+def test_sparse_reader_rejects_a_nonzero_malformed_raw_scratch(tmp_path: Path) -> None:
+    image = tmp_path / "malformed-scratch.ext4"
+    with image.open("wb") as handle:
+        handle.truncate(SCRATCH_CAPACITY_BYTES)
+        handle.seek(0)
+        handle.write(b"x")
+    stream = _ImageStream(image, SCRATCH_CAPACITY_BYTES)
+    storage = _ImageStorage(_ImageVolume(image, stream), stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    with pytest.raises(CategorizedError, match="durable filesystem is unreadable") as caught:
+        reader.read_volume(_scratch())
+    assert caught.value.category is ErrorCategory.CONFLICT
+
+
+def test_sparse_reader_rejects_a_short_blank_stream(tmp_path: Path) -> None:
+    stream = _Stream([SCRATCH_CAPACITY_BYTES - 1])
+    storage = _Storage(stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    with pytest.raises(CategorizedError, match="durable filesystem is unreadable") as caught:
+        reader.read_volume(_scratch())
+    assert caught.value.category is ErrorCategory.CONFLICT
+
+
+def test_sparse_reader_accepts_a_short_valid_ext4_stream(tmp_path: Path) -> None:
+    image = tmp_path / "short-result.ext4"
+    with image.open("wb") as handle:
+        handle.truncate(SCRATCH_CAPACITY_BYTES)
+    subprocess.run(
+        ["mkfs.ext4", "-q", "-F", str(image)], check=True, capture_output=True, timeout=120
+    )
+    result = RemoteModuleResultV1.model_validate(result_document()).to_wire_bytes()
+    payload = tmp_path / "result-v1.json"
+    payload.write_bytes(result)
+    subprocess.run(
+        ["debugfs", "-w", "-R", f"write {payload} /result-v1.json", str(image)],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    stream = _ImageStream(image, SCRATCH_CAPACITY_BYTES, cover_tail=False)
+    storage = _ImageStorage(_ImageVolume(image, stream), stream)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    assert reader.read_volume(_scratch()) == result
 
 
 def test_debugfs_returns_none_only_for_a_real_absent_result(tmp_path: Path) -> None:

@@ -97,7 +97,14 @@
     live_vm_host_worker_libvirt_group not in live_vm_host_worker_group_results.stdout.split()
     or 'kvm' not in live_vm_host_worker_group_results.stdout.split()
     or live_vm_host_worker_control_group in live_vm_host_worker_group_results.stdout.split()
-    or live_vm_host_authority_client_group in live_vm_host_worker_group_results.stdout.split()
+    or (
+    live_vm_host_worker_authority_enabled | bool
+    and live_vm_host_authority_client_group not in live_vm_host_worker_group_results.stdout.split()
+    )
+    or (
+    not live_vm_host_worker_authority_enabled | bool
+    and live_vm_host_authority_client_group in live_vm_host_worker_group_results.stdout.split()
+    )
     or 'sudo' in live_vm_host_worker_group_results.stdout.split()
     or 'docker' in live_vm_host_worker_group_results.stdout.split()
 
@@ -510,15 +517,27 @@
   failed_when: live_vm_host_authority_domains.stdout | trim | length > 0
   when: live_vm_host_authority_enabled | bool
 
-- name: Prove fixed workers and the reconciler cannot traverse authority paths
+- name: Prove fixed workers cannot traverse authority provider paths
   ansible.builtin.command: "/usr/bin/test ! -x {{ item.1 }}"
   become: true
   become_user: "{{ item.0 }}"
   loop: >-
-    {{ (live_vm_host_worker_accounts + ['kdive'])
-    | product(live_vm_host_authority_denied_paths) | list }}
+    {{ live_vm_host_worker_accounts
+    | product(live_vm_host_authority_denied_paths
+      | difference(['/run/kdive/provider-authority',
+                    '/run/kdive/provider-authority/request'])
+      if live_vm_host_worker_authority_enabled else live_vm_host_authority_denied_paths)
+    | list }}
   loop_control:
     label: "{{ item.0 }} -> {{ item.1 }}"
+  changed_when: false
+  when: live_vm_host_authority_enabled | bool
+
+- name: Prove the reconciler cannot traverse authority paths
+  ansible.builtin.command: "/usr/bin/test ! -x {{ item }}"
+  become: true
+  become_user: kdive
+  loop: "{{ live_vm_host_authority_denied_paths }}"
   changed_when: false
   when: live_vm_host_authority_enabled | bool
 

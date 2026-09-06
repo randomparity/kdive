@@ -16,6 +16,10 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.authority_sender import authority_sender_factory
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
+from kdive.jobs.external_boot_authority_client import (
+    ExternalBootClientFactory,
+    external_boot_client_factory,
+)
 from kdive.jobs.handlers import (
     diagnostics,
     external_boot,
@@ -48,6 +52,7 @@ class WorkerHandlerAssembly:
     capture_supervisor: CaptureOperationSupervisor
     worker_check_builders: diagnostics.WorkerCheckBuilders
     module_volume_reaper: ModuleVolumeReaper
+    external_boot_client_factory: ExternalBootClientFactory | None = None
 
 
 def build_worker_handler_assembly(
@@ -85,6 +90,10 @@ def build_worker_handler_assembly(
         },
         module_volume_reaper=composition.build_worker_module_volume_reaper(
             authority_sender_factory=sender_factory
+        ),
+        external_boot_client_factory=external_boot_client_factory(
+            secret_backend_from_env(registry=composition.secret_registry),
+            lambda: assembly.incarnation_credential,
         ),
     )
     return assembly
@@ -137,6 +146,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
             secret_registry=assembly.secret_registry,
+            authority_client_factory=assembly.external_boot_client_factory,
         )
     )
     systems.register_handlers(

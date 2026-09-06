@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
@@ -25,12 +25,16 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityRunningObservationV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.ports.external_boot import ExternalBootPreparationObservation
+from kdive.providers.ports.external_boot import (
+    ExternalBootPreparationObservation,
+    RunningKernelObservation,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +69,13 @@ class AuthorityRecoveryObserver(Protocol):
 
 
 @runtime_checkable
+class AuthorityRunningObserver(Protocol):
+    async def observe_running(
+        self, request: AuthorityMutationRequestV1
+    ) -> RunningKernelObservation: ...
+
+
+@runtime_checkable
 class AuthorityPreparationAdapter(Protocol):
     async def preparation_receipt(
         self, request: AuthorityPreparationMutationRequestV1
@@ -77,8 +88,14 @@ class AuthorityPreparationAdopter(Protocol):
         self,
         request: AuthorityPreparationMutationRequestV1,
         predecessor: AuthorityPreparationMutationRequestV1,
+        predecessor_receipt_identity: str,
         context: AuthorityCommitContextV1,
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityAdapterCloser(Protocol):
+    def close(self) -> None: ...
 
 
 class AuthorityRepository(Protocol):
@@ -99,6 +116,14 @@ class AuthorityRepository(Protocol):
     ) -> AuthorityBinding | None: ...
 
     async def read_head(self, binding: AuthorityBinding) -> JournalHead | None: ...
+
+    async def acknowledge(
+        self,
+        peer: AuthenticatedPeer,
+        binding: AuthorityBinding,
+        request: AuthorityTakeoverRequestV1,
+        acknowledgement: AuthorityAcknowledgementV1,
+    ) -> AuthorityAcknowledgementV1 | None: ...
 
     async def advance(
         self,
@@ -268,6 +293,10 @@ class ExternalBootAuthorityService:
         self.metrics = metrics or AuthorityServiceMetrics.empty()
         self._lanes: dict[UUID, _Lane] = {}
         self._logger = logging.getLogger(__name__)
+
+    def close(self) -> None:
+        if isinstance(self._adapter, AuthorityAdapterCloser):
+            self._adapter.close()
 
     def _lane(self, system_id: UUID) -> _Lane:
         lane = self._lanes.setdefault(system_id, _Lane(asyncio.Lock()))
@@ -873,9 +902,15 @@ class ExternalBootAuthorityService:
                     )
                     if watermark is None:
                         raise AuthorityServiceError("journal_conflict")
-                    return self._acknowledgement_response(
+                    response = self._acknowledgement_response(
                         request, records[: acknowledgement.sequence], watermark, acknowledgement
                     )
+                    projected = await self._repository.acknowledge(
+                        authenticated, binding, request, response
+                    )
+                    if projected is None or projected != response:
+                        raise AuthorityServiceError("superseded")
+                    return projected
                 trusted = await self._repository.read_head(binding)
                 watermark: JournalRecordV1 | None = None
                 pending = trusted.pending_takeover if trusted is not None else None
@@ -1005,7 +1040,13 @@ class ExternalBootAuthorityService:
                 lane.failed = True
                 raise
             self.metrics.set_unresolved((request.provider_kind, request.authority_instance), False)
-            return self._acknowledgement_response(request, records, watermark, acknowledgement)
+            response = self._acknowledgement_response(request, records, watermark, acknowledgement)
+            projected = await self._repository.acknowledge(
+                authenticated, binding, request, response
+            )
+            if projected is None or projected != response:
+                raise AuthorityServiceError("superseded")
+            return projected
 
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
@@ -1056,6 +1097,7 @@ class ExternalBootAuthorityService:
                         await self._finalize_adapter(request, records)
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
+                    predecessor_receipt_identity: str | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
                         predecessor_record = next(
                             (
@@ -1068,6 +1110,15 @@ class ExternalBootAuthorityService:
                             None,
                         )
                         if predecessor_record is not None:
+                            if (
+                                predecessor_record.outcome != "target"
+                                or predecessor_record.observation is None
+                                or predecessor_record.observation.category != "target"
+                            ):
+                                raise AuthorityServiceError("journal_conflict")
+                            predecessor_receipt_identity = (
+                                predecessor_record.observation.composite_state
+                            )
                             predecessor = request.model_copy(
                                 update={
                                     "authority_id": predecessor_record.authority_id,
@@ -1192,6 +1243,7 @@ class ExternalBootAuthorityService:
                         await self._adapter.adopt_preparation(
                             cast(AuthorityPreparationMutationRequestV1, request),
                             predecessor,
+                            cast(str, predecessor_receipt_identity),
                             context,
                         )
                     else:
@@ -1275,13 +1327,34 @@ class ExternalBootAuthorityService:
         read.  A concurrent takeover therefore cannot turn an observation made under a stale
         generation into an admission fact for a later mutation.
         """
+        return await self._observe_current(peer, request, self._adapter.observe)
+
+    async def observe_running(
+        self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
+    ) -> AuthorityRunningObservationV1:
+        """Read bounded kernel evidence through the same authenticated read-only lane."""
+
+        async def read(request: AuthorityMutationRequestV1) -> AuthorityRunningObservationV1:
+            if not isinstance(self._adapter, AuthorityRunningObserver):
+                raise AuthorityServiceError("provider_conflict")
+            observed = await self._adapter.observe_running(request)
+            return AuthorityRunningObservationV1.from_observation(observed)
+
+        return await self._observe_current(peer, request, read)
+
+    async def _observe_current[T](
+        self,
+        peer: AuthenticatedPeer | None,
+        request: AuthorityMutationRequestV1,
+        read: Callable[[AuthorityMutationRequestV1], Awaitable[T]],
+    ) -> T:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
         if trusted is None or not self._binding_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
-        async def run() -> AuthorityObservationV1:
+        async def run() -> T:
             try:
                 async with lane.lock:
                     if lane.failed:
@@ -1305,7 +1378,7 @@ class ExternalBootAuthorityService:
                     if confirmed is None or not self._binding_matches(confirmed, request):
                         raise AuthorityServiceError("superseded")
                     try:
-                        observation = await self._adapter.observe(request)
+                        observation = await read(request)
                     except AuthorityServiceError:
                         raise
                     except Exception:

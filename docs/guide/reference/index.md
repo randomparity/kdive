@@ -106,7 +106,7 @@
 | [`runs.get`](runs.md#runsget) | `implemented` |
 | [`runs.install`](runs.md#runsinstall) | `implemented` |
 | [`runs.list`](runs.md#runslist) | `implemented` |
-| [`runs.release_external_boot`](runs.md#runsrelease_external_boot) | `partial` |
+| [`runs.release_external_boot`](runs.md#runsrelease_external_boot) | `implemented` |
 | [`runs.set`](runs.md#runsset) | `implemented` |
 | [`secrets.list`](secrets.md#secretslist) | `implemented` |
 | [`session.whoami`](session.md#sessionwhoami) | `implemented` |
@@ -122,7 +122,7 @@
 | [`systems.profile_examples`](systems.md#systemsprofile_examples) | `implemented` |
 | [`systems.provision`](systems.md#systemsprovision) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `implemented` |
-| [`systems.resolve_external_boot_conflict`](systems.md#systemsresolve_external_boot_conflict) | `partial` |
+| [`systems.resolve_external_boot_conflict`](systems.md#systemsresolve_external_boot_conflict) | `implemented` |
 | [`systems.restore`](systems.md#systemsrestore) | `implemented` |
 | [`systems.snapshot`](systems.md#systemssnapshot) | `implemented` |
 | [`systems.ssh_info`](systems.md#systemsssh_info) | `implemented` |

@@ -10,6 +10,7 @@ import ssl
 import tempfile
 from ipaddress import IPv4Address
 from pathlib import Path
+from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.transport import (
@@ -21,8 +22,21 @@ from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
 from kdive.security.secrets.secrets import SecretBackend
 
 
+class _TlsClientBinding(Protocol):
+    """Closed client binding fields needed to resolve one TLS context."""
+
+    @property
+    def server_ca_ref(self) -> str: ...
+
+    @property
+    def client_cert_ref(self) -> str: ...
+
+    @property
+    def client_key_ref(self) -> str: ...
+
+
 def _resolve_tls_material(
-    binding: RemoteAuthorityBinding, secret_backend: SecretBackend
+    binding: _TlsClientBinding, secret_backend: SecretBackend
 ) -> ssl.SSLContext:
     """Load registered secret material into TLS; remove private files before returning."""
     try:

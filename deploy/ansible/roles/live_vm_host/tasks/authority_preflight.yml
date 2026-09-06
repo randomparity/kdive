@@ -1,4 +1,46 @@
 ---
+- name: Require the complete fixed-worker authority client contract
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_authority_enabled | bool
+      - item | length > 0
+    quiet: true
+  loop:
+    - "{{ live_vm_host_worker_authority_instance }}"
+    - "{{ live_vm_host_worker_authority_request_socket }}"
+    - "{{ live_vm_host_worker_authority_server_ca_source }}"
+    - "{{ live_vm_host_worker_authority_client_certificate_source }}"
+    - "{{ live_vm_host_worker_authority_client_key_source }}"
+  when: live_vm_host_worker_authority_enabled | bool
+  no_log: true
+
+- name: Inspect fixed-worker authority client sources on the control host
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ live_vm_host_worker_authority_server_ca_source }}"
+    - "{{ live_vm_host_worker_authority_client_certificate_source }}"
+    - "{{ live_vm_host_worker_authority_client_key_source }}"
+  delegate_to: localhost
+  become: false
+  register: live_vm_host_worker_authority_source_preflight
+  when: live_vm_host_worker_authority_enabled | bool
+  no_log: true
+
+- name: Require protected regular fixed-worker authority client sources
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - not item.stat.islnk
+      - item.stat.mode in ['0400', '0600']
+      - item.stat.size > 0
+    quiet: true
+  loop: "{{ live_vm_host_worker_authority_source_preflight.results }}"
+  when: live_vm_host_worker_authority_enabled | bool
+  no_log: true
+
 - name: Validate external-boot authority inputs before host mutation
   when: live_vm_host_authority_enabled | bool
   block:
