@@ -1056,7 +1056,218 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_JOURNAL_DIR",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_PROVIDER_SOCKET",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",
     }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        ",",
+        "operator,",
+        ",operator",
+        "operator,operator",
+        " operator",
+        "op erator",
+        "Operator",
+        "0operator",
+        "operátor",
+        "operator\n",
+        "a" * 33,
+        ",".join(f"account{index}" for index in range(33)),
+    ],
+)
+def test_denied_identity_setting_rejects_malformed_values_without_disclosure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str
+) -> None:
+    from kdive import config as registry
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_UID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_GID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID": "1002",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES": raw,
+        }
+    )
+    with pytest.raises(HostReadinessError) as caught:
+        AuthorityHostConfig.from_environment()
+    assert str(caught.value) == "configuration: invalid"
+    assert caught.value.details == {"component": "configuration", "reason": "invalid"}
+
+
+@pytest.mark.parametrize(
+    "names",
+    [("operator",), tuple(f"account{n}" for n in range(32)), ("_operator", "a" * 32, "account-2")],
+)
+def test_denied_identity_setting_selects_existing_host_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, names: tuple[str, ...]
+) -> None:
+    from kdive import config as registry
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    registry.load(
+        {
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_UID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_GID": "1001",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID": "1002",
+            "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES": ",".join(names),
+        }
+    )
+    assert AuthorityHostConfig.from_environment().denied_identities == names
+
+
+def test_denied_host_account_must_exist_and_failure_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = replace(_access_boundary_config(tmp_path), denied_identities=("missing-account",))
+
+    def missing(name: str) -> None:
+        raise KeyError(name)
+
+    monkeypatch.setattr(host.pwd, "getpwnam", missing)
+    with pytest.raises(HostReadinessError) as caught:
+        host._validate_access_boundary(config)  # noqa: SLF001
+    assert str(caught.value) == "access-boundary: identity-missing"
+    assert "missing-account" not in repr(caught.value.details)
+
+
+@pytest.mark.parametrize("unsafe_uid", [0, None])
+def test_host_specific_denied_identity_cannot_be_root_or_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_uid: int | None
+) -> None:
+    config = replace(_access_boundary_config(tmp_path), denied_identities=("operator",))
+    monkeypatch.setattr(
+        host.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(
+            pw_uid=config.authority_uid if unsafe_uid is None else unsafe_uid,
+            pw_gid=config.authority_gid + 10000,
+        ),
+    )
+    monkeypatch.setattr(host.os, "getgrouplist", lambda _name, gid: [gid])
+    with pytest.raises(HostReadinessError, match="access-boundary: denied-identity"):
+        host._validate_access_boundary(config)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("address", "port", "valid"),
+    [
+        (None, None, True),
+        ("127.0.0.1", "443", True),
+        ("0.0.0.0", "65535", True),
+        ("127.0.0.1", None, False),
+        (None, "443", False),
+        ("", "443", False),
+        ("::1", "443", False),
+        ("localhost", "443", False),
+        ("224.0.0.1", "443", False),
+        ("127.0.0.1", "0", False),
+        ("127.0.0.1", "65536", False),
+    ],
+)
+def test_network_host_settings_require_complete_ipv4_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    address: str | None,
+    port: str | None,
+    valid: bool,
+) -> None:
+    from kdive import config as registry
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    env = {
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-a",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_UID": "1001",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_GID": "1001",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_CLIENT_GID": "1002",
+    }
+    if address is not None:
+        env["KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS"] = address
+    if port is not None:
+        env["KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT"] = port
+    registry.load(env)
+    if valid:
+        config = AuthorityHostConfig.from_environment()
+        assert config.network_address == address
+        assert config.network_port == (int(port) if port is not None else None)
+    else:
+        with pytest.raises(HostReadinessError, match="configuration: invalid"):
+            AuthorityHostConfig.from_environment()
+
+
+@pytest.mark.parametrize("fault", ["bind", "validate", "health", "drift", "cancel", "close"])
+def test_host_closes_both_listeners_on_every_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    config = replace(_config(tmp_path), network_address="127.0.0.1", network_port=443)
+    closed: list[str] = []
+    health_checked: list[str] = []
+    notices: list[str] = []
+
+    class Listener:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.checks = 0
+
+        def validate(self) -> None:
+            self.checks += 1
+            if self.name == "network" and (
+                fault == "validate" or (fault == "drift" and self.checks > 1)
+            ):
+                raise OSError("changed")
+
+        async def start_serving(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            closed.append(self.name)
+            if fault == "close" and self.name == "network":
+                raise OSError("close failed")
+
+    async def unix(*_args: object, **_kwargs: object) -> Listener:
+        return Listener("unix")
+
+    async def network(*_args: object, **_kwargs: object) -> Listener:
+        if fault == "bind":
+            raise OSError("bind failed")
+        return Listener("network")
+
+    async def static(*_args: object) -> None:
+        return None
+
+    async def health(listener: Listener, *_args: object) -> None:
+        health_checked.append(listener.name)
+        if listener.name == "network" and fault == "health":
+            raise HostReadinessError("tls-health", "handshake-failed")
+
+    async def pause(_delay: float) -> None:
+        if fault != "drift":
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(host, "serve_authority_transport", unix)
+    monkeypatch.setattr(host, "serve_authority_network_transport", network)
+    monkeypatch.setattr(host, "_check_static_authority_host", static)
+    monkeypatch.setattr(host, "check_tls_health", health)
+    monkeypatch.setattr(host, "_notify_systemd", notices.append)
+    monkeypatch.setattr(host.asyncio, "sleep", pause)
+    with pytest.raises((HostReadinessError, asyncio.CancelledError)):
+        asyncio.run(run_authority_host(config))
+    assert set(closed) == ({"unix"} if fault == "bind" else {"unix", "network"})
+    assert notices[-1] == "STOPPING=1"
+    if fault in {"drift", "cancel", "close"}:
+        assert health_checked[:2] == ["unix", "network"]
+        assert notices[0] == "READY=1"
+    else:
+        assert "READY=1" not in notices
 
 
 @pytest.mark.parametrize(

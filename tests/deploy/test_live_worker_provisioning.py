@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 import yaml
+from jinja2 import Environment, StrictUndefined
 
 ROOT = Path(__file__).resolve().parents[2]
 SYSTEMD = ROOT / "deploy" / "systemd"
@@ -26,10 +27,21 @@ AUTHORITY_TEARDOWN = ROOT / "deploy" / "ansible" / "playbooks" / "authority_host
 AUTHORITY_PROOF = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
 AUTHORITY_PREFLIGHT = ROLE / "tasks" / "authority_preflight.yml"
 RUNNER_PLAY = ROOT / "deploy" / "ansible" / "playbooks" / "runner.yml"
+PROVIDER_AUTHORITY = ROLE.parent / "provider_authority_host"
 
 
 def _text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    if path == MAIN_TASKS:
+        # Follow the shared endpoint task at the same call site the runner executes it.
+        shared = PROVIDER_AUTHORITY / "tasks/libvirt.yml"
+        start = text.find("- name: Consume the shared private authority libvirt endpoint tasks")
+        if start >= 0:
+            end = text.index("- name: Start the external-boot authority service", start)
+            expanded = shared.read_text(encoding="utf-8").removeprefix("---\n")
+            expanded = expanded.replace("provider_authority_host_", "live_vm_host_authority_")
+            text = text[:start] + expanded + "\n" + text[end:]
+    return text
 
 
 def _yaml(path: Path) -> dict[str, object]:
@@ -37,6 +49,209 @@ def _yaml(path: Path) -> dict[str, object]:
     if not isinstance(document, dict):
         raise TypeError(f"expected YAML mapping in {path}")
     return cast(dict[str, object], document)
+
+
+def test_remote_play_owns_authority_and_firewall_before_service_start() -> None:
+    plays = yaml.safe_load(_text(ROOT / "deploy/ansible/site.yml"))
+    authority = [
+        play
+        for play in plays
+        if any(
+            (role.get("role") if isinstance(role, dict) else role) == "provider_authority_host"
+            for role in play.get("roles", [])
+        )
+    ]
+    assert len(authority) == 1, "production remote hosts need the authority owner"
+    assert authority[0]["hosts"] == "remote_libvirt_hosts"
+    tasks = _text(PROVIDER_AUTHORITY / "tasks/main.yml")
+    assert tasks.index("prepare.yml") < tasks.index("name: gdbstub_acl")
+    assert tasks.index("name: gdbstub_acl") < tasks.index("install.yml")
+    assert plays[0]["pre_tasks"], "partial authority input must fail before host mutation"
+    prepare = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/prepare.yml"))
+    quiesce = next(task for task in prepare if "ansible.builtin.systemd_service" in task)
+    assert quiesce["ansible.builtin.systemd_service"]["state"] == "stopped"
+    condition = Environment(undefined=StrictUndefined).compile_expression(quiesce["when"][1])
+    previous = {"source": "192.0.2.0/24", "port": 18443}
+    for current, pending, enabled, expected in (
+        (previous, None, True, False),
+        (previous, previous, True, True),
+        (previous | {"port": 18444}, None, True, True),
+        (previous | {"source": "198.51.100.0/24"}, None, True, True),
+        (None, None, True, True),
+        (None, None, False, True),
+    ):
+        assert (
+            condition(
+                provider_authority_host_enabled=enabled,
+                gdbstub_acl_authority_targets={
+                    "previous": previous,
+                    "pending": pending,
+                    "current": current,
+                },
+            )
+            is expected
+        )
+
+
+def test_provider_authority_defaults_expose_no_listener() -> None:
+    path = PROVIDER_AUTHORITY / "defaults/main.yml"
+    assert path.is_file(), "production authority defaults are missing"
+    defaults = _yaml(path)
+    assert defaults["provider_authority_host_enabled"] is False
+    assert defaults["provider_authority_host_network_address"] == ""
+    assert defaults["provider_authority_host_network_port"] is None
+
+
+def test_provider_authority_environment_retracts_only_network_configuration() -> None:
+    path = PROVIDER_AUTHORITY / "templates/environment.j2"
+    assert path.is_file(), "production authority environment is missing"
+    template = Environment(undefined=StrictUndefined).from_string(_text(path))
+    values = dict(
+        provider_authority_host_instance="authority-test",
+        provider_authority_host_uid=991,
+        provider_authority_host_gid=992,
+        provider_authority_host_client_gid=993,
+        provider_authority_host_network_address="127.0.0.1",
+        provider_authority_host_network_port=18443,
+        provider_authority_host_denied_identities=["operator", "observer"],
+    )
+    enabled = template.render(**values)
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS=127.0.0.1\n" in enabled
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT=18443\n" in enabled
+    assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES=operator,observer\n" in enabled
+    assert template.render(**values) == enabled
+    disabled = template.render(
+        **(
+            values
+            | {
+                "provider_authority_host_network_address": "",
+                "provider_authority_host_network_port": None,
+            }
+        )
+    )
+    assert "NETWORK_" not in disabled
+    assert "REQUEST_SOCKET=/run/kdive/provider-authority/request/authority.sock" in disabled
+    # pragma: allowlist nextline secret -- fixed socket path, not a credential
+    assert "PROVIDER_SOCKET=/run/kdive/provider-authority/libvirt/libvirt-sock" in disabled
+    drift = template.render(**(values | {"provider_authority_host_network_port": 18444}))
+    assert "NETWORK_PORT=18444" in drift
+    assert "NETWORK_PORT=18443" not in drift
+
+
+def test_provider_authority_reuses_service_confinement_and_rechecks_drift() -> None:
+    path = PROVIDER_AUTHORITY / "tasks/install.yml"
+    assert path.is_file(), "production authority installation is missing"
+    tasks = _text(path)
+    assert "kdive-external-boot-authority.service" in tasks
+    assert "--locked" in tasks
+    assert "--no-editable" in tasks
+    assert "Restart provider authority after deployed changes" in tasks
+    assert "check-external-boot-authority-host" in tasks
+    service = _text(AUTHORITY_SERVICE)
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
+    assert "NoNewPrivileges=yes" in service
+    assert "User=kdive-provider-authority" in service
+    assert "ReadWritePaths=/run/kdive/provider-authority/request" in service
+    assert "ReadWritePaths=/var/lib/kdive/provider-authority/journal" in service
+
+
+def test_provider_authority_disable_retains_journal_evidence() -> None:
+    path = PROVIDER_AUTHORITY / "tasks/disable.yml"
+    assert path.is_file(), "production authority cleanup is missing"
+    tasks = _text(path)
+    assert "state: stopped" in tasks
+    assert "enabled: false" in tasks
+    assert "state: absent" in tasks
+    assert "/etc/kdive/provider-authority.env" in tasks
+    assert "/etc/kdive/credentials/provider-authority" in tasks
+    assert "/var/lib/kdive/provider-authority/journal" not in tasks
+
+
+def test_provider_authority_owns_ansible_temporary_directories() -> None:
+    tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/install.yml"))
+    inspection = next(
+        task for task in tasks if task.get("register") == "provider_authority_host_paths"
+    )
+    creation = next(
+        task for task in tasks if task["name"] == "Create private authority directories"
+    )
+    for path in (
+        "/var/lib/kdive/provider-authority/.ansible",
+        "/var/lib/kdive/provider-authority/.ansible/tmp",
+    ):
+        assert path in inspection["loop"], "temporary paths need the existing symlink refusal"
+        assert {"path": path} in creation["loop"]
+    policy = creation["ansible.builtin.file"]
+    assert policy["owner"] == "kdive-provider-authority"
+    assert policy["group"] == "{{ item.group | default('kdive-provider-authority') }}"
+    assert policy["mode"] == "{{ item.mode | default('0700') }}"
+    first_user_tasks = next(
+        task for task in tasks if task.get("ansible.builtin.import_tasks") == "libvirt.yml"
+    )
+    assert tasks.index(creation) < tasks.index(first_user_tasks)
+    cleanup = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/disable.yml"))
+    removal = next(
+        task for task in cleanup if task.get("register") == "provider_authority_host_removed"
+    )
+    assert "/var/lib/kdive/provider-authority/.ansible" in removal["loop"]
+
+
+def test_provider_authority_failed_convergence_stops_the_service() -> None:
+    tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/main.yml"))
+    convergence = next(
+        task for task in tasks if task["name"] == "Converge the production authority"
+    )
+    rescue = convergence["rescue"]
+    assert convergence["block"][0]["ansible.builtin.include_role"]["name"] == "gdbstub_acl"
+    assert any(
+        task.get("ansible.builtin.systemd_service", {}).get("state") == "stopped" for task in rescue
+    )
+    assert rescue[-1].get("ansible.builtin.fail"), (
+        "failed readiness must remain a failed deployment"
+    )
+
+
+def test_provider_authority_rechecks_the_installed_environment_despite_revision_match() -> None:
+    tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/install.yml"))
+    install = next(task for task in tasks if "frozen dependency lock" in task["name"])
+    assert "when" not in install, "a matching revision cannot hide a removed or drifted venv"
+
+
+def test_production_identity_preflight_does_not_inherit_become_root_or_create_placeholders() -> (
+    None
+):
+    tasks = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/preflight.yml"))
+    gather = next(task for task in tasks if "ansible.builtin.setup" in task)
+    assert gather["become"] is False
+    assert "ansible_user_id" in gather["ansible.builtin.setup"]["filter"]
+    installation = yaml.safe_load(_text(PROVIDER_AUTHORITY / "tasks/install.yml"))
+    assert [
+        task["ansible.builtin.user"]["name"]
+        for task in installation
+        if "ansible.builtin.user" in task
+    ] == ["kdive-provider-authority"]
+
+
+def test_provider_authority_firewall_harness_runs_input_and_drift_contracts() -> None:
+    harness = _text(ROOT / "deploy/ansible/tests/run-gdbstub-acl-prune.sh")
+    assert "provider_authority_preflight" in harness
+    assert "authority_firewall" in harness
+
+
+def test_selected_authority_roles_do_not_read_injected_top_level_facts() -> None:
+    for role, filename in (
+        ("provider_authority_host", "preflight.yml"),
+        ("provider_authority_host", "install.yml"),
+        ("gdbstub_acl", "authority_validate.yml"),
+        ("gdbstub_acl", "authority_rules.yml"),
+        ("gdbstub_acl", "main.yml"),
+    ):
+        tasks = yaml.safe_load(_text(ROLE.parent / role / "tasks" / filename))
+        # setup's filter names the fact to gather, not an injected-variable read.
+        reads = [task for task in tasks if "ansible.builtin.setup" not in task]
+        assert not re.search(r"\bansible_(user_id|os_family)\b", yaml.safe_dump(reads)), (
+            f"{role}/{filename} must consume gathered ansible_facts directly"
+        )
 
 
 def test_fixed_slot_accounts_and_groups_are_declared() -> None:

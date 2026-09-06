@@ -42,6 +42,7 @@ from kdive.providers.infra.reaping import (
     OwnedDomain,
 )
 from kdive.providers.local_libvirt import composition as local_composition
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.traffic import (
     CaptureExecutionRequest,
     LocalCaptureConfiguration,
@@ -49,7 +50,10 @@ from kdive.providers.ports.traffic import (
     TrafficCaptureExecutor,
 )
 from kdive.providers.remote_libvirt import composition as remote_composition
-from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
+from kdive.providers.remote_libvirt.config import (
+    RemoteAuthorityBinding,
+    is_remote_libvirt_configured,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore
@@ -303,6 +307,8 @@ class ProviderComposition:
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
         local_reaper: InfraReaper | None = None,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+        | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return (
             _RuntimeDescriptor(
@@ -330,7 +336,9 @@ class ProviderComposition:
                 kind=ResourceKind.REMOTE_LIBVIRT,
                 enabled=lambda: _remote_libvirt_enabled(enable_remote_libvirt),
                 runtime_factory=lambda: remote_composition.build_runtime(
-                    secret_registry=self._secret_registry, store=self._object_store
+                    secret_registry=self._secret_registry,
+                    store=self._object_store,
+                    authority_sender_factory=authority_sender_factory,
                 ),
                 discovery_registration_factory=lambda: remote_composition.discovery_registration(
                     secret_registry=self._secret_registry
@@ -363,6 +371,8 @@ class ProviderComposition:
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
         local_reaper: InfraReaper | None = None,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+        | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return tuple(
             descriptor
@@ -371,6 +381,7 @@ class ProviderComposition:
                 enable_remote_libvirt=enable_remote_libvirt,
                 enable_local_libvirt=enable_local_libvirt,
                 local_reaper=local_reaper,
+                authority_sender_factory=authority_sender_factory,
             )
             if descriptor.enabled()
         )
@@ -381,6 +392,8 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+        | None = None,
     ) -> ProviderResolver:
         """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry.
 
@@ -395,6 +408,7 @@ class ProviderComposition:
                 enable_fault_inject=enable_fault_inject,
                 enable_remote_libvirt=enable_remote_libvirt,
                 enable_local_libvirt=enable_local_libvirt,
+                authority_sender_factory=authority_sender_factory,
             )
         }
         return ProviderResolver(runtimes)

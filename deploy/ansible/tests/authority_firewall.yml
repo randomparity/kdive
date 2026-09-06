@@ -1,0 +1,7 @@
+---
+- name: Exercise authority firewall convergence with isolated module boundaries
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - gdbstub_acl

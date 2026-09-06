@@ -1,0 +1,60 @@
+---
+- name: Validate authority firewall ownership
+  ansible.builtin.import_tasks: authority_validate.yml
+
+- name: Retract every retained authority tuple except the selected target
+  ansible.builtin.include_tasks: authority_rules.yml
+  vars:
+    gdbstub_acl_authority_rule: "{{ authority_owned_tuple }}"
+    gdbstub_acl_authority_remove: true
+  loop: "{{ gdbstub_acl_authority_targets.owned | unique }}"
+  loop_control:
+    loop_var: authority_owned_tuple
+  when: authority_owned_tuple != gdbstub_acl_authority_targets.current
+
+- name: Create the private firewall ownership directory
+  ansible.builtin.file:
+    path: "{{ gdbstub_acl_authority_state_path | dirname }}"
+    state: directory
+    mode: "0700"
+    follow: false
+  when: gdbstub_acl_authority_targets.current is not none
+
+- name: Persist recoverable authority ownership before installing any grant
+  ansible.builtin.copy:
+    dest: "{{ gdbstub_acl_authority_state_path }}"
+    content: >-
+      {{ {'current': gdbstub_acl_authority_targets.previous
+          if gdbstub_acl_authority_targets.previous == gdbstub_acl_authority_targets.current else none,
+          'pending': gdbstub_acl_authority_targets.current} | to_json }}
+    mode: "0600"
+    unsafe_writes: false
+  when:
+    - gdbstub_acl_authority_targets.current is not none
+    - >-
+      gdbstub_acl_authority_targets.previous != gdbstub_acl_authority_targets.current or
+      gdbstub_acl_authority_targets.pending is not none
+  no_log: true
+
+- name: Converge the selected source-scoped authority tuple
+  ansible.builtin.include_tasks: authority_rules.yml
+  vars:
+    gdbstub_acl_authority_rule: "{{ gdbstub_acl_authority_targets.current }}"
+    gdbstub_acl_authority_remove: false
+  when: gdbstub_acl_authority_targets.current is not none
+
+- name: Record the authority tuple only after successful rule convergence
+  ansible.builtin.copy:
+    dest: "{{ gdbstub_acl_authority_state_path }}"
+    content: >-
+      {{ {'current': gdbstub_acl_authority_targets.current, 'pending': none} | to_json }}
+    mode: "0600"
+    unsafe_writes: false
+  when: gdbstub_acl_authority_targets.current is not none
+  no_log: true
+
+- name: Remove retired authority firewall ownership after successful retraction
+  ansible.builtin.file:
+    path: "{{ gdbstub_acl_authority_state_path }}"
+    state: absent
+  when: gdbstub_acl_authority_targets.current is none

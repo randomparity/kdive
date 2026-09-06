@@ -425,6 +425,7 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
     assert set(by_provider["remote-libvirt"]._worker_check_ids) == {  # noqa: SLF001
         PROVIDER_TLS_ID,
         GDBSTUB_ACL_ID,
+        "provider_authority",
     }
     assert set(by_provider["local-libvirt"]._worker_check_ids) == {  # noqa: SLF001
         MULTIARCH_GDB_ID,

@@ -10,3 +10,7 @@ gdbstub_acl_gdbstub_port_range_dash: "{{ gdbstub_range | replace(':', '-') }}"
 # allowing SSH). Set false only if you enforce these ports by other means — the role
 # then FAILS when ufw is inactive rather than leaving the debug ports world-open.
 gdbstub_acl_ufw_enable: true
+
+# The production authority owner supplies this only for a complete enabled route.
+gdbstub_acl_authority_port: null
+gdbstub_acl_authority_state_path: /var/lib/kdive/firewall/provider-authority.json

@@ -54,6 +54,18 @@ class TlsCertRefs:
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteAuthorityBinding:
+    """The Resource-selected authority route and its TLS secret references."""
+
+    authority_instance: str
+    address: str
+    port: int
+    server_ca_ref: str
+    client_cert_ref: str
+    client_key_ref: str
+
+
+@dataclass(frozen=True, slots=True)
 class RemoteLibvirtConfig:
     """The resolved remote host: validated URI, cert refs, host-level knobs.
 
@@ -67,6 +79,7 @@ class RemoteLibvirtConfig:
     uri: str
     cert_refs: TlsCertRefs
     concurrent_allocation_cap: int
+    authority: RemoteAuthorityBinding | None = None
     storage_pool: str = _DEFAULT_STORAGE_POOL
     network: str = _DEFAULT_NETWORK
     machine: str = _DEFAULT_MACHINE
@@ -347,6 +360,7 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
             ca_cert_ref=instance.ca_cert_ref,
         ),
         concurrent_allocation_cap=instance.concurrent_allocation_cap,
+        authority=_authority_binding_for(instance),
         storage_pool=config.get(REMOTE_LIBVIRT_STORAGE_POOL) or _DEFAULT_STORAGE_POOL,
         network=config.get(REMOTE_LIBVIRT_NETWORK) or _DEFAULT_NETWORK,
         machine=config.get(REMOTE_LIBVIRT_MACHINE) or _DEFAULT_MACHINE,
@@ -362,6 +376,41 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
         ssh_addr=ssh_addr,
         ssh_port_min=ssh_port_min,
         ssh_port_max=ssh_port_max,
+    )
+
+
+def _authority_binding_for(instance: RemoteLibvirtInstance) -> RemoteAuthorityBinding | None:
+    """Map the inventory-validated optional authority tuple to its closed runtime value."""
+    values = (
+        instance.authority_instance,
+        instance.authority_address,
+        instance.authority_port,
+        instance.authority_server_ca_ref,
+        instance.authority_client_cert_ref,
+        instance.authority_client_key_ref,
+    )
+    if all(value is None for value in values):
+        return None
+    if (
+        instance.authority_instance is None
+        or instance.authority_address is None
+        or instance.authority_port is None
+        or instance.authority_server_ca_ref is None
+        or instance.authority_client_cert_ref is None
+        or instance.authority_client_key_ref is None
+    ):
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}] authority binding fields must be all present or "
+            "all absent",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return RemoteAuthorityBinding(
+        authority_instance=instance.authority_instance,
+        address=instance.authority_address,
+        port=instance.authority_port,
+        server_ca_ref=instance.authority_server_ca_ref,
+        client_cert_ref=instance.authority_client_cert_ref,
+        client_key_ref=instance.authority_client_key_ref,
     )
 
 

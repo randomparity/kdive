@@ -47,9 +47,11 @@ from kdive.providers.infra.console_hosting import (
 )
 from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
 from kdive.providers.infra.reaping import CaptureReaper, DumpVolumeReaper, InfraReaper
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration, TrafficCaptureOperationPorts
 from kdive.providers.remote_libvirt import stage_volume
 from kdive.providers.remote_libvirt.config import (
+    RemoteAuthorityBinding,
     RemoteLibvirtConfig,
     TlsCertRefs,
     is_remote_libvirt_configured,
@@ -371,13 +373,22 @@ def _resource_detail_projector(
 
 
 def _rebind_for_resource(
-    secret_registry: SecretRegistry, store: ObjectStore
+    secret_registry: SecretRegistry,
+    store: ObjectStore,
+    authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
 ) -> Callable[[str], ProviderRuntime]:
     def rebind(resource_name: str) -> ProviderRuntime:
+        sender = None
+        if authority_sender_factory is not None:
+            binding = remote_config_for_resource(resource_name).authority
+            if binding is not None:
+                sender = authority_sender_factory(binding)
         return build_runtime(
             secret_registry=secret_registry,
             store=store,
             config_factory=lambda: remote_config_for_resource(resource_name),
+            authority_sender_factory=authority_sender_factory,
+            _authority=sender,
         )
 
     return rebind
@@ -393,6 +404,9 @@ def build_runtime(
     secret_registry: SecretRegistry,
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
+    authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
+    | None = None,
+    _authority: AuthorityRequestSender | None = None,
 ) -> ProviderRuntime:
     """Build remote-libvirt ports; buildable without operator config (ADR-0076).
 
@@ -423,6 +437,7 @@ def build_runtime(
     )
 
     return ProviderRuntime(
+        authority=_authority,
         profile_policy=RemoteLibvirtProfilePolicy(),
         provisioner=RemoteLibvirtProvisioning(
             secret_registry=secret_registry, config_factory=config_factory
@@ -513,6 +528,8 @@ def build_runtime(
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
         binding=ResourceBindingCapabilities(
-            rebind_for_resource=_rebind_for_resource(secret_registry, store)
+            rebind_for_resource=_rebind_for_resource(
+                secret_registry, store, authority_sender_factory
+            )
         ),
     )

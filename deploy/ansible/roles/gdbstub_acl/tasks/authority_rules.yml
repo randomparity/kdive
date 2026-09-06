@@ -1,0 +1,34 @@
+---
+# Deny precedes grant on installation. On removal the grant goes first, so no intermediate
+# state leaves an obsolete source allowed without a deny. Existing protected ports are separate.
+- name: Reconcile authority firewalld rules in fail-closed order
+  ansible.posix.firewalld:
+    rich_rule: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: "{{ 'disabled' if gdbstub_acl_authority_remove else 'enabled' }}"
+  vars:
+    authority_drop: >-
+      rule priority="100" family="ipv4" port port="{{ gdbstub_acl_authority_rule.port }}" protocol="tcp" drop
+    authority_allow: >-
+      rule family="ipv4" source address="{{ gdbstub_acl_authority_rule.source }}"
+      port port="{{ gdbstub_acl_authority_rule.port }}" protocol="tcp" accept
+  loop: "{{ [authority_allow, authority_drop] if gdbstub_acl_authority_remove else [authority_drop, authority_allow] }}"
+  when: ansible_facts['os_family'] == 'RedHat'
+  no_log: true
+
+- name: Reconcile authority ufw rules in fail-closed order
+  community.general.ufw:
+    rule: "{{ item.rule }}"
+    direction: in
+    proto: tcp
+    from_ip: "{{ item.source | default(omit) }}"
+    to_port: "{{ gdbstub_acl_authority_rule.port | string }}"
+    insert: "{{ 1 if item.rule == 'allow' and not gdbstub_acl_authority_remove else omit }}"
+    delete: "{{ gdbstub_acl_authority_remove }}"
+  vars:
+    authority_drop: {rule: deny}
+    authority_allow: {rule: allow, source: "{{ gdbstub_acl_authority_rule.source }}"}
+  loop: "{{ [authority_allow, authority_drop] if gdbstub_acl_authority_remove else [authority_drop, authority_allow] }}"
+  when: ansible_facts['os_family'] == 'Debian'
+  no_log: true

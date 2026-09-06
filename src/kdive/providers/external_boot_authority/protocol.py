@@ -184,7 +184,25 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
         return self
 
 
-type AuthorityRequestV1 = AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1
+class AuthorityHealthRequestV1(_ClosedValue):
+    """Authentication-only request with no provider operation (ADR-0606)."""
+
+    schema_: Literal["external-boot-authority-health-v1"] = Field(
+        "external-boot-authority-health-v1", alias="schema"
+    )
+
+
+class AuthorityHealthAcknowledgementV1(_ClosedValue):
+    """Authentication succeeded for the current worker incarnation (ADR-0606)."""
+
+    schema_: Literal["external-boot-authority-health-v1"] = Field(
+        "external-boot-authority-health-v1", alias="schema"
+    )
+
+
+type AuthorityRequestV1 = (
+    AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1 | AuthorityHealthRequestV1
+)
 _AUTHORITY_REQUEST_ADAPTER = TypeAdapter(AuthorityRequestV1)
 
 

@@ -3,6 +3,11 @@
   hosts: remote_libvirt_hosts
   become: true
   gather_facts: true
+  pre_tasks:
+    - name: Validate authority opt-in inputs before any remote host mutation
+      ansible.builtin.import_role:
+        name: provider_authority_host
+        tasks_from: preflight
   roles:
     - libvirt_stack
 
@@ -28,12 +33,13 @@
     - role: remote_libvirt_module_appliance
       when: remote_libvirt_module_appliance_enabled | bool
 
-- name: Apply the gdbstub-port ACL
+- name: Apply protected-port ACLs and the optional provider authority
   hosts: remote_libvirt_hosts
   become: true
   gather_facts: true
   roles:
-    - gdbstub_acl
+    - role: provider_authority_host
+      tags: [provider_authority_host]
 
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
