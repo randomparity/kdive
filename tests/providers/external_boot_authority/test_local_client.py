@@ -9,6 +9,7 @@ import ssl
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -33,9 +34,62 @@ from kdive.providers.external_boot_authority.transport import (
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
+from tests.providers.external_boot_authority.service_support import _mutation, _service
 from tests.providers.external_boot_authority.tls_support import _tls_material
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_typed_unix_mutation_replays_after_lost_terminal_response(tmp_path: Path) -> None:
+    from kdive.jobs.authority_sender import AuthorityRequestSender
+    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+    from kdive.providers.external_boot_authority.transport import _dispatch
+
+    service, repository, adapter, peer, takeover = _service(tmp_path)
+    material = _tls_material(tmp_path, takeover.authority_instance)
+    socket_path = tmp_path / "authority.sock"
+    binding = replace(_binding(socket_path), authority_instance=takeover.authority_instance)
+    context = _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+    credential = SecretStr("active-incarnation")
+    sender = AuthorityRequestSender(
+        lambda: _AuthorityUnixTransport(binding, context), lambda: credential
+    )
+    drop_mutation_response = True
+
+    async def authenticate(value: SecretStr) -> AuthenticatedPeer:
+        assert value == credential
+        return peer
+
+    async def dispatch(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal drop_mutation_response
+        envelope = await read_frame(reader, maximum=MAX_ENVELOPE_BYTES)
+        response = await _dispatch(envelope, authenticate, service)
+        if json.loads(envelope)["operation"] == "execute-mutation" and drop_mutation_response:
+            drop_mutation_response = False
+            writer.transport.abort()
+            return
+        writer.write(len(response).to_bytes(4, "big") + response)
+        await writer.drain()
+
+    async with _server(socket_path, material, dispatch):
+        acknowledgement = await sender.acknowledge_takeover(
+            takeover, deadline=asyncio.get_running_loop().time() + 2
+        )
+        assert acknowledgement.journal_sequence == 2
+        assert adapter.calls == []
+        repository.current = True
+        mutation = _mutation(takeover)
+        with pytest.raises(
+            CategorizedError, match="authority: (invalid-response|transport-failed)"
+        ):
+            await sender.execute_mutation(mutation, deadline=asyncio.get_running_loop().time() + 2)
+        assert adapter.calls == ["commit:activate", "observe"]
+        receipt = await sender.execute_mutation(
+            mutation, deadline=asyncio.get_running_loop().time() + 2
+        )
+        assert receipt.category == "target"
+        assert adapter.calls == ["commit:activate", "observe"]
+
 
 _RESPONSE = json.dumps(
     {"status": "ok", "value": {"schema": "external-boot-authority-health-v1"}},

@@ -758,7 +758,7 @@ def test_host_shares_one_mutation_service_between_listeners(
     class Service:
         closed = False
 
-        def close(self) -> None:
+        async def close(self) -> None:
             self.closed = True
 
     service = Service()
@@ -1140,12 +1140,20 @@ def test_authority_host_config_reads_fixed_registry_and_credentials(
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_ADDRESS",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_NETWORK_PORT",
         "KDIVE_EXTERNAL_BOOT_AUTHORITY_DENIED_IDENTITIES",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES",
+        "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF",
         "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF",
     }
+    assert all(
+        setting.processes == frozenset({"worker"})
+        for setting in authority_settings.SETTINGS
+        if setting.name.startswith("KDIVE_WORKER_")
+    )
 
 
 @pytest.mark.parametrize(
