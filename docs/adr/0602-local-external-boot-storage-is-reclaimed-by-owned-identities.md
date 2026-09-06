@@ -1,4 +1,4 @@
-# 0602: Local external-boot storage is reclaimed by owned identities
+# 0602 — Local external-boot storage is reclaimed by owned identities
 
 ## Status
 
