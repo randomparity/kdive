@@ -132,6 +132,36 @@ runner cannot masquerade as "no environment":
 
 ## Running each tier
 
+### Installed local authority carrier
+
+Issue #2151's local x86_64 carrier is selected by the `live_vm` marker but remains dormant unless
+`KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file.
+The closed file contains `installed_revision` (the exact 40-character SHA), `system_id` (a
+pre-provisioned disposable System UUID), `ownership_prefix` (`kdive-2151-<sha12>-<nonce8>`), the
+literal `kdive-external-boot-authority.service` service name, and an absolute `barrier_socket`.
+It contains no credentials; the active fixed worker owns authentication.
+
+Run only the focused carrier after provisioning and backend bring-up:
+
+```sh
+KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
+  uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q
+```
+
+An unset trigger skips. Any configured mismatch fails before mutation. The carrier records exact
+domains, volumes, object keys, journal lanes, recovery paths, Runs, and activations beneath its
+unique ownership scope, then cleans only those recorded resources in reverse creation order. Do not
+run the host-wide `kdive-*` reaper for this proof.
+
+The current installed authority has no deterministic provider-effect barrier for suspending a real
+operation after its host effect but before journal/core terminal persistence. Consequently the
+configured carrier fails loud before mutation rather than claiming unresolved-takeover, restart,
+journal-loss, or stale-write acceptance from timing luck or fake ports. Helper tests under
+`test_installed_local_authority_support.py` prove only input and cleanup orchestration; they are not
+native acceptance. A first real run remains blocked until the assembled runtime supplies that
+barrier and binds the six public worker operations (activate, recover, resolve-conflict, release,
+cleanup, teardown).
+
 ### `live_stack` — drive the running stack over HTTP
 
 ```
