@@ -11,6 +11,7 @@ from uuid import UUID
 import pytest
 from psycopg import AsyncConnection
 
+import kdive.reconciler.cleanup.provider_resources.module_volume_reaping as reaping_enqueue
 from kdive.db.remote_module_attempt_obligations import ModuleAttempt, RetainedModuleAttempt
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
@@ -18,6 +19,9 @@ from kdive.jobs.handlers.module_volume_reaping import (
     remote_module_volume_reap_handler,
 )
 from kdive.providers.infra.reaping import ModuleVolumeKey
+from kdive.reconciler.cleanup.provider_resources.module_volume_reaping import (
+    enqueue_remote_module_volume_reap,
+)
 
 SYSTEM = UUID("00000000-0000-0000-0000-000000000001")
 RUN = UUID("00000000-0000-0000-0000-000000000002")
@@ -123,3 +127,19 @@ def test_provider_count_is_logged_only_in_worker_telemetry(
 def test_repository_failure_propagates() -> None:
     with pytest.raises(RuntimeError, match="database unavailable"):
         _run(Repository(error=RuntimeError("database unavailable")), Reaper())
+
+
+def test_enqueue_uses_the_closed_internal_maintenance_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def enqueue(*args: object, **kwargs: object) -> tuple[object, bool]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return object(), True
+
+    monkeypatch.setattr(reaping_enqueue.queue, "enqueue_with_status", enqueue)
+    assert asyncio.run(enqueue_remote_module_volume_reap(cast("AsyncConnection", object()))) is True
+    assert captured["args"][1] is JobKind.REMOTE_MODULE_VOLUME_REAP
+    assert captured["kwargs"]["recycle"].value == "terminal_or_canceled"

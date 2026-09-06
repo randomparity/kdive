@@ -158,10 +158,22 @@ def test_reconcile_now_clean_state_returns_zero_summary(migrated_url: str) -> No
         repair_counts = resp.data["repair_counts"]
         assert isinstance(repair_counts, dict)
         assert tuple(repair_counts) == ALL_REPAIR_KINDS
-        assert all(repair_counts[repair_kind] == 0 for repair_kind in ALL_REPAIR_KINDS)
+        assert repair_counts["module_volume_reap_jobs_enqueued"] == 1
+        assert all(
+            repair_counts[repair_kind] == 0
+            for repair_kind in ALL_REPAIR_KINDS
+            if repair_kind != "module_volume_reap_jobs_enqueued"
+        )
+        async with _pool(migrated_url) as pool:
+            repeated = await ops_reconcile.reconcile_now(
+                pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
+            )
+        repeated_counts = repeated.data["repair_counts"]
+        assert isinstance(repeated_counts, dict)
+        assert repeated_counts["module_volume_reap_jobs_enqueued"] == 0
         assert resp.data["failures"] == ""
         # A pass with nothing to repair is still audited (it ran a control action).
-        assert await _platform_audit_count(migrated_url) == 1
+        assert await _platform_audit_count(migrated_url) == 2
 
     asyncio.run(_run())
 
