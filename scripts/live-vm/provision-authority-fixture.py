@@ -12,6 +12,11 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
+# This script is the one explicitly selected disposable authority fixture. Set its fixed
+# authority-owned roots before importing provider modules, which bind runtime paths at import.
+os.environ["KDIVE_LIBVIRT_ROOTFS_ROOT"] = "/var/lib/kdive/provider-authority/rootfs"
+os.environ["KDIVE_LIBVIRT_CONSOLE_ROOT"] = "/var/lib/kdive/provider-authority/console"
+
 import libvirt
 
 from kdive.profiles.provisioning import ProvisioningProfile

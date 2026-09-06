@@ -115,8 +115,8 @@ live_vm_host_authority_health_client_key_source: ""
 # console were provisioned under this authority identity on its private daemon.
 live_vm_host_authority_local_mutation_enabled: false
 live_vm_host_authority_recovery_root: /var/lib/kdive/provider-authority/recovery
-live_vm_host_authority_rootfs_root: /var/lib/kdive/rootfs
-live_vm_host_authority_console_root: /var/lib/kdive/console
+live_vm_host_authority_rootfs_root: /var/lib/kdive/provider-authority/rootfs
+live_vm_host_authority_console_root: /var/lib/kdive/provider-authority/console
 live_vm_host_authority_external_boot_capacity_bytes: null
 live_vm_host_authority_s3_endpoint_url: ""
 live_vm_host_authority_s3_bucket: ""

@@ -52,6 +52,8 @@ def test_enabled_environment_contains_complete_mutation_configuration() -> None:
         provider_authority_host_denied_identities=["operator"],
         provider_authority_host_local_mutation_enabled=True,
         provider_authority_host_recovery_root="/var/lib/kdive/provider-authority/recovery",
+        provider_authority_host_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
+        provider_authority_host_console_root="/var/lib/kdive/provider-authority/console",
         provider_authority_host_external_boot_capacity_bytes=34359738368,
         provider_authority_host_s3_endpoint_url="https://objects.example.invalid",
         provider_authority_host_s3_bucket="artifacts",
@@ -202,6 +204,8 @@ def test_authority_unit_projects_s3_credentials_and_only_needed_devices() -> Non
     mutation = template.render(
         provider_authority_host_local_mutation_enabled=True,
         provider_authority_host_recovery_root="/var/lib/kdive/provider-authority/recovery",
+        provider_authority_host_rootfs_root="/var/lib/kdive/provider-authority/rootfs",
+        provider_authority_host_console_root="/var/lib/kdive/provider-authority/console",
     )
     assert "PrivateDevices=no" in mutation
     assert "DevicePolicy=closed" in mutation

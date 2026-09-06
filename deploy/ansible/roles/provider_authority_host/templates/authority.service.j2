@@ -50,6 +50,8 @@ ReadWritePaths=/var/lib/kdive/provider-authority/journal
 ReadWritePaths=/run/kdive/provider-authority/request
 {% if provider_authority_host_local_mutation_enabled %}
 ReadWritePaths={{ provider_authority_host_recovery_root }}
+ReadWritePaths={{ provider_authority_host_rootfs_root }}
+ReadWritePaths={{ provider_authority_host_console_root }}
 {% endif %}
 
 [Install]

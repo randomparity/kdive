@@ -919,20 +919,19 @@
     mode: "2770"
   loop: "{{ live_vm_host_worker_shared_directories }}"
 
-- name: Grant the opted-in authority access to managed rootfs and console roots
-  ansible.builtin.command:
-    argv:
-      - setfacl
-      - -m
-      - "u:{{ live_vm_host_authority_account }}:rwx"
-      - "{{ item }}"
+- name: Create owner-only authority runtime roots
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ live_vm_host_authority_account }}"
+    group: "{{ live_vm_host_authority_account }}"
+    mode: "0700"
+    follow: false
   loop:
     - "{{ live_vm_host_authority_rootfs_root }}"
     - "{{ live_vm_host_authority_console_root }}"
-  register: live_vm_host_authority_managed_root_acl
-  changed_when: false
-  when:
-    - live_vm_host_authority_enabled | bool
+  when: live_vm_host_authority_local_mutation_enabled | bool
+
     - live_vm_host_authority_local_mutation_enabled | bool
 
 - name: Inspect the fixed worker fixture parent without following links

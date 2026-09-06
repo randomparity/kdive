@@ -360,8 +360,12 @@ def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
     assert defaults["live_vm_host_authority_recovery_root"] == (
         "/var/lib/kdive/provider-authority/recovery"
     )
-    assert defaults["live_vm_host_authority_rootfs_root"] == "/var/lib/kdive/rootfs"
-    assert defaults["live_vm_host_authority_console_root"] == "/var/lib/kdive/console"
+    assert defaults["live_vm_host_authority_rootfs_root"] == (
+        "/var/lib/kdive/provider-authority/rootfs"
+    )
+    assert defaults["live_vm_host_authority_console_root"] == (
+        "/var/lib/kdive/provider-authority/console"
+    )
     assert defaults["live_vm_host_authority_external_boot_capacity_bytes"] is None
     assert defaults["live_vm_host_authority_s3_endpoint_url"] == ""
     assert defaults["live_vm_host_authority_s3_bucket"] == ""
@@ -391,12 +395,14 @@ def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
     assert 'mode: "0400"' in tasks
     assert "Symlink the target-native libguestfs binding into the authority venv" in tasks
     assert "if live_vm_host_authority_local_mutation_enabled else" in tasks
-    assert "Grant the opted-in authority access to managed rootfs and console roots" in tasks
-    assert "u:{{ live_vm_host_authority_account }}:rwx" in tasks
+    assert "Create owner-only authority runtime roots" in tasks
+    assert "u:{{ live_vm_host_authority_account }}:rwx" not in tasks
     assert "AWS_SHARED_CREDENTIALS_FILE" in tasks
 
     environment = _text(AUTHORITY_ENV_TEMPLATE)
     assert "KDIVE_LIBVIRT_RECOVERY_ROOT={{ live_vm_host_authority_recovery_root }}" in environment
+    assert "KDIVE_LIBVIRT_ROOTFS_ROOT={{ live_vm_host_authority_rootfs_root }}" in environment
+    assert "KDIVE_LIBVIRT_CONSOLE_ROOT={{ live_vm_host_authority_console_root }}" in environment
     assert "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES=" in environment
     assert "KDIVE_S3_ENDPOINT_URL={{ live_vm_host_authority_s3_endpoint_url }}" in environment
 
