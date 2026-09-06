@@ -61,11 +61,18 @@ def _canonical_bytes(value: BaseModel) -> bytes:
     return encoded
 
 
+def canonical_teardown_proof_bytes(proof: AuthorityTeardownProofV1) -> bytes:
+    """Encode the exact bounded UTF-8 proof document authenticated by the journal head."""
+    return _canonical_bytes(proof)
+
+
 def teardown_proof_digest(proof: AuthorityTeardownProofV1) -> str:
     """Name one closed teardown disposition with the authority observation digest."""
     return (
         "sha256:"
-        + hashlib.sha256(_TEARDOWN_PROOF_IDENTITY_PREFIX + _canonical_bytes(proof)).hexdigest()
+        + hashlib.sha256(
+            _TEARDOWN_PROOF_IDENTITY_PREFIX + canonical_teardown_proof_bytes(proof)
+        ).hexdigest()
     )
 
 

@@ -829,21 +829,12 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
 
 
 def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
-    """Release the recovery-store reservation, copying its three fields from the row verbatim.
+    """Recover, clean, then credit only after the authority proves owned storage absence.
 
-    ``objects`` is **always empty, and that is the truthful value.** Release performs no deletion:
-    ADR-0584's merged adapter lists ``RELEASE`` in neither its mutating nor its deleting operation
-    set, because deletion belongs to ``cleanup`` under a later generation. So at release time no
-    owned object is absent, and ``_ReleaseObject`` can represent only an absent object. Nor could
-    the handler check: ``ExternalBootPorts`` has no method reporting per-object absence, and
-    ``observe`` returns a ``RunningKernelObservation`` carrying no object identity.
-    ``enumeration_complete`` is truthful because the domain it can check is empty, not because it
-    checked and found nothing.
-    The handler never asserts ``absent`` for an object it did not check, and this design gives it no
-    way to; a store-side enumeration needs a port that does not exist (#2199/#2200).
-
-    Crediting the reservation back while the objects still exist departs from ADR-0583's ordering;
-    that is deferral record 0010, which this handler neither introduces nor resolves.
+    The root release job drives its derived ``recover`` and ``cleanup`` phases in the authority
+    journal.  The worker records an exact cleanup receipt from the terminal ``absent`` head before
+    the SQL finalizer deletes the ready reservation and writes its one release credit.  It does not
+    infer absence from a release request or credit while owned artifacts remain.
     """
 
     async def complete(context: OperationContext) -> ExternalBootDerivedReleaseCompletion:
