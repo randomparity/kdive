@@ -116,7 +116,7 @@ $$;
 CREATE FUNCTION public.commit_external_boot_preparation_result(
     p_credential_hash bytea, p_job_id uuid, p_attempt integer,
     p_authority_id uuid, p_generation bigint, p_operation text,
-    p_operation_identity text, p_operation_digest text,
+    p_operation_attempt_id uuid, p_operation_identity text, p_operation_digest text,
     p_journal_sequence bigint, p_journal_digest text,
     p_plan_identity text, p_receipt jsonb
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
@@ -128,21 +128,23 @@ DECLARE
     v_incarnation text;
     v_job public.jobs%ROWTYPE;
     v_materialization_identity text;
+    v_receipt_identity text;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
     END IF;
-    IF p_credential_hash IS NULL OR octet_length(p_credential_hash) <> 32
-       OR p_job_id IS NULL OR p_attempt IS NULL OR p_attempt <= 0
-       OR p_authority_id IS NULL OR p_generation IS NULL OR p_generation <= 0
-       OR p_operation NOT IN ('materialize', 'prepare')
-       OR p_operation_identity !~ '^sha256:[0-9a-f]{64}$'
-       OR p_operation_digest !~ '^sha256:[0-9a-f]{64}$'
-       OR p_journal_sequence IS NULL OR p_journal_sequence <= 0
-       OR p_journal_digest !~ '^sha256:[0-9a-f]{64}$'
-       OR p_plan_identity !~ '^sha256:[0-9a-f]{64}$'
-       OR jsonb_typeof(p_receipt) IS DISTINCT FROM 'object'
-       OR pg_column_size(p_receipt) > 65536 THEN
+    IF (octet_length(p_credential_hash) = 32
+       AND p_job_id IS NOT NULL AND p_attempt > 0
+       AND p_authority_id IS NOT NULL AND p_generation > 0
+       AND p_operation IN ('materialize', 'prepare')
+       AND p_operation_attempt_id IS NOT NULL
+       AND p_operation_identity ~ '^sha256:[0-9a-f]{64}$'
+       AND p_operation_digest ~ '^sha256:[0-9a-f]{64}$'
+       AND p_journal_sequence > 0
+       AND p_journal_digest ~ '^sha256:[0-9a-f]{64}$'
+       AND p_plan_identity ~ '^sha256:[0-9a-f]{64}$'
+       AND jsonb_typeof(p_receipt) = 'object'
+       AND pg_column_size(p_receipt) <= 65536) IS NOT TRUE THEN
         RAISE EXCEPTION 'external boot preparation commit facts are invalid'
             USING ERRCODE = '22023';
     END IF;
@@ -158,6 +160,9 @@ BEGIN
     );
     SELECT a.* INTO v_authority FROM public.external_boot_authorities AS a
     WHERE a.id = p_authority_id AND a.generation = p_generation FOR UPDATE;
+    SELECT w.incarnation INTO v_incarnation FROM public.worker_incarnations AS w
+    WHERE w.credential_hash = p_credential_hash AND w.state = 'active'
+      AND w.fence_protocol = 4 FOR UPDATE;
     SELECT j.* INTO v_job FROM public.jobs AS j WHERE j.id = p_job_id FOR UPDATE;
     SELECT e.* INTO v_activation FROM public.external_boot_activations AS e
     WHERE e.id = v_authority.activation_id FOR UPDATE;
@@ -177,66 +182,95 @@ BEGIN
             'root_operation_digest', v_authority.operation_digest
         ), p_operation
     );
-    IF v_authority.state <> 'current' OR v_authority.worker_incarnation <> v_incarnation
-       OR v_authority.job_id <> p_job_id OR v_authority.job_attempt <> p_attempt
-       OR v_authority.plan_identity <> p_plan_identity
-       OR v_job.state <> 'running' OR v_job.worker_id <> v_incarnation
-       OR v_job.attempt <> p_attempt OR v_job.lease_expires_at <= clock_timestamp()
-       OR v_job.payload #>> '{external_boot_authority_v1,plan_identity}' <> p_plan_identity
-       OR v_job.payload #>> '{external_boot_plan_v1,ownership,system_id}'
-            <> v_authority.system_id::text
-       OR v_job.payload #>> '{external_boot_plan_v1,ownership,run_id}'
-            <> v_authority.run_id::text
-       OR v_bound.operation_identity <> p_operation_identity
-       OR v_bound.operation_digest <> p_operation_digest
-       OR v_head.authority_id <> p_authority_id OR v_head.generation <> p_generation
-       OR v_head.sequence <> p_journal_sequence OR v_head.digest <> p_journal_digest
-       OR v_head.phase <> 'terminal'
-       OR v_head.head_record->>'operation' <> p_operation
-       OR v_head.head_record->>'operation_identity' <> p_operation_identity
-       OR v_head.head_record->>'operation_digest' <> p_operation_digest
-       OR v_activation.system_id <> v_authority.system_id
-       OR v_activation.run_id <> v_authority.run_id
-       OR v_activation.plan_identity <> p_plan_identity
-       OR v_activation.cleanup_complete THEN
+    IF (v_incarnation IS NOT NULL AND v_authority.state = 'current'
+       AND v_authority.worker_incarnation = v_incarnation
+       AND v_authority.job_id = p_job_id AND v_authority.job_attempt = p_attempt
+       AND v_authority.plan_identity = p_plan_identity
+       AND v_job.state = 'running' AND v_job.worker_id = v_incarnation
+       AND v_job.attempt = p_attempt AND v_job.lease_expires_at > clock_timestamp()
+       AND v_job.payload #>> '{external_boot_authority_v1,plan_identity}' = p_plan_identity
+       AND v_job.payload #>> '{external_boot_plan_v1,ownership,system_id}'
+            = v_authority.system_id::text
+       AND v_job.payload #>> '{external_boot_plan_v1,ownership,run_id}'
+            = v_authority.run_id::text
+       AND v_bound.operation_identity = p_operation_identity
+       AND v_bound.operation_digest = p_operation_digest
+       AND v_head.authority_id = p_authority_id AND v_head.generation = p_generation
+       AND v_head.sequence = p_journal_sequence AND v_head.digest = p_journal_digest
+       AND v_head.phase = 'terminal'
+       AND v_head.head_record->>'attempt_id' = p_operation_attempt_id::text
+       AND v_head.head_record->>'operation' = p_operation
+       AND v_head.head_record->>'operation_identity' = p_operation_identity
+       AND v_head.head_record->>'operation_digest' = p_operation_digest
+       AND v_activation.system_id = v_authority.system_id
+       AND v_activation.run_id = v_authority.run_id
+       AND v_activation.plan_identity = p_plan_identity
+       AND NOT v_activation.cleanup_complete) IS NOT TRUE THEN
         RETURN 'superseded';
     END IF;
 
+    v_receipt_identity := 'sha256:' || encode(sha256(
+        convert_to('kdive-external-boot-preparation-receipt-v1', 'UTF8') ||
+        decode('00', 'hex') || convert_to(
+            public.canonical_external_boot_authority_json(p_receipt), 'UTF8'
+        )
+    ), 'hex');
+    IF (p_receipt = jsonb_build_object(
+            'state', p_receipt->'state', 'binding', p_receipt->'binding',
+            'plan_identity', p_receipt->'plan_identity', 'authority', p_receipt->'authority',
+            'operation_identity', p_receipt->'operation_identity',
+            'materialization', p_receipt->'materialization',
+            'recovery_point', p_receipt->'recovery_point'
+        )
+        AND p_receipt #>> '{binding,system_id}' = v_authority.system_id::text
+        AND p_receipt #>> '{binding,run_id}' = v_authority.run_id::text
+        AND p_receipt #>> '{binding,activation_id}' = v_authority.activation_id::text
+        AND p_receipt->>'plan_identity' = p_plan_identity
+        AND p_receipt->>'operation_identity' = p_operation_identity
+        AND p_receipt #>> '{authority,ref}' =
+            'authority/' || p_authority_id::text || '/' || p_generation::text || '/' ||
+            p_operation_attempt_id::text
+        AND v_head.head_record #>> '{observation,composite_state}' = v_receipt_identity
+    ) IS NOT TRUE THEN RETURN 'conflict'; END IF;
+
     IF p_operation = 'materialize' THEN
-        IF p_receipt->>'schema' <> 'external-boot-materialization-v1'
-           OR p_receipt #>> '{ownership,system_id}' <> v_authority.system_id::text
-           OR p_receipt #>> '{ownership,run_id}' <> v_authority.run_id::text
-           OR p_receipt->>'plan_identity' <> p_plan_identity
-           OR v_activation.state <> 'preparing' THEN RETURN 'conflict'; END IF;
+        IF (p_receipt->>'state' = 'materialized'
+           AND p_receipt->'recovery_point' = 'null'::jsonb
+           AND p_receipt #>> '{materialization,schema}' = 'external-boot-materialization-v1'
+           AND p_receipt #>> '{materialization,ownership,system_id}' =
+                v_authority.system_id::text
+           AND p_receipt #>> '{materialization,ownership,run_id}' = v_authority.run_id::text
+           AND p_receipt #>> '{materialization,plan_identity}' = p_plan_identity
+           AND v_activation.state = 'preparing') IS NOT TRUE
+        THEN RETURN 'conflict'; END IF;
         IF v_activation.materialization IS NOT NULL THEN
-            RETURN CASE WHEN v_activation.materialization = p_receipt
+            RETURN CASE WHEN v_activation.materialization = p_receipt->'materialization'
                         THEN 'applied' ELSE 'conflict' END;
         END IF;
-        UPDATE public.external_boot_activations SET materialization = p_receipt
+        UPDATE public.external_boot_activations SET materialization = p_receipt->'materialization'
         WHERE id = v_activation.id;
     ELSE
-        IF p_receipt->>'schema' <> 'external-boot-recovery-v1'
-           OR p_receipt #>> '{binding,system_id}' <> v_authority.system_id::text
-           OR p_receipt #>> '{binding,run_id}' <> v_authority.run_id::text
-           OR p_receipt #>> '{binding,activation_id}' <> v_authority.activation_id::text
-           OR p_receipt->>'plan_identity' <> p_plan_identity
-           OR v_activation.materialization IS NULL
-           OR v_activation.state NOT IN ('preparing', 'prepared') THEN RETURN 'conflict'; END IF;
+        IF (p_receipt->>'state' = 'prepared'
+           AND p_receipt #>> '{recovery_point,schema}' = 'external-boot-recovery-v1'
+           AND v_activation.materialization IS NOT NULL
+           AND v_activation.state IN ('preparing', 'prepared')) IS NOT TRUE
+        THEN RETURN 'conflict'; END IF;
         v_materialization_identity := 'sha256:' || encode(sha256(
             convert_to('kdive-external-boot-materialization-v1', 'UTF8') || decode('00', 'hex') ||
             convert_to(public.canonical_external_boot_authority_json(
                 v_activation.materialization
             ), 'UTF8')
         ), 'hex');
-        IF p_receipt->>'materialization_identity' <> v_materialization_identity THEN
+        IF p_receipt #>> '{recovery_point,materialization_identity}'
+           IS DISTINCT FROM v_materialization_identity THEN
             RETURN 'conflict';
         END IF;
         IF v_activation.state = 'prepared' THEN
-            RETURN CASE WHEN v_activation.recovery_point = p_receipt
+            RETURN CASE WHEN v_activation.recovery_point = p_receipt->'recovery_point'
                         THEN 'applied' ELSE 'conflict' END;
         END IF;
         UPDATE public.external_boot_activations
-        SET recovery_point = p_receipt, state = 'prepared'
+        SET recovery_point = p_receipt->'recovery_point', state = 'prepared'
         WHERE id = v_activation.id;
     END IF;
     INSERT INTO public.external_boot_authority_audit (
@@ -352,7 +386,7 @@ REVOKE ALL ON FUNCTION
         text, uuid, bigint, bigint, text, text
     ),
     public.commit_external_boot_preparation_result(
-        bytea, uuid, integer, uuid, bigint, text, text, text, bigint, text, text, jsonb
+        bytea, uuid, integer, uuid, bigint, text, uuid, text, text, bigint, text, text, jsonb
     )
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
     kdive_provider_authority;
@@ -361,5 +395,5 @@ GRANT EXECUTE ON FUNCTION public.resolve_current_external_boot_preparation_autho
     text, uuid, bigint, bigint, text, text
 ) TO kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION public.commit_external_boot_preparation_result(
-    bytea, uuid, integer, uuid, bigint, text, text, text, bigint, text, text, jsonb
+    bytea, uuid, integer, uuid, bigint, text, uuid, text, text, bigint, text, text, jsonb
 ) TO kdive_worker;

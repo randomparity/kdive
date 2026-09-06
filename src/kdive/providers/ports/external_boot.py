@@ -376,6 +376,11 @@ class ExternalBootPreparationObservation(_ClosedValue):
             raise ValueError("recovery point does not match preparation binding")
         return self
 
+    @property
+    def identity(self) -> str:
+        """Return the journal-bound identity of this exact durable receipt."""
+        return _identity(b"kdive-external-boot-preparation-receipt-v1", self)
+
 
 class ExternalBootPreparationPorts(Protocol):
     """Provider-owned durable receipt seam for server preparation."""

@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from uuid import uuid4
+
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+)
 from tests.db.external_boot_authority_support import (
     _PLAN,
     _RoleDsns,
@@ -116,7 +125,22 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
     assert plan.identity != _PLAN
 
     journal_digest = "sha256:" + "d" * 64
-    receipt = external_boot_materialization(plan)
+    operation_attempt_id = uuid4()
+    materialization_receipt = external_boot_materialization(plan)
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=ExternalBootActivationBinding(
+            system_id=str(case.system_id),
+            run_id=str(case.run_id),
+            activation_id=str(case.activation_id),
+        ),
+        plan_identity=plan.identity,
+        authority=OpaqueProviderRef(
+            ref=f"authority/{authority_id}/{generation}/{operation_attempt_id}"
+        ),
+        operation_identity=materialize[1],
+        materialization=materialization_receipt,
+    )
     with psycopg.connect(migrated_url) as admin:
         admin.execute(
             "INSERT INTO external_boot_authority_journal_heads "
@@ -132,8 +156,10 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
                 Jsonb(
                     {
                         "operation": "materialize",
+                        "attempt_id": str(operation_attempt_id),
                         "operation_identity": materialize[1],
                         "operation_digest": materialize[2],
+                        "observation": {"composite_state": receipt.identity},
                     }
                 ),
             ),
@@ -145,6 +171,7 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
         authority_id,
         generation,
         "materialize",
+        operation_attempt_id,
         materialize[1],
         materialize[2],
         2,
@@ -152,13 +179,43 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
         plan.identity,
         Jsonb(receipt.model_dump(mode="json", by_alias=True)),
     )
+    commit_sql = (
+        "SELECT commit_external_boot_preparation_result(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+    )
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         assert worker.execute(
-            "SELECT commit_external_boot_preparation_result(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            commit_sql,
             arguments,
         ).fetchone() == ("applied",)
+        receipt_json = receipt.model_dump(mode="json", by_alias=True)
+        for path in (
+            ("binding", "system_id"),
+            ("authority", "ref"),
+            ("materialization", "ownership"),
+        ):
+            malformed = deepcopy(receipt_json)
+            owner = malformed
+            for key in path[:-1]:
+                nested = owner[key]
+                assert isinstance(nested, dict)
+                owner = nested
+            del owner[path[-1]]
+            rejected = arguments[:-1] + (Jsonb(malformed),)
+            assert worker.execute(
+                commit_sql,
+                rejected,
+            ).fetchone() == ("conflict",)
         assert worker.execute(
-            "SELECT commit_external_boot_preparation_result(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            commit_sql,
+            arguments[:6] + (uuid4(),) + arguments[7:],
+        ).fetchone() == ("superseded",)
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            worker.execute(
+                commit_sql,
+                arguments[:6] + (None,) + arguments[7:],
+            )
+        assert worker.execute(
+            commit_sql,
             arguments,
         ).fetchone() == ("applied",)
     with psycopg.connect(migrated_url) as admin:
@@ -170,7 +227,7 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
         ).fetchone()
     assert state == (
         "preparing",
-        receipt.model_dump(mode="json", by_alias=True),
+        materialization_receipt.model_dump(mode="json", by_alias=True),
         "running",
         "current",
     )
