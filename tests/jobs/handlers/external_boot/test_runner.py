@@ -20,6 +20,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -51,14 +52,25 @@ from kdive.jobs.models import (
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.external_boot import RunningKernelObservation
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityObservationV1,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
+)
+from kdive.providers.ports.external_boot import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+    RunningKernelObservation,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import build_job
-from tests.jobs.handlers.external_boot.vehicle import Vehicle
+from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 from tests.mcp.systems_support import provider_resolver
+from tests.support.external_boot_plan import external_boot_materialization
 
 ACTIVATING = frozenset({ExternalBootActivationState.ACTIVATING})
 NO_EVIDENCE: frozenset[str] = frozenset()
@@ -90,8 +102,21 @@ def _job(case: SeededCase) -> Job:
     kind = JobKind.TEARDOWN if case.purpose == "teardown" else JobKind.BOOT
     key = "system_id" if kind is JobKind.TEARDOWN else "run_id"
     value = case.vehicle.system_id if kind is JobKind.TEARDOWN else case.vehicle.run_id
-    job = build_job(kind, {key: str(value), "external_boot_authority_v1": case.marker})
-    return job.model_copy(update={"id": case.job_id, "attempt": case.attempt})
+    job = build_job(
+        kind,
+        {
+            key: str(value),
+            "external_boot_authority_v1": case.marker,
+            "external_boot_plan_v1": case.vehicle.plan.model_dump(mode="json", by_alias=True),
+        },
+    )
+    return job.model_copy(
+        update={
+            "id": case.job_id,
+            "attempt": case.attempt,
+            "worker_id": case.worker_incarnation,
+        }
+    )
 
 
 def _observe(context: OperationContext) -> RunningKernelObservation:
@@ -178,6 +203,112 @@ def _drive(migrated_url: str, body: Callable[..., Awaitable[None]], dsn: str | N
                 await body(seed, worker)
 
     asyncio.run(_main())
+
+
+def test_preparing_without_executor_refuses_before_authority_or_provider(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        with pytest.raises(CategorizedError, match="preparation executor"):
+            await _run(
+                worker,
+                case,
+                ports=_ports(case, resolver=resolver_for(vehicle)),
+                require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+                call_port=lambda _context: (_ for _ in ()).throw(AssertionError("provider called")),
+            )
+        assert await _authority_count(seed) == 0
+        assert vehicle.port.calls == []
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_preparing_executes_and_commits_exact_materialization(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[AuthorityPreparationMutationRequestV1] = []
+    committed: list[AuthorityPreparationMutationRequestV1] = []
+
+    class Executor:
+        async def execute_preparation(
+            self, request: AuthorityPreparationMutationRequestV1
+        ) -> AuthorityPreparationResponseV1:
+            executed.append(request)
+            receipt = ExternalBootPreparationObservation(
+                state="materialized",
+                binding=ExternalBootActivationBinding(
+                    system_id=str(request.system_id),
+                    run_id=str(request.run_id),
+                    activation_id=str(request.activation_id),
+                ),
+                plan_identity=request.plan_identity,
+                authority=OpaqueProviderRef(
+                    ref=f"authority/{request.authority_id}/{request.generation}/{request.attempt_id}"
+                ),
+                operation_identity=request.operation_identity,
+                materialization=external_boot_materialization(request.plan),
+            )
+            observation = AuthorityObservationV1(
+                observation_id=uuid4(), category="target", composite_state=receipt.identity
+            )
+            return AuthorityPreparationResponseV1(
+                observation=observation,
+                receipt=receipt,
+                journal_sequence=4,
+                journal_digest="sha256:" + "d" * 64,
+            )
+
+    async def commit(_conn: AsyncConnection, **values: Any) -> str:
+        committed.append(values["request"])
+        return "applied"
+
+    monkeypatch.setattr(
+        "kdive.jobs.handlers.external_boot.runner.commit_external_boot_preparation_result",
+        commit,
+    )
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed,
+            vehicle,
+            purpose="activate",
+            activation_state="preparing",
+            with_materialization=False,
+            with_recovery_point=False,
+        )
+        ports = replace(
+            _ports(
+                case,
+                resolver=resolver_for(vehicle),
+                acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+            ),
+            preparation_executor=Executor(),
+        )
+        await _run(
+            worker,
+            case,
+            ports=ports,
+            require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
+            call_port=lambda _context: None,
+        )
+        assert executed == committed
+        assert executed[0].plan == vehicle.plan
+        assert executed[0].operation.value == "materialize"
+        assert executed[0].operation_identity.startswith("sha256:")
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
 
 
 def test_provider_kind_mismatch_is_refused_before_allocation(

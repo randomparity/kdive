@@ -15,11 +15,12 @@ from pydantic import SecretStr
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityPreparationResponseV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan, ExternalBootPreparationObservation
+from kdive.providers.ports.external_boot import ExternalBootPlan
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import AuthenticatedPeer
@@ -378,8 +379,7 @@ async def commit_external_boot_preparation_result(
     job_id: UUID,
     job_attempt: int,
     request: AuthorityPreparationMutationRequestV1,
-    head: JournalHead,
-    receipt: ExternalBootPreparationObservation,
+    response: AuthorityPreparationResponseV1,
 ) -> PreparationCommitStatus:
     """Commit one journal-anchored preparation receipt without completing its job."""
     credential_hash = hashlib.sha256(credential.get_secret_value().encode("utf-8")).digest()
@@ -397,10 +397,10 @@ async def commit_external_boot_preparation_result(
                 request.attempt_id,
                 request.operation_identity,
                 request.operation_digest,
-                head.sequence,
-                head.digest,
+                response.journal_sequence,
+                response.journal_digest,
                 request.plan_identity,
-                Jsonb(receipt.model_dump(mode="json", by_alias=True)),
+                Jsonb(response.receipt.model_dump(mode="json", by_alias=True)),
             ),
         )
         row = await cursor.fetchone()
