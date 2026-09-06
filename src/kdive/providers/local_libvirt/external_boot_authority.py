@@ -342,6 +342,9 @@ class LocalExternalBootAuthorityAdapter:
                 if not self._ports.cleanup_is_accounted(point, authority):
                     self._pending_cleanup_finalization[context.operation_identity] = point
                 self._ports.cleanup(point, authority)
+                self._ports.record_cleanup_quarantine(
+                    point, _cleanup_proof(context, point), authority
+                )
             else:
                 # An operation added to _MUTATING_OPERATIONS without a mapping here must
                 # not fall through to whichever branch happens to be last.

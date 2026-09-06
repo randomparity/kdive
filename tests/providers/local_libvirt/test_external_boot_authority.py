@@ -42,6 +42,7 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    CleanupQuarantineReceiptV1,
     CleanupTombstoneV1,
     FinalizeCleanupProof,
     LocalExternalBootIO,
@@ -172,6 +173,7 @@ class _FakeIO:
         # both lets `finalize_tombstone` below refuse exactly where the real store refuses.
         self.intent_present = True
         self.finalized_proof: FinalizeCleanupProof | None = None
+        self.cleanup_quarantine: CleanupQuarantineReceiptV1 | None = None
         # Raised by `reopen_binding` in place of returning the record. `FileNotFoundError` is
         # what the real store raises for every state in which the recovery record cannot be
         # rebuilt; `OSError` stands for a read that merely failed.
@@ -190,8 +192,30 @@ class _FakeIO:
         if self.tombstone and self.intent_present:
             self.intent_present = False
         self.tombstone = False
+        self.cleanup_quarantine = None
         self.finalized_proof = proof
         self.actions.append("finalize")
+
+    def record_cleanup_quarantine(
+        self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        self.cleanup_quarantine = CleanupQuarantineReceiptV1(
+            tombstone=CleanupTombstoneV1(
+                binding=recovery.binding,
+                recovery_point=recovery,
+                point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+            ),
+            proof=proof,
+        )
+
+    def read_cleanup_quarantine(
+        self, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        del binding
+        return self.cleanup_quarantine
+
+    def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
+        self.cleanup_quarantine = receipt.model_copy(update={"managed": True})
 
     # -- LocalExternalBootOperation ------------------------------------------------
     def recovery_ref(self, binding: ExternalBootActivationBinding) -> OpaqueProviderRef:

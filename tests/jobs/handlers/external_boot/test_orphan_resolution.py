@@ -6,7 +6,9 @@ import asyncio
 from uuid import uuid4
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
+from kdive.db.external_boot_recovery_quarantine import record_cleanup_quarantine
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.orphan import resolve_recovery_orphan_handler
@@ -53,14 +55,6 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                         system_id=system_id,
                         run_id=run_id,
                     )
-                resource = await (
-                    await conn.execute(
-                        "SELECT a.resource_id FROM systems s JOIN allocations a "
-                        "ON a.id = s.allocation_id WHERE s.id = %s",
-                        (system_id,),
-                    )
-                ).fetchone()
-                assert resource is not None
                 record_id = uuid4()
                 object_binding = RecoveryObjectBinding(
                     record_id=str(record_id),
@@ -76,41 +70,63 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     attempt_id=str(uuid4()),
                     mutation_journal_sequence=7,
                     mutation_journal_digest="sha256:" + "b" * 64,
+                    reserved_bytes=4096,
                 )
                 provider = FaultInjectExternalBoot()
-                observation = provider.register_recovery_object(object_binding)
+                provider.register_recovery_object(object_binding)
+                authority_job = await (
+                    await conn.execute(
+                        "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, "
+                        "dedup_key) VALUES ('boot', %s, 'succeeded', 3, %s, %s) RETURNING id",
+                        (
+                            Jsonb({"run_id": str(run_id)}),
+                            Jsonb({"principal": "admin", "agent_session": None, "project": "proj"}),
+                            str(uuid4()),
+                        ),
+                    )
+                ).fetchone()
+                assert authority_job is not None
+                worker = f"worker-{uuid4()}"
                 await conn.execute(
-                    "INSERT INTO external_boot_recovery_quarantine "
-                    "(id, object_identity, resource_id, system_id, activation_id, provider_kind, "
-                    "authority_instance, object_kind, object_reference, ownership_digest, "
-                    "operation_identity, attempt_id, mutation_journal_sequence, "
-                    "mutation_journal_digest, observed_digest, reserved_bytes) "
-                    "VALUES (%s, %s, %s, %s, %s, 'local-libvirt', %s, %s, %s, %s, "
-                    "%s, %s, %s, %s, %s, 4096)",
+                    "INSERT INTO worker_incarnations "
+                    "(incarnation, authority_kind, authority_binding, credential_hash, "
+                    "fence_protocol) VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
+                    (worker, b"1" * 32),
+                )
+                await conn.execute(
+                    "INSERT INTO external_boot_authorities "
+                    "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, "
+                    "job_attempt, purpose, provider_kind, authority_instance, worker_incarnation, "
+                    "operation, operation_identity, operation_digest, generation, state, "
+                    "acknowledged_at, retired_at) SELECT %s, s.allocation_id, %s, %s, %s, %s, 1, "
+                    "'teardown', 'local-libvirt', 'authority/a', %s, 'cleanup', 'cleanup-a', %s, "
+                    "1, 'retired', now(), now() FROM systems s WHERE s.id = %s",
                     (
-                        record_id,
-                        "quarantine-a",
-                        resource[0],
                         system_id,
                         seeded.activation.id,
-                        "authority/a",
-                        object_binding.kind,
-                        object_binding.reference.ref,
-                        object_binding.ownership_digest,
-                        object_binding.operation_identity,
-                        object_binding.attempt_id,
-                        object_binding.mutation_journal_sequence,
-                        object_binding.mutation_journal_digest,
-                        observation.observed_digest,
+                        run_id,
+                        seeded.activation.plan_identity,
+                        authority_job[0],
+                        worker,
+                        _DIGEST,
+                        system_id,
                     ),
                 )
+                identities = await record_cleanup_quarantine(
+                    conn,
+                    activation_id=seeded.activation.id,
+                    observations=provider.quarantined_objects(
+                        object_binding.binding, OpaqueProviderRef(ref="authority/a")
+                    ),
+                )
+                assert len(identities) == 1
                 resolver = provider_resolver(external_boot_recovery_objects=provider)
                 first = await resolve_recovery_orphan(
                     conn_pool,
                     _ctx(),
                     resolver=resolver,
                     system_id=str(system_id),
-                    object_identities=["quarantine-a"],
+                    object_identities=list(identities),
                     disposition="delete",
                 )
                 second = await resolve_recovery_orphan(
@@ -118,7 +134,7 @@ def test_delete_flows_from_admin_admission_through_real_queue_and_fault_provider
                     _ctx(),
                     resolver=resolver,
                     system_id=str(system_id),
-                    object_identities=["quarantine-a"],
+                    object_identities=list(identities),
                     disposition="delete",
                 )
                 assert first.object_id == second.object_id
