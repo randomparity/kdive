@@ -1059,7 +1059,7 @@ def main() -> NoReturn:
     document: dict[str, object] | None = None
     operation_error: ApplianceError | None = None
     try:
-        _mount("devtmpfs", Path("/dev"), "devtmpfs", 2 | 4 | 8)
+        _mount("devtmpfs", Path("/dev"), "devtmpfs", 2 | 8)
         _mount_root()
         _mount("/dev/vdb", SOURCE, "ext4", 1 | 2 | 4 | 8)
         _mount("/dev/vdc", SCRATCH, "ext4", 2 | 4 | 8)
