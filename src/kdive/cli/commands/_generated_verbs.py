@@ -3671,7 +3671,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="runs.release_external_boot",
         read_only=False,
         destructive=False,
-        help="Validate a release of this Run's external boot, then report the executor is missing.",
+        help="Enqueue release of this Run's external boot and return a durable `job_id`.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -4124,7 +4124,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="systems.resolve_external_boot_conflict",
         read_only=False,
         destructive=False,
-        help="Validate a recovery-conflict resolution, then report the executor is missing.",
+        help="Enqueue an idempotent recovery-conflict resolution job.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -4149,7 +4149,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 name="--observed-identity",
                 dest="observed_identity",
                 required=True,
-                help="The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'; validated for shape only today, because the compare-and-set that consumes it lands with the recovery executor.",
+                help="The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'. It is durably bound to the request; the worker must freshly observe and match this exact identity before changing state.",
                 arg_type="str",
                 action=None,
                 choices=(),
