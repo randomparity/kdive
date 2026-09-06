@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import re
@@ -1847,6 +1848,25 @@ def test_lifecycle_wrapper_uses_the_validated_public_uri_and_python_client() -> 
     assert "LifecycleRequest.model_validate" in text
     assert "request_path" in text
     assert "KDIVE_WORKER_DATABASE_URL" in text
+
+
+def test_lifecycle_launcher_covers_required_worker_settings_and_authority_route() -> None:
+    from kdive.processes.lifecycle.systemd.systemd_worker_contract import WorkerSettings
+
+    program = LIFECYCLE.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    dictionaries = [node for node in ast.walk(ast.parse(program)) if isinstance(node, ast.Dict)]
+    settings_keys = next(
+        keys
+        for node in dictionaries
+        if "worker_database_url"
+        in (keys := {key.value for key in node.keys if isinstance(key, ast.Constant)})
+    )
+    required = {name for name, field in WorkerSettings.model_fields.items() if field.is_required()}
+    route = {name for name in WorkerSettings.model_fields if name.startswith("authority_")}
+    assert required | route <= settings_keys
+    assert settings_keys <= WorkerSettings.model_fields.keys()
+    assert "libvirt_recovery_root" not in settings_keys
+    assert "external_boot_capacity_bytes" not in settings_keys
 
 
 @pytest.mark.parametrize(

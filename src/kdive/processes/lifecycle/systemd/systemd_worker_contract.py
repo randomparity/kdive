@@ -88,8 +88,6 @@ class WorkerSettings(BaseModel):
     fixture_catalog_path: str
     worker_database_url: SecretStr
     libvirt_uri: str
-    libvirt_recovery_root: str
-    external_boot_capacity_bytes: Annotated[int, Field(gt=0)]
     s3_endpoint_url: str
     s3_bucket: str
     s3_region: str
@@ -116,7 +114,6 @@ class WorkerSettings(BaseModel):
         "install_staging",
         "fixture_catalog_path",
         "libvirt_uri",
-        "libvirt_recovery_root",
         "s3_endpoint_url",
         "s3_bucket",
         "s3_region",

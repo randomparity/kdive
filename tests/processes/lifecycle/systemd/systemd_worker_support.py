@@ -15,8 +15,6 @@ def start_payload(**overrides: object) -> dict[str, object]:
         "fixture_catalog_path": "/srv/kdive/fixtures/catalog.yaml",
         "worker_database_url": "postgresql://worker:password@db/kdive",  # pragma: allowlist secret
         "libvirt_uri": "qemu+unix:///session?socket=/run/libvirt/virtqemud-sock",
-        "libvirt_recovery_root": "/var/lib/kdive/recovery",
-        "external_boot_capacity_bytes": 32 * 1024**3,
         "s3_endpoint_url": "http://minio:9000",
         "s3_bucket": "kdive-artifacts",
         "s3_region": "us-east-1",

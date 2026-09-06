@@ -122,7 +122,14 @@
   failed_when: >-
     live_vm_host_authority_client_group not in live_vm_host_authority_group_result.stdout.split()
     or live_vm_host_worker_libvirt_group in live_vm_host_authority_group_result.stdout.split()
-    or 'kvm' in live_vm_host_authority_group_result.stdout.split()
+    or (
+    live_vm_host_authority_local_mutation_enabled | bool
+    and 'kvm' not in live_vm_host_authority_group_result.stdout.split()
+    )
+    or (
+    not live_vm_host_authority_local_mutation_enabled | bool
+    and 'kvm' in live_vm_host_authority_group_result.stdout.split()
+    )
   when: live_vm_host_authority_enabled | bool
 
 - name: Assert every worker keeps only its own primary group
