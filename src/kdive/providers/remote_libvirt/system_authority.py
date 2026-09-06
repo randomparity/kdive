@@ -596,6 +596,7 @@ class _PrivateStore:
                 or stat.S_IMODE(status.st_mode) != 0o600
                 or status.st_uid != self._owner_uid
                 or status.st_gid != self._owner_gid
+                or status.st_nlink != 1
                 or status.st_size > _MAX_STATE_BYTES + 1
             ):
                 raise ValueError("remote authority System state entry is unsafe")
@@ -909,8 +910,16 @@ class RemoteAuthoritySystemProvider:
         context: AuthoritySystemCommitContextV1,
         snapshot: AuthoritySystemProvisionSnapshot,
     ) -> _ProvisionIntentV1:
-        _pool, _base, base_path = self._base(connection, entry)
+        pool, _base, base_path = self._base(connection, entry)
         overlay = overlay_volume_name(request.system_id)
+        if (
+            self._domain_optional(connection, request.system_id) is not None
+            or self._volume_optional(pool, overlay) is not None
+        ):
+            raise CategorizedError(
+                "remote authority System objects exist without private ownership intent",
+                category=ErrorCategory.CONFLICT,
+            )
         overlay_path = _storage_path(posixpath.join(posixpath.dirname(base_path), overlay))
         self._guard_graph(connection, request.system_id, overlay)
         domain_name = domain_name_for(request.system_id)

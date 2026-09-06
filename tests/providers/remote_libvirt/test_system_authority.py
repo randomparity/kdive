@@ -417,6 +417,43 @@ async def test_provider_implements_fixed_port_and_persists_intent_before_mutatio
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("retained_domain", [False, True])
+async def test_missing_intent_never_adopts_retained_provider_objects(
+    tmp_path: Path, retained_domain: bool
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        (state / f"{SYSTEM_ID}.provision.json").unlink()
+        if not retained_domain:
+            connection.domains.clear()
+        mutations = list(connection.mutations)
+        with pytest.raises(CategorizedError) as caught:
+            await provider.execute_system_provision(_request(), _context(), _snapshot())
+        assert caught.value.category is ErrorCategory.CONFLICT
+        assert connection.mutations == mutations
+        assert not list(state.iterdir())
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_hardlinked_private_intent_is_rejected_before_provider_access(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        os.link(state / f"{SYSTEM_ID}.provision.json", tmp_path / "intent-alias")
+        opens = connection.opens
+        with pytest.raises(ValueError, match="unsafe"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+        assert connection.opens == opens
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.anyio
 async def test_wrong_snapshot_binding_opens_no_connection(tmp_path: Path) -> None:
     connection = _Connection()
     provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
