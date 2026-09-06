@@ -177,6 +177,46 @@ async def test_shutdown_is_nonwaiting_and_rejects_new_work() -> None:
 
 
 @pytest.mark.anyio
+async def test_queued_shutdown_preserves_repeated_caller_cancellation() -> None:
+    worker_reached = threading.Event()
+    release_worker = threading.Event()
+    provider_effects: list[str] = []
+    prior_trace = threading.gettrace()
+
+    def trace(frame: Any, event: str, _arg: object) -> Any:
+        if (
+            event == "call"
+            and frame.f_code.co_name == "_worker"
+            and threading.current_thread().name.startswith("kdive-remote-module-prepare")
+        ):
+            worker_reached.set()
+            release_worker.wait()
+        return trace
+
+    threading.settrace(trace)
+    executor = RemoteModulePreparationExecutor()
+    try:
+        task = asyncio.create_task(executor.run(lambda: provider_effects.append("started")))
+        await asyncio.to_thread(worker_reached.wait)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        executor.shutdown()
+        release_worker.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelling() == 2
+        assert task.cancelled()
+        assert provider_effects == []
+    finally:
+        release_worker.set()
+        executor.shutdown()
+        threading.settrace(prior_trace)
+
+
+@pytest.mark.anyio
 async def test_verified_consumer_runs_inline_with_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -65,6 +65,7 @@ class RemoteModulePreparationExecutor:
             while not completed.done():
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(completed)
-            future.exception()
+            if not future.cancelled():
+                future.exception()
             raise cancelled from None
         return future.result()
