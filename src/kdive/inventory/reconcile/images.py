@@ -37,6 +37,7 @@ from psycopg import AsyncConnection
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.images import ImageState
@@ -55,6 +56,7 @@ from kdive.inventory.model import (
 from kdive.inventory.reconcile.locks import inventory_pass_lock
 from kdive.inventory.reconcile.prune import prune_or_cordon_image
 from kdive.inventory.reconcile.records import CONFIG_MANAGED_BY, ReconcileDiff, ReconcileRecord
+from kdive.providers.ports.external_boot import RootSpecV1
 
 _log = logging.getLogger(__name__)
 
@@ -463,10 +465,12 @@ def _realize(
     Never downgrades a row already ``registered`` from a build/upload: a ``build`` (or an
     ``s3`` whose object/digest is not yet confirmed) leaves a realized row exactly as it is,
     so the runtime-owned object_key/digest/state are preserved (invariant 1). A ``staged-path``
-    source seeds ``registered`` with ``path`` set and the others NULL (ADR-0228); it is declared,
-    not probed — resolution at provision time is the gate. ``provenance``/``attested`` are resolved
-    by :func:`_resolve_provenance` and ``kernel_config_key`` by :func:`_resolve_kernel_config_key`;
-    both are carried onto the row unchanged (the resolvers own the preserve-vs-replace decision).
+    source seeds ``registered`` with ``path`` and, when its sidecar contains an architecture-
+    matched mechanically inspected root specification, that specification's source identity as
+    its digest (ADR-0624). It is declared, not probed or hashed — resolution at provision time is
+    the byte gate. ``provenance``/``attested`` are resolved by :func:`_resolve_provenance` and
+    ``kernel_config_key`` by :func:`_resolve_kernel_config_key`; both are carried onto the row
+    unchanged (the resolvers own the preserve-vs-replace decision).
     """
     source = entry.source
 
@@ -478,7 +482,8 @@ def _realize(
         )
 
     if isinstance(source, StagedPathSource):
-        return _built(_REGISTERED, None, None, source.path, None), None
+        digest, warning = _staged_path_digest(entry, provenance)
+        return _built(_REGISTERED, None, None, source.path, digest), warning
     if isinstance(source, StagedSource):
         return _built(_REGISTERED, None, source.volume, None, None), None
     if isinstance(source, BuildSource):
@@ -488,6 +493,38 @@ def _realize(
         state, object_key, volume, digest, warning = _realize_s3(entry, row, source, head)
         return _built(state, object_key, volume, None, digest), warning
     raise AssertionError(f"unhandled image source kind: {source!r}")  # pragma: no cover
+
+
+def _staged_path_digest(
+    entry: ImageEntry, provenance: dict[str, object]
+) -> tuple[str | None, str | None]:
+    """Derive an optional digest from a mechanically inspected staged-image root spec.
+
+    Reconcile parses only the bounded sidecar already in memory; it never reads or hashes the
+    staged image. Missing root facts retain ordinary digest-less staged-path behavior. Purported
+    root facts that are malformed, from another authority/source kind, or for another architecture
+    remain visible as provenance but cannot promote a catalog digest.
+    """
+    raw_root = provenance.get("root_spec")
+    if raw_root is None:
+        return None, None
+    try:
+        root_spec = RootSpecV1.model_validate(raw_root)
+    except ValidationError:
+        return None, f"{entry.name}: staged root provenance is malformed; digest not promoted"
+    if root_spec.architecture != entry.arch:
+        return (
+            None,
+            f"{entry.name}: staged root provenance architecture does not match inventory; "
+            "digest not promoted",
+        )
+    if root_spec.authority != "stage-inspection" or root_spec.source.kind != "staged-image":
+        return (
+            None,
+            f"{entry.name}: staged root provenance is not mechanically inspected; "
+            "digest not promoted",
+        )
+    return root_spec.source.identity, None
 
 
 def _realize_build(
