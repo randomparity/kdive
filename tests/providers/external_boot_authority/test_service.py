@@ -86,9 +86,12 @@ async def test_takeover_anchors_without_provider_access(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_preparation_uses_authenticated_lane_and_exact_receipt(tmp_path: Path) -> None:
     service, repository, _adapter, peer, takeover = _service(tmp_path)
+    plan = external_boot_plan(takeover.system_id, takeover.run_id)
+    takeover = takeover.model_copy(update={"plan_identity": plan.identity})
+    repository.request = takeover
+    repository.allocating_request = takeover
     await service.acknowledge_takeover(peer, takeover)
     repository.current = True
-    plan = external_boot_plan(takeover.system_id, takeover.run_id)
     request = AuthorityPreparationMutationRequestV1(
         **takeover.model_dump(
             mode="python",
