@@ -18,10 +18,12 @@ so an unauthorized caller learns nothing about whether the System carries an act
 
 from __future__ import annotations
 
+import hashlib
 from typing import LiteralString
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter, ValidationError
 
@@ -29,16 +31,20 @@ from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import Digest
 from kdive.domain.lifecycle.records import Run
+from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
@@ -112,6 +118,11 @@ _ACTIVE_JOBS_SQL: LiteralString = (
 
 _REPOSITORY = ExternalBootActivationRepository()
 _IDENTITY = TypeAdapter(Digest)
+
+_CONFLICT_AUTHORITY_SQL: LiteralString = (
+    "SELECT provider_kind, authority_instance "
+    "FROM resolve_external_boot_conflict_dispatch_binding(%s, %s, %s, %s)"
+)
 
 _PROMOTION = (
     "Promoted when the external-boot recovery job handler and worker claim path land (#2118)."
@@ -400,6 +411,7 @@ async def resolve_conflict(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    resolver: ProviderResolver,
     system_id: str,
     operation: str,
     observed_identity: str,
@@ -423,20 +435,33 @@ async def resolve_conflict(
             invalid = _resolution_input_error(system_id, operation, observed_identity)
             if invalid is not None:
                 return invalid
-            return await _resolve_conflict_locked(conn, ctx, uid, system.project)
+            return await _resolve_conflict_locked(
+                conn,
+                ctx,
+                resolver,
+                uid,
+                system.project,
+                observed_identity,
+            )
 
 
 async def _resolve_conflict_locked(
-    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, project: str
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    resolver: ProviderResolver,
+    system_id: UUID,
+    project: str,
+    observed_identity: str,
 ) -> ToolResponse:
-    """Decide the resolution under the System lock.
+    """Decide and enqueue the resolution atomically under the System lock.
 
     See :func:`_release_locked` for why the restricting activation is read directly rather
     than inferred from the guard.
     """
     object_id = str(system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if await _REPOSITORY.get_restricting_for_system(conn, system_id) is None:
+        activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
+        if activation is None:
             return _conflict(
                 object_id,
                 reason="no_recovery_conflict",
@@ -452,7 +477,67 @@ async def _resolve_conflict_locked(
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(object_id, exc, ctx)
-    return _executor_unavailable(object_id, RESOLVE_CONFLICT_TOOL)
+
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _CONFLICT_AUTHORITY_SQL,
+                (
+                    activation.id,
+                    activation.system_id,
+                    activation.run_id,
+                    activation.plan_identity,
+                ),
+            )
+            authorities = await cur.fetchall()
+        if not authorities:
+            return _config_error(
+                object_id,
+                reason="conflict_authority_unresolved",
+                detail=(
+                    "the restricting activation has no unambiguous durable authority binding "
+                    "from which recovery can be dispatched"
+                ),
+                next_action="systems.get",
+            )
+
+        authority = authorities[0]
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                (f"{activation.id}\0{SUPPORTED_RESOLUTION_OPERATION}\0{observed_identity}").encode()
+            ).hexdigest()
+        )
+        dedup_key = f"external-boot-conflict:{operation_identity}"
+        try:
+            kind, payload = await build_external_boot_payload(
+                conn,
+                activation_id=activation.id,
+                purpose="resolve-conflict",
+                operation="resolve-conflict",
+                provider_kind=str(authority["provider_kind"]),
+                authority_instance=str(authority["authority_instance"]),
+                operation_identity=operation_identity,
+                expected_observed_composite=observed_identity,
+                resolver=resolver,
+            )
+        except CategorizedError as exc:
+            # Admission failures at this boundary are closed configuration refusals. They occur
+            # before enqueue, and the surrounding transaction protects future additions here.
+            return _config_error(
+                object_id,
+                reason="conflict_authority_unresolved",
+                detail=f"the durable conflict authority cannot dispatch recovery: {exc}",
+                next_action="systems.get",
+            )
+        job = await queue.enqueue(
+            conn,
+            kind,
+            payload,
+            job_authorizing(ctx, project),
+            dedup_key,
+        )
+    response = ToolResponse.from_job(job)
+    return response.model_copy(update={"data": {**response.data, "system_id": object_id}})
 
 
 def _orphan_input_error(
