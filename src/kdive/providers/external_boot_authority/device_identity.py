@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import posixpath
-from typing import Annotated, Literal
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from kdive.providers.external_boot_authority.protocol import MAX_MESSAGE_BYTES
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+    HostStatDeviceIdentity,
+    RemoteDeviceIdentity,
+)
 
 _MAX_PATH_BYTES = 4_096
 _MAX_IDENTITY_COMPONENT = 2**64 - 1
@@ -104,3 +111,56 @@ def decode_device_identity_response(payload: bytes) -> DeviceIdentityResponseV1:
         return value
     except ValidationError, ValueError, TypeError, UnicodeError:
         raise ValueError("invalid device identity response") from None
+
+
+class _IdentityLookup(Protocol):
+    def __call__(self, path: str) -> RemoteDeviceIdentity | None: ...
+
+
+class RemoteDeviceIdentityService:
+    """Bounded provider-host filesystem identity lookup service."""
+
+    def __init__(
+        self,
+        identity: _IdentityLookup | None = None,
+        *,
+        capacity: int = 4,
+    ) -> None:
+        if capacity < 1 or capacity > 4:
+            raise ValueError("identity lookup capacity must be between one and four")
+        self._identity = identity or HostStatDeviceIdentity().identity
+        self._executor = ThreadPoolExecutor(
+            max_workers=capacity, thread_name_prefix="kdive-device-identity"
+        )
+        self._admission = threading.BoundedSemaphore(capacity)
+        self._lock = threading.Lock()
+        self._closed = False
+
+    async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityResponseV1:
+        with self._lock:
+            if self._closed or not self._admission.acquire(blocking=False):
+                raise RuntimeError("provider-failure")
+            try:
+                future = self._executor.submit(self._identity, request.path)
+            except BaseException:
+                self._admission.release()
+                raise RuntimeError("provider-failure") from None
+        future.add_done_callback(lambda _future: self._admission.release())
+        try:
+            result = await asyncio.shield(asyncio.wrap_future(future))
+        except BaseException:
+            if future.cancelled():
+                raise RuntimeError("provider-failure") from None
+            raise
+        if result is None:
+            return DeviceIdentityAbsentV1()
+        if type(result) is not RemoteDeviceIdentity:
+            raise RuntimeError("provider-failure")
+        if result.kind == "block":
+            return DeviceIdentityBlockV1(primary=result.primary)
+        return DeviceIdentityInodeV1(primary=result.primary, secondary=result.secondary)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._executor.shutdown(wait=False, cancel_futures=True)
