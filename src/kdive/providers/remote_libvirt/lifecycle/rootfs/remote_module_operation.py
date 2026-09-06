@@ -165,7 +165,7 @@ class RemoteModuleApplianceExecution:
     emulator_path: str
     memory_kib: int
     vcpus: int
-    appliance_volume: str
+    appliance_volume: str | None
     appliance_image_digest: str
     root: Callable[[RemoteModuleOperationV1], PreparedVolume]
     read_scratch_result: Callable[[PreparedVolume, float], bytes | None]
@@ -173,3 +173,5 @@ class RemoteModuleApplianceExecution:
     secret_registry: SecretRegistry
     deadline_executor: DeadlineExecutor
     monotonic: Callable[[], float]
+    appliance_kernel: Path | None = None
+    appliance_initrd: Path | None = None

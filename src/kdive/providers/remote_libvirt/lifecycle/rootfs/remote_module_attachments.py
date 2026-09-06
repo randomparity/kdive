@@ -66,6 +66,8 @@ class ExpectedAppliance:
     memory_kib: int | None = None
     vcpus: int | None = None
     emulator_path: str | None = None
+    kernel: str | None = None
+    initrd: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,7 +514,10 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
     ):
         raise _conflict("resumed appliance UUID normalization mismatched")
     os_nodes = root.findall("os")
-    if os_nodes[0].attrib or [child.tag for child in os_nodes[0]] != ["type"]:
+    expected_os_children = (
+        ["type"] if expected.appliance.volume is not None else ["type", "kernel", "initrd"]
+    )
+    if os_nodes[0].attrib or [child.tag for child in os_nodes[0]] != expected_os_children:
         raise _conflict("resumed appliance OS shape mismatched")
     type_nodes = root.findall("./os/type")
     if len(type_nodes) != 1:
@@ -525,6 +530,20 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         expected_type["machine"] = expected.appliance.machine
     if type_node.attrib != expected_type:
         raise _conflict("resumed appliance OS type mismatched")
+    if expected.appliance.volume is None:
+        kernel = root.find("./os/kernel")
+        initrd = root.find("./os/initrd")
+        if (
+            kernel is None
+            or initrd is None
+            or kernel.attrib
+            or initrd.attrib
+            or list(kernel)
+            or list(initrd)
+            or (kernel.text or "") != expected.appliance.kernel
+            or (initrd.text or "") != expected.appliance.initrd
+        ):
+            raise _conflict("resumed appliance direct kernel mismatched")
     if expected.appliance.memory_kib is not None:
         memory_nodes = root.findall("./memory")
         if (

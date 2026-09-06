@@ -91,6 +91,12 @@ class ConcreteRemoteModuleAuthorityHost:
             vcpus=configured.vcpus,
             pool=self._configuration.volumes.pool_name,
             appliance_volume=configured.appliance_volume,
+            appliance_kernel=(
+                None if configured.appliance_kernel is None else str(configured.appliance_kernel)
+            ),
+            appliance_initrd=(
+                None if configured.appliance_initrd is None else str(configured.appliance_initrd)
+            ),
             appliance_image_digest=configured.appliance_image_digest,
             root=configured.root(operation),
             source=volumes.source,
