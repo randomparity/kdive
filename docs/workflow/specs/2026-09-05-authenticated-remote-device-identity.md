@@ -24,6 +24,10 @@ The provider-host service delegates only to `HostStatDeviceIdentity`. Its respon
 value: `absent`, `inode` with unsigned 64-bit `st_dev` and `st_ino`, or `block` with unsigned
 64-bit `st_rdev`. It emits no path or host detail. The existing authority listener remains the
 single server endpoint, and the two existing operation schemas and dispatch paths do not change.
+The dispatcher offloads the following `stat(2)` lookup from the event loop, and the existing
+bounded server session owns the await. A stalled host filesystem can outlive the abandoned worker
+thread, but it cannot retain the network session, delay other authority requests, or produce a late
+response.
 
 `RemoteAuthorityDeviceIdentity` is synchronous because ADR-0603's inspection port and libvirt
 preparation path are synchronous. It receives only the Resource-bound `AuthorityRequestSender` and
@@ -34,7 +38,9 @@ translates that remainder to the loop's absolute monotonic clock, and awaits the
 `resolve_device_identity` method. The sender then applies that single deadline across TCP connect,
 TLS handshake, write, response read, and close. A zero or expired preparation budget fails before
 sender or network use. Repeated identity calls always consume the same captured preparation
-deadline.
+deadline. The adapter is valid only in the existing synchronous preparation worker context; if it
+detects a running event loop in its calling thread, it fails with the same redacted infrastructure
+error instead of nesting or blocking that loop.
 
 Remote-libvirt composition exposes one factory that accepts only the already Resource-bound sender
 and captured preparation deadline and returns the synchronous port. #2170 will inject that factory
@@ -93,6 +99,10 @@ allowed after the budget expires.
 - Existing widened: the mutual-TLS AF_UNIX listener accepts a third operation. Existing TLS 1.3,
   client-certificate authentication, request credential authentication, frame bound, session
   timeout, and socket ownership/ACL checks remain unchanged.
+- Existing widened: a provider-host path reaches following `stat(2)`. Closed path validation occurs
+  before dispatch; the lookup is offloaded from the authority event loop and its response await is
+  bounded by the existing session timeout. The abandoned thread may remain kernel-blocked, but it
+  owns no socket writer or request credential and cannot publish after timeout.
 - Existing used: ADR-0606's Resource-bound sender supplies fixed destination selection, call-local
   TLS material, and active-incarnation credential borrowing. #2170 preparation composition supplies
   only that sender and the enclosing deadline; no request or path can select another destination or
@@ -120,8 +130,10 @@ selection. External-boot mutation authorization remains governed by ADR-0584 and
   aliases match, and distinct block devices differ. Bind-mount equality is exercised when the host
   permits an unprivileged mount namespace and otherwise records a precise skip.
 - Transport tests prove unauthenticated and unconfigured requests never call `stat`, operational
-  lookup failures are redacted, and stalled connect/read/close stages cannot exceed one absolute
-  deadline.
+  lookup failures are redacted, a blocked host lookup cannot block the event loop or publish after
+  session timeout, and stalled connect/read/close stages cannot exceed one absolute deadline.
+- Adapter tests prove an active event loop in the calling thread fails closed without starting a
+  nested loop or sending a request.
 - Composition tests prove a missing Resource-bound sender returns no port and configured
   construction retains only that sender plus the captured preparation deadline.
 - Run focused tests, `just lint`, `just type`, and bare `just ci` with blocking stream redirection.
