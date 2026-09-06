@@ -226,6 +226,13 @@ class LocalExternalBootAuthorityAdapter:
                 logger.exception("external-boot partial preparation abort failed")
                 raise AuthorityServiceError("provider_conflict") from None
             if result in {"removed", "absent"}:
+                try:
+                    absent = self._ports.recovery_is_absent(binding, authority)
+                except Exception:
+                    logger.exception("external-boot recovery absence is unprovable")
+                    raise AuthorityServiceError("provider_conflict") from None
+                if not absent:
+                    raise AuthorityServiceError("provider_conflict")
                 if len(self._pending_absence) >= _MAX_ADMITTED_LANES:
                     del self._pending_absence[next(iter(self._pending_absence))]
                 self._pending_absence[request.operation_identity] = request
@@ -307,6 +314,13 @@ class LocalExternalBootAuthorityAdapter:
         pending = self._pending_absence.get(request.operation_identity)
         if pending is not None:
             if pending != request:
+                raise AuthorityServiceError("provider_conflict")
+            try:
+                absent = self._ports.recovery_is_absent(binding, authority)
+            except Exception:
+                logger.exception("external-boot recovery absence is unprovable")
+                raise AuthorityServiceError("provider_conflict") from None
+            if not absent:
                 raise AuthorityServiceError("provider_conflict")
             del self._pending_absence[request.operation_identity]
             return self._absent_observation(request, binding, authority)

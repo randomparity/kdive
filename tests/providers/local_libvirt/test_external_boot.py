@@ -965,10 +965,12 @@ def test_receipt_only_partial_is_authenticated_and_removed(tmp_path: Path) -> No
     )
     with RecoveryMetadataStore(root) as store:
         store.publish_preparation(receipt)
-        assert (
-            store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
-            is None
+        partial = store.inspect_abortable_partial(
+            _BINDING, request.plan.identity, request.authority
         )
+        assert not isinstance(partial, str)
+        assert partial.intent is None
+        assert partial.materialization == receipt.materialization
         store.remove_abortable_partial(_BINDING, request.plan.identity, request.authority)
         assert (
             store.inspect_abortable_partial(_BINDING, request.plan.identity, request.authority)
@@ -1024,8 +1026,14 @@ def _materialization() -> ExternalBootMaterialization:
             "gnu_build_id": "01020304",
         },
         artifacts=MaterializedArtifacts(
-            kernel=OpaqueProviderRef(ref="artifacts/system/run/kernel"),
-            modules=OpaqueProviderRef(ref="artifacts/system/run/modules"),
+            kernel=OpaqueProviderRef(
+                ref=f"local-artifact-v2/{_BINDING.system_id}/{_BINDING.run_id}/"
+                f"{_BINDING.activation_id}/{'a' * 64}/kernel"
+            ),
+            modules=OpaqueProviderRef(
+                ref=f"local-artifact-v2/{_BINDING.system_id}/{_BINDING.run_id}/"
+                f"{_BINDING.activation_id}/{'a' * 64}/modules"
+            ),
             initrd=None,
         ),
     )
@@ -4349,3 +4357,123 @@ def test_target_projection_digest_still_measures_projection_inputs() -> None:
     assert "<domain" not in canonical.decode()
     changed = projection.model_copy(update={"cmdline": projection.cmdline + " quiet"})
     assert changed.digest != projection.digest
+
+
+@pytest.mark.parametrize("boundary", ["partial-rmdir", "abort-unlink", "after-abort-unlink"])
+def test_partial_abort_receipt_survives_final_removal_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    intent = _pre_stop(_metadata().model_copy(update={"prior_power": "inactive"}))
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    partial_name = f".{_BINDING.system_id}.{_BINDING.activation_id}.partial"
+    abort_name = f".{_BINDING.system_id}.{_BINDING.activation_id}.abort.json"
+    real_unlink = os.unlink
+    real_rmdir = os.rmdir
+    interrupted = False
+
+    def interrupt_unlink(path: str, *, dir_fd: int) -> None:
+        nonlocal interrupted
+        if path == abort_name and boundary == "abort-unlink" and not interrupted:
+            interrupted = True
+            raise OSError("injected abort unlink interruption")
+        real_unlink(path, dir_fd=dir_fd)
+        if path == abort_name and boundary == "after-abort-unlink" and not interrupted:
+            interrupted = True
+            raise OSError("injected post-abort unlink interruption")
+
+    def interrupt_rmdir(path: str, *, dir_fd: int) -> None:
+        nonlocal interrupted
+        if path == partial_name and boundary == "partial-rmdir" and not interrupted:
+            interrupted = True
+            raise OSError("injected partial rmdir interruption")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", interrupt_unlink)
+    monkeypatch.setattr(os, "rmdir", interrupt_rmdir)
+    with RecoveryMetadataStore(root) as store, pytest.raises(OSError, match="injected"):
+        store.remove_abortable_partial(_BINDING, intent.plan_identity, authority)
+
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    monkeypatch.setattr(os, "rmdir", real_rmdir)
+    with RecoveryMetadataStore(root) as restarted:
+        restarted.remove_abortable_partial(_BINDING, intent.plan_identity, authority)
+        assert restarted.exact_recovery_absence(_BINDING)
+
+
+def test_partial_abort_receipt_rejects_foreign_request_after_last_owned_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    intent = _pre_stop(_metadata().model_copy(update={"prior_power": "inactive"}))
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        store.publish_pre_stop(intent)
+    partial_name = f".{_BINDING.system_id}.{_BINDING.activation_id}.partial"
+    real_rmdir = os.rmdir
+
+    def interrupt_rmdir(path: str, *, dir_fd: int) -> None:
+        if path == partial_name:
+            raise OSError("injected partial rmdir interruption")
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "rmdir", interrupt_rmdir)
+    with RecoveryMetadataStore(root) as store, pytest.raises(OSError, match="injected"):
+        store.remove_abortable_partial(_BINDING, intent.plan_identity, authority)
+    monkeypatch.setattr(os, "rmdir", real_rmdir)
+
+    with (
+        RecoveryMetadataStore(root) as restarted,
+        pytest.raises(ValueError, match="does not match"),
+    ):
+        restarted.remove_abortable_partial(
+            _BINDING, intent.plan_identity, OpaqueProviderRef(ref="authority/foreign")
+        )
+    assert (root / partial_name).is_dir()
+
+
+def test_authenticated_partial_abort_removes_activation_artifacts_before_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    projection = _projection()
+    with TargetProjectionStore(root) as projections:
+        kernel = projections.publish(projection)
+    activation = root / _BINDING.system_id / _BINDING.run_id / _BINDING.activation_id
+    for name in ("kernel", "modules"):
+        (activation / name).write_bytes(b"owned")
+        (activation / name).chmod(0o600)
+    materialization = _materialization().model_copy(
+        update={
+            "plan_identity": projection.plan_identity,
+            "artifacts": MaterializedArtifacts(
+                kernel=kernel,
+                modules=external_boot_module._projection_ref(projection, "modules"),
+                initrd=None,
+            ),
+        }
+    )
+    request = _preparation_request("materialize")
+    receipt = ExternalBootPreparationObservation(
+        state="materialized",
+        binding=_BINDING,
+        plan_identity=projection.plan_identity,
+        authority=request.authority,
+        operation_identity=request.operation_identity,
+        materialization=materialization,
+    )
+    with RecoveryMetadataStore(root) as store:
+        store.publish_preparation(receipt)
+        partial = store.inspect_abortable_partial(
+            _BINDING, projection.plan_identity, request.authority
+        )
+        assert not isinstance(partial, str) and partial.materialization is not None
+        store.remove_abortable_activation(_BINDING, projection.plan_identity, materialization)
+        assert not store.exact_recovery_absence(_BINDING)
+        store.remove_abortable_partial(_BINDING, projection.plan_identity, request.authority)
+        assert store.exact_recovery_absence(_BINDING)

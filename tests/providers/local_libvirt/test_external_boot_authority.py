@@ -892,6 +892,7 @@ async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery() 
     io = _FakeIO()
     io.reopen_error = FileNotFoundError("intent.json")
     io.partial_abort_result = "removed"
+    io.recovery_absent = True
     request = _request(
         purpose="teardown",
         operation=AuthorityOperation.TEARDOWN,
@@ -905,7 +906,7 @@ async def test_teardown_aborts_partial_and_hands_terminal_absence_to_recovery() 
     assert committed.category == "absent"
     assert recovered == committed
     assert io.actions.count("abort-preparation") == 1
-    assert "recovery-absence" not in io.actions
+    assert io.actions.count("recovery-absence") == 2
 
 
 async def test_restarted_recovery_proves_all_exact_storage_absent() -> None:
@@ -940,6 +941,25 @@ async def test_restarted_recovery_refuses_present_activation_residue() -> None:
         await _adapter(io).observe_recovery(request, _recovery_context())
 
     assert caught.value.category == "provider_conflict"
+
+
+async def test_partial_abort_does_not_cache_absence_while_activation_residue_exists() -> None:
+    io = _FakeIO()
+    io.reopen_error = FileNotFoundError("intent.json")
+    io.partial_abort_result = "removed"
+    io.recovery_absent = False
+    request = _request(
+        purpose="teardown",
+        operation=AuthorityOperation.TEARDOWN,
+        recovery_objects=(_owned_object(),),
+    )
+    adapter = _adapter(io)
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await adapter.commit(request, _context(AuthorityOperation.TEARDOWN))
+
+    assert caught.value.category == "provider_conflict"
+    assert io.actions.count("recovery-absence") == 1
 
 
 async def test_restarted_recovery_classifies_tombstone_before_absence_probe() -> None:

@@ -1232,9 +1232,10 @@ class _RealLocalExternalBootOperation:
         authority: OpaqueProviderRef,
     ) -> PartialAbortResult:
         with RecoveryMetadataStore(self._recovery_root) as store:
-            intent = store.inspect_abortable_partial(binding, plan_identity, authority)
-            if isinstance(intent, str):
-                return cast(PartialAbortResult, intent)
+            partial = store.inspect_abortable_partial(binding, plan_identity, authority)
+            if isinstance(partial, str):
+                return cast(PartialAbortResult, partial)
+            intent = partial.intent
             if intent is not None:
                 if intent.source_boot != source_identity or intent.target_boot != target_identity:
                     raise ValueError("recovery partial identity conflicts with teardown request")
@@ -1244,6 +1245,8 @@ class _RealLocalExternalBootOperation:
                     readiness = self._session.readiness()
                     if not readiness.ok:
                         raise ValueError("source readiness failed while aborting preparation")
+            if partial.materialization is not None:
+                store.remove_abortable_activation(binding, plan_identity, partial.materialization)
             store.remove_abortable_partial(binding, plan_identity, authority)
             return "removed"
 
@@ -1825,6 +1828,22 @@ _PREPARATION_NAME = "preparation-result.json"
 _MAX_METADATA_BYTES = 262_144
 
 
+class LocalPartialAbortReceiptV1(BaseModel):
+    """Root-level authority retained while the owned partial directory is removed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_: Literal["local-partial-abort-v1"] = Field("local-partial-abort-v1", alias="schema")
+    binding: ExternalBootActivationBinding
+    plan_identity: Digest
+    authority: OpaqueProviderRef
+
+
+@dataclass(frozen=True, slots=True)
+class AbortablePartial:
+    intent: LocalPreStopIntentV1 | None
+    materialization: ExternalBootMaterialization | None
+
+
 class LocalPreparationReceiptsV1(BaseModel):
     """Both phase receipts retained in one owner-bound canonical record."""
 
@@ -2352,8 +2371,12 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         plan_identity: Digest,
         authority: OpaqueProviderRef,
-    ) -> LocalPreStopIntentV1 | None | Literal["absent", "not-partial"]:
+    ) -> AbortablePartial | Literal["absent", "not-partial"]:
         name = recovery_directory_name(_recovery_ref(binding), binding)
+        abort_name = f".{name}.abort.json"
+        expected_abort = LocalPartialAbortReceiptV1(
+            binding=binding, plan_identity=plan_identity, authority=authority
+        )
         try:
             complete_fd = _open_private_directory(self._root_fd, name)
         except FileNotFoundError:
@@ -2361,11 +2384,16 @@ class RecoveryMetadataStore:
         else:
             os.close(complete_fd)
             return "not-partial"
+        abort_receipt = self._read_optional_abort_receipt(abort_name)
+        if abort_receipt is not None and abort_receipt != expected_abort:
+            raise ValueError("partial abort receipt does not match teardown request")
         partial_name = f".{name}.partial"
         try:
             directory_fd = _open_private_directory(self._root_fd, partial_name)
         except FileNotFoundError:
-            return "absent"
+            if abort_receipt is None:
+                return "absent"
+            return AbortablePartial(intent=None, materialization=None)
         try:
             entries = set(os.listdir(directory_fd))
             allowed = {
@@ -2378,6 +2406,7 @@ class RecoveryMetadataStore:
             if entries - allowed:
                 raise ValueError("recovery partial contains unexpected residue")
             intent: LocalPreStopIntentV1 | None = None
+            materialization: ExternalBootMaterialization | None = None
             if _INTENT_NAME in entries:
                 intent = self._read_pre_stop(directory_fd)
                 if intent.binding != binding or intent.plan_identity != plan_identity:
@@ -2391,9 +2420,11 @@ class RecoveryMetadataStore:
                         or receipt.authority != authority
                     ):
                         raise ValueError("recovery partial does not match teardown request")
-            if intent is None and _PREPARATION_NAME not in entries:
+                receipt = receipts.prepare or receipts.materialize
+                materialization = None if receipt is None else receipt.materialization
+            if intent is None and materialization is None and abort_receipt is None:
                 raise ValueError("recovery partial has no owned record")
-            return intent
+            return AbortablePartial(intent=intent, materialization=materialization)
         finally:
             os.close(directory_fd)
 
@@ -2408,26 +2439,135 @@ class RecoveryMetadataStore:
             return
         name = recovery_directory_name(_recovery_ref(binding), binding)
         partial_name = f".{name}.partial"
+        abort_name = f".{name}.abort.json"
+        receipt = LocalPartialAbortReceiptV1(
+            binding=binding, plan_identity=plan_identity, authority=authority
+        )
+        data = receipt.model_dump_json(by_alias=True).encode()
+        if len(data) > _MAX_METADATA_BYTES:
+            raise ValueError("partial abort receipt exceeds its byte bound")
+        existing = self._read_optional_abort_receipt(abort_name)
+        if existing is None:
+            _replace_private_file(self._root_fd, f"{abort_name}.next", abort_name, data)
+            os.fsync(self._root_fd)
+        elif existing != receipt:
+            raise ValueError("partial abort receipt conflicts with teardown request")
         try:
             directory_fd = _open_private_directory(self._root_fd, partial_name)
         except FileNotFoundError:
-            return
-        try:
-            for entry in (
-                f".{_ARCHIVE_NAME}.partial",
-                _ARCHIVE_NAME,
-                _INITIAL_INTENT_TEMPORARY_NAME,
-                _INTENT_NAME,
-                _PREPARATION_NAME,
-            ):
-                with suppress(FileNotFoundError):
-                    os.unlink(entry, dir_fd=directory_fd)
-                    os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                for entry in (
+                    f".{_ARCHIVE_NAME}.partial",
+                    _ARCHIVE_NAME,
+                    _INITIAL_INTENT_TEMPORARY_NAME,
+                    _INTENT_NAME,
+                    _PREPARATION_NAME,
+                ):
+                    with suppress(FileNotFoundError):
+                        os.unlink(entry, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         with suppress(FileNotFoundError):
             os.rmdir(partial_name, dir_fd=self._root_fd)
             os.fsync(self._root_fd)
+        with suppress(FileNotFoundError):
+            os.unlink(abort_name, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+
+    def remove_abortable_activation(
+        self,
+        binding: ExternalBootActivationBinding,
+        plan_identity: Digest,
+        materialization: ExternalBootMaterialization,
+    ) -> None:
+        """Remove only artifacts authenticated by the durable preparation receipt."""
+        ownership = ActivationOwnership(system_id=binding.system_id, run_id=binding.run_id)
+        if materialization.ownership != ownership or materialization.plan_identity != plan_identity:
+            raise ValueError("materialization does not match partial abort ownership")
+        refs = [materialization.artifacts.kernel, materialization.artifacts.modules]
+        if materialization.artifacts.initrd is not None:
+            refs.append(materialization.artifacts.initrd)
+        parts = [_artifact_ref_parts(ref, ownership, binding.activation_id) for ref in refs]
+        if any(item[1:5] != parts[0][1:5] for item in parts[1:]):
+            raise ValueError("materialization artifacts do not share one projection")
+        try:
+            system_fd = _open_private_directory(self._root_fd, binding.system_id)
+        except FileNotFoundError:
+            return
+        try:
+            try:
+                run_fd = _open_private_directory(system_fd, binding.run_id)
+            except FileNotFoundError:
+                return
+            try:
+                try:
+                    activation_fd = _open_private_directory(run_fd, binding.activation_id)
+                except FileNotFoundError:
+                    return
+                try:
+                    try:
+                        digest_fd = _open_private_directory(activation_fd, parts[0][4])
+                    except FileNotFoundError:
+                        digest_fd = None
+                    if digest_fd is not None:
+                        try:
+                            try:
+                                projection_data = _read_private_file(digest_fd, _PROJECTION_NAME)
+                            except FileNotFoundError:
+                                pass
+                            else:
+                                projection = TargetProjectionV1.model_validate_json(projection_data)
+                                if (
+                                    projection.canonical_bytes() != projection_data
+                                    or projection.ownership != ownership
+                                    or projection.activation_id != binding.activation_id
+                                    or projection.plan_identity != plan_identity
+                                    or projection.digest.removeprefix("sha256:") != parts[0][4]
+                                ):
+                                    raise ValueError(
+                                        "target projection does not authenticate abort"
+                                    )
+                                os.unlink(_PROJECTION_NAME, dir_fd=digest_fd)
+                                os.fsync(digest_fd)
+                        finally:
+                            os.close(digest_fd)
+                    for item in parts:
+                        with suppress(FileNotFoundError):
+                            os.unlink(item[5], dir_fd=activation_fd)
+                            os.fsync(activation_fd)
+                    with suppress(FileNotFoundError):
+                        os.rmdir(parts[0][4], dir_fd=activation_fd)
+                        os.fsync(activation_fd)
+                finally:
+                    os.close(activation_fd)
+                with suppress(FileNotFoundError):
+                    os.rmdir(binding.activation_id, dir_fd=run_fd)
+                    os.fsync(run_fd)
+            finally:
+                os.close(run_fd)
+            with suppress(FileNotFoundError):
+                os.rmdir(binding.run_id, dir_fd=system_fd)
+                os.fsync(system_fd)
+        finally:
+            os.close(system_fd)
+        with suppress(FileNotFoundError):
+            os.rmdir(binding.system_id, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+
+    def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
+        try:
+            data = _read_private_file(self._root_fd, name)
+        except FileNotFoundError:
+            return None
+        if not data or len(data) > _MAX_METADATA_BYTES:
+            raise ValueError("partial abort receipt is empty or oversized")
+        receipt = LocalPartialAbortReceiptV1.model_validate_json(data)
+        if receipt.model_dump_json(by_alias=True).encode() != data:
+            raise ValueError("partial abort receipt is not canonical")
+        return receipt
 
     def exact_recovery_absence(self, binding: ExternalBootActivationBinding) -> bool:
         """Read-only proof that every exact activation-owned storage location is absent."""
@@ -2440,6 +2580,8 @@ class RecoveryMetadataStore:
             else:
                 os.close(descriptor)
                 return False
+        if self._read_optional_abort_receipt(f".{name}.abort.json") is not None:
+            return False
         try:
             system_fd = _open_private_directory(self._root_fd, binding.system_id)
         except FileNotFoundError:

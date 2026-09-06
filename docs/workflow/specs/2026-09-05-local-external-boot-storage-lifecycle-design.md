@@ -66,6 +66,13 @@ readiness mechanism required by #2243 before deleting evidence. It then removes 
 intent, archive, and archive-temporary names and the exact partial directory. Every step is
 idempotent; teardown retries this arm until it returns absent.
 
+Before unlinking the final in-partial ownership record, abort publishes a canonical 0600
+root-level receipt bound to the activation, plan, and authority, then fsyncs the root. That receipt
+is the sole authority for resuming deletion of an otherwise empty partial after restart. Abort also
+removes the receipt-authenticated activation payloads and projection before reporting `removed`;
+it removes the abort receipt only after the partial directory is gone and the root is fsynced. A
+foreign or malformed receipt fails closed, and exact absence includes the receipt.
+
 `abort_preparation` returns a closed result: `removed`, `absent`, or `not-partial`. `removed` and
 `absent` create an adapter-local pending-absence handoff only after the adapter has verified that
 `context.phase` is `mutation-started`, its commit point is TEARDOWN, and the admitted request owns
@@ -76,6 +83,10 @@ calling `_resolve_point`, `_require_matching_identities`, or the RecoveryPoint-d
 categorizer. The map is bounded to the existing admitted-lane capacity and evicts its oldest entry;
 an equal same-process request consumes the handoff. A mismatched request cannot consume or replace
 an entry.
+
+Commit and recovery observation both re-run the complete non-mutating exact-absence inventory
+before returning a pending terminal handoff. In-process caching therefore cannot hide activation
+residue or differ from the result after an adapter restart.
 
 `AuthorityMutationAdapter` adds
 `observe_recovery(request, AuthorityRecoveryObservationContextV1)`. The closed context carries only

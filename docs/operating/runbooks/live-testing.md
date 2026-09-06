@@ -542,7 +542,9 @@ worker behind it is visible as a stale log rather than read as a graded process.
 # External-boot recovery capacity
 
 Each fixed worker has `KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES`, measured in bytes per
-activation. Provisioning measures filesystem free bytes after the slot roots are created and
+activation. The shipped Ansible value is 32 GiB, which accommodates the simultaneous maximum
+represented by the current kernel, initrd, module, archive-temporary, and metadata bounds.
+Provisioning measures filesystem free bytes after the slot roots are created and
 before workers are released. The required free capacity per worker is that ceiling multiplied by
 the configured simultaneous-activation count. If the observed value is lower, provisioning stops
 and external boot is not advertised. Increase the filesystem capacity or lower admitted

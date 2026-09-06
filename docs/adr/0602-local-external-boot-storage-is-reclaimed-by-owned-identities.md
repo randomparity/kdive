@@ -70,6 +70,10 @@ free bytes observed after the per-slot roots exist and before worker release. In
 fails provisioning, so external boot is not advertised; the recovery action is to increase the
 filesystem or lower admitted concurrency and rerun provisioning.
 
+The shipped ceiling is 32 GiB per activation. It admits the simultaneous maximum represented by
+the current plan and archive bounds, including atomic temporary copies; provisioning multiplies
+that ceiling by admitted concurrency rather than assuming typical payload sizes.
+
 ## Consequences
 
 Cleanup is idempotent across interruption at each unlink and rmdir, while sibling Runs and
