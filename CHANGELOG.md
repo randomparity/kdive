@@ -253,6 +253,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reap orphaned remote module volumes
 - Compose remote module volume reaper
 - Enqueue remote module volume reaping
+- Isolate activation cleanup artifacts
+- Pass external boot storage bounds
+- Bind teardown recovery observations
+- Reclaim interrupted preparation
+- Gate external boot recovery capacity
 
 ### Changed
 
@@ -1307,6 +1312,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve tenant job pagination
 - Format module reap design snippet
 - Refresh job reference for internal volume reaping
+- Design external-boot storage lifecycle
+- Correct storage ownership design
+- Close storage lifecycle gaps
+- Bound pending absence handoff
+- Define recovery observation context
+- Ratify local storage reclamation
+- Align storage records with gate format
 
 ### Fixed
 
@@ -2109,6 +2121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve module reap payload wire shape
 - Retry unreachable module volume fleets
 - Snapshot remote fleet configuration
+- Preserve partial abort authority
+- Run capacity probe in check mode
 
 ### Security
 
