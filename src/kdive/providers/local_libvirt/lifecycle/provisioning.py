@@ -204,6 +204,7 @@ class LocalLibvirtProvisioning:
         upload_fetch: UploadFetch | None = None,
         free_port: FreePort | None = None,
         extract_baseline_kernel: ExtractBaselineKernel | None = None,
+        before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
         guest_egress: bool = False,
     ) -> None:
         self._connect = connect
@@ -214,6 +215,7 @@ class LocalLibvirtProvisioning:
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
         self._free_port = free_port or _bind_probe_free_port
         self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
+        self._before_extract_baseline = before_extract_baseline
         # Operator-resolved egress policy for the SSH-forward NIC (ADR-0313, #1031). Default False
         # keeps restrict=on; composition binds the per-Resource value via rebind_for_resource.
         self._guest_egress = guest_egress
@@ -403,7 +405,20 @@ class LocalLibvirtProvisioning:
             initrd = dest / "initrd"
             present_initrd = initrd if self._files.baseline_exists(str(initrd)) else None
             return BaselineKernel(kernel=dest / "kernel", initrd=present_initrd)
-        return self._extract_baseline_kernel(Path(base), dest, baseline_kernel)
+        if self._before_extract_baseline is None:
+            return self._extract_baseline_kernel(Path(base), dest, baseline_kernel)
+        extractor = self._extract_baseline_kernel
+        if extractor is not _real_extract_baseline_kernel:
+            raise CategorizedError(
+                "baseline intent callback requires the real baseline extractor",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        return _real_extract_baseline_kernel(
+            Path(base),
+            dest,
+            baseline_kernel,
+            before_extract=self._before_extract_baseline,
+        )
 
     def _gdb_port_for(self, system_id: UUID) -> int:
         """Reuse the System's recorded gdbstub port if its domain already records one; else a
