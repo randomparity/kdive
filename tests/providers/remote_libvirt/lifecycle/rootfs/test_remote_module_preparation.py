@@ -11,15 +11,14 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
-    prepare_verified_remote_module_attempt,
 )
+from kdive.services.remote_module_volume_preparation import prepare_verified_remote_module_attempt
 
 
 @pytest.fixture(autouse=True)
 def _identity_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation."
-        "build_remote_device_identity_port",
+        "kdive.services.remote_module_volume_preparation.build_remote_device_identity_port",
         lambda authority, _deadline: authority,
     )
 
@@ -106,8 +105,7 @@ async def test_verified_consumer_runs_inline_with_identity(
         return await consumer(attempt)
 
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation."
-        "run_verified_module_attempt_preparation",
+        "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
         verify,
     )
     result = await prepare_verified_remote_module_attempt(
@@ -155,8 +153,7 @@ async def test_cancellation_retains_verified_consumer_until_completion(
             verifier_active = False
 
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation."
-        "run_verified_module_attempt_preparation",
+        "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
         verify,
     )
 
@@ -207,8 +204,7 @@ async def test_expired_deadline_reaches_no_provider_operation(
         return await consumer(attempt)
 
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation."
-        "run_verified_module_attempt_preparation",
+        "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
         verify,
     )
     reached = False
