@@ -60,6 +60,15 @@ _ACTIVATION_EDGES = {
     ("recovering", "recovery_failed"),
     ("recovering", "recovery_conflict"),
     ("recovery_conflict", "recovering"),
+    ("preparing", "torn_down"),
+    ("prepared", "torn_down"),
+    ("activating", "torn_down"),
+    ("active", "torn_down"),
+    ("recovering", "torn_down"),
+    ("recovered", "torn_down"),
+    ("recovery_conflict", "torn_down"),
+    ("recovery_failed", "torn_down"),
+    ("abandoned", "torn_down"),
 }
 
 
@@ -257,6 +266,23 @@ def test_activation_row_enforces_cleanup_matrix_and_positive_generation() -> Non
         ExternalBootActivation.model_validate(
             common | {"state": "active", "activation_readiness_deadline": _AT}
         )
+
+
+def test_torn_down_is_not_abandoned_and_requires_teardown_evidence() -> None:
+    common = dict(
+        id=_ACTIVATION_ID,
+        system_id=_SYSTEM_ID,
+        run_id=_RUN_ID,
+        plan_identity=_PLAN,
+        operation_owner_id=_OBSERVATION_ID,
+        authority_generation=1,
+        state="torn_down",
+        cleanup_complete=False,
+        created_at=_AT,
+        updated_at=_AT,
+    )
+    with pytest.raises(ValidationError, match="teardown"):
+        ExternalBootActivation.model_validate(common)
 
 
 def test_activation_row_rejects_recovery_point_for_another_activation() -> None:

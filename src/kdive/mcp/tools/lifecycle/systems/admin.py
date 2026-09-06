@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+from typing import LiteralString
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -16,7 +18,6 @@ from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import (
-    ExternalBootActivationState,
     IllegalTransition,
     RunState,
     SystemState,
@@ -27,6 +28,7 @@ from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -50,6 +52,7 @@ from kdive.profiles.provider_policy import (
 )
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
@@ -72,58 +75,16 @@ _TEARDOWN = JobKind.TEARDOWN
 _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
+_SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
+    "SELECT activation_id, run_id, plan_identity, provider_kind, authority_instance "
+    "FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
+)
 
 
 def _teardown_dedup_key(system_id: UUID) -> str:
     """One expression for the replay probe and the enqueue; the key does not vary with
     ``idempotency_key``, so the probe runs unconditionally."""
     return f"{system_id}:teardown"
-
-
-def _external_boot_teardown_unavailable(
-    system_id: str, activation: ExternalBootActivation
-) -> ToolResponse:
-    """Refuse the ordinary teardown path while authority-fenced teardown is incomplete."""
-    if activation.state is ExternalBootActivationState.ACTIVE:
-        detail = (
-            "release this Run's external boot with runs.release_external_boot, wait for cleanup, "
-            "then retry systems.teardown"
-        )
-        next_actions = ["runs.release_external_boot", "runs.get"]
-        reason = "external_boot_release_required"
-    elif activation.state is ExternalBootActivationState.RECOVERY_CONFLICT:
-        detail = (
-            "resolve the external-boot recovery conflict first; authority-fenced System teardown "
-            "for this state is not yet available and no teardown job was enqueued"
-        )
-        next_actions = ["systems.resolve_external_boot_conflict", "runs.get"]
-        reason = "external_boot_teardown_not_supported"
-    elif activation.state is ExternalBootActivationState.RECOVERY_FAILED:
-        detail = (
-            "authority-fenced System teardown from external-boot recovery failure is not yet "
-            "available; no teardown job was enqueued"
-        )
-        next_actions = ["runs.get"]
-        reason = "external_boot_teardown_not_supported"
-    else:
-        detail = (
-            "wait for the external-boot operation and cleanup to settle, then retry "
-            "systems.teardown; no teardown job was enqueued"
-        )
-        next_actions = ["runs.get"]
-        reason = "external_boot_teardown_in_progress"
-    return ToolResponse.failure(
-        system_id,
-        ErrorCategory.CONFLICT,
-        detail=detail,
-        suggested_next_actions=next_actions,
-        data={
-            "reason": reason,
-            "activation_id": str(activation.id),
-            "activation_state": activation.state.value,
-            "owning_run_id": str(activation.run_id),
-        },
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +349,7 @@ async def teardown_system(
     system_id: str,
     *,
     idempotency_key: str | None = None,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
     """Enqueue an idempotent teardown for a System the caller's project administers.
 
@@ -410,7 +372,7 @@ async def teardown_system(
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error("idempotency_key", exc)
             try:
-                return await _teardown_locked(conn, ctx, uid, system_id, idempotency_key)
+                return await _teardown_locked(conn, ctx, uid, system_id, idempotency_key, resolver)
             except UniqueViolation:
                 if idempotency_key is None:
                     raise  # only the keyed path records, so an unkeyed collision is not ours
@@ -428,6 +390,7 @@ async def _teardown_locked(
     uid: UUID,
     system_id: str,
     idempotency_key: str | None,
+    resolver: ProviderResolver | None,
 ) -> ToolResponse:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
         system = await SYSTEMS.get(conn, uid)
@@ -441,9 +404,17 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
-        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_restricting_for_system(conn, uid)
+        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, uid)
         if activation is not None:
-            return _external_boot_teardown_unavailable(system_id, activation)
+            return await _enqueue_authority_teardown(
+                conn,
+                ctx,
+                system,
+                activation,
+                system_id,
+                idempotency_key,
+                resolver,
+            )
         if idempotency_key is not None:
             replay = await resolve_envelope_replay(
                 conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
@@ -495,3 +466,90 @@ async def _teardown_locked(
                 envelope=envelope,
             )
         return envelope
+
+
+async def _enqueue_authority_teardown(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    system: System,
+    activation: ExternalBootActivation,
+    system_id: str,
+    idempotency_key: str | None,
+    resolver: ProviderResolver | None,
+) -> ToolResponse:
+    """Route every durable external-boot history through its exact authority marker."""
+    if resolver is None:
+        return ToolResponse.failure(
+            system_id,
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail="external-boot teardown requires the configured authority resolver",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "external_boot_teardown_authority_unresolved"},
+        )
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_SYSTEM_TEARDOWN_AUTHORITY_SQL, (system.id,))
+        bindings = await cur.fetchall()
+    if len(bindings) != 1 or UUID(str(bindings[0]["activation_id"])) != activation.id:
+        return ToolResponse.failure(
+            system_id,
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail="the newest external-boot activation has no unambiguous authority route",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "external_boot_teardown_authority_unresolved"},
+        )
+    prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
+    if prior is not None:
+        marker = prior.payload.get("external_boot_authority_v1")
+        if not isinstance(marker, dict) or marker.get("activation_id") != str(activation.id):
+            return ToolResponse.failure(
+                system_id,
+                ErrorCategory.CONFLICT,
+                detail="an ordinary teardown job cannot be replayed for external-boot history",
+                suggested_next_actions=["jobs.wait", "systems.get"],
+                data={"reason": "ordinary_teardown_fenced_by_external_boot"},
+            )
+        return job_envelope(prior, "system_id", system.id)
+    operation_identity = (
+        "sha256:"
+        + sha256(
+            f"{activation.id}\0system-teardown\0{activation.plan_identity}\0{_teardown_dedup_key(system.id)}".encode()
+        ).hexdigest()
+    )
+    binding = bindings[0]
+    try:
+        kind, payload = await build_external_boot_payload(
+            conn,
+            activation_id=activation.id,
+            purpose="teardown",
+            operation="teardown",
+            provider_kind=str(binding["provider_kind"]),
+            authority_instance=str(binding["authority_instance"]),
+            operation_identity=operation_identity,
+            resolver=resolver,
+        )
+    except CategorizedError as exc:
+        return ToolResponse.failure(
+            system_id,
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail=f"the external-boot teardown authority cannot be dispatched: {exc}",
+            suggested_next_actions=["systems.get"],
+            data={"reason": "external_boot_teardown_authority_unresolved"},
+        )
+    job = await queue.enqueue(
+        conn,
+        kind,
+        payload,
+        job_authorizing(ctx, system.project),
+        _teardown_dedup_key(system.id),
+    )
+    envelope = job_envelope(job, "system_id", system.id)
+    if idempotency_key is not None:
+        await record_envelope(
+            conn,
+            principal=ctx.principal,
+            key=idempotency_key,
+            project=system.project,
+            kind=_TEARDOWN_KIND,
+            envelope=envelope,
+        )
+    return envelope

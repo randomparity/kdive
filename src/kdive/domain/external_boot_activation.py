@@ -197,15 +197,18 @@ class ExternalBootCleanupEvidenceV1(_ClosedEvidence):
     )
     activation_id: UUID
     system_id: UUID
-    release_identity: Digest
-    mode: Literal["ordinary", "system_teardown"]
+    release_identity: Digest | None = None
+    mode: Literal["ordinary", "system_teardown", "pending_system_teardown"]
     teardown_identity: Digest | None = None
     completed_at: UtcDateTime
 
     @model_validator(mode="after")
     def _mode_matches_teardown(self) -> ExternalBootCleanupEvidenceV1:
-        if (self.mode == "system_teardown") != (self.teardown_identity is not None):
+        teardown = self.mode in {"system_teardown", "pending_system_teardown"}
+        if teardown != (self.teardown_identity is not None):
             raise ValueError("teardown_identity presence must match cleanup mode")
+        if (self.mode == "pending_system_teardown") != (self.release_identity is None):
+            raise ValueError("release_identity absence must match pending cleanup mode")
         return self
 
 
@@ -250,6 +253,7 @@ class ExternalBootActivation(_ClosedRow):
             ExternalBootActivationState.ABANDONED,
             ExternalBootActivationState.RECOVERY_FAILED,
             ExternalBootActivationState.RECOVERY_CONFLICT,
+            ExternalBootActivationState.TORN_DOWN,
         }
         if self.cleanup_complete and self.state not in cleanup_states:
             raise ValueError("cleanup_complete is invalid for this activation state")
@@ -265,6 +269,7 @@ class ExternalBootActivation(_ClosedRow):
         materialized_states = set(ExternalBootActivationState) - {
             ExternalBootActivationState.PREPARING,
             ExternalBootActivationState.ABANDONED,
+            ExternalBootActivationState.TORN_DOWN,
         }
         if self.state in materialized_states and self.materialization is None:
             raise ValueError("materialization is required for this activation state")
@@ -326,6 +331,8 @@ class ExternalBootActivation(_ClosedRow):
             and self.teardown_evidence.system_id != self.system_id
         ):
             raise ValueError("teardown evidence ownership does not match activation")
+        if self.state is ExternalBootActivationState.TORN_DOWN and self.teardown_evidence is None:
+            raise ValueError("torn_down activation requires teardown evidence")
         if self.cleanup_complete != (self.cleanup_evidence is not None):
             raise ValueError("cleanup evidence presence must match cleanup_complete")
         if self.cleanup_complete:
@@ -336,6 +343,7 @@ class ExternalBootActivation(_ClosedRow):
                 ExternalBootActivationState.RECOVERED,
                 ExternalBootActivationState.ABANDONED,
             }
+            pending_teardown = cleanup_evidence.mode == "pending_system_teardown"
             if (
                 (cleanup_evidence.mode == "ordinary") != ordinary
                 or ordinary != (self.teardown_evidence is None)
@@ -344,6 +352,7 @@ class ExternalBootActivation(_ClosedRow):
                     and (
                         self.teardown_evidence is None
                         or cleanup_evidence.teardown_identity != self.teardown_evidence.identity
+                        or (pending_teardown != (cleanup_evidence.release_identity is None))
                     )
                 )
             ):

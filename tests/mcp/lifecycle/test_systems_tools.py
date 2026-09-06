@@ -48,6 +48,7 @@ from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardow
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     MaterializableRootfsRef,
@@ -1268,8 +1269,14 @@ async def _seed_system_with_profile(
 # --- systems.teardown tool + handler -------------------------------------------------------
 
 
-async def _teardown(pool: AsyncConnectionPool, ctx: RequestContext, system_id: str):
-    return await teardown_system(pool, ctx, system_id)
+async def _teardown(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system_id: str,
+    *,
+    resolver: ProviderResolver | None = None,
+):
+    return await teardown_system(pool, ctx, system_id, resolver=resolver)
 
 
 def _teardown_profile() -> dict[str, Any]:
@@ -1312,7 +1319,68 @@ def test_teardown_admin_enqueues_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_teardown_refuses_while_external_boot_is_active(migrated_url: str) -> None:
+async def _seed_retired_teardown_authority(conn: psycopg.AsyncConnection, seeded: Any) -> None:
+    """Persist the durable route that System teardown must use, not infer."""
+    job_id = uuid4()
+    worker = f"worker-{uuid4()}"
+    await conn.execute(
+        "INSERT INTO jobs (id, kind, payload, state, max_attempts, authorizing, dedup_key) "
+        "VALUES (%s, 'boot', %s, 'succeeded', 3, %s, %s)",
+        (
+            job_id,
+            Jsonb({"run_id": str(seeded.run_id)}),
+            Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
+            f"seed-authority-{job_id}",
+        ),
+    )
+    await conn.execute(
+        "INSERT INTO worker_incarnations "
+        "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
+        "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
+        (worker, b"1" * 32),
+    )
+    row = await conn.execute(
+        "SELECT s.allocation_id, e.plan_identity FROM systems AS s "
+        "JOIN external_boot_activations AS e ON e.system_id = s.id "
+        "WHERE s.id = %s AND e.id = %s",
+        (seeded.system_id, seeded.activation.id),
+    )
+    authority_row = await row.fetchone()
+    assert authority_row is not None
+    allocation_id, plan_identity = authority_row
+    await conn.execute(
+        "INSERT INTO external_boot_authorities "
+        "(system_id, allocation_id, activation_id, run_id, plan_identity, job_id, job_attempt, "
+        "purpose, provider_kind, authority_instance, worker_incarnation, operation, "
+        "operation_identity, operation_digest, generation, state, acknowledged_at, retired_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, 'recover', 'local-libvirt', 'authority-a', %s, "
+        "'recover', 'prior-recovery', %s, 1, 'retired', now(), now())",
+        (
+            seeded.system_id,
+            allocation_id,
+            seeded.activation.id,
+            seeded.run_id,
+            plan_identity,
+            job_id,
+            worker,
+            "sha256:" + "2" * 64,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "cleanup_complete", "ready_reservation"),
+    [
+        (ExternalBootActivationState.ACTIVE, False, True),
+        (ExternalBootActivationState.RECOVERED, True, False),
+    ],
+)
+def test_teardown_with_external_boot_history_enqueues_authority_marker(
+    migrated_url: str,
+    state: ExternalBootActivationState,
+    cleanup_complete: bool,
+    ready_reservation: bool,
+) -> None:
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
             alloc_id = await granted_allocation(pool)
@@ -1321,29 +1389,41 @@ def test_teardown_refuses_while_external_boot_is_active(migrated_url: str) -> No
             async with pool.connection() as conn:
                 seeded = await seed_activation(
                     conn,
-                    state=ExternalBootActivationState.ACTIVE,
-                    ready_reservation=True,
+                    state=state,
+                    cleanup_complete=cleanup_complete,
+                    ready_reservation=ready_reservation,
                     system_id=UUID(system_id),
                     run_id=UUID(run_id),
                 )
-            response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+                await _seed_retired_teardown_authority(conn, seeded)
+            response = await _teardown(
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
+            )
+            assert response.status == "queued", response.model_dump()
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
                 system = await cur.fetchone()
-                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'teardown'")
-                jobs = await cur.fetchone()
+                await cur.execute("SELECT payload FROM jobs WHERE id = %s", (response.object_id,))
+                job = await cur.fetchone()
 
-        assert response.status == "error"
-        assert response.error_category == "conflict"
-        assert response.data == {
-            "reason": "external_boot_release_required",
-            "activation_id": str(seeded.activation.id),
-            "activation_state": "active",
-            "owning_run_id": run_id,
-        }
-        assert response.suggested_next_actions == ["runs.release_external_boot", "runs.get"]
         assert system is not None and system["state"] == "ready"
-        assert jobs is not None and jobs["n"] == 0
+        assert job is not None
+        marker = job["payload"]["external_boot_authority_v1"]
+        assert marker == {
+            "activation_id": str(seeded.activation.id),
+            "run_id": run_id,
+            "system_id": system_id,
+            "plan_identity": seeded.activation.plan_identity,
+            "purpose": "teardown",
+            "provider_kind": "local-libvirt",
+            "authority_instance": "authority-a",
+            "operation": "teardown",
+            "operation_identity": marker["operation_identity"],
+        }
+        assert marker["operation_identity"].startswith("sha256:")
 
     asyncio.run(_run())
 
@@ -1358,21 +1438,26 @@ def test_teardown_activation_fence_preempts_keyed_ordinary_replay(migrated_url: 
             )
             run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
             async with pool.connection() as conn:
-                await seed_activation(
+                seeded = await seed_activation(
                     conn,
                     state=ExternalBootActivationState.ACTIVE,
                     ready_reservation=True,
                     system_id=UUID(system_id),
                     run_id=UUID(run_id),
                 )
+                await _seed_retired_teardown_authority(conn, seeded)
             replay = await teardown_system(
-                pool, ctx(Role.ADMIN), system_id, idempotency_key="teardown-before-activation"
+                pool,
+                ctx(Role.ADMIN),
+                system_id,
+                idempotency_key="teardown-before-activation",
+                resolver=provider_resolver(external_boot=ExternalBootOperations()),
             )
 
         assert first.status == "queued"
         assert replay.status == "error"
         assert replay.error_category == "conflict"
-        assert replay.data["reason"] == "external_boot_release_required"
+        assert replay.data["reason"] == "ordinary_teardown_fenced_by_external_boot"
 
     asyncio.run(_run())
 
@@ -1397,10 +1482,9 @@ def test_teardown_reports_unavailable_external_boot_failure_escape(migrated_url:
                 jobs = await cur.fetchone()
 
         assert response.status == "error"
-        assert response.error_category == "conflict"
-        assert response.data["reason"] == "external_boot_teardown_not_supported"
-        assert "not yet available" in (response.detail or "")
-        assert response.suggested_next_actions == ["runs.get"]
+        assert response.error_category == "configuration_error"
+        assert response.data["reason"] == "external_boot_teardown_authority_unresolved"
+        assert response.suggested_next_actions == ["systems.get"]
         assert jobs is not None and jobs["n"] == 0
 
     asyncio.run(_run())

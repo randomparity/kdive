@@ -233,7 +233,26 @@ class ExternalBootActivationRepository:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT * FROM external_boot_activations WHERE system_id = %s "
-                "AND (state NOT IN ('recovered', 'abandoned') OR NOT cleanup_complete)",
+                "AND (state NOT IN ('recovered', 'abandoned', 'torn_down') "
+                "OR NOT cleanup_complete)",
+                (system_id,),
+            )
+            row = await cur.fetchone()
+        return _activation(row)
+
+    async def get_latest_for_system(
+        self, conn: AsyncConnection, system_id: UUID
+    ) -> ExternalBootActivation | None:
+        """Return the newest durable activation, including completed history.
+
+        A clean release is not permission to let an ordinary worker destroy the authority-owned
+        domain and overlays.  Public System teardown uses this history only to route a marked
+        authority job; it never treats it as provider evidence.
+        """
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT * FROM external_boot_activations WHERE system_id = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
                 (system_id,),
             )
             row = await cur.fetchone()
