@@ -409,13 +409,7 @@ class LocalAuthoritySystemProvider:
         intent = self._load_intent(request.system_id)
         if intent is None:
             inspection = self._inspect_without_intent(request.system_id)
-            return self._absence_facts(
-                request,
-                domain_absent=inspection.domain_absent,
-                storage_absent=inspection.overlay_absent and inspection.baseline_absent,
-                intent_absent=True,
-                completed_at=self._completion_time(request),
-            )
+            return self._complete_absence_facts(request, inspection, create=True)
         self._require_teardown_intent(intent, request)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
         try:
@@ -465,13 +459,7 @@ class LocalAuthoritySystemProvider:
         intent = self._load_intent(request.system_id)
         if intent is None:
             inspection = self._inspect_without_intent(request.system_id)
-            return self._absence_facts(
-                request,
-                domain_absent=inspection.domain_absent,
-                storage_absent=inspection.overlay_absent and inspection.baseline_absent,
-                intent_absent=True,
-                completed_at=self._completion_time(request),
-            )
+            return self._complete_absence_facts(request, inspection, create=False)
         self._require_teardown_intent(intent, request)
         session = self._open_teardown(request.system_id, intent.overlay, intent.baseline)
         try:
@@ -490,6 +478,34 @@ class LocalAuthoritySystemProvider:
         """Prove retained ownership and graph exclusivity immediately before one deletion step."""
         self._verify_retained_provision_identity(intent)
         self._assert_no_sibling_attachment(intent.system_id, intent.overlay, intent.baseline)
+
+    def _complete_absence_facts(
+        self,
+        request: AuthoritySystemMutationRequestV1,
+        inspection: Any,
+        *,
+        create: bool,
+    ) -> AuthoritySystemAbsenceFacts:
+        domain_absent = inspection.domain_absent
+        storage_absent = inspection.overlay_absent and inspection.baseline_absent
+        completed_at = self._completion_time(request)
+        if create and completed_at is None and domain_absent and storage_absent:
+            completion = self._store_completion(
+                _Completion(
+                    system_id=request.system_id,
+                    operation=request.operation,
+                    operation_digest=request.operation_digest,
+                    completed_at=self._utc_now(),
+                )
+            )
+            completed_at = completion.completed_at
+        return self._absence_facts(
+            request,
+            domain_absent=domain_absent,
+            storage_absent=storage_absent,
+            intent_absent=True,
+            completed_at=completed_at,
+        )
 
     def _inspect_without_intent(self, system_id: UUID) -> Any:
         session = self._open_teardown(

@@ -20,6 +20,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
     ExpectedAttachmentState,
     HostStatDeviceIdentity,
     RemoteDeviceIdentity,
+    prove_no_foreign_path_references,
     prove_no_foreign_storage_references,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
@@ -48,6 +49,21 @@ class Domain:
 
     def isPersistent(self) -> int:  # noqa: N802
         return int(self.inactive_xml is not None)
+
+
+class _FreeingDomain(Domain):
+    def __init__(self, xml: str, *, fail_read: bool = False) -> None:
+        super().__init__(xml)
+        self.fail_read = fail_read
+        self.freed = 0
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+        if self.fail_read:
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+        return super().XMLDesc(flags)
+
+    def free(self) -> None:
+        self.freed += 1
 
 
 class Conn:
@@ -112,6 +128,35 @@ def storage_pool(*, name: str = "systems", target_path: str = "/pool") -> FakeSt
             )
         )
     return pool
+
+
+def test_path_reference_proof_releases_every_domain_after_xml_failure() -> None:
+    failed = _FreeingDomain("<domain><name>failed</name></domain>", fail_read=True)
+    remaining = _FreeingDomain("<domain><name>remaining</name></domain>")
+
+    with pytest.raises(CategorizedError, match="could not read"):
+        prove_no_foreign_path_references(
+            Conn([failed, remaining]),
+            IdentityPort(),
+            "00000000-0000-4000-8000-000000000001",
+            frozenset({"/protected"}),
+        )
+
+    assert failed.freed == remaining.freed == 1
+
+
+def test_path_reference_proof_releases_every_domain_when_enumeration_exceeds_bound() -> None:
+    domains = [_FreeingDomain("<domain><name>bounded</name></domain>") for _ in range(4097)]
+
+    with pytest.raises(CategorizedError, match="enumeration exceeds"):
+        prove_no_foreign_path_references(
+            Conn(cast("list[Domain]", domains)),
+            IdentityPort(),
+            "00000000-0000-4000-8000-000000000001",
+            frozenset({"/protected"}),
+        )
+
+    assert all(domain.freed == 1 for domain in domains)
 
 
 def system_xml(system: str, *, volume: str = "root", arch: str = "x86_64") -> str:

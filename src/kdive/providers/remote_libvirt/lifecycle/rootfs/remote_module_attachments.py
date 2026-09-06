@@ -357,53 +357,80 @@ def _prove_no_foreign_references(
     except libvirt.libvirtError as exc:
         raise _infrastructure("could not enumerate remote teardown attachments") from exc
     if len(domains) > MAX_LIBVIRT_XML_DOCUMENTS:
-        raise _infrastructure("remote teardown domain enumeration exceeds provider limit")
+        error = _infrastructure("remote teardown domain enumeration exceeds provider limit")
+        for cleanup_error in _release_domains(domains, set()):
+            error.add_note(f"cleanup failed: {cleanup_error!r}")
+        raise error
     budget = XmlEnumerationBudget()
     seen_names: set[str] = set()
-    for domain in domains:
-        try:
-            active = bool(domain.isActive())
-            documents = [domain.XMLDesc(0)]
-            if active and domain.isPersistent():
-                documents.append(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
-        except libvirt.libvirtError as exc:
-            raise _infrastructure("could not read a remote teardown attachment") from exc
-        try:
-            for index, document in enumerate(documents):
+    released: set[int] = set()
+    cleanup_errors: list[Exception] = []
+    try:
+        for domain in domains:
+            try:
                 try:
-                    root = budget.parse(document)
-                except (ET.ParseError, DefusedXmlException, ValueError) as exc:
-                    raise _conflict("could not inspect a remote teardown attachment") from exc
-                name = root.findtext("name")
-                if index == 0:
-                    if not name or name in seen_names:
-                        raise _conflict("duplicate or unnamed remote teardown domain")
-                    seen_names.add(name)
-                owner = _system_ownership(root, domain=name)
-                references = volume_references(root)
-                paths = path_references(root)
-                paths.update(
-                    value
-                    for value in (root.findtext("./os/kernel"), root.findtext("./os/initrd"))
-                    if value is not None
-                )
-                document_identities = {resolve(path) for path in paths}
-                document_identities.update(
-                    resolve(_volume_path(conn, pool, volume)) for pool, volume in references
-                )
-                direct = set(references) & set(protected_volumes)
-                aliases = document_identities & protected_identities
-                exact_owner = owner == owner_system_id and name == domain_name_for(
-                    UUID(owner_system_id)
-                )
-                if (direct or aliases) and not exact_owner:
-                    raise _conflict(
-                        "another domain references remote teardown storage", domain=name
+                    active = bool(domain.isActive())
+                    documents = [domain.XMLDesc(0)]
+                    if active and domain.isPersistent():
+                        documents.append(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+                except libvirt.libvirtError as exc:
+                    raise _infrastructure("could not read a remote teardown attachment") from exc
+                for index, document in enumerate(documents):
+                    try:
+                        root = budget.parse(document)
+                    except (ET.ParseError, DefusedXmlException, ValueError) as exc:
+                        raise _conflict("could not inspect a remote teardown attachment") from exc
+                    name = root.findtext("name")
+                    if index == 0:
+                        if not name or name in seen_names:
+                            raise _conflict("duplicate or unnamed remote teardown domain")
+                        seen_names.add(name)
+                    owner = _system_ownership(root, domain=name)
+                    references = volume_references(root)
+                    paths = path_references(root)
+                    paths.update(
+                        value
+                        for value in (root.findtext("./os/kernel"), root.findtext("./os/initrd"))
+                        if value is not None
                     )
-        finally:
-            closer = getattr(domain, "free", None)
-            if callable(closer):
+                    document_identities = {resolve(path) for path in paths}
+                    document_identities.update(
+                        resolve(_volume_path(conn, pool, volume)) for pool, volume in references
+                    )
+                    direct = set(references) & set(protected_volumes)
+                    aliases = document_identities & protected_identities
+                    exact_owner = owner == owner_system_id and name == domain_name_for(
+                        UUID(owner_system_id)
+                    )
+                    if (direct or aliases) and not exact_owner:
+                        raise _conflict(
+                            "another domain references remote teardown storage", domain=name
+                        )
+            finally:
+                cleanup_errors.extend(_release_domains((domain,), released))
+    except BaseException as error:
+        cleanup_errors.extend(_release_domains(domains, released))
+        for cleanup_error in cleanup_errors:
+            error.add_note(f"cleanup failed: {cleanup_error!r}")
+        raise
+    if cleanup_errors:
+        raise ExceptionGroup("remote teardown domain cleanup failed", cleanup_errors)
+
+
+def _release_domains(domains: Sequence[Domain], released: set[int]) -> list[Exception]:
+    errors: list[Exception] = []
+    for domain in domains:
+        identifier = id(domain)
+        if identifier in released:
+            continue
+        released.add(identifier)
+        closer = getattr(domain, "free", None)
+        if callable(closer):
+            try:
                 closer()
+            except Exception as error:
+                errors.append(error)
+    return errors
 
 
 def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:

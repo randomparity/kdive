@@ -16,7 +16,6 @@ from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemError,
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
-    _Completion,
     _Intent,
 )
 from kdive.providers.system_authority import (
@@ -412,25 +411,14 @@ def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: 
 
     facts = asyncio.run(provider.execute_preactivation_teardown(request, context))
 
-    assert not facts.complete
-    assert facts.quarantine_retained
+    assert facts.complete
     assert calls == ["inspect", "close"]
-    assert not (tmp_path / "intents").exists()
-
-    completion = provider._store_completion(
-        _Completion(
-            system_id=request.system_id,
-            operation=request.operation,
-            operation_digest=request.operation_digest,
-            completed_at=datetime(2026, 9, 6, tzinfo=UTC),
-        )
-    )
     receipt = tmp_path / "intents" / f"{request.system_id}.preactivation-teardown.complete.json"
     before = receipt.read_bytes()
     replayed = asyncio.run(provider.observe_preactivation_teardown(request, context))
 
     assert replayed.complete
-    assert replayed.completed_at == completion.completed_at
+    assert replayed.completed_at == facts.completed_at
     assert receipt.read_bytes() == before
     assert calls == ["inspect", "close", "inspect", "close"]
 
