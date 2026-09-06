@@ -44,6 +44,98 @@ _AUTHORITY_ARTIFACT_ROOTS = (
 _IDENTITY_PYTHON = "/usr/bin/python3"
 _FAULT_BARRIER_MAX_BYTES = 1024
 _FAULT_BARRIER_SOCKET = Path("/run/kdive/provider-authority/proof-control/control.sock")
+_JOURNAL_ROOT = Path("/var/lib/kdive/provider-authority/journal")
+_JOURNAL_PROOF_MAX_BYTES = 512
+
+_JOURNAL_LANE_CLIENT = """
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import sys
+
+root = "/var/lib/kdive/provider-authority/journal"
+request = json.loads(sys.stdin.buffer.read(512))
+if not isinstance(request, dict) or request.get("action") not in {"hide", "restore"}:
+    raise SystemExit("invalid journal proof request")
+system_id = request.get("system_id")
+if not isinstance(system_id, str) or re.fullmatch(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", system_id
+) is None:
+    raise SystemExit("invalid journal proof system")
+uid = pwd.getpwnam("kdive-provider-authority").pw_uid
+root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    root_status = os.fstat(root_fd)
+    if (not stat.S_ISDIR(root_status.st_mode) or root_status.st_uid != uid
+            or stat.S_IMODE(root_status.st_mode) != 0o700):
+        raise SystemExit("unsafe journal root")
+    name = system_id + ".jsonl"
+    held = "." + system_id + ".native-proof-held"
+    if request["action"] == "hide":
+        status = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != uid
+                or stat.S_IMODE(status.st_mode) != 0o600 or status.st_nlink != 1):
+            raise SystemExit("unsafe journal lane")
+        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            content = os.read(descriptor, 64 * 1024 * 1024 + 1)
+        finally:
+            os.close(descriptor)
+        if len(content) != status.st_size or len(content) > 64 * 1024 * 1024:
+            raise SystemExit("journal lane exceeds bound")
+        try:
+            os.stat(held, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise SystemExit("journal proof hold already exists")
+        proof = {
+            "device": str(status.st_dev), "inode": str(status.st_ino),
+            "size": str(status.st_size),
+            "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        }
+        os.rename(name, held, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+        print(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+    else:
+        required = {"action", "system_id", "device", "inode", "size", "digest"}
+        if set(request) != required or any(not isinstance(request[key], str) for key in required):
+            raise SystemExit("invalid journal restoration proof")
+        if (not re.fullmatch(r"[0-9]+", request["device"])
+                or not re.fullmatch(r"[0-9]+", request["inode"])
+                or not re.fullmatch(r"[0-9]+", request["size"])
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", request["digest"]) is None):
+            raise SystemExit("invalid journal restoration proof")
+        try:
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise SystemExit("journal lane unexpectedly exists")
+        status = os.stat(held, dir_fd=root_fd, follow_symlinks=False)
+        identity = str(status.st_dev), str(status.st_ino), str(status.st_size)
+        expected = request["device"], request["inode"], request["size"]
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != uid
+                or stat.S_IMODE(status.st_mode) != 0o600 or status.st_nlink != 1
+                or identity != expected):
+            raise SystemExit("journal lane identity changed")
+        descriptor = os.open(held, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            content = os.read(descriptor, 64 * 1024 * 1024 + 1)
+        finally:
+            os.close(descriptor)
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        if len(content) != status.st_size or digest != request["digest"]:
+            raise SystemExit("journal lane content changed")
+        os.rename(held, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+        print('{"state":"restored"}')
+finally:
+    os.close(root_fd)
+"""
 
 _FAULT_BARRIER_METADATA = """
 import os
@@ -194,6 +286,16 @@ class ActivationJob:
     investigation_id: str
     run_id: str
     activate_job_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class JournalLaneProof:
+    """Exact immutable lane facts required to restore a temporarily hidden journal."""
+
+    device: str
+    inode: str
+    size: str
+    digest: str
 
 
 def _output(*argv: str) -> str:
@@ -595,6 +697,66 @@ def fault_barrier_request(config: NativeAuthorityConfig, request: dict[str, str]
     return response
 
 
+def _journal_lane_request(config: NativeAuthorityConfig, request: dict[str, str]) -> dict[str, str]:
+    """Run the fixed root-only lane mover; it never accepts a filesystem destination."""
+    payload = json.dumps(request, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    if not payload or len(payload) > _JOURNAL_PROOF_MAX_BYTES:
+        raise ValueError("journal lane proof request exceeds its closed byte limit")
+    result = subprocess.run(
+        ["sudo", "-n", _IDENTITY_PYTHON, "-c", _JOURNAL_LANE_CLIENT],
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace").strip()[-1000:]
+        raise RuntimeError(f"installed authority journal lane proof failed: {detail}")
+    if len(result.stdout) > _JOURNAL_PROOF_MAX_BYTES:
+        raise AssertionError("journal lane proof response is oversized")
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise AssertionError("journal lane proof is malformed") from None
+    if not isinstance(response, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in response.items()
+    ):
+        raise AssertionError("journal lane proof is malformed")
+    return response
+
+
+def hide_authority_journal_lane(config: NativeAuthorityConfig) -> JournalLaneProof:
+    """Hide exactly this System's lane and retain its inode/content proof for restoration."""
+    response = _journal_lane_request(config, {"action": "hide", "system_id": str(config.system_id)})
+    required = {"device", "inode", "size", "digest"}
+    if set(response) != required or any(
+        not response[name].isdigit() for name in required - {"digest"}
+    ):
+        raise AssertionError("journal lane proof is malformed")
+    digest = response["digest"]
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise AssertionError("journal lane proof is malformed")
+    return JournalLaneProof(
+        device=response["device"], inode=response["inode"], size=response["size"], digest=digest
+    )
+
+
+def restore_authority_journal_lane(config: NativeAuthorityConfig, proof: JournalLaneProof) -> None:
+    """Restore only the exact previously hidden lane; replacement is a hard failure."""
+    response = _journal_lane_request(
+        config,
+        {
+            "action": "restore",
+            "system_id": str(config.system_id),
+            "device": proof.device,
+            "inode": proof.inode,
+            "size": proof.size,
+            "digest": proof.digest,
+        },
+    )
+    if response != {"state": "restored"}:
+        raise AssertionError(f"journal lane proof did not restore its exact lane: {response!r}")
+
+
 def arm_fault_barrier(
     config: NativeAuthorityConfig,
     run_id: str,
@@ -645,6 +807,114 @@ def restart_authority_after_fault(config: NativeAuthorityConfig) -> None:
     _output("sudo", "-n", "systemctl", "restart", config.authority_service)
     if _output("systemctl", "is-active", config.authority_service) != "active":
         raise AssertionError("authority service did not return active after fault restart")
+
+
+def stop_authority_for_journal_loss(config: NativeAuthorityConfig) -> None:
+    """Stop only the configured authority before hiding its lane for an inventory proof."""
+    _output("sudo", "-n", "systemctl", "stop", config.authority_service)
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", config.authority_service], check=False
+    )
+    if result.returncode == 0:
+        raise AssertionError("authority service remained active before journal-loss proof")
+
+
+def require_journal_inventory_refusal(config: NativeAuthorityConfig) -> None:
+    """Require a hidden owned lane to prevent startup; a missing lane cannot silently recreate."""
+    result = subprocess.run(
+        ["sudo", "-n", "systemctl", "start", config.authority_service],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError("authority accepted a missing journal lane")
+
+
+def run_installed_local_authority_journal_restore_recovery() -> None:
+    """Prove a renamed owned journal lane blocks startup and restores byte-for-byte before retry."""
+    config = load_config()
+    if config is None:
+        pytest.skip("installed local-authority carrier is not configured")
+    require_fault_barrier(config)
+    installed = _output("sudo", "-n", "cat", "/opt/kdive-provider-authority/revision")
+    assert installed == config.installed_revision, (
+        "installed authority revision does not match config"
+    )
+    running_workers = _output(
+        "systemctl", "list-units", "kdive-live-worker@*.service", "--state=running", "--no-legend"
+    )
+    require_deployed_revision(config, require_stack(), running_workers)
+    db_url = os.environ.get("KDIVE_DATABASE_URL")
+    assert db_url, "native authority carrier requires KDIVE_DATABASE_URL"
+    issuer = require_issuer()
+    token = mint_role_token(
+        issuer, project=config.project, agent_session=config.ownership_prefix, role="admin"
+    )
+    ledger = ResourceLedger(config.ownership_prefix)
+
+    async def run() -> None:
+        await provision_authority_fixture(db_url, config)
+        require_authority_artifact_confinement(config, running_workers)
+        client = LiveStackClient.over_http(require_stack(), token)
+        async with client:
+            primary: Exception | None = None
+            try:
+                activation = await start_external_boot_activation(
+                    client,
+                    config,
+                    ledger,
+                    before_activate=lambda run_id: arm_fault_barrier(
+                        config, run_id, "activate", "after-provider"
+                    ),
+                )
+                wait_for_fault_barrier(config)
+                stop_authority_for_journal_loss(config)
+                proof = hide_authority_journal_lane(config)
+                try:
+                    require_journal_inventory_refusal(config)
+                finally:
+                    restore_authority_journal_lane(config, proof)
+                    restart_authority_after_fault(config)
+                await drain_job(client, "activate-journal-restore", activation.activate_job_id)
+                release = ok(
+                    await scalar(client, "runs.release_external_boot", run_id=activation.run_id),
+                    "release",
+                )
+                await drain_job(client, "release", release.object_id)
+                await assert_root_release_completion(
+                    db_url,
+                    NormalOperationJobs(
+                        activation.investigation_id,
+                        activation.run_id,
+                        activation.activate_job_id,
+                        release.object_id,
+                    ),
+                )
+            except Exception as exc:
+                primary = exc
+            finally:
+                failures = [primary] if primary is not None else []
+                for resource in reversed(
+                    [item for item in ledger.resources if item.kind == "investigation"]
+                ):
+                    try:
+                        closed = await client.call_tool(
+                            "investigations.close",
+                            investigation_id=resource.identity,
+                            summary="Native authority proof cleanup",
+                        )
+                        assert not isinstance(closed, list) and closed.status not in {
+                            "error",
+                            "failed",
+                        }
+                    except Exception as exc:
+                        failures.append(exc)
+                if len(failures) == 1:
+                    raise failures[0]
+                if failures:
+                    raise ExceptionGroup("native carrier and cleanup failures", failures)
+
+    asyncio.run(run())
 
 
 async def assert_root_release_completion(db_url: str, operations: NormalOperationJobs) -> None:

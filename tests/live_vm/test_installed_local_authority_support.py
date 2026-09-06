@@ -29,6 +29,7 @@ from tests.live_vm.installed_local_authority_support import (
     arm_fault_barrier,
     assert_root_release_completion,
     drive_normal_operations,
+    hide_authority_journal_lane,
     load_config,
     provision_authority_fixture,
     release_fault_barrier,
@@ -36,6 +37,7 @@ from tests.live_vm.installed_local_authority_support import (
     require_deployed_revision,
     require_fault_barrier,
     restart_authority_after_fault,
+    restore_authority_journal_lane,
     wait_for_fault_barrier,
 )
 
@@ -220,6 +222,65 @@ def test_fault_barrier_waits_for_reached_state_then_restarts_only_configured_ser
         ("sudo", "-n", "systemctl", "restart", config.authority_service),
         ("systemctl", "is-active", config.authority_service),
     ]
+
+
+def test_journal_loss_helper_moves_only_the_configured_lane_and_restores_exact_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+    requests: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        assert argv[:4] == ["sudo", "-n", "/usr/bin/python3", "-c"]
+        request = json.loads(cast(bytes, kwargs["input"]))
+        requests.append(request)
+        response = (
+            {"device": "1", "inode": "2", "size": "3", "digest": "sha256:" + "a" * 64}
+            if request["action"] == "hide"
+            else {"state": "restored"}
+        )
+        return subprocess.CompletedProcess(argv, 0, json.dumps(response).encode(), b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    lane = hide_authority_journal_lane(config)
+    restore_authority_journal_lane(config, lane)
+
+    assert requests == [
+        {"action": "hide", "system_id": str(config.system_id)},
+        {
+            "action": "restore",
+            "system_id": str(config.system_id),
+            "device": "1",
+            "inode": "2",
+            "size": "3",
+            "digest": "sha256:" + "a" * 64,
+        },
+    ]
+
+
+def test_journal_loss_helper_refuses_an_unverified_or_unrestored_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = NativeAuthorityConfig(
+        installed_revision="1" * 40,
+        system_id=uuid4(),
+        project="kdive-2151-project",
+        ownership_prefix="kdive-2151-" + "1" * 12 + "-" + "2" * 8,
+        authority_service="kdive-external-boot-authority.service",
+    )
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, b'{"device":"1","inode":"2"}', b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(AssertionError, match="journal lane proof is malformed"):
+        hide_authority_journal_lane(config)
 
 
 def test_normal_driver_uses_public_tools_and_drains_jobs(
