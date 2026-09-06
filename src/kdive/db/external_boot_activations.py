@@ -216,6 +216,15 @@ class ExternalBootActivationRepository:
                 reservation.reserved_bytes,
             ):
                 raise ValueError("activation reservation retry does not match durable identity")
+            await cur.execute(
+                "SELECT claim_authority_system_first_activation(%s,%s) AS status",
+                (activation.system_id, activation.id),
+            )
+            authority_claim = await cur.fetchone()
+            if authority_claim is None or authority_claim["status"] not in {"ordinary", "applied"}:
+                raise ExternalBootTeardownInProgress(
+                    f"system {activation.system_id} is not released for first activation"
+                )
         current = _activation(row)
         if current is None:
             raise RuntimeError("activation create returned no row")

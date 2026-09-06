@@ -296,6 +296,20 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.resolve_authority_system_server_binding(p_system_id uuid)
+RETURNS TABLE(
+    system_id uuid, allocation_id uuid, resource_id uuid, provider_kind text,
+    resource_name text, authority_instance text, profile_identity text,
+    root_identity text, ownership_state text
+) LANGUAGE sql SECURITY DEFINER SET search_path = '' STABLE AS $$
+    SELECT owner.system_id,owner.allocation_id,owner.resource_id,owner.provider_kind,
+           owner.resource_name,owner.authority_instance,owner.profile_identity,
+           owner.root_identity,owner.state
+    FROM public.authority_system_ownership AS owner
+    WHERE pg_has_role(session_user,'kdive_server','member')
+      AND owner.system_id=p_system_id
+$$;
+
 CREATE FUNCTION public.claim_authority_system_first_activation(
     p_system_id uuid, p_activation_id uuid
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
@@ -336,24 +350,31 @@ DECLARE
     v_id uuid := gen_random_uuid();
     v_generation bigint;
     v_digest text;
+    v_system_id uuid;
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE = '42501';
     END IF;
+    SELECT (payload #>> '{authority_system_v1,system_id}')::uuid INTO v_system_id
+    FROM public.jobs WHERE id=p_job_id;
+    IF v_system_id IS NULL THEN
+        RETURN QUERY SELECT 'superseded'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'kdive:system:' || v_system_id::text, 2125));
+    SELECT * INTO v_owner FROM public.authority_system_ownership
+    WHERE system_id=v_system_id FOR UPDATE;
+    SELECT * INTO v_job FROM public.jobs WHERE id=p_job_id FOR UPDATE;
     SELECT incarnation INTO v_worker FROM public.worker_incarnations
     WHERE credential_hash=p_credential_hash AND state='active' AND fence_protocol=4;
-    SELECT * INTO v_job FROM public.jobs WHERE id=p_job_id FOR UPDATE;
     v_marker := v_job.payload->'authority_system_v1';
     IF v_worker IS NULL OR v_job.id IS NULL OR v_job.state <> 'running'
        OR v_job.worker_id <> v_worker OR v_job.attempt <> p_job_attempt
        OR v_job.lease_expires_at <= clock_timestamp()
-       OR jsonb_typeof(v_marker) IS DISTINCT FROM 'object' THEN
+       OR jsonb_typeof(v_marker) IS DISTINCT FROM 'object'
+       OR v_marker->>'system_id' IS DISTINCT FROM v_system_id::text THEN
         RETURN QUERY SELECT 'superseded'::text,NULL::uuid,NULL::bigint,NULL::text; RETURN;
     END IF;
-    PERFORM pg_advisory_xact_lock(hashtextextended(
-        'kdive:system:' || (v_marker->>'system_id'), 2125));
-    SELECT * INTO v_owner FROM public.authority_system_ownership
-    WHERE system_id=(v_marker->>'system_id')::uuid FOR UPDATE;
     SELECT * INTO v_existing FROM public.authority_system_attempts
     WHERE job_id=p_job_id AND job_attempt=p_job_attempt AND request_attempt_id=p_request_attempt_id;
     IF v_existing.id IS NOT NULL THEN
@@ -430,6 +451,8 @@ DECLARE
     v_worker text;
     v_attempt public.authority_system_attempts%ROWTYPE;
     v_owner public.authority_system_ownership%ROWTYPE;
+    v_job public.jobs%ROWTYPE;
+    v_system_id uuid;
     v_now timestamptz := clock_timestamp();
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_worker', 'member') THEN
@@ -439,17 +462,26 @@ BEGIN
        OR p_quiescence_digest !~ '^sha256:[0-9a-f]{64}$' THEN
         RAISE EXCEPTION 'authority System acknowledgement is invalid' USING ERRCODE='22023';
     END IF;
-    SELECT incarnation INTO v_worker FROM public.worker_incarnations
-    WHERE credential_hash=p_credential_hash AND state='active' AND fence_protocol=4;
-    SELECT * INTO v_attempt FROM public.authority_system_attempts
-    WHERE id=p_authority_id AND generation=p_generation FOR UPDATE;
-    IF v_attempt.id IS NULL OR v_worker IS NULL THEN
+    SELECT system_id INTO v_system_id FROM public.authority_system_attempts
+    WHERE id=p_authority_id AND generation=p_generation;
+    IF v_system_id IS NULL THEN
         RETURN QUERY SELECT 'superseded'::text,NULL::timestamptz; RETURN;
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        'kdive:system:' || v_attempt.system_id::text,2125));
+        'kdive:system:' || v_system_id::text,2125));
     SELECT * INTO v_owner FROM public.authority_system_ownership
-    WHERE system_id=v_attempt.system_id FOR UPDATE;
+    WHERE system_id=v_system_id FOR UPDATE;
+    SELECT * INTO v_attempt FROM public.authority_system_attempts
+    WHERE id=p_authority_id AND generation=p_generation FOR UPDATE;
+    SELECT * INTO v_job FROM public.jobs WHERE id=p_job_id FOR UPDATE;
+    SELECT incarnation INTO v_worker FROM public.worker_incarnations
+    WHERE credential_hash=p_credential_hash AND state='active' AND fence_protocol=4;
+    IF v_attempt.id IS NULL OR v_worker IS NULL
+       OR v_attempt.worker_incarnation <> v_worker OR v_attempt.job_id <> p_job_id
+       OR v_attempt.job_attempt <> p_job_attempt
+       OR v_attempt.request_attempt_id <> p_request_attempt_id THEN
+        RETURN QUERY SELECT 'superseded'::text,NULL::timestamptz; RETURN;
+    END IF;
     IF v_attempt.state IN ('current','terminal') THEN
         RETURN QUERY SELECT CASE WHEN v_attempt.ack_sequence=p_ack_sequence
                                    AND v_attempt.ack_digest=p_ack_digest
@@ -457,19 +489,15 @@ BEGIN
                                   THEN 'replay' ELSE 'conflict' END,
             v_attempt.acknowledged_at; RETURN;
     END IF;
-    IF v_attempt.state <> 'allocating' OR v_attempt.worker_incarnation <> v_worker
-       OR v_attempt.job_id <> p_job_id OR v_attempt.job_attempt <> p_job_attempt
-       OR v_attempt.request_attempt_id <> p_request_attempt_id
-       OR p_ack_sequence <> v_owner.journal_sequence
+    IF v_attempt.state <> 'allocating' OR p_ack_sequence <> v_owner.journal_sequence
        OR p_ack_digest <> v_owner.journal_digest
        OR v_owner.journal_phase <> 'takeover-acknowledged'
        OR (v_owner.journal_record->>'authority_id')::uuid <> v_attempt.id
        OR (v_owner.journal_record->>'generation')::bigint <> v_attempt.generation
-       OR NOT EXISTS (
-           SELECT 1 FROM public.jobs WHERE id=p_job_id AND
-           state = 'running' AND worker_id = v_worker AND attempt = p_job_attempt
-           AND lease_expires_at > clock_timestamp()
-       ) THEN RETURN QUERY SELECT 'superseded'::text,NULL::timestamptz; RETURN; END IF;
+       OR v_job.state <> 'running' OR v_job.worker_id <> v_worker
+       OR v_job.attempt <> p_job_attempt
+       OR v_job.lease_expires_at <= clock_timestamp()
+       THEN RETURN QUERY SELECT 'superseded'::text,NULL::timestamptz; RETURN; END IF;
     UPDATE public.authority_system_attempts SET state='superseded',superseded_at=v_now
     WHERE id=v_owner.current_attempt_id AND state='current';
     UPDATE public.authority_system_attempts SET state='current',ack_sequence=p_ack_sequence,
@@ -581,6 +609,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
     v_attempt public.authority_system_attempts%ROWTYPE;
     v_owner public.authority_system_ownership%ROWTYPE;
+    v_system_id uuid;
     v_sequence bigint;
     v_digest text;
     v_phase text;
@@ -602,6 +631,15 @@ BEGIN
        ] THEN
         RAISE EXCEPTION 'authority System journal record is invalid' USING ERRCODE='22023';
     END IF;
+    SELECT system_id INTO v_system_id FROM public.authority_system_attempts
+    WHERE id=p_authority_id AND generation=p_generation;
+    IF v_system_id IS NULL THEN
+        RETURN QUERY SELECT 'superseded'::text,NULL::bigint,NULL::text; RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'kdive:system:' || v_system_id::text,2125));
+    SELECT * INTO v_owner FROM public.authority_system_ownership
+    WHERE system_id=v_system_id FOR UPDATE;
     SELECT * INTO v_attempt FROM public.authority_system_attempts
     WHERE id=p_authority_id AND generation=p_generation FOR UPDATE;
     IF v_attempt.id IS NULL OR v_attempt.worker_incarnation<>p_peer_incarnation
@@ -609,10 +647,6 @@ BEGIN
            SELECT 1 FROM public.worker_incarnations WHERE incarnation=p_peer_incarnation
            AND state='active' AND fence_protocol=4
        ) THEN RETURN QUERY SELECT 'superseded'::text,NULL::bigint,NULL::text; RETURN; END IF;
-    PERFORM pg_advisory_xact_lock(hashtextextended(
-        'kdive:system:' || v_attempt.system_id::text,2125));
-    SELECT * INTO v_owner FROM public.authority_system_ownership
-    WHERE system_id=v_attempt.system_id FOR UPDATE;
     IF v_owner.journal_sequence<>p_expected_sequence
        OR v_owner.journal_digest<>p_expected_digest THEN
         RETURN QUERY SELECT 'conflict'::text,v_owner.journal_sequence,v_owner.journal_digest; RETURN;
@@ -748,23 +782,31 @@ DECLARE
     v_owner public.authority_system_ownership%ROWTYPE;
     v_job public.jobs%ROWTYPE;
     v_system public.systems%ROWTYPE;
+    v_system_id uuid;
 BEGIN
     IF NOT pg_has_role(session_user,'kdive_worker','member') THEN
         RAISE EXCEPTION 'worker authority is required' USING ERRCODE='42501';
     END IF;
-    SELECT incarnation INTO v_worker FROM public.worker_incarnations
-    WHERE credential_hash=p_credential_hash AND state='active' AND fence_protocol=4;
-    SELECT * INTO v_attempt FROM public.authority_system_attempts
-    WHERE id=p_authority_id AND generation=p_generation FOR UPDATE;
-    IF v_attempt.id IS NULL OR v_worker IS NULL THEN
+    SELECT system_id INTO v_system_id FROM public.authority_system_attempts
+    WHERE id=p_authority_id AND generation=p_generation;
+    IF v_system_id IS NULL THEN
         RETURN QUERY SELECT 'superseded'::text,NULL::text,NULL::text; RETURN;
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        'kdive:system:' || v_attempt.system_id::text,2125));
+        'kdive:system:' || v_system_id::text,2125));
     SELECT * INTO v_owner FROM public.authority_system_ownership
-    WHERE system_id=v_attempt.system_id FOR UPDATE;
+    WHERE system_id=v_system_id FOR UPDATE;
+    SELECT * INTO v_attempt FROM public.authority_system_attempts
+    WHERE id=p_authority_id AND generation=p_generation FOR UPDATE;
     SELECT * INTO v_job FROM public.jobs WHERE id=p_job_id FOR UPDATE;
-    SELECT * INTO v_system FROM public.systems WHERE id=v_attempt.system_id FOR UPDATE;
+    SELECT * INTO v_system FROM public.systems WHERE id=v_system_id FOR UPDATE;
+    SELECT incarnation INTO v_worker FROM public.worker_incarnations
+    WHERE credential_hash=p_credential_hash AND state='active' AND fence_protocol=4;
+    IF v_attempt.id IS NULL OR v_worker IS NULL
+       OR v_attempt.worker_incarnation<>v_worker OR v_attempt.job_id<>p_job_id
+       OR v_attempt.job_attempt<>p_job_attempt THEN
+        RETURN QUERY SELECT 'superseded'::text,v_job.state,v_system.state; RETURN;
+    END IF;
     IF v_attempt.consumed_at IS NOT NULL THEN
         RETURN QUERY SELECT CASE WHEN v_attempt.receipt_bytes=p_receipt_bytes
                                   AND v_attempt.terminal_head_sequence=p_journal_sequence
@@ -773,8 +815,7 @@ BEGIN
             v_job.state,v_system.state; RETURN;
     END IF;
     IF v_owner.current_attempt_id<>v_attempt.id OR v_attempt.state<>'terminal'
-       OR v_attempt.worker_incarnation<>v_worker OR v_attempt.job_id<>p_job_id
-       OR v_attempt.job_attempt<>p_job_attempt OR v_attempt.receipt_bytes<>p_receipt_bytes
+       OR v_attempt.receipt_bytes<>p_receipt_bytes
        OR v_attempt.terminal_head_sequence<>p_journal_sequence
        OR v_attempt.terminal_head_digest<>p_journal_digest
        OR v_owner.journal_sequence<>p_journal_sequence
@@ -815,6 +856,8 @@ RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
     v_attempt public.authority_system_attempts%ROWTYPE;
     v_owner public.authority_system_ownership%ROWTYPE;
+    v_job public.jobs%ROWTYPE;
+    v_system public.systems%ROWTYPE;
     v_count integer := 0;
 BEGIN
     IF NOT pg_has_role(session_user,'kdive_reconciler','member') THEN
@@ -834,16 +877,29 @@ BEGIN
                    SELECT 1 FROM public.worker_incarnations AS worker
                    WHERE worker.incarnation=attempt.worker_incarnation AND worker.state='active'
                ))
-        ORDER BY attempt.receipt_at,attempt.id FOR UPDATE OF attempt SKIP LOCKED LIMIT p_limit
+        ORDER BY attempt.receipt_at,attempt.id LIMIT p_limit
     LOOP
         PERFORM pg_advisory_xact_lock(hashtextextended(
             'kdive:system:' || v_attempt.system_id::text,2125));
         SELECT * INTO v_owner FROM public.authority_system_ownership
         WHERE system_id=v_attempt.system_id FOR UPDATE;
-        IF v_owner.current_attempt_id<>v_attempt.id
+        SELECT * INTO v_attempt FROM public.authority_system_attempts
+        WHERE id=v_attempt.id FOR UPDATE;
+        SELECT * INTO v_job FROM public.jobs WHERE id=v_attempt.job_id FOR UPDATE;
+        SELECT * INTO v_system FROM public.systems WHERE id=v_attempt.system_id FOR UPDATE;
+        IF v_attempt.id IS NULL OR v_attempt.state<>'terminal'
+           OR v_attempt.consumed_at IS NOT NULL
+           OR v_owner.current_attempt_id<>v_attempt.id
            OR v_owner.journal_sequence<>v_attempt.terminal_head_sequence
            OR v_owner.journal_digest<>v_attempt.terminal_head_digest
-           OR v_attempt.receipt_disposition='retained-quarantine' THEN
+           OR v_attempt.receipt_disposition='retained-quarantine'
+           OR v_job.id IS NULL
+           OR NOT (v_job.state<>'running' OR v_job.lease_expires_at<=clock_timestamp()
+                   OR NOT EXISTS (
+                       SELECT 1 FROM public.worker_incarnations AS worker
+                       WHERE worker.incarnation=v_attempt.worker_incarnation
+                       AND worker.state='active'
+                   )) THEN
             CONTINUE;
         ELSIF v_attempt.receipt_disposition='provision-ready'
               AND v_owner.state='provisioning' THEN
@@ -903,11 +959,13 @@ FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witne
 REVOKE ALL ON FUNCTION
     public.register_authority_system_ownership(uuid,uuid,text,text,text,text,text),
     public.request_authority_system_preactivation_teardown(uuid,uuid,text),
+    public.resolve_authority_system_server_binding(uuid),
     public.claim_authority_system_first_activation(uuid,uuid)
 FROM PUBLIC, kdive_worker, kdive_reconciler, kdive_lifecycle_witness, kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION
     public.register_authority_system_ownership(uuid,uuid,text,text,text,text,text),
     public.request_authority_system_preactivation_teardown(uuid,uuid,text),
+    public.resolve_authority_system_server_binding(uuid),
     public.claim_authority_system_first_activation(uuid,uuid)
 TO kdive_server;
 

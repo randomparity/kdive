@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -28,6 +30,26 @@ from tests.db.external_boot_authority_support import (
     _RoleDsns,
     authority_role_dsns,  # noqa: F401
 )
+
+
+def _wait_for_advisory_wait(
+    observer: psycopg.Connection, future: Future[object], backend_pid: int
+) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if (
+            observer.execute(
+                "SELECT 1 FROM pg_locks WHERE pid=%s AND locktype='advisory' AND NOT granted",
+                (backend_pid,),
+            ).fetchone()
+            is not None
+        ):
+            return
+        if future.done():
+            future.result()
+            raise AssertionError("authority contender completed before waiting on the System lock")
+        time.sleep(0.01)
+    raise AssertionError("authority contender did not wait on the System lock")
 
 
 def test_migration_0148_is_registered_last() -> None:
@@ -63,6 +85,7 @@ def test_0148_installs_two_private_tables_and_exact_function_grants(
         assert functions >= {
             "register_authority_system_ownership",
             "request_authority_system_preactivation_teardown",
+            "resolve_authority_system_server_binding",
             "claim_authority_system_first_activation",
             "allocate_authority_system_attempt",
             "acknowledge_authority_system_attempt",
@@ -74,6 +97,42 @@ def test_0148_installs_two_private_tables_and_exact_function_grants(
             "list_authority_system_journal_heads",
             "repair_terminal_authority_system_attempts",
         }
+
+        allowed = {
+            "register_authority_system_ownership(uuid,uuid,text,text,text,text,text)": {
+                "kdive_server"
+            },
+            "request_authority_system_preactivation_teardown(uuid,uuid,text)": {"kdive_server"},
+            "resolve_authority_system_server_binding(uuid)": {"kdive_server"},
+            "claim_authority_system_first_activation(uuid,uuid)": {"kdive_server"},
+            "allocate_authority_system_attempt(bytea,uuid,integer,uuid)": {"kdive_worker"},
+            (
+                "acknowledge_authority_system_attempt(bytea,uuid,integer,uuid,bigint,uuid,"
+                "bigint,text,text)"
+            ): {"kdive_worker"},
+            "finalize_authority_system_attempt(bytea,uuid,integer,uuid,bigint,bigint,text,bytea)": {
+                "kdive_worker"
+            },
+            "resolve_allocating_authority_system_attempt(text,uuid,bigint)": {
+                "kdive_provider_authority"
+            },
+            "resolve_current_authority_system_attempt(text,uuid,bigint,bigint,text)": {
+                "kdive_provider_authority"
+            },
+            "read_authority_system_journal_head(text,uuid,bigint,text)": {
+                "kdive_provider_authority"
+            },
+            "advance_authority_system_journal_head(text,uuid,bigint,bigint,text,jsonb,bytea)": {
+                "kdive_provider_authority"
+            },
+            "list_authority_system_journal_heads(text)": {"kdive_provider_authority"},
+            "repair_terminal_authority_system_attempts(integer)": {"kdive_reconciler"},
+        }
+        for signature, roles in allowed.items():
+            for role, login in role_dsns.logins.items():
+                assert admin.execute(
+                    "SELECT has_function_privilege(%s,%s,'EXECUTE')", (login, signature)
+                ).fetchone() == (role in roles,)
 
     for role in role_dsns.logins:
         with psycopg.connect(role_dsns(role)) as restricted:
@@ -259,7 +318,9 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
     resource_id, allocation_id, system_id, image_id, job_id = (uuid4() for _ in range(5))
     request_attempt_id = uuid4()
     worker = f"docker:authority-flow-{uuid4()}"
+    other_worker = f"docker:authority-flow-{uuid4()}"
     credential = b"f" * 32
+    other_credential = b"g" * 32
     profile_digest = "sha256:" + "a" * 64
     root_digest = "sha256:" + "b" * 64
     bootstrap_key = "ssh-ed25519 YWFhYQ== kdive-system"
@@ -310,6 +371,12 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
             "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash) "
             "VALUES (%s,'docker','{}',4,%s)",
             (worker, credential),
+        )
+        conn.execute(
+            "INSERT INTO worker_incarnations "
+            "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash) "
+            "VALUES (%s,'docker','{}',4,%s)",
+            (other_worker, other_credential),
         )
         conn.execute(
             "INSERT INTO jobs (id,kind,state,attempt,max_attempts,worker_id,lease_expires_at,"
@@ -419,6 +486,38 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
         ).fetchone()
         assert ack is not None and ack[0] == "acknowledged"
         worker_conn.commit()
+        replay_ack = worker_conn.execute(
+            "SELECT * FROM acknowledge_authority_system_attempt(%s,%s,1,%s,%s,%s,2,%s,%s)",
+            (
+                credential,
+                job_id,
+                authority_id,
+                generation,
+                request_attempt_id,
+                second[2],
+                quiescence,
+            ),
+        ).fetchone()
+        assert replay_ack == ("replay", ack[1])
+        for wrong_credential, wrong_job, wrong_attempt in (
+            (other_credential, job_id, 1),
+            (credential, uuid4(), 1),
+            (credential, job_id, 2),
+        ):
+            denied = worker_conn.execute(
+                "SELECT * FROM acknowledge_authority_system_attempt(%s,%s,%s,%s,%s,%s,2,%s,%s)",
+                (
+                    wrong_credential,
+                    wrong_job,
+                    wrong_attempt,
+                    authority_id,
+                    generation,
+                    request_attempt_id,
+                    second[2],
+                    quiescence,
+                ),
+            ).fetchone()
+            assert denied == ("superseded", None)
 
     with psycopg.connect(migrated_url) as conn:
         assert conn.execute(
@@ -533,6 +632,24 @@ def test_0148_worker_authority_journal_and_exact_receipt_replay(
             (credential, job_id, authority_id, generation, completed[2], receipt),
         ).fetchone()
         assert replay == ("applied", "succeeded", "ready")
+        for wrong_credential, wrong_job, wrong_attempt in (
+            (other_credential, job_id, 1),
+            (credential, uuid4(), 1),
+            (credential, job_id, 2),
+        ):
+            denied = worker_conn.execute(
+                "SELECT status FROM finalize_authority_system_attempt(%s,%s,%s,%s,%s,7,%s,%s)",
+                (
+                    wrong_credential,
+                    wrong_job,
+                    wrong_attempt,
+                    authority_id,
+                    generation,
+                    completed[2],
+                    receipt,
+                ),
+            ).fetchone()
+            assert denied == ("superseded",)
 
     with psycopg.connect(migrated_url) as conn:
         stored = conn.execute(
@@ -641,6 +758,44 @@ def test_0148_allocation_supersedes_only_dead_unacknowledged_candidate(
         assert first is not None and first[0] == "allocated"
         first_authority = first[1]
         worker_conn.commit()
+
+        holder = psycopg.connect(migrated_url)
+        contender = psycopg.connect(role_dsns("kdive_worker"))
+        contender.execute("SET statement_timeout='5s'")
+
+        def acknowledge_while_locked() -> object:
+            return contender.execute(
+                "SELECT * FROM acknowledge_authority_system_attempt(%s,%s,1,%s,%s,%s,1,%s,%s)",
+                (
+                    first_credential,
+                    first_job,
+                    first_authority,
+                    first[2],
+                    first_request,
+                    profile_digest,
+                    root_digest,
+                ),
+            ).fetchone()
+
+        try:
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,2125))",
+                (f"kdive:system:{system_id}",),
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(acknowledge_while_locked)
+                _wait_for_advisory_wait(holder, future, contender.info.backend_pid)
+                assert holder.execute(
+                    "SELECT id FROM authority_system_attempts WHERE id=%s FOR UPDATE NOWAIT",
+                    (first_authority,),
+                ).fetchone() == (first_authority,)
+                holder.rollback()
+                assert future.result(timeout=5) == ("superseded", None)
+        finally:
+            holder.rollback()
+            contender.rollback()
+            contender.close()
+            holder.close()
 
         assert (
             worker_conn.execute(

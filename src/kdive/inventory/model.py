@@ -323,6 +323,16 @@ class LocalLibvirtInstance(_Instance):
     # gets SLIRP NAT + DNS and an agent can install tools at runtime. Operator-owned: it is resolved
     # from this file at provision time, never from the allocation/provision request.
     guest_egress: bool = False
+    # Opt-in for activation-free provisioning on the matching authority host. The server records
+    # only this identity; socket paths and credentials remain fixed worker/host configuration.
+    authority_instance: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("authority_instance")
+    @classmethod
+    def _authority_instance_is_nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("authority_instance must be non-empty")
+        return value
 
 
 class FaultInjectInstance(_Instance):

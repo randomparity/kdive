@@ -11,6 +11,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing
 from kdive.jobs.payloads import SystemPayload, TeardownPayload
+from kdive.providers.system_authority.protocol import AuthoritySystemMarkerV1
 from kdive.security.authz.context import RequestContext
 
 
@@ -26,11 +27,12 @@ class JobOperations:
         project: str,
         allocation_id: UUID,
         system_id: UUID,
+        authority_marker: AuthoritySystemMarkerV1 | None = None,
     ) -> Job:
         return await queue.enqueue(
             conn,
             JobKind.PROVISION,
-            SystemPayload(system_id=str(system_id)),
+            SystemPayload(system_id=str(system_id), authority_system_v1=authority_marker),
             authorizing(ctx, project),
             f"{allocation_id}:provision",
         )

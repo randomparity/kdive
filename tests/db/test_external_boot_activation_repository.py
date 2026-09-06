@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from kdive.db.external_boot_activations import (
     CasStatus,
     ExternalBootActivationRepository,
+    ExternalBootTeardownInProgress,
 )
 from kdive.db.locks import LockScope, advisory_xact_lock, try_advisory_xact_lock
 from kdive.db.remote_module_attempt_obligations import (
@@ -240,6 +241,73 @@ def test_create_reads_and_stale_generation_are_atomic(migrated_url: str) -> None
             assert applied.activation is not None
             assert applied.activation.materialization == materialization
             await conn.commit()
+
+    asyncio.run(_run())
+
+
+def test_create_hands_ready_authority_to_first_activation_and_blocks_teardown(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        repo = ExternalBootActivationRepository()
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            system_id, run_id = await _seed(conn)
+            binding = await (
+                await conn.execute(
+                    "SELECT system.allocation_id,allocation.resource_id "
+                    "FROM systems AS system JOIN allocations AS allocation "
+                    "ON allocation.id=system.allocation_id WHERE system.id=%s",
+                    (system_id,),
+                )
+            ).fetchone()
+            assert binding is not None
+            await conn.execute(
+                "INSERT INTO authority_system_ownership "
+                "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+                "authority_instance,profile_identity,root_identity,state) VALUES "
+                "(%s,%s,%s,'local-libvirt','local','authority-a',%s,%s,'ready')",
+                (system_id, *binding, _DIGEST, _PLAN),
+            )
+            activation, reservation = _records(system_id, run_id)
+            await repo.create(conn, activation, reservation)
+            owner = await (
+                await conn.execute(
+                    "SELECT state,first_activation_id FROM authority_system_ownership "
+                    "WHERE system_id=%s",
+                    (system_id,),
+                )
+            ).fetchone()
+            assert owner == ("activated", activation.id)
+
+            blocked_system_id, blocked_run_id = await _seed(conn)
+            blocked_binding = await (
+                await conn.execute(
+                    "SELECT system.allocation_id,allocation.resource_id "
+                    "FROM systems AS system JOIN allocations AS allocation "
+                    "ON allocation.id=system.allocation_id WHERE system.id=%s",
+                    (blocked_system_id,),
+                )
+            ).fetchone()
+            assert blocked_binding is not None
+            await conn.execute(
+                "INSERT INTO authority_system_ownership "
+                "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+                "authority_instance,profile_identity,root_identity,state) VALUES "
+                "(%s,%s,%s,'local-libvirt','local','authority-a',%s,%s,'teardown-requested')",
+                (blocked_system_id, *blocked_binding, _DIGEST, _PLAN),
+            )
+            await conn.commit()
+            blocked_activation, blocked_reservation = _records(blocked_system_id, blocked_run_id)
+            with pytest.raises(ExternalBootTeardownInProgress):
+                async with conn.transaction():
+                    await repo.create(conn, blocked_activation, blocked_reservation)
+            count = await (
+                await conn.execute(
+                    "SELECT count(*) FROM external_boot_activations WHERE system_id=%s",
+                    (blocked_system_id,),
+                )
+            ).fetchone()
+            assert count == (0,)
 
     asyncio.run(_run())
 

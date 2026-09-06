@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.config import (
+    local_authority_instance_for_resource,
+    local_guest_egress_for_resource,
+)
 
 _BLOCK = """
 schema_version = 2
@@ -67,3 +71,21 @@ def test_malformed_file_degrades_to_false_and_logs(
     with caplog.at_level(logging.WARNING):
         assert local_guest_egress_for_resource("loc") is False
     assert any("systems.toml" in rec.getMessage() for rec in caplog.records)
+
+
+def test_authority_instance_is_explicit_and_malformed_inventory_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_systems_toml(
+        tmp_path,
+        monkeypatch,
+        name="loc",
+        egress='authority_instance = "authority-a"',
+    )
+    assert local_authority_instance_for_resource("loc") == "authority-a"
+    assert local_authority_instance_for_resource("other") is None
+
+    (tmp_path / "systems.toml").write_text("this is = = not valid toml [[[\n")
+    with pytest.raises(CategorizedError) as excinfo:
+        local_authority_instance_for_resource("loc")
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
