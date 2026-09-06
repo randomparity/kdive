@@ -57,6 +57,10 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.diagnostic_sysrq": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.watch_for_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
+    "runs.release_external_boot": ("tests/services/external_boot/test_recovery_requests.py",),
+    "systems.resolve_external_boot_conflict": (
+        "tests/services/external_boot/test_recovery_requests.py",
+    ),
     "control.capture_traffic": ("tests/mcp/lifecycle/test_control_tools.py",),
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
@@ -743,8 +747,6 @@ def test_every_tool_has_a_valid_maturity() -> None:
 _PARTIAL_TOOLS = frozenset(
     {
         "ops.resolve_recovery_orphan",
-        "runs.release_external_boot",
-        "systems.resolve_external_boot_conflict",
     }
 )
 
@@ -996,6 +998,8 @@ _JOB_HANDLE_TOOLS = frozenset(
         "control.capture_traffic",
         "control.diagnostic_sysrq",
         "control.watch_for_crash",
+        "runs.release_external_boot",
+        "systems.resolve_external_boot_conflict",
         "systems.authorize_ssh_key",
         "systems.check_ssh_reachable",
         "systems.snapshot",

@@ -121,6 +121,11 @@ _CONFLICT_AUTHORITY_SQL: LiteralString = (
     "FROM resolve_external_boot_conflict_dispatch_binding(%s, %s, %s, %s)"
 )
 
+_RELEASE_AUTHORITY_SQL: LiteralString = (
+    "SELECT provider_kind, authority_instance "
+    "FROM resolve_external_boot_release_dispatch_binding(%s, %s, %s, %s)"
+)
+
 _PROMOTION = (
     "Promoted when the external-boot recovery job handler and worker claim path land (#2118)."
 )
@@ -276,7 +281,11 @@ async def _active_job_ids_for_system(conn: AsyncConnection, system_id: UUID) -> 
 
 
 async def request_release(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    resolver: ProviderResolver | None = None,
 ) -> ToolResponse:
     """Admit a release of the Run's external-boot activation, then report the missing executor.
 
@@ -306,11 +315,15 @@ async def request_release(
                     detail="this Run is bound to no System, so it holds no external boot",
                     next_action="runs.get",
                 )
-            return await _release_locked(conn, ctx, run, run.system_id)
+            return await _release_locked(conn, ctx, run, run.system_id, resolver)
 
 
 async def _release_locked(
-    conn: AsyncConnection, ctx: RequestContext, run: Run, system_id: UUID
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    system_id: UUID,
+    resolver: ProviderResolver | None,
 ) -> ToolResponse:
     """Decide the release under the System lock, so every read sees one consistent activation.
 
@@ -325,7 +338,8 @@ async def _release_locked(
     """
     object_id = str(run.id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        if await _REPOSITORY.get_restricting_for_system(conn, system_id) is None:
+        activation = await _REPOSITORY.get_restricting_for_system(conn, system_id)
+        if activation is None:
             return _conflict(
                 object_id,
                 reason="no_active_activation",
@@ -342,6 +356,17 @@ async def _release_locked(
             )
         except ExternalBootDenied as exc:
             return _external_boot_denial(object_id, exc, ctx)
+        operation_identity = (
+            "sha256:"
+            + hashlib.sha256(
+                f"{activation.id}\0release\0{activation.plan_identity}".encode()
+            ).hexdigest()
+        )
+        dedup_key = f"external-boot-release:{operation_identity}"
+        existing = await queue.get_by_dedup_key(conn, dedup_key)
+        if existing is not None:
+            response = ToolResponse.from_job(existing)
+            return response.model_copy(update={"data": {**response.data, "run_id": object_id}})
         job_ids = await _active_job_ids_for_system(conn, system_id)
         if job_ids:
             return _conflict(
@@ -363,7 +388,49 @@ async def _release_locked(
                 next_actions=["debug.detach", "runs.get"],
                 data=_bounded_ids("session_ids", session_ids),
             )
-    return _executor_unavailable(object_id, RELEASE_TOOL)
+        if resolver is None:
+            return _executor_unavailable(object_id, RELEASE_TOOL)
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _RELEASE_AUTHORITY_SQL,
+                (activation.id, activation.system_id, activation.run_id, activation.plan_identity),
+            )
+            authorities = await cur.fetchall()
+        if len(authorities) != 1:
+            return _config_error(
+                object_id,
+                reason="release_authority_unresolved",
+                detail="the exact durable external-boot release authority is unavailable",
+                next_action="runs.get",
+            )
+        authority = authorities[0]
+        try:
+            kind, payload = await build_external_boot_payload(
+                conn,
+                activation_id=activation.id,
+                purpose="release",
+                operation="release",
+                provider_kind=str(authority["provider_kind"]),
+                authority_instance=str(authority["authority_instance"]),
+                operation_identity=operation_identity,
+                resolver=resolver,
+            )
+        except CategorizedError as exc:
+            return _config_error(
+                object_id,
+                reason="release_authority_unresolved",
+                detail=f"the durable release authority cannot dispatch recovery: {exc}",
+                next_action="runs.get",
+            )
+        job = await queue.enqueue(
+            conn,
+            kind,
+            payload,
+            job_authorizing(ctx, run.project),
+            dedup_key,
+        )
+    response = ToolResponse.from_job(job)
+    return response.model_copy(update={"data": {**response.data, "run_id": object_id}})
 
 
 def _resolution_input_error(

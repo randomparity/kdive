@@ -80,7 +80,7 @@ def test_only_the_orphan_repair_is_destructive() -> None:
     assert _ORPHAN in _docmeta.DESTRUCTIVE_TOOLS
 
 
-@pytest.mark.parametrize("name", (_RELEASE, _ORPHAN))
+@pytest.mark.parametrize("name", (_ORPHAN,))
 def test_each_contract_declares_a_partial_maturity_the_generator_accepts(name: str) -> None:
     """`just docs-check` fails on a malformed detail, so the generator's own check runs here."""
     meta = TOOLS[name].meta or {}
@@ -92,8 +92,9 @@ def test_each_contract_declares_a_partial_maturity_the_generator_accepts(name: s
     assert "#2118" in detail.promotion
 
 
-def test_conflict_resolution_is_implemented() -> None:
-    assert (TOOLS[_RESOLVE].meta or {}).get("maturity") == "implemented"
+@pytest.mark.parametrize("name", (_RELEASE, _RESOLVE))
+def test_enqueued_recovery_contract_is_implemented(name: str) -> None:
+    assert (TOOLS[name].meta or {}).get("maturity") == "implemented"
 
 
 @pytest.mark.parametrize("name", _CONTRACTS)
@@ -107,7 +108,7 @@ def test_every_parameter_description_is_one_line(name: str) -> None:
         assert "\n" not in description, f"{name}:{parameter}"
 
 
-@pytest.mark.parametrize("name", (_RELEASE, _ORPHAN))
+@pytest.mark.parametrize("name", (_ORPHAN,))
 def test_each_docstring_opens_on_what_the_tool_does_today(name: str) -> None:
     """An agent that reads only the first sentence must not believe the operation happened."""
     description = TOOLS[name].description or ""
@@ -117,7 +118,7 @@ def test_each_docstring_opens_on_what_the_tool_does_today(name: str) -> None:
     assert any(word in opening for word in _MISSING_EXECUTOR_WORDS), opening
 
 
-@pytest.mark.parametrize("name", (_RELEASE, _ORPHAN))
+@pytest.mark.parametrize("name", (_ORPHAN,))
 def test_each_docstring_discloses_the_refusal_and_names_the_promotion(name: str) -> None:
     description = TOOLS[name].description or ""
     assert _UNAVAILABLE in description
@@ -258,14 +259,16 @@ def _assert_unavailable(response: ToolResponse) -> None:
     assert response.data["reason"] == _UNAVAILABLE, dumped
 
 
-def test_the_release_tool_reports_the_executor_is_unavailable(
+def test_the_release_tool_fails_closed_without_durable_authority(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _body(harness: _Harness) -> ToolResponse:
         seeded = await _seed(harness.pool, state=_STATE.ACTIVE)
         return await harness.tools[_RELEASE].fn(run_id=seeded.run_id)
 
-    _assert_unavailable(_drive(migrated_url, monkeypatch, _ctx(), _body))
+    response = _drive(migrated_url, monkeypatch, _ctx(), _body)
+    assert response.error_category == "configuration_error"
+    assert response.data["reason"] == "release_authority_unresolved"
 
 
 def test_the_conflict_resolution_tool_fails_closed_without_durable_authority(
