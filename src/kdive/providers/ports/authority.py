@@ -2,6 +2,10 @@
 
 from typing import Protocol
 
+from kdive.providers.external_boot_authority.device_identity import (
+    DeviceIdentityRequestV1,
+    DeviceIdentityResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityHealthAcknowledgementV1,
@@ -15,6 +19,10 @@ class AuthorityRequestSender(Protocol):
     """One Resource's route; deadlines use the event loop's absolute monotonic clock."""
 
     async def health(self, *, deadline: float) -> AuthorityHealthAcknowledgementV1: ...
+
+    async def resolve_device_identity(
+        self, request: DeviceIdentityRequestV1, *, deadline: float
+    ) -> DeviceIdentityResponseV1: ...
 
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float

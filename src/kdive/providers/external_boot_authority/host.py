@@ -25,6 +25,7 @@ from kdive.db.external_boot_authority_journal import (
     list_journal_heads,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.device_identity import RemoteDeviceIdentityService
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import record_digest
 from kdive.providers.external_boot_authority.settings import (
@@ -1076,6 +1077,7 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
     listener: AuthorityListener | None = None
     network_listener: AuthorityNetworkListener | None = None
     journal_validator = JournalInventoryValidator()
+    identity_service = RemoteDeviceIdentityService()
 
     async def authenticate(credential: SecretStr) -> AuthenticatedPeer:
         return await _authenticate(config, credential)
@@ -1083,12 +1085,15 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
     try:
         await _bounded_readiness_check(_check_static_authority_host(config, journal_validator))
         try:
-            listener = await serve_authority_transport(config, authenticate, service=None)
+            listener = await serve_authority_transport(
+                config, authenticate, service=None, identity_service=identity_service
+            )
             if config.network_address is not None:
                 network_listener = await serve_authority_network_transport(
                     config,
                     authenticate,
                     service=None,
+                    identity_service=identity_service,
                 )
         except Exception:
             raise HostReadinessError("listener", "bind-failed") from None
@@ -1125,8 +1130,11 @@ async def run_authority_host(config: AuthorityHostConfig) -> None:
                 if network_listener is not None:
                     await _close_listener(network_listener)
             finally:
-                if listener is not None:
-                    await _close_listener(listener)
+                try:
+                    if listener is not None:
+                        await _close_listener(listener)
+                finally:
+                    identity_service.close()
 
 
 async def check_authority_host_once(config: AuthorityHostConfig) -> None:

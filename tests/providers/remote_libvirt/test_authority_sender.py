@@ -19,6 +19,10 @@ from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority import protocol, transport
+from kdive.providers.external_boot_authority.device_identity import (
+    DeviceIdentityInodeV1,
+    DeviceIdentityRequestV1,
+)
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.remote_libvirt import composition
@@ -40,6 +44,36 @@ def _sender(backend: object, borrow: object):
     return AuthorityRequestSender(
         lambda: cast(_AuthorityNetworkTransport, backend), cast(Callable[[], SecretStr], borrow)
     )
+
+
+async def test_sender_uses_typed_identity_operation_and_rejects_malformed_success() -> None:
+    class IdentityService:
+        async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityInodeV1:
+            assert request.path == "/disk"
+            return DeviceIdentityInodeV1(primary=3, secondary=4)
+
+    class Backend:
+        malformed = False
+
+        async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
+            assert deadline == 123.0
+            if self.malformed:
+                return b'{"status":"ok","value":{"kind":"inode"}}'
+
+            async def authenticate(_value: SecretStr) -> AuthenticatedPeer:
+                return AuthenticatedPeer("worker")
+
+            return await transport._dispatch(envelope, authenticate, None, IdentityService())
+
+    backend = Backend()
+    sender = _sender(backend, lambda: SecretStr("credential"))
+    assert await sender.resolve_device_identity(
+        DeviceIdentityRequestV1(path="/disk"), deadline=123.0
+    ) == DeviceIdentityInodeV1(primary=3, secondary=4)
+    backend.malformed = True
+    with pytest.raises(CategorizedError, match="remote device identity is invalid") as caught:
+        await sender.resolve_device_identity(DeviceIdentityRequestV1(path="/disk"), deadline=123.0)
+    assert caught.value.category is ErrorCategory.CONFLICT
 
 
 async def test_sender_borrows_only_while_encoding_and_authenticates_active_incarnation() -> None:
@@ -73,6 +107,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
         "health",
         "acknowledge_takeover",
         "execute_mutation",
+        "resolve_device_identity",
     }
     assert all(not isinstance(getattr(sender, slot), SecretStr) for slot in sender.__slots__)
 

@@ -25,6 +25,10 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from pydantic import SecretStr
 
 from kdive.providers.external_boot_authority import host, transport
+from kdive.providers.external_boot_authority.device_identity import (
+    DeviceIdentityInodeV1,
+    DeviceIdentityRequestV1,
+)
 from kdive.providers.external_boot_authority.host import (
     AuthorityHostConfig,
     HostReadinessError,
@@ -39,6 +43,69 @@ from kdive.providers.external_boot_authority.transport import (
     read_frame,
     serve_authority_transport,
 )
+
+
+def test_identity_dispatch_authenticates_before_independent_service() -> None:
+    called = False
+
+    async def reject(_credential: SecretStr) -> AuthenticatedPeer:
+        raise ValueError
+
+    class IdentityService:
+        async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityInodeV1:
+            del request
+            nonlocal called
+            called = True
+            return DeviceIdentityInodeV1(primary=1, secondary=2)
+
+    async def exercise() -> None:
+        response = await transport._dispatch(
+            encode_request_envelope(
+                "resolve-device-identity",
+                DeviceIdentityRequestV1(path="/disk").model_dump(mode="json"),
+                "credential",
+            ),
+            reject,
+            None,
+            IdentityService(),
+        )
+        assert json.loads(response) == {"category": "unauthenticated", "status": "error"}
+
+    asyncio.run(exercise())
+    assert called is False
+
+
+def test_identity_dispatch_is_independent_of_mutation_service() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class IdentityService:
+        async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityInodeV1:
+            assert request.path == "/disk"
+            return DeviceIdentityInodeV1(primary=1, secondary=2)
+
+    async def exercise() -> None:
+        response = await transport._dispatch(
+            encode_request_envelope(
+                "resolve-device-identity",
+                DeviceIdentityRequestV1(path="/disk").model_dump(mode="json"),
+                "credential",
+            ),
+            authenticate,
+            None,
+            IdentityService(),
+        )
+        assert json.loads(response) == {
+            "status": "ok",
+            "value": {
+                "kind": "inode",
+                "primary": 1,
+                "secondary": 2,
+                "version": "device-identity-v1",
+            },
+        }
+
+    asyncio.run(exercise())
 
 
 @pytest.fixture

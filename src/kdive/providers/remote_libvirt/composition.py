@@ -38,6 +38,10 @@ from kdive.providers.core.runtime import (
     StagedVolumeProbe,
 )
 from kdive.providers.core.transport_reset import TransportResetter
+from kdive.providers.external_boot_authority.device_identity import (
+    RemoteAuthorityDeviceIdentity,
+    build_remote_device_identity_port,
+)
 from kdive.providers.infra.console_hosting import (
     AsyncioPumpRunner,
     CollectorRegistry,
@@ -397,6 +401,13 @@ def _rebind_for_resource(
 def build_stage_volume_deps(provider: str) -> StageVolumeDeps:
     """Build remote-libvirt dependencies for the ``stage-volume`` CLI operation."""
     return stage_volume.build_stage_volume_deps(provider)
+
+
+def build_remote_device_identity(
+    authority: AuthorityRequestSender | None, preparation_deadline: float
+) -> RemoteAuthorityDeviceIdentity | None:
+    """Expose ADR-0603 identity only for a Resource-bound authority route."""
+    return build_remote_device_identity_port(authority, preparation_deadline)
 
 
 def build_runtime(

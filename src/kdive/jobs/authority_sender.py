@@ -8,6 +8,11 @@ from collections.abc import Callable
 from pydantic import BaseModel, SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.device_identity import (
+    DeviceIdentityRequestV1,
+    DeviceIdentityResponseV1,
+    decode_device_identity_response,
+)
 from kdive.providers.external_boot_authority.network_client import (
     _AuthorityNetworkTransport,
     _resolve_tls_material,
@@ -36,6 +41,7 @@ _PEER_REASONS = frozenset(
         "journal-conflict",
         "provider-conflict",
         "provider-not-configured",
+        "provider-failure",
     }
 )
 
@@ -101,6 +107,41 @@ class AuthorityRequestSender:
             self._encode("health", AuthorityHealthRequestV1()), deadline=deadline
         )
         return _decode_response(response, AuthorityHealthAcknowledgementV1)
+
+    async def resolve_device_identity(
+        self, request: DeviceIdentityRequestV1, *, deadline: float
+    ) -> DeviceIdentityResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("resolve-device-identity", request), deadline=deadline
+        )
+        try:
+            value = json.loads(response)
+            if (
+                not isinstance(value, dict)
+                or json.dumps(
+                    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+                != response
+            ):
+                raise ValueError
+            if value.get("status") == "ok" and set(value) == {"status", "value"}:
+                encoded = json.dumps(
+                    value["value"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+                return decode_device_identity_response(encoded)
+            if (
+                value.get("status") == "error"
+                and set(value) == {"status", "category"}
+                and value.get("category") in _PEER_REASONS
+            ):
+                raise _failure(str(value["category"]))
+        except CategorizedError:
+            raise
+        except ValueError, TypeError, RecursionError:
+            pass
+        raise CategorizedError(
+            "remote device identity is invalid", category=ErrorCategory.CONFLICT
+        ) from None
 
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float
